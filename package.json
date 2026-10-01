@@ -52,18 +52,19 @@
       "platform": "web"
     }
   },
-  "dependencies": {
-    "puppeteer-core": "^23.0.0"
-  },
   "peerDependencies": {
     "@deepseek-ai/cordis": ">=4.0.0",
-    "@deepseek-ai/dsh-tools": "^0.1.5-rc.2"
+    "@deepseek-ai/dsh-tools": "^0.1.5-rc.2",
+    "puppeteer-core": "^23.0.0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {
       "optional": true
     },
     "@deepseek-ai/dsh-tools": {
+      "optional": true
+    },
+    "puppeteer-core": {
       "optional": true
     }
   },
