@@ -1,0 +1,106 @@
+{
+  "schema": "dsagent/skill-contract@1",
+  "id": "competitor-indicator",
+  "entry": {
+    "form": "package",
+    "pkg": "competitor_indicator"
+  },
+  "input": {
+    "args": [
+      {
+        "name": "competitor_ids",
+        "flag": "--competitor-ids",
+        "required": true,
+        "description": "竞品商品 ID，多个用逗号分隔"
+      },
+      {
+        "name": "entity_id",
+        "flag": "--entity-id",
+        "type": "integer",
+        "required": true,
+        "description": "达摩盘 API 对比基准商品 ID（仅用于请求，报告只展示竞品）"
+      },
+      {
+        "name": "begin_date",
+        "flag": "--begin-date",
+        "required": true,
+        "description": "分析周期开始 YYYY-MM-DD"
+      },
+      {
+        "name": "end_date",
+        "flag": "--end-date",
+        "required": true,
+        "description": "分析周期结束 YYYY-MM-DD"
+      },
+      {
+        "name": "peer_begin_date",
+        "flag": "--peer-begin-date",
+        "required": true,
+        "description": "对比周期开始 YYYY-MM-DD"
+      },
+      {
+        "name": "peer_end_date",
+        "flag": "--peer-end-date",
+        "required": true,
+        "description": "对比周期结束 YYYY-MM-DD"
+      },
+      {
+        "name": "competition_type",
+        "flag": "--competition-type",
+        "description": "竞争类型，默认 2=商品"
+      },
+      {
+        "name": "audience_action",
+        "flag": "--audience-action",
+        "default": "",
+        "description": "人群行为，默认搜索+购买。支持：浏览/搜索/收藏/加购/购买 或 1~5，多项用逗号分隔"
+      },
+      {
+        "name": "audience_days",
+        "flag": "--audience-days",
+        "default": "",
+        "description": "人群时间窗，默认30。支持：7/15/30/90 或 最近30天"
+      }
+    ],
+    "subcommands": [
+      {
+        "name": "report",
+        "description": "从 JSON 生成 HTML 报告",
+        "args": [
+          {
+            "name": "input",
+            "required": true,
+            "description": "analyze 输出的 JSON 文件"
+          },
+          {
+            "name": "output",
+            "default": "",
+            "description": "HTML 输出路径"
+          }
+        ]
+      },
+      {
+        "name": "history",
+        "description": "查看本地已抓取的竞品分析",
+        "args": [
+          {
+            "name": "competitor_id",
+            "flag": "--competitor-id",
+            "default": "",
+            "description": "竞品 ID 模糊筛选"
+          },
+          {
+            "name": "limit",
+            "type": "integer",
+            "default": 50
+          }
+        ]
+      }
+    ]
+  },
+  "output": {
+    "protocol": "dsagent-result",
+    "resultPrefix": "__DSAGENT_RESULT__",
+    "filesMarker": "---[OUTPUT_FILES]"
+  }
+}

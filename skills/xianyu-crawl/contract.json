@@ -1,0 +1,33 @@
+{
+  "schema": "dsagent/skill-contract@1",
+  "id": "xianyu-crawl",
+  "entry": {
+    "form": "script",
+    "script": "scripts/fetch_data.py"
+  },
+  "input": {
+    "args": [
+      {
+        "name": "keyword",
+        "description": "搜索关键词（如未提供则从 DSAGENT_REQUEST 环境变量提取）"
+      },
+      {
+        "name": "page",
+        "type": "integer",
+        "default": 1,
+        "description": "页码（默认 1）"
+      },
+      {
+        "name": "size",
+        "type": "integer",
+        "default": 30,
+        "description": "每页数量（默认 30，最大 50）"
+      }
+    ]
+  },
+  "output": {
+    "protocol": "dsagent-result",
+    "resultPrefix": "__DSAGENT_RESULT__",
+    "filesMarker": "---[OUTPUT_FILES]"
+  }
+}

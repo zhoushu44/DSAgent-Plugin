@@ -47,6 +47,7 @@ const PLATFORMS: Array<[string, string]> = [
   ['kuaishou', '快手'],
   ['wechat_mp', '公众号'],
   ['taobao', '淘宝'],
+  ['sycm', '生意参谋'],
   ['pinduoduo', '拼多多'],
   ['xianyu', '闲鱼'],
   ['wechat_store', '微信小店'],

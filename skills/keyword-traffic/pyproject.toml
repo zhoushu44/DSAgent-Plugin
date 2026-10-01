@@ -1,0 +1,10 @@
+[project]
+slug = "keyword-traffic"
+name = "万相台关键词流量趋势"
+category = "淘系" 
+version = "1.2.0"
+author = "YiqiWork"
+description = "绑定生意参谋自动查询关键词流量解析"
+icon_url ="https://ts2.tc.mm.bing.net/th/id/ODF.Ale95ldqkyoSqyZGGQvKNQ?w=32&h=32&qlt=90&pcl=fffffc&o=6&pid=1.2"
+requires-python = ">=3.10"
+dependencies = ["httpx>=0.27"]

@@ -1,0 +1,9 @@
+[project]
+slug = "data-report"
+name = " 数据可视化报告"
+category = "图表生成"
+version = "1.0.0"
+author = "YiqiWork"
+description = "上传Excel或CSV，一键生成可视化数据分析报告"
+icon_url = "https://img.icons8.com/?size=48&id=QemG6zV0OIia&format=png"
+requires-python = ">=3.10"

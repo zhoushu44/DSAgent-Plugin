@@ -1,0 +1,12 @@
+[project]
+slug = "store-patrol-manager"
+name = "巡店管家"
+category = "店铺经营"
+version = "2.0.0"
+author = "QIWork"
+description = "基于当前绑定店铺和指定周期完成店铺、类目、商品、推广、退款及可选行业校准"
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.qiwork]
+display_name = "巡店管家"

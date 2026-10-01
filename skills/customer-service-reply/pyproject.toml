@@ -1,0 +1,9 @@
+[project]
+slug = "customer-service-reply"
+name = "电商客服话术生成"
+category = "客服"
+version = "1.0.0"
+author = "YiqiWork"
+description = "电商客服全场景话术生成技能，覆盖售前、售中、售后，适配12大平台及30+行业"
+icon_url = "https://s1.aigei.com/src/img/png/bc/bce1d121b969417f8a5c6b12b2ea21da.png?imageMogr2/auto-orient/thumbnail/!282x282r/gravity/Center/crop/282x282/quality/85/%7CimageView2/2/w/282&e=2051020800&token=P7S2Xpzfz11vAkASLTkfHN7Fw-oOZBecqeJaxypL:rQSS8-kZ-kDb0HafTKR-D73a0tM="
+requires-python = ">=3.10"

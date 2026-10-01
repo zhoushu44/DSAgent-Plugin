@@ -1,0 +1,4 @@
+skill: data-report
+version: 1.4.0
+note: 大文件流式 inspect + heartbeat + json-safe 铁律 + script_safety 护栏 + dedup/dispose; runtime check 默认 best-effort
+build_time: 2026-06-03 16:15:37 +0800

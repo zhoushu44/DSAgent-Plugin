@@ -1,0 +1,81 @@
+{
+  "schema": "dsagent/skill-contract@1",
+  "id": "keyword-traffic",
+  "entry": {
+    "form": "package",
+    "pkg": "keyword_traffic"
+  },
+  "input": {
+    "subcommands": [
+      {
+        "name": "categories",
+        "description": "查询关键词匹配的行业类目",
+        "args": [
+          {
+            "name": "keyword",
+            "positional": true,
+            "required": true
+          }
+        ]
+      },
+      {
+        "name": "trend",
+        "description": "获取关键词流量趋势（最多13个月）",
+        "args": [
+          {
+            "name": "keyword",
+            "positional": true,
+            "required": true
+          },
+          {
+            "name": "cate_id",
+            "type": "integer",
+            "default": 0
+          },
+          {
+            "name": "months",
+            "type": "integer",
+            "default": 13
+          }
+        ]
+      },
+      {
+        "name": "summary",
+        "description": "获取市场数据总结",
+        "args": [
+          {
+            "name": "keyword",
+            "positional": true,
+            "required": true
+          },
+          {
+            "name": "cate_id",
+            "type": "integer",
+            "default": 0
+          }
+        ]
+      },
+      {
+        "name": "history",
+        "description": "查看 Connect skill-cache 中已抓取的关键词",
+        "args": [
+          {
+            "name": "keyword",
+            "default": "",
+            "description": "关键词模糊筛选"
+          },
+          {
+            "name": "limit",
+            "type": "integer",
+            "default": 50
+          }
+        ]
+      }
+    ]
+  },
+  "output": {
+    "protocol": "dsagent-result",
+    "resultPrefix": "__DSAGENT_RESULT__",
+    "filesMarker": "---[OUTPUT_FILES]"
+  }
+}

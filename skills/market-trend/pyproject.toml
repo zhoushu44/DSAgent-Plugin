@@ -1,0 +1,10 @@
+[project]
+slug = "market-trend"
+name = "生意参谋市场排行分析"
+category = "淘系"
+version = "1.2.0"
+author = "YiqiWork"
+description = "生意参谋市场排行：4 周期商品排名趋势分析（上升/下降/新上榜/跌出榜），输出 JSON + CSV"
+icon_url = "https://img.alicdn.com/imgextra/i4/O1CN01ryp9zX1fDE0AzYiQP_!!6000000003972-2-tps-160-160.png"
+requires-python = ">=3.10"
+dependencies = ["httpx>=0.27"]

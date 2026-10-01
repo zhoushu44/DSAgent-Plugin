@@ -1,0 +1,72 @@
+{
+  "schema": "dsagent/skill-contract@1",
+  "id": "douyin-crawl",
+  "entry": {
+    "form": "script",
+    "script": "scripts/fetch_data.py"
+  },
+  "input": {
+    "args": [
+      {
+        "name": "mode",
+        "choices": [
+          "user",
+          "detail",
+          "search",
+          "user-search",
+          "hot",
+          "favorite",
+          "profile",
+          "topic",
+          "topic-search",
+          "related"
+        ],
+        "description": "采集模式（不传则按参数自动判定）"
+      },
+      {
+        "name": "keyword",
+        "description": "搜索关键词（如未提供则从 DSAGENT_REQUEST 提取）"
+      },
+      {
+        "name": "aweme_id",
+        "flag": "--aweme-id",
+        "description": "视频 ID（detail / related 模式必填）"
+      },
+      {
+        "name": "ch_id",
+        "flag": "--ch-id",
+        "description": "话题 ID（topic 模式可选，不传则按关键词解析）"
+      },
+      {
+        "name": "count",
+        "type": "integer",
+        "default": 18,
+        "description": "单次数量（默认 18，最大 50）"
+      },
+      {
+        "name": "max_cursor",
+        "flag": "--max-cursor",
+        "type": "integer",
+        "default": 0,
+        "description": "翻页游标（user / favorite 模式）"
+      },
+      {
+        "name": "cursor",
+        "type": "integer",
+        "default": 0,
+        "description": "翻页游标（topic 模式）"
+      },
+      {
+        "name": "offset",
+        "type": "integer",
+        "default": 0,
+        "description": "偏移量（search / user-search 模式）"
+      }
+    ]
+  },
+  "output": {
+    "protocol": "dsagent-result",
+    "resultPrefix": "__DSAGENT_RESULT__",
+    "filesMarker": "---[OUTPUT_FILES]"
+  }
+}

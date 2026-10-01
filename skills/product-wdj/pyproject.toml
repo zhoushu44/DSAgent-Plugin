@@ -1,0 +1,28 @@
+[project]
+slug = "product-wdj"
+name = "淘宝商品问大家分析"
+category = "淘系"
+version = "1.2.0"
+author = "YiqiWork"
+video_url = "https://media.bjnews.com.cn/video/out/2025/09/03/5627281659826089570.m3u8"
+description = "获取淘宝/天猫商品问大家问答，导出 CSV 与 JSON，生成 HTML 报告"
+detail_description = """
+## 功能
+
+获取淘宝/天猫商品「问大家」问答列表与回答详情，导出 CSV、JSON 与 HTML 报告。
+
+## 前置条件
+
+1. 在 **平台连接** 添加并登录 **淘宝买家账号**（`platform=taobao`）
+2. 将该账号 **绑定到当前对话的智能体**
+
+## 产物
+
+| 类型 | 路径 |
+|------|------|
+| JSON/CSV/HTML | `{workspace}/artifacts/` |
+| 洞察 Markdown | `{workspace}/artifacts/问大家洞察_{item_id}.md` |
+"""
+icon_url = "https://gw.alicdn.com/imgextra/i4/O1CN01qOI6vB1zaqrBKbyFr_!!6000000006731-73-tps-64-64.ico"
+requires-python = ">=3.10"
+dependencies = ["httpx>=0.27", "jieba>=0.42", "markdown>=3.5"]

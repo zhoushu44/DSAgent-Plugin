@@ -1,0 +1,91 @@
+{
+  "schema": "dsagent/skill-contract@1",
+  "id": "zhihu-crawl",
+  "entry": {
+    "form": "script",
+    "script": "scripts/fetch_data.py"
+  },
+  "input": {
+    "args": [
+      {
+        "name": "mode",
+        "description": "采集模式（不传则按参数自动判定）"
+      },
+      {
+        "name": "keyword",
+        "description": "搜索关键词 / 用户昵称（如未提供则从 DSAGENT_REQUEST 提取）"
+      },
+      {
+        "name": "question_id",
+        "flag": "--question-id",
+        "description": "问题 ID（answers 模式必填）"
+      },
+      {
+        "name": "answer_id",
+        "flag": "--answer-id",
+        "description": "回答 ID（answer / comments 模式必填）"
+      },
+      {
+        "name": "url_token",
+        "flag": "--url-token",
+        "description": "用户 url_token（member 系模式可选，不传则按关键词搜人）"
+      },
+      {
+        "name": "search_type",
+        "flag": "--search-type",
+        "choices": [
+          "general",
+          "question",
+          "content"
+        ],
+        "default": "general",
+        "description": "搜索类型（默认 general）"
+      },
+      {
+        "name": "sort_by",
+        "flag": "--sort-by",
+        "choices": [
+          "default",
+          "hot"
+        ],
+        "default": "default",
+        "description": "回答排序（answers 模式，默认 default）"
+      },
+      {
+        "name": "order",
+        "choices": [
+          "normal",
+          "score"
+        ],
+        "default": "normal",
+        "description": "评论排序（comments 模式，默认 normal）"
+      },
+      {
+        "name": "with_child",
+        "flag": "--with-child",
+        "type": "boolean",
+        "description": "评论模式同时采集二级评论"
+      },
+      {
+        "name": "csv",
+        "type": "boolean",
+        "description": "同时导出 CSV 到 workspace/artifacts"
+      },
+      {
+        "name": "count",
+        "type": "integer"
+      },
+      {
+        "name": "offset",
+        "type": "integer",
+        "default": 0,
+        "description": "偏移量（翻页用）"
+      }
+    ]
+  },
+  "output": {
+    "protocol": "dsagent-result",
+    "resultPrefix": "__DSAGENT_RESULT__",
+    "filesMarker": "---[OUTPUT_FILES]"
+  }
+}

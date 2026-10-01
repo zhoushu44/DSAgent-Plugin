@@ -1,0 +1,10 @@
+[project]
+slug = "competitor-indicator"
+name = "达摩盘竞品指标对比"
+category = "无界"
+version = "1.0.0"
+author = "YiqiWork"
+description = "绑定生意参谋/达摩盘，按商品ID查询竞品核心指标对比"
+icon_url = "https://ts2.tc.mm.bing.net/th/id/ODF.Ale95ldqkyoSqyZGGQvKNQ?w=32&h=32&qlt=90&pcl=fffffc&o=6&pid=1.2"
+requires-python = ">=3.10"
+dependencies = ["httpx>=0.27", "markdown>=3.5"]

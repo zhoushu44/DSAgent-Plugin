@@ -1,0 +1,9 @@
+[project]
+slug = "industry-data-mcp"
+name = "TB行业数据分析"
+category = "淘系"
+version = "1.0.0"
+author = "YiqiWork"
+description = "官网订购MCP后使用该技能分析行业数据产出报告"
+icon_url = "https://gw.alicdn.com/imgextra/i4/O1CN01qOI6vB1zaqrBKbyFr_!!6000000006731-73-tps-64-64.ico"
+

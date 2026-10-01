@@ -221,6 +221,10 @@ const BINDING_RULES: Array<[string, string]> = [
   ['keyword-traffic', 'sycm'],
   ['market-trend', 'sycm'],
   ['store-patrol-manager', 'sycm'],
+  // sycm 平台（参谋长分析包转换的诊断类技能 —— 凭证层同样复用淘宝登录态）
+  ['category-structure-diagnosis', 'sycm'],
+  ['product-layering-diagnosis', 'sycm'],
+  ['shop-promotion-diagnosis', 'sycm'],
   // taobao 平台（淘宝登录态）
   ['product-reviews', 'taobao'],
   ['product-wdj', 'taobao'],

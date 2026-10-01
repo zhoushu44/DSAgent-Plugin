@@ -1,0 +1,94 @@
+{
+  "schema": "dsagent/skill-contract@1",
+  "id": "competitor-strategy-comparison",
+  "entry": {
+    "form": "package",
+    "pkg": "competitor_strategy_comparison"
+  },
+  "input": {
+    "args": [
+      {
+        "name": "item_id",
+        "flag": "--item-id",
+        "required": true,
+        "description": "本店商品 ID"
+      },
+      {
+        "name": "competitor_id",
+        "flag": "--competitor-id",
+        "required": true,
+        "description": "同叶子类目竞品 ID"
+      },
+      {
+        "name": "start_date",
+        "flag": "--start-date",
+        "required": true,
+        "description": "开始日期 YYYY-MM-DD"
+      },
+      {
+        "name": "end_date",
+        "flag": "--end-date",
+        "required": true,
+        "description": "结束日期 YYYY-MM-DD"
+      }
+    ],
+    "subcommands": [
+      {
+        "name": "list-products",
+        "description": "列出本店可分析商品",
+        "args": [
+          {
+            "name": "page",
+            "type": "integer",
+            "default": 1
+          },
+          {
+            "name": "page_size",
+            "flag": "--page-size",
+            "type": "integer",
+            "default": 10
+          },
+          {
+            "name": "keyword",
+            "default": ""
+          }
+        ]
+      },
+      {
+        "name": "report",
+        "description": "从内部 JSON 生成 HTML 报告",
+        "args": [
+          {
+            "name": "input",
+            "required": true
+          },
+          {
+            "name": "output",
+            "default": ""
+          }
+        ]
+      },
+      {
+        "name": "history",
+        "description": "查看已生成的分析产物",
+        "args": [
+          {
+            "name": "competitor_id",
+            "flag": "--competitor-id",
+            "default": ""
+          },
+          {
+            "name": "limit",
+            "type": "integer",
+            "default": 50
+          }
+        ]
+      }
+    ]
+  },
+  "output": {
+    "protocol": "dsagent-result",
+    "resultPrefix": "__DSAGENT_RESULT__",
+    "filesMarker": "---[OUTPUT_FILES]"
+  }
+}

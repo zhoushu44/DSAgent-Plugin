@@ -1,0 +1,59 @@
+{
+  "schema": "dsagent/skill-contract@1",
+  "id": "market-analysis",
+  "entry": {
+    "form": "package",
+    "pkg": "market_analysis"
+  },
+  "input": {
+    "args": [
+      {
+        "name": "queries",
+        "positional": true,
+        "type": "array",
+        "nargs": "+",
+        "required": true,
+        "description": "关键词或自然语言请求，例如：手机 / 帮我查看手机的趋势"
+      },
+      {
+        "name": "sort",
+        "default": "",
+        "description": "排序方式：default|sale|credit|price-asc|price-desc，默认综合排序"
+      },
+      {
+        "name": "location",
+        "default": "",
+        "description": "发货地，例如：浙江"
+      },
+      {
+        "name": "item_limit",
+        "type": "integer"
+      },
+      {
+        "name": "page_size",
+        "type": "integer",
+        "hidden": true
+      },
+      {
+        "name": "max_pages",
+        "type": "integer",
+        "hidden": true
+      },
+      {
+        "name": "price_min",
+        "type": "number",
+        "description": "最低价格"
+      },
+      {
+        "name": "price_max",
+        "type": "number",
+        "description": "最高价格"
+      }
+    ]
+  },
+  "output": {
+    "protocol": "dsagent-result",
+    "resultPrefix": "__DSAGENT_RESULT__",
+    "filesMarker": "---[OUTPUT_FILES]"
+  }
+}

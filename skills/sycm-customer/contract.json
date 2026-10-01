@@ -1,0 +1,136 @@
+{
+  "schema": "dsagent/skill-contract@1",
+  "id": "sycm-customer",
+  "entry": {
+    "form": "package",
+    "pkg": "customer_analysis"
+  },
+  "input": {
+    "args": [
+      {
+        "name": "date",
+        "default": "",
+        "description": "统计日期 YYYY-MM-DD（默认昨天）"
+      },
+      {
+        "name": "date_type",
+        "flag": "--date-type",
+        "default": "day",
+        "description": "概览 dateType，默认 day"
+      },
+      {
+        "name": "profile_date_type",
+        "flag": "--profile-date-type",
+        "default": "recent30",
+        "description": "画像 dateType，默认 recent30"
+      },
+      {
+        "name": "profile_days",
+        "flag": "--profile-days",
+        "type": "integer",
+        "description": "画像统计天数，默认 30"
+      },
+      {
+        "name": "attributes_summary",
+        "flag": "--attributes-summary",
+        "default": "",
+        "description": "汇总画像属性，逗号分隔（默认 prefer_type,interest,gender,age,province,city）"
+      },
+      {
+        "name": "attributes_detail",
+        "flag": "--attributes-detail",
+        "default": "",
+        "description": "店铺客户深度画像属性，逗号分隔（默认 career_type,education_degree,brand,brand_cate,purchase_power）"
+      },
+      {
+        "name": "crowd_type",
+        "flag": "--crowd-type",
+        "default": "",
+        "description": "客户类型，逗号分隔：shop_crowd,new_crowd,unpur_crowd,purch_crowd（默认全部）"
+      },
+      {
+        "name": "from_overview_json",
+        "flag": "--from-overview-json",
+        "default": "",
+        "description": "本地客户概览 JSON（1.json）"
+      },
+      {
+        "name": "from_profile_json",
+        "flag": "--from-profile-json",
+        "default": "",
+        "description": "本地店铺客户汇总画像 JSON（shop_crowd，7.json），同 --from-profile-json-shop"
+      },
+      {
+        "name": "from_profile_json_shop",
+        "flag": "--from-profile-json-shop",
+        "default": "",
+        "description": "本地店铺客户汇总画像 JSON（7.json）"
+      },
+      {
+        "name": "from_profile_json_new",
+        "flag": "--from-profile-json-new",
+        "default": "",
+        "description": "本地客户新访画像 JSON（4.json）"
+      },
+      {
+        "name": "from_profile_json_unpur",
+        "flag": "--from-profile-json-unpur",
+        "default": "",
+        "description": "本地未购客户回访画像 JSON（5.json）"
+      },
+      {
+        "name": "from_profile_json_purch",
+        "flag": "--from-profile-json-purch",
+        "default": "",
+        "description": "本地已购客户回访画像 JSON（6.json）"
+      },
+      {
+        "name": "from_profile_detail_json",
+        "flag": "--from-profile-detail-json",
+        "default": "",
+        "description": "本地店铺客户消费层级等深度画像 JSON（2.json，shop_crowd）"
+      },
+      {
+        "name": "from_profile_purchase_json_new",
+        "flag": "--from-profile-purchase-json-new",
+        "default": "",
+        "description": "本地客户新访消费层级 JSON"
+      },
+      {
+        "name": "from_profile_purchase_json_unpur",
+        "flag": "--from-profile-purchase-json-unpur",
+        "default": "",
+        "description": "本地未购回访消费层级 JSON"
+      },
+      {
+        "name": "from_profile_purchase_json_purch",
+        "flag": "--from-profile-purchase-json-purch",
+        "default": "",
+        "description": "本地已购回访消费层级 JSON"
+      },
+      {
+        "name": "from_page_info_json",
+        "flag": "--from-page-info-json",
+        "default": "",
+        "description": "本地页面配置 JSON（getPageInfo，3.json）"
+      },
+      {
+        "name": "skip_shop_detail",
+        "flag": "--skip-shop-detail",
+        "type": "boolean",
+        "description": "跳过各人群消费层级画像拉取"
+      },
+      {
+        "name": "fetch_purchase_power_online",
+        "flag": "--fetch-purchase-power-online",
+        "type": "boolean",
+        "description": "本地汇总 JSON 模式下仍在线拉取各人群消费层级"
+      }
+    ]
+  },
+  "output": {
+    "protocol": "dsagent-result",
+    "resultPrefix": "__DSAGENT_RESULT__",
+    "filesMarker": "---[OUTPUT_FILES]"
+  }
+}

@@ -1,0 +1,18 @@
+[project]
+slug = "sycm-customer"
+name = "生意参谋客户分析"
+category = "淘系"
+version = "1.2.0"
+author = "YiqiWork"
+description = "生意参谋店铺客户概览与客户画像分析，导出 JSON/CSV/HTML 报告"
+icon_url = "https://gw.alicdn.com/imgextra/i4/O1CN01qOI6vB1zaqrBKbyFr_!!6000000006731-73-tps-64-64.ico"
+requires-python = ">=3.10"
+dependencies = []
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["customer_analysis*"]

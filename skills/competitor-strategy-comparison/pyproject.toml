@@ -1,0 +1,10 @@
+[project]
+slug = "competitor-strategy-comparison"
+name = "竞品策略对比分析"
+category = "淘系"
+version = "2.0.0"
+author = "QIWork"
+icon_url = "https://ts2.tc.mm.bing.net/th/id/ODF.Ale95ldqkyoSqyZGGQvKNQ?w=32&h=32&qlt=90&pcl=fffffc&o=6&pid=1.2"
+description = "使用当前QIWork智能体绑定店铺的登录态，按本店商品和竞品ID获取DMP关键指标、人群及推广策略对比数据"
+requires-python = ">=3.10"
+dependencies = ["httpx>=0.27", "markdown>=3.5"]

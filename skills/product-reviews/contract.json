@@ -1,0 +1,86 @@
+{
+  "schema": "dsagent/skill-contract@1",
+  "id": "product-reviews",
+  "entry": {
+    "form": "package",
+    "pkg": "product_reviews"
+  },
+  "input": {
+    "args": [
+      {
+        "name": "item",
+        "positional": true,
+        "nargs": "?",
+        "default": "",
+        "description": "商品 ID 或商品链接"
+      },
+      {
+        "name": "item_id",
+        "default": "",
+        "description": "商品 ID（auctionNumId）"
+      },
+      {
+        "name": "page_size",
+        "type": "integer",
+        "description": "每页条数"
+      },
+      {
+        "name": "max_pages",
+        "type": "integer",
+        "description": "最多抓取页数（默认 5；与 --all_pages 或 intent 中「全部」互斥）"
+      },
+      {
+        "name": "all_pages",
+        "type": "boolean",
+        "description": "获取全部（仅当用户明确要求全部数据时使用）"
+      },
+      {
+        "name": "order_type",
+        "choices": [
+          "searchImpr",
+          "feedbackdate"
+        ],
+        "description": "排序：searchImpr 综合排序（默认）、feedbackdate 最新时间"
+      },
+      {
+        "name": "intent",
+        "default": "",
+        "description": "自然语言补充：如「按时间排序翻3页」「获取全部评价」"
+      },
+      {
+        "name": "from_json",
+        "flag": "--from-json",
+        "default": "",
+        "description": "从本地 JSONP/JSON 文件解析评价（调试用，跳过评价 API）"
+      },
+      {
+        "name": "from_detail_json",
+        "flag": "--from-detail-json",
+        "default": "",
+        "description": "从本地 JSONP/JSON 文件解析商品 SKU 详情（调试用）"
+      }
+    ],
+    "subcommands": [
+      {
+        "name": "report",
+        "args": [
+          {
+            "name": "input",
+            "required": true,
+            "description": "collect 输出的 JSON 文件"
+          },
+          {
+            "name": "output",
+            "default": "",
+            "description": "HTML 输出路径（默认覆盖原 report_path）"
+          }
+        ]
+      }
+    ]
+  },
+  "output": {
+    "protocol": "dsagent-result",
+    "resultPrefix": "__DSAGENT_RESULT__",
+    "filesMarker": "---[OUTPUT_FILES]"
+  }
+}

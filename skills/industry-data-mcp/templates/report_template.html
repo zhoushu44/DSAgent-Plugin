@@ -1,0 +1,712 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title><!-- TITLE -->类目数据分析报告<!-- /TITLE --></title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <style>
+        /* ===== 全局重置 ===== */
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+                         'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+            background: #f0f2f5;
+            color: #1a1a2e;
+            line-height: 1.6;
+            padding: 0;
+        }
+
+        /* ===== 头部 Header ===== */
+        .header {
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+            color: #fff;
+            padding: 48px 40px 36px;
+            text-align: center;
+            position: relative;
+            overflow: hidden;
+        }
+        .header::before {
+            content: '';
+            position: absolute;
+            top: -50%; left: -50%;
+            width: 200%; height: 200%;
+            background: radial-gradient(circle at 30% 50%, rgba(83,127,231,0.08) 0%, transparent 60%),
+                        radial-gradient(circle at 70% 50%, rgba(233,69,96,0.06) 0%, transparent 60%);
+            pointer-events: none;
+        }
+        .header h1 { font-size: 2.6em; font-weight: 700; letter-spacing: 2px; position: relative; }
+        .header .subtitle { font-size: 1.1em; opacity: 0.75; margin-top: 8px; position: relative; }
+        .header .date-badge {
+            display: inline-block; margin-top: 14px; padding: 6px 22px;
+            background: rgba(255,255,255,0.12); border-radius: 20px;
+            font-size: 0.95em; letter-spacing: 0.5px; position: relative;
+        }
+        .header .total-badge {
+            display: inline-block; margin-top: 10px; padding: 5px 18px;
+            background: rgba(233,69,96,0.25); border: 1px solid rgba(233,69,96,0.4);
+            border-radius: 20px; font-size: 0.88em; position: relative;
+        }
+
+        /* ===== 容器 ===== */
+        .container { max-width: 1320px; margin: 0 auto; padding: 32px 24px 80px; }
+
+        /* ===== 核心指标卡片网格 ===== */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 14px; margin-bottom: 28px;
+        }
+        .stat-card {
+            background: #fff; border-radius: 14px; padding: 20px 18px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+            transition: transform 0.15s, box-shadow 0.15s;
+            position: relative; overflow: hidden;
+        }
+        .stat-card:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0,0,0,0.08); }
+        .stat-card .icon { font-size: 1.4em; margin-bottom: 2px; }
+        .stat-card .label { font-size: 0.78em; color: #888; font-weight: 500; }
+        .stat-card .value {
+            font-size: 1.6em; font-weight: 700; margin-top: 4px; color: #1a1a2e;
+        }
+        .stat-card .value .unit { font-size: 0.5em; color: #999; font-weight: 400; margin-left: 3px; }
+
+        /* 6种卡片左边框颜色 */
+        .stat-card.accent-1 { border-left: 4px solid #537fe7; }
+        .stat-card.accent-2 { border-left: 4px solid #e94560; }
+        .stat-card.accent-3 { border-left: 4px solid #3ecf8e; }
+        .stat-card.accent-4 { border-left: 4px solid #f59e0b; }
+        .stat-card.accent-5 { border-left: 4px solid #8b5cf6; }
+        .stat-card.accent-6 { border-left: 4px solid #06b6d4; }
+        .stat-card.accent-7 { border-left: 4px solid #ec4899; }
+        .stat-card.accent-8 { border-left: 4px solid #14b8a6; }
+
+        /* ===== Tab 页签 ===== */
+        .tabs { display: flex; gap: 4px; margin-bottom: 24px; flex-wrap: wrap; }
+        .tab-btn {
+            padding: 10px 22px; border: none; background: #e8eaed;
+            border-radius: 10px 10px 0 0; font-size: 0.9em; font-weight: 600;
+            color: #666; cursor: pointer; transition: all 0.15s;
+        }
+        .tab-btn:hover { background: #dde0e4; }
+        .tab-btn.active { background: #fff; color: #1a1a2e; box-shadow: 0 -2px 6px rgba(0,0,0,0.04); }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+
+        .tab-panel {
+            background: #fff; border-radius: 0 14px 14px 14px;
+            padding: 28px 30px; box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+        }
+
+        /* ===== Section 容器 ===== */
+        .section {
+            background: #fff; border-radius: 14px; padding: 28px 30px;
+            margin-bottom: 24px; box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+        }
+        .section-title {
+            font-size: 1.25em; font-weight: 700; margin-bottom: 18px;
+            display: flex; align-items: center; gap: 10px; color: #1a1a2e;
+        }
+        .section-title .badge {
+            font-size: 0.55em; background: #e94560; color: #fff;
+            padding: 2px 10px; border-radius: 10px; font-weight: 500;
+        }
+        .section-title .badge-blue {
+            font-size: 0.55em; background: #537fe7; color: #fff;
+            padding: 2px 10px; border-radius: 10px; font-weight: 500;
+        }
+
+        /* ===== 图表容器 ===== */
+        .chart-row {
+            display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-bottom: 24px;
+        }
+        .chart-box {
+            background: #fff; border-radius: 14px; padding: 18px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+        }
+        .chart-box-full {
+            background: #fff; border-radius: 14px; padding: 18px; margin-bottom: 18px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+        }
+        .chart-box .chart-title, .chart-box-full .chart-title {
+            font-size: 0.92em; font-weight: 600; color: #555;
+            margin-bottom: 10px; text-align: center;
+        }
+        .chart-box canvas { width: 100% !important; max-height: 270px; }
+        .chart-box-full canvas { width: 100% !important; max-height: 360px; }
+
+        /* ===== 表格 ===== */
+        .table-wrap { overflow-x: auto; }
+        table { width: 100%; border-collapse: collapse; font-size: 0.88em; }
+        th {
+            background: #f8f9fc; color: #555; font-weight: 600;
+            padding: 10px 12px; text-align: left; border-bottom: 2px solid #eee;
+            white-space: nowrap;
+        }
+        td { padding: 10px 12px; border-bottom: 1px solid #f0f0f0; vertical-align: middle; }
+        tr:hover td { background: #fafbfe; }
+        .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+        .highlight { color: #e94560; font-weight: 600; }
+        .num.highlight { color: #e94560; font-weight: 700; }
+        .highlight-green { color: #3ecf8e; font-weight: 600; }
+        .trend-up { color: #3ecf8e; }
+        .trend-down { color: #e94560; }
+
+        /* ===== 排名 ===== */
+        .rank-1 { background: linear-gradient(135deg, #ffd70015, #ffed4a05); }
+        .rank-2 { background: linear-gradient(135deg, #c0c0c015, #e8e8e805); }
+        .rank-3 { background: linear-gradient(135deg, #cd7f3215, #e0a06005); }
+        .rank-num {
+            display: inline-block; width: 22px; height: 22px; line-height: 22px;
+            text-align: center; border-radius: 6px; font-size: 0.78em; font-weight: 700;
+        }
+        .rank-1 .rank-num { background: #ffd700; color: #1a1a2e; }
+        .rank-2 .rank-num { background: #c0c0c0; color: #1a1a2e; }
+        .rank-3 .rank-num { background: #cd7f32; color: #fff; }
+
+        /* ===== 品牌标签 ===== */
+        .brand-tag {
+            display: inline-block; padding: 1px 8px; border-radius: 4px;
+            font-size: 0.78em; font-weight: 600; background: #eef3ff; color: #537fe7;
+        }
+
+        /* ===== 洞察卡片 ===== */
+        .insight-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+        .insight-card { padding: 16px 18px; border-radius: 12px; font-size: 0.9em; }
+        .insight-card.blue { background: #eef3ff; border-left: 4px solid #537fe7; }
+        .insight-card.green { background: #edfaf4; border-left: 4px solid #3ecf8e; }
+        .insight-card.red { background: #fef0f0; border-left: 4px solid #e94560; }
+        .insight-card.purple { background: #f3eeff; border-left: 4px solid #8b5cf6; }
+        .insight-card.orange { background: #fff8f0; border-left: 4px solid #f59e0b; }
+        .insight-card.pink { background: #fef0f6; border-left: 4px solid #ec4899; }
+        .insight-card .label { font-weight: 600; margin-bottom: 4px; }
+
+        /* ===== Footer & 提示 ===== */
+        .footer { text-align: center; padding: 24px; color: #aaa; font-size: 0.82em; }
+        .tip { font-size: 0.8em; color: #999; margin-top: 6px; }
+        .divider { border: none; border-top: 1px solid #eee; margin: 24px 0; }
+
+        /* ===== 商品标题截断 ===== */
+        .prod-title {
+            max-width: 260px; overflow: hidden; text-overflow: ellipsis;
+            white-space: nowrap; display: inline-block; vertical-align: middle;
+            font-size: 0.92em;
+        }
+
+        /* ===== 移动端适配 ===== */
+        @media (max-width: 900px) {
+            .header { padding: 32px 20px 28px; }
+            .header h1 { font-size: 1.6em; }
+            .container { padding: 20px 12px 60px; }
+            .stats-grid { grid-template-columns: repeat(2, 1fr); gap: 10px; }
+            .stat-card { padding: 14px 12px; }
+            .stat-card .value { font-size: 1.2em; }
+            .chart-row { grid-template-columns: 1fr; }
+            .insight-grid { grid-template-columns: 1fr; }
+            .section, .tab-panel { padding: 18px 14px; }
+            .prod-title { max-width: 140px; }
+        }
+    </style>
+</head>
+<body>
+    <!-- ===== HEADER ===== -->
+    <div class="header">
+        <h1>👔 <!-- HEADER_TITLE -->类目数据分析报告<!-- /HEADER_TITLE --></h1>
+        <div class="subtitle">行业库 · 参谋长 · 含商品级深度透视</div>
+        <div class="date-badge">📅 统计周期：<!-- DATE_RANGE -->YYYY-MM-DD ~ YYYY-MM-DD<!-- /DATE_RANGE --> &nbsp;|&nbsp; 最新数据日：<!-- LATEST_DATE -->YYYY-MM-DD<!-- /LATEST_DATE --></div>
+        <div class="total-badge">📦 在售商品总数：<strong><!-- TOTAL_PRODUCTS -->N<!-- /TOTAL_PRODUCTS --></strong> 件</div>
+    </div>
+
+    <div class="container">
+        <!-- ===== 核心指标卡片 ===== -->
+        <div class="stats-grid" id="statsGrid">
+            <!-- 由 JS 动态渲染 -->
+        </div>
+
+        <!-- ===== 趋势图表 ===== -->
+        <div class="chart-row">
+            <div class="chart-box">
+                <div class="chart-title">📊 交易指数 &amp; GMV 每日趋势</div>
+                <canvas id="chartTradeGmv"></canvas>
+            </div>
+            <div class="chart-box">
+                <div class="chart-title">📊 UV &amp; 点击率 每日趋势</div>
+                <canvas id="chartUvCtr"></canvas>
+            </div>
+        </div>
+
+        <!-- ===== Tab 导航 ===== -->
+        <div class="tabs" id="tabNav">
+            <button class="tab-btn active" data-tab="tab-overview">📋 类目概览</button>
+            <button class="tab-btn" data-tab="tab-products">🛒 商品榜单 TOP20</button>
+            <button class="tab-btn" data-tab="tab-brands">🏷️ 品牌分析</button>
+            <button class="tab-btn" data-tab="tab-price">💲 价格带分析</button>
+            <button class="tab-btn" data-tab="tab-insights">💡 综合洞察</button>
+        </div>
+
+        <!-- ===== Tab 1: 类目概览 ===== -->
+        <div id="tab-overview" class="tab-content active">
+            <div class="tab-panel">
+                <div class="section-title">📋 每日数据明细</div>
+                <div class="table-wrap">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>日期</th><th>星期</th>
+                                <th class="num">交易指数</th><th class="num">GMV (¥)</th>
+                                <th class="num">UV</th><th class="num">浏览量 IV</th>
+                                <th class="num">搜索曝光</th><th class="num">搜索点击</th>
+                                <th class="num">点击率</th><th>日环比</th>
+                            </tr>
+                        </thead>
+                        <tbody id="dailyTableBody"></tbody>
+                    </table>
+                </div>
+                <hr class="divider" style="margin-top:24px;">
+                <div class="section-title" style="margin-top:8px;">🔥 热搜关键词 TOP 10 <span class="badge">按交易指数</span></div>
+                <div class="table-wrap">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>排名</th><th>关键词</th>
+                                <th class="num">交易指数</th><th class="num">GMV (¥)</th>
+                                <th class="num">UV</th><th class="num">搜索曝光</th>
+                                <th class="num">搜索点击</th><th class="num">点击率</th>
+                                <th class="num">支付转化率</th><th>搜索曝光环比</th>
+                            </tr>
+                        </thead>
+                        <tbody id="hotWordsBody"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- ===== Tab 2: 商品榜单 ===== -->
+        <div id="tab-products" class="tab-content">
+            <div class="tab-panel">
+                <div class="section-title">🛒 热销商品榜 TOP 20 <span class="badge">按交易指数降序</span></div>
+                <div class="table-wrap">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>#</th><th>商品</th><th>品牌</th>
+                                <th class="num">售价 (¥)</th><th class="num">交易指数</th>
+                                <th class="num">GMV (¥)</th><th class="num">UV</th>
+                                <th class="num">搜索曝光</th><th class="num">搜索点击</th>
+                                <th class="num">点击率</th><th class="num">支付转化率</th>
+                            </tr>
+                        </thead>
+                        <tbody id="productBody"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- ===== Tab 3: 品牌分析 ===== -->
+        <div id="tab-brands" class="tab-content">
+            <div class="tab-panel">
+                <div class="section-title">🏷️ 品牌集中度分析 <span class="badge-blue">基于TOP20商品</span></div>
+                <div class="chart-row">
+                    <div class="chart-box"><div class="chart-title">品牌交易指数占比</div><canvas id="chartBrandShare"></canvas></div>
+                    <div class="chart-box"><div class="chart-title">品牌平均客单价 (¥)</div><canvas id="chartBrandPrice"></canvas></div>
+                </div>
+                <div class="table-wrap">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>品牌</th><th class="num">上榜商品数</th>
+                                <th class="num">合计交易指数</th><th class="num">合计 GMV (¥)</th>
+                                <th class="num">总 UV</th><th class="num">平均售价 (¥)</th>
+                                <th class="num">平均点击率</th><th class="num">平均支付转化率</th>
+                            </tr>
+                        </thead>
+                        <tbody id="brandBody"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- ===== Tab 4: 价格带分析 ===== -->
+        <div id="tab-price" class="tab-content">
+            <div class="tab-panel">
+                <div class="section-title">💲 价格带分布 <span class="badge-blue">基于TOP20商品</span></div>
+                <div class="chart-row">
+                    <div class="chart-box"><div class="chart-title">各价格带商品数量</div><canvas id="chartPriceCount"></canvas></div>
+                    <div class="chart-box"><div class="chart-title">各价格带 GMV 贡献</div><canvas id="chartPriceGmv"></canvas></div>
+                </div>
+                <div class="table-wrap">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>价格带</th><th class="num">商品数</th>
+                                <th class="num">交易指数合计</th><th class="num">GMV 合计 (¥)</th>
+                                <th class="num">总 UV</th><th class="num">平均点击率</th>
+                                <th class="num">平均支付转化率</th><th>评价</th>
+                            </tr>
+                        </thead>
+                        <tbody id="priceBody"></tbody>
+                    </table>
+                </div>
+                <div class="tip">价格带划分：¥0-100 经济型 · ¥100-200 中端 · ¥200-400 中高端 · ¥400+ 高端</div>
+            </div>
+        </div>
+
+        <!-- ===== Tab 5: 综合洞察 ===== -->
+        <div id="tab-insights" class="tab-content">
+            <div class="tab-panel">
+                <div class="section-title">💡 数据洞察与策略建议</div>
+                <div class="insight-grid" id="insightGrid"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ===== Footer ===== -->
+    <div class="footer">
+        数据来源：行业库 · 参谋长 &nbsp;|&nbsp; 生成时间：<!-- GENERATED_DATE -->YYYY-MM-DD<!-- /GENERATED_DATE --> &nbsp;|&nbsp; 数据仅供内部参考
+    </div>
+
+<script>
+// ============================================================
+//  数据注入区 — 修改下方 DATA 对象的内容即可渲染报告
+// ============================================================
+
+const DATA = {
+    // ---- 核心指标 ----
+    stats: [
+        { icon: '🏆', label: '交易指数', value: '116,383', accent: 'accent-1' },
+        { icon: '💰', label: '预估 GMV', value: '¥1,538.8', unit: '万', accent: 'accent-2' },
+        { icon: '👥', label: '访客数 (UV)', value: '382.8', unit: '万', accent: 'accent-3' },
+        { icon: '📦', label: '浏览量 (IV)', value: '1,608.7', unit: '万', accent: 'accent-4' },
+        { icon: '🔍', label: '搜索人气', value: '709,500', accent: 'accent-5' },
+        { icon: '📈', label: '点击率 (CTR)', value: '4.43', unit: '%', accent: 'accent-6' },
+        { icon: '🛒', label: '在线商品数', value: '2,015', accent: 'accent-7' },
+        { icon: '🏪', label: '活跃品牌数', value: 'TOP 5', accent: 'accent-8' },
+    ],
+
+    // ---- 每日趋势 ----
+    dailySeries: [
+        { date: '07-07', weekday: '周二', tradeIdx: 29985, gmv: 4001785, uv: 937739, iv: 3250106,
+          seImps: 3230273, seClicks: 143993, ctr: 4.46, change: '—' },
+        { date: '07-08', weekday: '周三', tradeIdx: 33407, gmv: 4631070, uv: 781091, iv: 3175437,
+          seImps: 3145054, seClicks: 143685, ctr: 4.57, change: '▲ +11.4%' },
+        { date: '07-11', weekday: '周六', tradeIdx: 16890, gmv: 2162354, uv: 685467, iv: 3179523,
+          seImps: 3179313, seClicks: 136006, ctr: 4.28, change: '▼ -49.4%' },
+        { date: '07-12', weekday: '周日', tradeIdx: 17872, gmv: 2291863, uv: 725525, iv: 3250889,
+          seImps: 3253844, seClicks: 140627, ctr: 4.32, change: '▲ +5.8%' },
+        { date: '07-13', weekday: '周一', tradeIdx: 18229, gmv: 2301399, uv: 698037, iv: 3230954,
+          seImps: 3221120, seClicks: 145189, ctr: 4.51, change: '▲ +2.0%' },
+    ],
+
+    // ---- 热搜关键词 ----
+    hotWords: [
+        { rank:1, word:'polo衫男', tradeIdx:5224, gmv:11259732, uv:91701, imps:2731391,
+          clicks:251208, ctr:9.20, payRate:5.69, impsRatio:'▲ +1.37%' },
+        { rank:2, word:'polo衫男款', tradeIdx:3465, gmv:7028956, uv:59202, imps:1754070,
+          clicks:142457, ctr:8.12, payRate:5.84, impsRatio:'▼ -1.76%' },
+        { rank:3, word:'男士短袖t恤', tradeIdx:2871, gmv:5799492, uv:126596, imps:1439538,
+          clicks:89790, ctr:6.24, payRate:2.27, impsRatio:'▼ -1.48%' },
+        { rank:4, word:'男士polo衫', tradeIdx:2454, gmv:5136890, uv:41349, imps:1304485,
+          clicks:110637, ctr:8.48, payRate:5.90, impsRatio:'▼ -0.95%' },
+        { rank:5, word:'短袖', tradeIdx:2107, gmv:4651142, uv:465793, imps:2101027,
+          clicks:107701, ctr:5.13, payRate:0.45, impsRatio:'▲ +0.75%' },
+    ],
+
+    // ---- 商品榜单 ----
+    products: [
+        { rank:1, title:'AIRism POLO衫/短袖优衣库男装女装T恤26春夏新款', brand:'优衣库',
+          price:'¥93~149', tradeIdx:5250, gmv:783738, uv:86593, imps:382735,
+          clicks:16353, ctr:4.27, payRate:6.10 },
+        { rank:2, title:'HLA海澜之家短袖Polo26春夏新款凉感翻领小标微弹T恤男', brand:'海澜之家',
+          price:'¥98~101', tradeIdx:2619, gmv:264362, uv:36120, imps:287431,
+          clicks:17501, ctr:6.09, payRate:7.22 },
+    ],
+
+    // ---- 品牌分析 ----
+    brands: [
+        { name:'海澜之家', count:7, tradeIdxSum:11907, gmvSum:1150581, uvSum:192905,
+          avgPrice:98, avgCtr:4.29, avgPayRate:5.54 },
+        { name:'优衣库', count:2, tradeIdxSum:7663, gmvSum:1144421, uvSum:131770,
+          avgPrice:121, avgCtr:4.14, avgPayRate:6.55 },
+    ],
+
+    // ---- 价格带 ----
+    priceSegments: [
+        { name:'¥0~100', count:9, tradeIdxSum:12931, gmvSum:991704, uvSum:505078,
+          avgCtr:4.51, avgPayRate:3.78, eval:'性价比之选' },
+        { name:'¥100~200', count:10, tradeIdxSum:20927, gmvSum:2443121, uvSum:937645,
+          avgCtr:4.45, avgPayRate:5.33, eval:'主力战场' },
+        { name:'¥200~400', count:2, tradeIdxSum:2380, gmvSum:612202, uvSum:91884,
+          avgCtr:5.34, avgPayRate:2.62, eval:'品质升级' },
+        { name:'¥400+', count:1, tradeIdxSum:1339, gmvSum:910520, uvSum:76521,
+          avgCtr:5.11, avgPayRate:1.79, eval:'高端形象' },
+    ],
+
+    // ---- 综合洞察卡片 ----
+    insights: [
+        { color:'blue', label:'📌 工作日效应明显',
+          text:'周二~周三交易指数显著高于周末（+77%），建议主力推广预算集中在周二~周三投放。' },
+        { color:'green', label:'📌 精准词转化优秀',
+          text:'"polo衫男" CTR 9.2%，精准长尾词 ROI 突出，应作为搜索推广核心词持续投放。' },
+    ],
+};
+
+// ============================================================
+//  渲染引擎 — 以下代码无需修改
+// ============================================================
+
+Chart.defaults.font.family = "-apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif";
+Chart.defaults.font.size = 11;
+
+/* 颜色常量 */
+const COLORS = {
+    blue:   'rgba(83, 127, 231, 0.7)',
+    red:    'rgba(233, 69, 96, 0.7)',
+    green:  'rgba(62, 207, 142, 0.6)',
+    orange: 'rgba(245, 158, 11, 0.7)',
+    purple: 'rgba(139, 92, 246, 0.5)',
+    cyan:   'rgba(6, 182, 212, 0.7)',
+    pink:   'rgba(236, 72, 153, 0.7)',
+    teal:   'rgba(20, 184, 166, 0.7)',
+};
+const CHART_COLORS = [COLORS.blue, COLORS.red, COLORS.orange, COLORS.green, COLORS.purple, COLORS.cyan, COLORS.pink, COLORS.teal];
+
+function num(n) { return Number(n).toLocaleString(); }
+
+function changeHtml(s) {
+    if (!s || s === '—') return '<span class="num">—</span>';
+    if (s.includes('▲')) return `<span class="num trend-up">${s}</span>`;
+    if (s.includes('▼')) return `<span class="num trend-down">${s}</span>`;
+    return `<span class="num">${s}</span>`;
+}
+
+function impRatioHtml(s) {
+    if (!s) return '—';
+    return s.includes('▲') ? `<span class="trend-up">${s}</span>` : `<span class="trend-down">${s}</span>`;
+}
+
+/* ---- 核心指标 ---- */
+(function() {
+    const grid = document.getElementById('statsGrid');
+    DATA.stats.forEach(s => {
+        grid.innerHTML += `<div class="stat-card ${s.accent}">
+            <div class="icon">${s.icon}</div>
+            <div class="label">${s.label}</div>
+            <div class="value">${s.value}${s.unit ? `<span class="unit">${s.unit}</span>` : ''}</div>
+        </div>`;
+    });
+})();
+
+/* ---- 每日明细表 ---- */
+(function() {
+    const tbody = document.getElementById('dailyTableBody');
+    DATA.dailySeries.forEach(d => {
+        tbody.innerHTML += `<tr>
+            <td>${d.date}</td><td>${d.weekday}</td>
+            <td class="num">${num(d.tradeIdx)}</td>
+            <td class="num">${num(d.gmv)}</td>
+            <td class="num">${num(d.uv)}</td>
+            <td class="num">${num(d.iv)}</td>
+            <td class="num">${num(d.seImps)}</td>
+            <td class="num">${num(d.seClicks)}</td>
+            <td class="num">${d.ctr}%</td>
+            <td>${changeHtml(d.change)}</td>
+        </tr>`;
+    });
+})();
+
+/* ---- 图表 1: 交易指数 & GMV ---- */
+new Chart(document.getElementById('chartTradeGmv'), {
+    type: 'bar',
+    data: {
+        labels: DATA.dailySeries.map(d => d.date + '(' + d.weekday + ')'),
+        datasets: [
+            { label: '交易指数', data: DATA.dailySeries.map(d => d.tradeIdx),
+              backgroundColor: COLORS.blue, borderColor: '#537fe7', borderWidth: 1,
+              borderRadius: 4, order: 2, yAxisID: 'y' },
+            { label: 'GMV (¥万)', data: DATA.dailySeries.map(d => +(d.gmv / 10000).toFixed(1)),
+              type: 'line', borderColor: '#e94560',
+              backgroundColor: 'rgba(233,69,96,0.08)', pointBackgroundColor: '#e94560',
+              pointBorderColor: '#fff', pointBorderWidth: 2, pointRadius: 5,
+              fill: true, tension: 0.35, order: 1, yAxisID: 'y1' },
+        ]
+    },
+    options: {
+        responsive: true, interaction: { mode: 'index', intersect: false },
+        plugins: { legend: { position: 'top', labels: { usePointStyle: true, padding: 14 } } },
+        scales: {
+            y: { beginAtZero: true, title: { display: true, text: '交易指数' }, grid: { color: 'rgba(0,0,0,0.04)' } },
+            y1: { position: 'right', beginAtZero: true, title: { display: true, text: 'GMV (¥万)' }, grid: { display: false } },
+        }
+    }
+});
+
+/* ---- 图表 2: UV & CTR ---- */
+new Chart(document.getElementById('chartUvCtr'), {
+    type: 'bar',
+    data: {
+        labels: DATA.dailySeries.map(d => d.date + '(' + d.weekday + ')'),
+        datasets: [
+            { label: 'UV (访客)', data: DATA.dailySeries.map(d => d.uv),
+              backgroundColor: COLORS.green, borderColor: '#3ecf8e', borderWidth: 1,
+              borderRadius: 4, order: 2 },
+            { label: '点击率 CTR', data: DATA.dailySeries.map(d => d.ctr),
+              type: 'line', borderColor: '#f59e0b',
+              backgroundColor: 'rgba(245,158,11,0.08)', pointBackgroundColor: '#f59e0b',
+              pointBorderColor: '#fff', pointBorderWidth: 2, pointRadius: 5,
+              fill: true, tension: 0.35, order: 1, yAxisID: 'y1' },
+        ]
+    },
+    options: {
+        responsive: true, interaction: { mode: 'index', intersect: false },
+        plugins: { legend: { position: 'top', labels: { usePointStyle: true, padding: 14 } } },
+        scales: {
+            y: { beginAtZero: true, title: { display: true, text: 'UV' }, grid: { color: 'rgba(0,0,0,0.04)' },
+                ticks: { callback: v => (v/10000).toFixed(0)+'万' } },
+            y1: { position: 'right', min: Math.min(...DATA.dailySeries.map(d=>d.ctr)) - 0.3,
+                max: Math.max(...DATA.dailySeries.map(d=>d.ctr)) + 0.3,
+                title: { display: true, text: '点击率 %' }, grid: { display: false } },
+        }
+    }
+});
+
+/* ---- 热搜词表 ---- */
+(function() {
+    const tbody = document.getElementById('hotWordsBody');
+    DATA.hotWords.forEach(h => {
+        const cls = h.rank <= 3 ? `rank-${h.rank}` : '';
+        tbody.innerHTML += `<tr class="${cls}">
+            <td><span class="rank-num">${h.rank}</span></td>
+            <td><strong>${h.word}</strong></td>
+            <td class="num">${num(h.tradeIdx)}</td>
+            <td class="num">${num(h.gmv)}</td>
+            <td class="num">${num(h.uv)}</td>
+            <td class="num">${num(h.imps)}</td>
+            <td class="num">${num(h.clicks)}</td>
+            <td class="num highlight">${h.ctr}%</td>
+            <td class="num">${h.payRate}%</td>
+            <td class="num">${impRatioHtml(h.impsRatio)}</td>
+        </tr>`;
+    });
+})();
+
+/* ---- 商品榜单表 ---- */
+(function() {
+    const tbody = document.getElementById('productBody');
+    DATA.products.forEach(p => {
+        const cls = p.rank <= 3 ? `rank-${p.rank}` : '';
+        tbody.innerHTML += `<tr class="${cls}">
+            <td><span class="rank-num">${p.rank}</span></td>
+            <td><span class="prod-title" title="${p.title}">${p.title}</span></td>
+            <td><span class="brand-tag">${p.brand}</span></td>
+            <td class="num">${p.price}</td>
+            <td class="num highlight">${num(p.tradeIdx)}</td>
+            <td class="num">${num(p.gmv)}</td>
+            <td class="num">${num(p.uv)}</td>
+            <td class="num">${num(p.imps)}</td>
+            <td class="num">${num(p.clicks)}</td>
+            <td class="num">${p.ctr}%</td>
+            <td class="num">${p.payRate}%</td>
+        </tr>`;
+    });
+})();
+
+/* ---- 品牌表 & 图表 ---- */
+(function() {
+    const tbody = document.getElementById('brandBody');
+    DATA.brands.forEach(b => {
+        tbody.innerHTML += `<tr>
+            <td><strong>${b.name}</strong></td>
+            <td class="num">${b.count}</td>
+            <td class="num">${num(b.tradeIdxSum)}</td>
+            <td class="num">${num(b.gmvSum)}</td>
+            <td class="num">${num(b.uvSum)}</td>
+            <td class="num">¥${b.avgPrice}</td>
+            <td class="num">${b.avgCtr}%</td>
+            <td class="num">${b.avgPayRate}%</td>
+        </tr>`;
+    });
+
+    const sorted = [...DATA.brands].sort((a,b) => b.tradeIdxSum - a.tradeIdxSum);
+    new Chart(document.getElementById('chartBrandShare'), {
+        type: 'doughnut',
+        data: { labels: sorted.map(b => b.name),
+            datasets: [{ data: sorted.map(b => b.tradeIdxSum),
+                backgroundColor: CHART_COLORS.slice(0, sorted.length),
+                borderWidth: 2, borderColor: '#fff' }] },
+        options: { responsive: true, plugins: {
+            legend: { position: 'right', labels: { padding: 10, font: { size: 10 } } } }
+        }
+    });
+
+    const priceSorted = [...DATA.brands].sort((a,b) => b.avgPrice - a.avgPrice);
+    new Chart(document.getElementById('chartBrandPrice'), {
+        type: 'bar',
+        data: { labels: priceSorted.map(b => b.name),
+            datasets: [{ label: '平均售价 (¥)', data: priceSorted.map(b => b.avgPrice),
+                backgroundColor: CHART_COLORS.slice(0, priceSorted.length).map(c => c.replace('0.7','0.8')),
+                borderRadius: 4 }] },
+        options: { indexAxis: 'y', responsive: true, plugins: { legend: { display: false } },
+            scales: { x: { beginAtZero: true, title: { display: true, text: '¥' } } } }
+    });
+})();
+
+/* ---- 价格带表 & 图表 ---- */
+(function() {
+    const tbody = document.getElementById('priceBody');
+    DATA.priceSegments.forEach(p => {
+        tbody.innerHTML += `<tr>
+            <td><strong>${p.name}</strong></td>
+            <td class="num">${p.count}</td>
+            <td class="num">${num(p.tradeIdxSum)}</td>
+            <td class="num">${num(p.gmvSum)}</td>
+            <td class="num">${num(p.uvSum)}</td>
+            <td class="num">${p.avgCtr}%</td>
+            <td class="num">${p.avgPayRate}%</td>
+            <td>${p.eval}</td>
+        </tr>`;
+    });
+
+    new Chart(document.getElementById('chartPriceCount'), {
+        type: 'bar',
+        data: { labels: DATA.priceSegments.map(p => p.name),
+            datasets: [{ label: '商品数', data: DATA.priceSegments.map(p => p.count),
+                backgroundColor: ['#3ecf8e','#537fe7','#f59e0b','#e94560'],
+                borderRadius: 4 }] },
+        options: { responsive: true, plugins: { legend: { display: false } },
+            scales: { y: { beginAtZero: true, ticks: { stepSize: 1 } } } }
+    });
+
+    new Chart(document.getElementById('chartPriceGmv'), {
+        type: 'doughnut',
+        data: { labels: DATA.priceSegments.map(p => p.name),
+            datasets: [{ data: DATA.priceSegments.map(p => p.gmvSum),
+                backgroundColor: ['#3ecf8e','#537fe7','#f59e0b','#e94560'],
+                borderWidth: 2, borderColor: '#fff' }] },
+        options: { responsive: true, plugins: { legend: { position: 'right', labels: { padding: 10, font: { size: 10 } } } } }
+    });
+})();
+
+/* ---- 综合洞察 ---- */
+(function() {
+    const grid = document.getElementById('insightGrid');
+    DATA.insights.forEach(i => {
+        grid.innerHTML += `<div class="insight-card ${i.color}">
+            <div class="label">${i.label}</div>
+            <div>${i.text}</div>
+        </div>`;
+    });
+})();
+
+/* ---- Tab 切换 ---- */
+document.querySelectorAll('.tab-btn').forEach(btn => {
+    btn.addEventListener('click', function() {
+        document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+        document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+        this.classList.add('active');
+        document.getElementById(this.dataset.tab).classList.add('active');
+    });
+});
+</script>
+</body>
+</html>

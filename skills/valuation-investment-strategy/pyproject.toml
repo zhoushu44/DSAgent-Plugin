@@ -1,0 +1,9 @@
+[project]
+slug = " valuation-investment-strategy"
+name = " 估值与投资策略分析"
+category = "股票"
+version = "1.0.0"
+author = "YiqiWork"
+description = "将已完成基本面分析的A股标的转化为情景估值与投资计划，根据商业模式选择合适方法并给出假设与来源链接"
+icon_url = "https://s1.aigei.com/src/img/png/b5/b5c7cfb49c044ae7b185dbc1f987033b.png?imageMogr2/auto-orient/thumbnail/!282x282r/gravity/Center/crop/282x282/quality/85/%7CimageView2/2/w/282&e=2051020800&token=P7S2Xpzfz11vAkASLTkfHN7Fw-oOZBecqeJaxypL:I_jH2P3WY0Z9HLp6BnqMNyNz3SI="
+requires-python = ">=3.10"

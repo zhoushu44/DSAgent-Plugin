@@ -1,0 +1,7 @@
+"""跨平台常量；不保存店铺、账号、地址或凭证。"""
+
+EXIT_SUCCESS = 0
+EXIT_PARAM_ERROR = 1
+EXIT_DATA_ERROR = 2
+EXIT_VALIDATION_ERROR = 3
+

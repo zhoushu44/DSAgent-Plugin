@@ -1,0 +1,10 @@
+[project]
+slug = "product-reviews"
+name = "淘宝商品评价分析"
+category = "淘系"
+version = "1.2.0"
+author = "YiqiWork"
+description = "输入商品链接或者商品ID自动获取评价数据、并解读评价信息，生成可视化报表分析评价模板可改"
+icon_url = "https://gw.alicdn.com/imgextra/i4/O1CN01qOI6vB1zaqrBKbyFr_!!6000000006731-73-tps-64-64.ico"
+requires-python = ">=3.10"
+dependencies = ["httpx>=0.27", "jieba>=0.42", "markdown>=3.5"]

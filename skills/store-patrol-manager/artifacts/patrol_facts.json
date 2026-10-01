@@ -1,0 +1,291 @@
+{
+  "schema_version": "patrol-facts/1.0",
+  "run": {
+    "shop_name": "tb957985228335",
+    "display_start": "2026-09-16",
+    "display_end": "2026-09-22",
+    "baseline_day": "2026-09-15",
+    "formal_days": [
+      "2026-09-16",
+      "2026-09-17",
+      "2026-09-18",
+      "2026-09-19",
+      "2026-09-20",
+      "2026-09-21",
+      "2026-09-22"
+    ],
+    "query_days": [
+      "2026-09-15",
+      "2026-09-16",
+      "2026-09-17",
+      "2026-09-18",
+      "2026-09-19",
+      "2026-09-20",
+      "2026-09-21",
+      "2026-09-22"
+    ],
+    "generated_at": "2026-09-22T16:56:22.689665+00:00"
+  },
+  "coverage": {
+    "shop": {
+      "status": "not_queried",
+      "actual_days": [],
+      "covered_days": null,
+      "missing_days": [
+        "2026-09-15",
+        "2026-09-16",
+        "2026-09-17",
+        "2026-09-18",
+        "2026-09-19",
+        "2026-09-20",
+        "2026-09-21",
+        "2026-09-22"
+      ],
+      "missing_formal_days": [
+        "2026-09-16",
+        "2026-09-17",
+        "2026-09-18",
+        "2026-09-19",
+        "2026-09-20",
+        "2026-09-21",
+        "2026-09-22"
+      ],
+      "baseline_available": false,
+      "errors": null
+    },
+    "item": {
+      "status": "not_queried",
+      "actual_days": [],
+      "covered_days": null,
+      "missing_days": [
+        "2026-09-15",
+        "2026-09-16",
+        "2026-09-17",
+        "2026-09-18",
+        "2026-09-19",
+        "2026-09-20",
+        "2026-09-21",
+        "2026-09-22"
+      ],
+      "missing_formal_days": [
+        "2026-09-16",
+        "2026-09-17",
+        "2026-09-18",
+        "2026-09-19",
+        "2026-09-20",
+        "2026-09-21",
+        "2026-09-22"
+      ],
+      "baseline_available": false,
+      "errors": null
+    },
+    "promotion": {
+      "status": "not_queried",
+      "actual_days": [],
+      "covered_days": null,
+      "missing_days": [
+        "2026-09-16",
+        "2026-09-17",
+        "2026-09-18",
+        "2026-09-19",
+        "2026-09-20",
+        "2026-09-21",
+        "2026-09-22"
+      ],
+      "missing_formal_days": [
+        "2026-09-16",
+        "2026-09-17",
+        "2026-09-18",
+        "2026-09-19",
+        "2026-09-20",
+        "2026-09-21",
+        "2026-09-22"
+      ],
+      "baseline_available": false,
+      "errors": null
+    },
+    "refund": {
+      "status": "not_queried",
+      "actual_days": [],
+      "covered_days": null,
+      "missing_days": [
+        "2026-09-16",
+        "2026-09-17",
+        "2026-09-18",
+        "2026-09-19",
+        "2026-09-20",
+        "2026-09-21",
+        "2026-09-22"
+      ],
+      "missing_formal_days": [
+        "2026-09-16",
+        "2026-09-17",
+        "2026-09-18",
+        "2026-09-19",
+        "2026-09-20",
+        "2026-09-21",
+        "2026-09-22"
+      ],
+      "baseline_available": false,
+      "errors": null
+    },
+    "industry": {
+      "status": "not_queried",
+      "actual_days": [],
+      "covered_days": null,
+      "missing_days": [
+        "2026-09-16",
+        "2026-09-17",
+        "2026-09-18",
+        "2026-09-19",
+        "2026-09-20",
+        "2026-09-21",
+        "2026-09-22"
+      ],
+      "missing_formal_days": [
+        "2026-09-16",
+        "2026-09-17",
+        "2026-09-18",
+        "2026-09-19",
+        "2026-09-20",
+        "2026-09-21",
+        "2026-09-22"
+      ],
+      "baseline_available": false,
+      "errors": null
+    }
+  },
+  "summary": {
+    "shop_period": {
+      "covered_days": [],
+      "pay_amount": 0,
+      "net_payment_amount": 0,
+      "visitors": 0,
+      "page_views": 0,
+      "buyers": 0,
+      "orders": 0,
+      "paid_items": 0,
+      "cart_buyers": 0,
+      "cart_items": 0,
+      "refund_amount": 0,
+      "conversion_rate": null,
+      "average_order_value": null,
+      "payment_refund_rate": null
+    },
+    "shop_first_to_last_change": {},
+    "promotion_period": {
+      "spend": 0,
+      "impressions": 0,
+      "clicks": 0,
+      "orders": 0,
+      "gmv": 0,
+      "direct_orders": 0,
+      "direct_gmv": 0,
+      "cart": 0,
+      "direct_cart": 0,
+      "inquiry": 0,
+      "roi": null,
+      "ctr": null,
+      "cvr": null
+    },
+    "item_period": {
+      "pay_amount": 0,
+      "category_count": 0,
+      "product_count": 0
+    },
+    "shop_item_reconciliation": {
+      "shop_pay_amount": 0,
+      "item_pay_amount": 0,
+      "difference": 0,
+      "difference_rate": null
+    }
+  },
+  "tables": {
+    "shop_daily": {},
+    "categories": [],
+    "category_daily": [],
+    "products": [],
+    "promotion_channels": [],
+    "promotion_plans": [],
+    "industry_sources": [],
+    "category_comparison": [],
+    "category_industry_daily": []
+  },
+  "category_mapping": {},
+  "warnings": [
+    {
+      "layer": "shop",
+      "status": "not_queried",
+      "missing_formal_days": [
+        "2026-09-16",
+        "2026-09-17",
+        "2026-09-18",
+        "2026-09-19",
+        "2026-09-20",
+        "2026-09-21",
+        "2026-09-22"
+      ],
+      "baseline_available": false
+    },
+    {
+      "layer": "item",
+      "status": "not_queried",
+      "missing_formal_days": [
+        "2026-09-16",
+        "2026-09-17",
+        "2026-09-18",
+        "2026-09-19",
+        "2026-09-20",
+        "2026-09-21",
+        "2026-09-22"
+      ],
+      "baseline_available": false
+    },
+    {
+      "layer": "promotion",
+      "status": "not_queried",
+      "missing_formal_days": [
+        "2026-09-16",
+        "2026-09-17",
+        "2026-09-18",
+        "2026-09-19",
+        "2026-09-20",
+        "2026-09-21",
+        "2026-09-22"
+      ],
+      "baseline_available": false
+    },
+    {
+      "layer": "refund",
+      "status": "not_queried",
+      "missing_formal_days": [
+        "2026-09-16",
+        "2026-09-17",
+        "2026-09-18",
+        "2026-09-19",
+        "2026-09-20",
+        "2026-09-21",
+        "2026-09-22"
+      ],
+      "baseline_available": false
+    },
+    {
+      "layer": "industry",
+      "status": "not_queried",
+      "missing_formal_days": [
+        "2026-09-16",
+        "2026-09-17",
+        "2026-09-18",
+        "2026-09-19",
+        "2026-09-20",
+        "2026-09-21",
+        "2026-09-22"
+      ],
+      "baseline_available": false
+    }
+  ],
+  "aggregation_notes": {
+    "promotion": "同一来源同时存在日趋势和周期汇总时，仅采用日趋势，避免重复累计",
+    "industry": "行业重复快照和零值占位不进入趋势关系判断"
+  }
+}

@@ -1,0 +1,9 @@
+[project]
+slug = "smart-compose"
+name = " 智能排版"
+category = "文案"
+version = "1.0.0"
+author = "YiqiWork"
+description = "AI驱动智能排版：识别图文结构，匹配平台调性，自动生成完整排版"
+icon_url = "https://huixie.iflyrec.com/assets/template-purple.a738e83b.png"
+requires-python = ">=3.10"

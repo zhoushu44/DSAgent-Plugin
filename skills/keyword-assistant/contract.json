@@ -1,0 +1,117 @@
+{
+  "schema": "dsagent/skill-contract@1",
+  "id": "keyword-assistant",
+  "entry": {
+    "form": "package",
+    "pkg": "keyword_assistant"
+  },
+  "input": {
+    "args": [
+      {
+        "name": "keywords",
+        "positional": true,
+        "type": "array",
+        "nargs": "*",
+        "description": "种子关键词列表（如：卫衣 连衣裙）。rank 模式下可省略"
+      },
+      {
+        "name": "mode",
+        "choices": [
+          "expand",
+          "rank"
+        ],
+        "default": "expand",
+        "description": "查询模式：expand=关联词拓展（默认）| rank=搜索排行榜"
+      },
+      {
+        "name": "rank_type",
+        "choices": [
+          "hot",
+          "rise",
+          "new"
+        ],
+        "default": "hot",
+        "description": "排行榜类型（仅 rank 模式）：hot=热搜 | rise=飙升 | new=新词（默认 hot）"
+      },
+      {
+        "name": "kw_type",
+        "choices": [
+          "search",
+          "category"
+        ],
+        "default": "search",
+        "description": "搜索词类型（仅 rank 模式）：search=搜索词 | category=类目词（默认 search）"
+      },
+      {
+        "name": "order_by",
+        "choices": [
+          "seIpvUvHits",
+          "payByrCnt",
+          "clickThroughRate"
+        ],
+        "default": "seIpvUvHits",
+        "description": "排序字段：seIpvUvHits=搜索人气（默认）| payByrCnt=支付买家数 | clickThroughRate=点击率"
+      },
+      {
+        "name": "cate_id",
+        "default": "",
+        "description": "淘宝类目 ID（可选，解决权限问题）"
+      },
+      {
+        "name": "output_format",
+        "choices": [
+          "json",
+          "text",
+          "table"
+        ],
+        "default": "json",
+        "description": "输出格式（默认 json）"
+      },
+      {
+        "name": "max_pages",
+        "type": "integer"
+      },
+      {
+        "name": "date_range",
+        "default": "",
+        "description": "日期范围，格式: YYYY-MM-DD|YYYY-MM-DD（默认近7天，排除今天）。可选 'recent30' 快捷指定近30天"
+      }
+    ],
+    "subcommands": [
+      {
+        "name": "inject-report",
+        "args": [
+          {
+            "name": "insights_md",
+            "required": true,
+            "description": "Agent 生成的 Markdown 洞察文件路径"
+          },
+          {
+            "name": "mode",
+            "choices": [
+              "expand",
+              "rank"
+            ],
+            "default": "expand",
+            "description": "对应的数据获取模式（默认 expand）"
+          },
+          {
+            "name": "run_id",
+            "default": "",
+            "description": "指定 run_id（默认取该 mode 最近一次）"
+          },
+          {
+            "name": "seed_keyword",
+            "default": "",
+            "description": "expand 模式下仅报告该种子词（默认使用全部种子词）"
+          }
+        ]
+      }
+    ]
+  },
+  "output": {
+    "protocol": "dsagent-result",
+    "resultPrefix": "__DSAGENT_RESULT__",
+    "filesMarker": "---[OUTPUT_FILES]"
+  }
+}

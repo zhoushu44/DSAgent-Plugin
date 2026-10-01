@@ -164,6 +164,10 @@ const SKILL_PLATFORM: Record<string, string> = {
   'keyword-traffic': 'sycm',
   'market-trend': 'sycm',
   'store-patrol-manager': 'sycm',
+  // sycm 平台（参谋长分析包转换的诊断类技能）
+  'category-structure-diagnosis': 'sycm',
+  'product-layering-diagnosis': 'sycm',
+  'shop-promotion-diagnosis': 'sycm',
   // taobao 平台（淘宝登录态）
   'taobao-publish': 'taobao',
   'product-reviews': 'taobao',
@@ -231,6 +235,10 @@ const SKILL_CAPABILITY: Record<string, string> = {
   dws: 'channel',
   // vertical：垂直业务（无平台后缀的店铺 / 行业 / 金融类）
   'store-patrol-manager': 'vertical',
+  // 参谋长分析包转换的诊断类技能
+  'category-structure-diagnosis': 'vertical',
+  'product-layering-diagnosis': 'vertical',
+  'shop-promotion-diagnosis': 'vertical',
   'competitor-strategy-comparison': 'vertical',
   'competitor-indicator': 'vertical',
   'market-trend': 'vertical',

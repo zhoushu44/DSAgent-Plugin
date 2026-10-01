@@ -1,0 +1,93 @@
+{
+  "schema": "dsagent/skill-contract@1",
+  "id": "product-wdj",
+  "entry": {
+    "form": "package",
+    "pkg": "product_wdj"
+  },
+  "input": {
+    "args": [
+      {
+        "name": "item",
+        "positional": true,
+        "nargs": "?",
+        "default": "",
+        "description": "商品 ID 或商品链接"
+      },
+      {
+        "name": "item_id",
+        "default": "",
+        "description": "商品 ID"
+      },
+      {
+        "name": "page_size",
+        "type": "integer",
+        "description": "每页问题数"
+      },
+      {
+        "name": "max_pages",
+        "type": "integer",
+        "description": "最多获取页数（默认 5；与 --all_pages 互斥）"
+      },
+      {
+        "name": "all_pages",
+        "type": "boolean",
+        "description": "获取全部问题（仅当用户明确要求全部数据时使用）"
+      },
+      {
+        "name": "tag_id",
+        "default": "",
+        "description": "标签筛选 propertyId"
+      },
+      {
+        "name": "search_text",
+        "default": "",
+        "description": "问题搜索关键词"
+      },
+      {
+        "name": "skip_answers",
+        "type": "boolean",
+        "description": "仅获取问题列表，不拉取回答详情"
+      },
+      {
+        "name": "intent",
+        "default": "",
+        "description": "自然语言补充：如「获取3页」「获取全部问大家」"
+      },
+      {
+        "name": "from_json",
+        "flag": "--from-json",
+        "default": "",
+        "description": "从本地 JSONP/JSON 文件解析问大家列表（调试用）"
+      },
+      {
+        "name": "from_detail_json",
+        "flag": "--from-detail-json",
+        "default": "",
+        "description": "从本地 JSONP/JSON 解析回答详情（与 --from-json 联调）"
+      }
+    ],
+    "subcommands": [
+      {
+        "name": "report",
+        "args": [
+          {
+            "name": "input",
+            "required": true,
+            "description": "collect 输出的 JSON 文件"
+          },
+          {
+            "name": "output",
+            "default": "",
+            "description": "HTML 输出路径（默认覆盖原 report_path）"
+          }
+        ]
+      }
+    ]
+  },
+  "output": {
+    "protocol": "dsagent-result",
+    "resultPrefix": "__DSAGENT_RESULT__",
+    "filesMarker": "---[OUTPUT_FILES]"
+  }
+}

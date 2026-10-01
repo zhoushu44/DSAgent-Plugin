@@ -1,0 +1,103 @@
+{
+  "schema": "dsagent/skill-contract@1",
+  "id": "store-patrol-manager",
+  "entry": {
+    "form": "package",
+    "pkg": "store_patrol_manager"
+  },
+  "input": {
+    "args": [
+      {
+        "name": "shop_name",
+        "flag": "--shop-name",
+        "required": true
+      },
+      {
+        "name": "display_start",
+        "flag": "--display-start",
+        "required": true
+      },
+      {
+        "name": "display_end",
+        "flag": "--display-end",
+        "required": true
+      },
+      {
+        "name": "category_map",
+        "flag": "--category-map",
+        "default": ""
+      },
+      {
+        "name": "evidence",
+        "default": "artifacts/patrol_evidence.json"
+      }
+    ],
+    "subcommands": [
+      {
+        "name": "prepare",
+        "description": "从本次原始 JSON 冻结证据"
+      },
+      {
+        "name": "aggregate",
+        "description": "从证据生成事实",
+        "args": [
+          {
+            "name": "evidence",
+            "required": true
+          },
+          {
+            "name": "facts",
+            "default": "artifacts/patrol_facts.json"
+          }
+        ]
+      },
+      {
+        "name": "validate",
+        "description": "校验证据和事实",
+        "args": [
+          {
+            "name": "evidence",
+            "required": true
+          },
+          {
+            "name": "facts",
+            "required": true
+          },
+          {
+            "name": "validation",
+            "default": "artifacts/patrol_validation.json"
+          }
+        ]
+      },
+      {
+        "name": "analyze",
+        "description": "一次完成冻结、汇总和校验",
+        "args": [
+          {
+            "name": "facts",
+            "default": "artifacts/patrol_facts.json"
+          },
+          {
+            "name": "validation",
+            "default": "artifacts/patrol_validation.json"
+          }
+        ]
+      },
+      {
+        "name": "summary",
+        "description": "输出供模型读取的紧凑事实目录",
+        "args": [
+          {
+            "name": "facts",
+            "required": true
+          }
+        ]
+      }
+    ]
+  },
+  "output": {
+    "protocol": "dsagent-result",
+    "resultPrefix": "__DSAGENT_RESULT__",
+    "filesMarker": "---[OUTPUT_FILES]"
+  }
+}

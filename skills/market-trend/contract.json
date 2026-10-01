@@ -1,0 +1,110 @@
+{
+  "schema": "dsagent/skill-contract@1",
+  "id": "market-trend",
+  "entry": {
+    "form": "package",
+    "pkg": "market_trend"
+  },
+  "input": {
+    "args": [
+      {
+        "name": "cate_id",
+        "required": true,
+        "description": "类目 ID（必填，如 29）。不知道ID？先用 list-categories --keyword 查询"
+      },
+      {
+        "name": "cate_flag",
+        "default": "",
+        "description": "类目标记（可选）"
+      },
+      {
+        "name": "rank_type"
+      },
+      {
+        "name": "trend_mode",
+        "choices": [
+          "week",
+          "month"
+        ],
+        "default": "week",
+        "description": "趋势模式: week=周趋势（默认）| month=月趋势"
+      },
+      {
+        "name": "date_range",
+        "default": "",
+        "description": "基准日期范围 YYYY-MM-DD|YYYY-MM-DD（默认自动计算上周/上月）"
+      },
+      {
+        "name": "max_pages",
+        "type": "integer"
+      },
+      {
+        "name": "seller_type",
+        "default": "-1",
+        "description": "店铺类型: -1=全部（默认）| 0=淘宝 | 1=天猫"
+      },
+      {
+        "name": "price_seg",
+        "default": "",
+        "description": "价格带筛选（默认不限）"
+      },
+      {
+        "name": "cate_name",
+        "default": "",
+        "description": "类目名称（可选，不传则自动从 cate_id 反查）"
+      },
+      {
+        "name": "output_format",
+        "choices": [
+          "json",
+          "text",
+          "table"
+        ],
+        "default": "json",
+        "description": "输出格式（默认 json）"
+      }
+    ],
+    "subcommands": [
+      {
+        "name": "inject-report",
+        "args": [
+          {
+            "name": "insights_md",
+            "default": "",
+            "description": "Agent 生成的 Markdown 洞察文件路径（可选，不提供则跳过洞察注入）"
+          },
+          {
+            "name": "cate_id",
+            "default": "",
+            "description": "类目 ID（默认取最近一次趋势抓取）"
+          },
+          {
+            "name": "rank_type",
+            "default": "",
+            "description": "榜单类型（默认取最近一次）"
+          },
+          {
+            "name": "trend_mode",
+            "default": "",
+            "description": "趋势模式 week|month（默认取最近一次）"
+          }
+        ]
+      },
+      {
+        "name": "list-categories",
+        "args": [
+          {
+            "name": "keyword",
+            "default": "",
+            "description": "类目名称搜索关键词（模糊匹配，支持空格分隔多关键词 AND 匹配）"
+          }
+        ]
+      }
+    ]
+  },
+  "output": {
+    "protocol": "dsagent-result",
+    "resultPrefix": "__DSAGENT_RESULT__",
+    "filesMarker": "---[OUTPUT_FILES]"
+  }
+}
