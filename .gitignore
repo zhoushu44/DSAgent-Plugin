@@ -1,0 +1,22 @@
+# 依赖
+node_modules/
+
+# 构建产物
+lib/
+dist/
+
+# 敏感数据
+*.env
+.env*
+*.key
+*.pem
+**/dsagent-accounts*.json
+**/credentials*.json
+**/credentials*.yaml
+
+# IDE
+.trae/
+
+# 系统文件
+.DS_Store
+Thumbs.db

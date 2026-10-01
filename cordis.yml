@@ -1,0 +1,46 @@
+# DSAgent 插件挂载清单（Cordis）
+#
+# 用法：
+#   pnpm dsh web --patch ./plugins/dsagent-plugin/cordis.yml
+#
+# ⚠️ 路径说明（换机器必改）：
+#   name 字段必须是**绝对路径**，指向插件的 TS 入口。
+#   这是 Harness 的硬性要求（见 docs/migration-to-harness.md 官方示例），
+#   且本项目确认**不支持**在 YAML 里写 ${VAR} 插值 —— 写了会原样当字符串传下去。
+#   因此下列路径为硬编码，换机器/换目录时需手动替换这两处：
+#     - dsagent-plugin.name
+#     - dsagent-plugin.config.skillRoot
+#     - dsagent-skills.config.customSkillDirs
+#
+#   其余可变量（工作区、技能根目录）走**运行时环境变量**，
+#   由代码读取，不在此文件配置：
+#     DSAGENT_WORKSPACE / DSAGENT_SKILL_ROOT
+#
+# 其它：
+#   disabled: true 会卸载整套能力（页面 + 工具），但**保留本配置项**，改回 false 即恢复
+
+- insert:
+    # ── 本项目插件本体：账号连接器页 + 技能市场页 + 工具注册 ──
+    - id: dsagent-plugin
+      name: 'e:/360MoveData/Users/Administrator/Desktop/deepseek-agent/plugins/dsagent-plugin/src/index.ts'
+      disabled: false
+      config:
+        # 技能根目录：指向本项目现成的 skills/（36 个技能）
+        # 用 customSkillDirs 挂载，不搬目录、不改结构
+        skillRoot: 'e:/360MoveData/Users/Administrator/Desktop/deepseek-agent/skills'
+        # 凭证存储路径：本地 JSON 文件，存账号 Cookie
+        storePath: 'C:/Users/Administrator/.dsh/dsagent-accounts.json'
+        # 未绑定账号时，工具返回引导文案而非硬报错
+        guideOnUnbound: true
+
+    # ── 技能发现：挂本项目 skills/，并与 Harness 自带技能双向隔离 ──
+    - id: dsagent-skills
+      name: '@deepseek-ai/dsh-skill-filesystem'
+      disabled: false
+      config:
+        # ★ 关键：只认下面这个目录，本项目技能与 Harness 自带技能互不可见
+        includeDefaultRoots: false
+        customSkillDirs:
+          - 'e:/360MoveData/Users/Administrator/Desktop/deepseek-agent/skills'
+        # 技能文件改动免重启生效
+        watch: true
