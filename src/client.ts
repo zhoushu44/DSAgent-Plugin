@@ -93,26 +93,30 @@ export function apply(ctx: ClientContext, cfg?: Config) {
     }
   }, 'dsagent: client UI')
 
-  // ── 侧边栏按钮组件 ──
-  function SidebarButton(props: { active?: boolean; onClick?: () => void; [key: string]: unknown }) {
+  // ── 侧边栏图标组件 ──
+  // ★ 必须渲染 span 而非 button：宿主 PanelRow 外层已是 <button onClick=selectPanel>，
+  //   button 嵌套 button 是非法 HTML，浏览器解析时会把内层 button 拆出 DOM 层级，
+  //   导致点击区域错乱（外层按钮被截断、只剩文字附近可点）。
+  //   点击行为完全由宿主外层按钮接管，这里只负责显示图标。
+  function SidebarButton(props: { active?: boolean; onClick?: () => void; size?: number; [key: string]: unknown }) {
+    const size = props.size ?? 18
     return React.createElement(
-      'button',
+      'span',
       {
         'data-slot-id': 'dsagent',
-        title: tt('entry.tooltip'),
-        onClick: props.onClick,
         style: {
-          display: 'flex',
+          display: 'inline-flex',
           alignItems: 'center',
           justifyContent: 'center',
-          width: '40px',
-          height: '40px',
-          border: 'none',
-          borderRadius: '8px',
-          cursor: 'pointer',
-          background: props.active ? '#eef3ff' : 'transparent',
-          color: props.active ? '#2b6cff' : '#67708a',
-          fontSize: '18px',
+          width: `${size}px`,
+          height: `${size}px`,
+          fontSize: `${size}px`,
+          lineHeight: 1,
+          // 继承宿主 panelRow 的颜色（active 态宿主自己会变色）
+          color: 'inherit',
+          // 纯图标：不吃 pointer 事件，点击穿透到宿主外层按钮
+          pointerEvents: 'none',
+          userSelect: 'none',
         },
       },
       '🔌',
@@ -180,6 +184,7 @@ export function apply(ctx: ClientContext, cfg?: Config) {
         React.createElement(
           'button',
           {
+            type: 'button',
             onClick: () => setTab('account'),
             style: {
               border: 'none',
@@ -190,6 +195,7 @@ export function apply(ctx: ClientContext, cfg?: Config) {
               borderBottom: `2px solid ${tab === 'account' ? '#2b6cff' : 'transparent'}`,
               fontWeight: tab === 'account' ? 600 : 400,
               fontSize: '13px',
+              fontFamily: 'inherit',
             },
           },
           tt('tab.account'),
@@ -197,6 +203,7 @@ export function apply(ctx: ClientContext, cfg?: Config) {
         React.createElement(
           'button',
           {
+            type: 'button',
             onClick: () => setTab('market'),
             style: {
               border: 'none',
@@ -207,6 +214,7 @@ export function apply(ctx: ClientContext, cfg?: Config) {
               borderBottom: `2px solid ${tab === 'market' ? '#2b6cff' : 'transparent'}`,
               fontWeight: tab === 'market' ? 600 : 400,
               fontSize: '13px',
+              fontFamily: 'inherit',
             },
           },
           tt('tab.market'),

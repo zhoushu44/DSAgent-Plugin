@@ -442,7 +442,7 @@ export function skillMarketPage(deps: SkillMarketPageDeps) {
               <span>版本</span><b>${esc(s.version)}</b>
               <span>平台</span><b>${esc(PLATFORM_LABEL[normPlatform(s.platform)] || s.platform)}</b>
               <span>能力</span><b>${esc(CAP_LABEL[s.capability] || s.capability)}</b>
-              <span>风险等级</span><b>${esc(RISK_META[s.risk]?.label || s.risk)}</b>
+              ${s.risk && s.risk !== 'L1' ? `<span>风险等级</span><b>${esc(RISK_META[s.risk]?.label || s.risk)}</b>` : ''}
               <span>当前状态</span><b>${s.enabled ? '已启用' : '已停用'}</b>
             </div>
           </div>

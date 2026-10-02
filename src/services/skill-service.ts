@@ -342,6 +342,8 @@ function toggleFrontmatter(raw: string, enabled: boolean): string {
 const RESULT_PREFIX = '__DSAGENT_RESULT__'
 const IDLE_TIMEOUT = 60_000       // 60 秒 idle 超时
 const MAX_OUTPUT = 64 * 1024
+/** 缓存 TTL：过期后下次 list() 自动重扫 skills/，新技能目录无需重启即可见 */
+const CACHE_TTL = 60_000
 
 /**
  * 通过 host 半区 HTTP 路由拉取技能列表。
@@ -369,6 +371,8 @@ async function fetchHostSkills(): Promise<SkillRow[] | null> {
 export function createSkillService(skillRoot: string) {
   const root = resolve(skillRoot || '.')
   let cache: SkillRow[] | null = null
+  /** 缓存写入时间：超过 CACHE_TTL 视为过期，下次 list() 重扫 */
+  let cacheAt = 0
 
   /** 越界防护：目标路径必须落在 skillRoot 内 */
   function assertInsideRoot(target: string) {
@@ -422,14 +426,22 @@ export function createSkillService(skillRoot: string) {
   }
 
   return {
-    /** 列出技能（带缓存，toggle 后失效） */
+    /** 列出技能（带 TTL 缓存：过期 / toggle 后自动重扫；browser 半区回退 host 路由） */
     async list(opts?: { platform?: string; capability?: string; onlyEnabled?: boolean }): Promise<SkillRow[]> {
-      if (!cache) {
+      // ★ TTL 过期即重扫：往 skills/ 加新目录后无需重启 DSH 即可见。
+      //   扫描本身只是 readdir + 逐个读 SKILL.md（几十个小文件），成本低，
+      //   60s 一次完全没有压力；真正的网络请求（技能执行）不受此缓存影响。
+      const expired = cache !== null && Date.now() - cacheAt > CACHE_TTL
+      if (!cache || expired) {
         cache = await scan()
+        cacheAt = Date.now()
         // browser 半区无文件系统，本地扫描恒为空 → 回退到 host 半区路由取真实列表
         if (!cache.length) {
           const remote = await fetchHostSkills()
-          if (remote && remote.length) cache = remote
+          if (remote && remote.length) {
+            cache = remote
+            cacheAt = Date.now()
+          }
         }
       }
       let rows = cache
@@ -477,6 +489,7 @@ export function createSkillService(skillRoot: string) {
     /** 强制重新扫描（页面刷新用） */
     async refresh(): Promise<SkillRow[]> {
       cache = null
+      cacheAt = 0
       return this.list()
     },
 
@@ -735,6 +748,7 @@ export function createSkillService(skillRoot: string) {
 
       // 失效缓存
       cache = null
+      cacheAt = 0
 
       return { ok: true, skillId: name }
     },
@@ -805,6 +819,7 @@ export function createSkillService(skillRoot: string) {
 
     dispose() {
       cache = null
+      cacheAt = 0
     },
   }
 }

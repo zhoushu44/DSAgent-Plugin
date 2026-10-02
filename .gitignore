@@ -1,6 +1,10 @@
 # 依赖
 node_modules/
 
+# Python 字节码缓存（随解释器版本全量变更，无提交价值）
+__pycache__/
+*.pyc
+
 # 构建产物
 lib/
 dist/
