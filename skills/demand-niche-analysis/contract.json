@@ -1,0 +1,61 @@
+{
+  "schema": "dsagent/skill-contract@1",
+  "id": "demand-niche-analysis",
+  "entry": {
+    "form": "script",
+    "script": "scripts/collect.py"
+  },
+  "input": {
+    "args": [
+      {
+        "name": "keyword",
+        "positional": true,
+        "required": true,
+        "description": "核心关键词，如：便携榨汁杯"
+      },
+      {
+        "name": "platform",
+        "choices": ["taobao"],
+        "default": "taobao",
+        "description": "目标平台（当前支持 taobao，其他平台适配器开发中）"
+      },
+      {
+        "name": "audience",
+        "default": "",
+        "description": "目标人群约束，如：通勤和健身人群"
+      },
+      {
+        "name": "scenario",
+        "default": "",
+        "description": "使用场景约束，如：办公室、户外、旅行"
+      },
+      {
+        "name": "price_min",
+        "type": "number",
+        "description": "价格带下限（元）"
+      },
+      {
+        "name": "price_max",
+        "type": "number",
+        "description": "价格带上限（元）"
+      },
+      {
+        "name": "item_limit",
+        "type": "integer",
+        "default": 120,
+        "description": "商品采集数量（默认 120，上限 200）"
+      },
+      {
+        "name": "save",
+        "type": "boolean",
+        "default": false,
+        "description": "同时保存采集数据 JSON 到 artifacts/"
+      }
+    ]
+  },
+  "output": {
+    "protocol": "dsagent-result",
+    "resultPrefix": "__DSAGENT_RESULT__",
+    "filesMarker": "---[OUTPUT_FILES]"
+  }
+}
