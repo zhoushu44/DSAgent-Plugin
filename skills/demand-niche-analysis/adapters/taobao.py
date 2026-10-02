@@ -77,19 +77,32 @@ class TaobaoAdapter:
         data.collected_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         data.raw_meta["date_range"] = self._default_date_range()
 
-        # 1) 关联词拓展（sycm，需要登录态；失败降级为空并记 data_gaps）
+        # 1) 关联词拓展（sycm，可选增强层）
+        #    ★ sycm 与 taobao 是两套域会话，sycm 未登录很常见；
+        #      此时降级为「只基于商品数据」分析，并在 data_gaps 里明确提示用户重新登录，
+        #      绝不因可选层失败而让整个技能失败（商品层仍能支撑价格/竞争/标题分析）。
         try:
             data.keyword_trend = self._fetch_related_words(keyword, data.raw_meta["date_range"])
         except PlatformRequestError as e:
-            kind = e.failure_kind
-            if kind == FAILURE_TOKEN:
-                raise AdapterError(FAILURE_TOKEN, f"生意参谋登录态失效：{e}") from e
+            kind = getattr(e, "failure_kind", "") or ""
             if kind == FAILURE_RISK:
-                raise AdapterError(FAILURE_RISK, f"关键词拓展被风控：{e}") from e
-            # 权限类（no_permission / api_error）：商品层仍可用，记录缺口
-            data.data_gaps.append(f"关键词趋势数据不可用（{e}），分析将只基于商品数据")
+                data.data_gaps.append(
+                    f"关键词趋势被风控拦截（{e}）——建议先过验证再重试以补齐趋势层"
+                )
+            elif kind == FAILURE_TOKEN:
+                data.data_gaps.append(
+                    "生意参谋（sycm）会话未登录，关键词趋势层缺失——"
+                    "请到「账号连接」重新登录淘宝账号以补齐该层；"
+                    "本次分析仅基于商品数据（价格带/竞争/标题线索）"
+                )
+            else:
+                data.data_gaps.append(
+                    f"关键词趋势数据不可用（{e}），本次分析仅基于商品数据"
+                )
         except Exception as e:  # noqa: BLE001
-            data.data_gaps.append(f"关键词趋势采集异常（{e}），分析将只基于商品数据")
+            data.data_gaps.append(
+                f"关键词趋势采集异常（{e}），本次分析仅基于商品数据"
+            )
 
         # 2) 商品搜索（MTOP）
         products = self._fetch_products(keyword, c)
@@ -100,9 +113,8 @@ class TaobaoAdapter:
 
         if not products:
             raise AdapterError(FAILURE_API, f"关键词「{keyword}」未采集到商品数据")
-        if not data.keyword_trend:
-            if "关键词趋势" not in " ".join(data.data_gaps):
-                data.data_gaps.append("关键词趋势数据为空")
+        if not data.keyword_trend and not any("关键词趋势" in g for g in data.data_gaps):
+            data.data_gaps.append("关键词趋势数据为空（sycm 返回 0 条关联词）")
 
         # 评价/投放层数据本期未启用（PDF 的痛点层依赖评价采集，较慢）
         data.data_gaps.append("评价数据未采集（痛点层本期未启用，痛点分析基于标题词频推断）")
