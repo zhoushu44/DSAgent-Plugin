@@ -57,8 +57,10 @@
  */
 import { CredentialStore, resolveAccountForRequest, type StoredAccount } from './services/credential-store.js'
 import { clearProfileLocks, findChromePath, profileDir, profileOwner, releaseProfile, tryAcquireProfile } from './browser-login.js'
+import { createAttrCache, type AttrCache } from './services/attr-cache.js'
 import { existsSync, statSync, writeFileSync } from 'node:fs'
-import { basename } from 'node:path'
+import { basename, join } from 'node:path'
+import { homedir } from 'node:os'
 
 /** 商品列表入口 —— 发布的**唯一正确起点**（从列表点「发布新商品」才会带上完整上下文参数） */
 const PDD_GOODS_LIST_URL = 'https://mms.pinduoduo.com/goods/goods_list'
@@ -136,6 +138,19 @@ const ATTR_MODEL_TIMEOUT_MS = 20_000
 const ATTR_DROPDOWN_WAIT_MS = 800
 /** 不自动填的属性：品牌涉及品牌授权，选错有侵权风险，一律留给人工 */
 const ATTR_SKIP_RE = /^品牌$/
+
+/**
+ * 类目属性缓存 —— 同平台+同类目发相似商品时复用上次成功填的值，省模型 API 调用。
+ * ★ 命中缓存后仍读当前下拉选项做验证，选项变了就 fallback 到模型（不硬塞旧值）。
+ * 落盘在 ~/.dsh/.attr-cache.json（与凭证库、skill-stats 同目录）。
+ *
+ * ★ 与 taobao-publish 同一处缺陷：必须用 ESM import，不能用 `require()`。
+ *   本项目是 `"type": "module"`，`require` 在 ESM 作用域下不存在，
+ *   会在模块求值时报 `ReferenceError` 并拖垮整个 host 半区（本文件被 index.ts 静态 import）。
+ */
+const attrCache: AttrCache = createAttrCache(
+  join(homedir(), '.dsh', '.attr-cache.json')
+)
 
 /** 本工具在 Profile 锁中的占用者标识（用于互斥提示文案） */
 const PROFILE_OWNER = '拼多多发布'
@@ -1098,9 +1113,13 @@ async function fillField(page: any, keywords: RegExp, value: string): Promise<st
     let hit = visible.find(el => re.test(direct(el)))
     if (!hit) hit = visible.find(el => re.test(chain(el)))
     if (!hit) return null
+    // 类目规则优先：按 DOM 里的 maxlength 截断
+    let finalVal = v
+    const ml = Number(hit.getAttribute('maxlength')) || (hit.maxLength > 0 ? hit.maxLength : 0)
+    if (ml > 0 && finalVal.length > ml) finalVal = finalVal.slice(0, ml)
     const proto = hit instanceof HTMLTextAreaElement ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype
     const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set
-    if (setter) setter.call(hit, v); else hit.value = v
+    if (setter) setter.call(hit, finalVal); else hit.value = finalVal
     hit.dispatchEvent(new Event('input', { bubbles: true }))
     hit.dispatchEvent(new Event('change', { bubbles: true }))
     hit.dispatchEvent(new Event('blur', { bubbles: true }))
@@ -1358,21 +1377,32 @@ interface PddAttrItem {
   filled: boolean
   /** 值控件 placeholder，用于识别搜索型下拉 */
   placeholder: string
+  /** 文本输入框的 maxlength（类目规则的一部分，0/未设=不限） */
+  maxlength: number
+  /** 是否必填（拼多多用「重要」标记） */
+  required: boolean
+  /** 字段下方的校验提示文案 */
+  hint: string
 }
 
 /** 读商品属性区的全部属性项 */
 async function readAttrItems(page: any): Promise<PddAttrItem[]> {
   return await page.evaluate(() => {
-    const out: { id: string; name: string; filled: boolean; placeholder: string }[] = []
+    const out: { id: string; name: string; filled: boolean; placeholder: string; maxlength: number; required: boolean; hint: string }[] = []
     const items = Array.from(document.querySelectorAll('.goods-propertys .property-item')) as HTMLElement[]
     for (const it of items) {
       const fi = it.querySelector('[id^="basic.propertys."]') as HTMLElement | null
       if (!fi) continue
       const inp = fi.querySelector('input[data-testid="beast-core-select-htmlInput"]') as HTMLInputElement | null
       if (!inp) continue
-      const name = ((fi.querySelector('label') as HTMLElement | null)?.innerText || '')
-        .replace(/重要/g, '').replace(/[*＊]/g, '').replace(/\s+/g, '')
-      out.push({ id: fi.id, name, filled: !!(inp.value || '').trim(), placeholder: inp.placeholder || '' })
+      const labelEl = fi.querySelector('label') as HTMLElement | null
+      const name = (labelEl?.innerText || '').replace(/重要/g, '').replace(/[*＊]/g, '').replace(/\s+/g, '')
+      // 类目规则：从 DOM 读 maxlength + 必填标记 + 校验提示
+      const ml = Number(inp.getAttribute('maxlength')) || (inp.maxLength > 0 ? inp.maxLength : 0)
+      const required = !!fi.querySelector('[class*="important"], [class*="required"], .required')
+      const hintEl = fi.querySelector('[class*="Error"], [class*="error"], [class*="help"], [class*="tip"]') as HTMLElement | null
+      const hint = (hintEl?.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 120)
+      out.push({ id: fi.id, name, filled: !!(inp.value || '').trim(), placeholder: inp.placeholder || '', maxlength: ml, required, hint })
     }
     return out
   }).catch(() => []) as PddAttrItem[]
@@ -1491,7 +1521,7 @@ async function pickAttrValue(
   attrName: string,
   options: string[],
   ctx: { title: string },
-): Promise<string | null> {
+): Promise<{ value: string; hesitated: boolean; candidates: number } | null> {
   if (!options.length) return null
   const sys = '你是电商商品发布助手。根据商品标题，从「候选值」中为该属性挑选最合适的一个。\n'
     + '硬性规则：① 只能原样返回候选值中的一个，不得改写、不得创造新值；\n'
@@ -1518,7 +1548,11 @@ async function pickAttrValue(
     if (!jsonText) return null
     const v = (JSON.parse(jsonText) as { value?: unknown })?.value
     const picked = typeof v === 'string' ? v.trim() : ''
-    return picked && options.includes(picked) ? picked : null
+    if (!picked) return null
+    // 犹豫信号：返回了值但不在候选里 = 想改写，按放弃处理但标记
+    const hesitated = !options.includes(picked)
+    if (hesitated) return null
+    return { value: picked, hesitated: false, candidates: options.length }
   } catch {
     return null
   }
@@ -1531,10 +1565,11 @@ async function pickAttrValue(
  */
 async function fillAttributes(
   page: any,
-  ctx: { title: string },
+  ctx: { title: string; category: string },
 ): Promise<{ filled: string[]; missed: string[] }> {
   const filled: string[] = []
   const missed: string[] = []
+  const cat = ctx.category || ''
   const all = await readAttrItems(page)
   const todo = all.filter(i => i.name && !i.filled && !ATTR_SKIP_RE.test(i.name))
   if (all.length) {
@@ -1552,19 +1587,42 @@ async function fillAttributes(
       missed.push(isSearch ? `${it.name}（需输入关键词搜索，未自动选）` : `${it.name}（下拉未读到选项）`)
       continue
     }
-    const picked = await pickAttrValue(it.name, options, ctx)
-    if (!picked) {
+
+    // ── 缓存优先：同类目上次成功填的值，若仍在当前选项里就直接用（省模型 API）──
+    let pick: { value: string; hesitated: boolean; candidates: number } | null = null
+    let fromCache = false
+    if (cat) {
+      const cached = await attrCache.lookup(PLATFORM, cat, it.name).catch(() => null)
+      if (cached && options.includes(cached)) {
+        pick = { value: cached, hesitated: false, candidates: options.length }
+        fromCache = true
+      }
+    }
+    // ── 缓存未命中或值已不在选项里 → fallback 到模型 ──
+    if (!pick) {
+      pick = await pickAttrValue(it.name, options, ctx)
+    }
+
+    if (!pick) {
       await closeAttrDropdown(page, it.id)
       console.log(`[dsagent-pdd-publish] 属性「${it.name}」候选：${options.join(' / ')}`)
       missed.push(`${it.name}（候选 ${options.length} 项，模型未选）`)
       continue
     }
-    const ok = await clickOpenOption(page, picked)
+    const ok = await clickOpenOption(page, pick.value)
     await sleep(400)
-    const confirmed = ok && await verifyAttrValue(page, it.id, picked)
+    const confirmed = ok && await verifyAttrValue(page, it.id, pick.value)
     await closeAttrDropdown(page, it.id)
-    if (confirmed) filled.push(`${it.name}=${picked}`)
-    else missed.push(`${it.name}（点选「${picked}」${ok ? '后未确认到值' : '失败'}）`)
+    if (confirmed) {
+      const tag = fromCache ? '缓存命中' : `候选${pick.candidates}项`
+      filled.push(`${it.name}=${pick.value}（${tag}）`)
+      // 只记模型选的值（缓存命中的已记过，不重复刷 hits）
+      if (!fromCache && cat) {
+        await attrCache.record(PLATFORM, cat, it.name, pick.value).catch(() => {})
+      }
+    } else {
+      missed.push(`${it.name}（点选「${pick.value}」${ok ? '后未确认到值' : '失败'}）`)
+    }
   }
   return { filled, missed }
 }
@@ -2050,7 +2108,7 @@ export async function pddPublish(
     // 属性值由文本模型从**页面真实下拉选项**里选（见 fillAttributes）。
     try {
       const attrs = await withStallWatch(
-        step2, '第二步-商品属性', 150_000, () => fillAttributes(step2, { title }),
+        step2, '第二步-商品属性', 150_000, () => fillAttributes(step2, { title, category }),
       )
       filled.push(...attrs.filled)
       missed.push(...attrs.missed)

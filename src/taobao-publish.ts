@@ -28,8 +28,10 @@
  */
 import { CredentialStore, resolveAccountForRequest, type StoredAccount } from './services/credential-store.js'
 import { clearProfileLocks, findChromePath, profileDir, profileOwner, releaseProfile, tryAcquireProfile, registerProfilePort, registeredPortFor, verifyPortOwnership } from './browser-login.js'
+import { createAttrCache, type AttrCache } from './services/attr-cache.js'
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
+import { homedir } from 'node:os'
 
 /** 发布入口（按渠道）。淘宝先落在「选类目」页，选完类目才进正式表单；天猫同理。 */
 const CHANNELS: Record<string, { label: string; url: string; categoryUrl?: string }> = {
@@ -82,6 +84,21 @@ const ATTR_MODEL_MAX_TOKENS = 512
 const ATTR_DROPDOWN_WAIT_MS = 800
 /** 不自动填的类目属性：品牌涉及品牌授权，选错有侵权风险，一律留给人工 */
 const ATTR_SKIP_RE = /^品牌$/
+
+/**
+ * 类目属性缓存 —— 同平台+同类目发相似商品时复用上次成功填的值，省模型 API 调用。
+ * ★ 命中缓存后仍读当前下拉选项做验证，选项变了就 fallback 到模型（不硬塞旧值）。
+ * 落盘在 ~/.dsh/.attr-cache.json（与凭证库、skill-stats 同目录）。
+ *
+ * ★ 这里必须用 **ESM import**，不能用 `require()`：
+ *   本项目是 `"type": "module"`，`require` 在 ESM 作用域下不存在，
+ *   会在模块求值时抛 `ReferenceError: require is not defined`。
+ *   由于本文件被 index.ts 静态 import，该错误会**拖垮整个 host 半区**
+ *   （不只是淘宝发布工具不可用，而是插件加载失败）。
+ */
+const attrCache: AttrCache = createAttrCache(
+  join(homedir(), '.dsh', '.attr-cache.json')
+)
 
 /** 本工具在 Profile 锁中的占用者标识（用于互斥提示文案） */
 const PROFILE_OWNER = '淘宝发布'
@@ -763,9 +780,13 @@ async function fillField(page: any, keywords: RegExp, value: string, labels: str
     if (!hit) hit = visible.find(el => re.test(direct(el))) || null
     if (!hit) hit = visible.find(el => re.test(chain(el))) || null
     if (!hit) return null
+    // 类目规则优先：按 DOM 里的 maxlength 截断（类目规定的字符上限压倒默认值）
+    let finalVal = v
+    const ml = Number(hit.getAttribute('maxlength')) || (hit.maxLength > 0 ? hit.maxLength : 0)
+    if (ml > 0 && finalVal.length > ml) finalVal = finalVal.slice(0, ml)
     const proto = hit instanceof HTMLTextAreaElement ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype
     const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set
-    if (setter) setter.call(hit, v); else hit.value = v
+    if (setter) setter.call(hit, finalVal); else hit.value = finalVal
     hit.dispatchEvent(new Event('input', { bubbles: true }))
     hit.dispatchEvent(new Event('change', { bubbles: true }))
     hit.dispatchEvent(new Event('blur', { bubbles: true }))
@@ -785,6 +806,10 @@ interface TbCatPropItem {
   filled: boolean
   /** 控件类型：combobox（可输入/可下拉）/ select（只读下拉）/ text（纯输入） */
   kind: 'combobox' | 'select' | 'text'
+  /** 文本/combobox 输入框的 maxlength（类目规则的一部分，0/未设=不限） */
+  maxlength: number
+  /** 字段下方的校验提示文案（如「请选择」「不能超过 X 字」），类目规则的页面体现 */
+  hint: string
 }
 
 /**
@@ -796,7 +821,7 @@ interface TbCatPropItem {
  */
 async function readCatPropItems(page: any): Promise<TbCatPropItem[]> {
   return await page.evaluate(() => {
-    const out: { id: string; name: string; required: boolean; filled: boolean; kind: string }[] = []
+    const out: { id: string; name: string; required: boolean; filled: boolean; kind: string; maxlength: number; hint: string }[] = []
     const root = document.getElementById('struct-catProp')
     if (!root) return out
     const items = Array.from(root.querySelectorAll('[id^="struct-p-"]')) as HTMLElement[]
@@ -813,7 +838,11 @@ async function readCatPropItems(page: any): Promise<TbCatPropItem[]> {
       const kind = ac ? 'combobox' : (trg ? 'select' : 'text')
       const val = (inp?.value || '').trim()
       const shown = ((field.querySelector('.next-select-values') as HTMLElement | null)?.innerText || '').trim()
-      out.push({ id: it.id, name, required, filled: !!(val || shown), kind })
+      // 类目规则：从 DOM 读 maxlength（文本/combobox 输入框）+ 校验提示（字段下方红色文案）
+      const ml = inp ? (Number(inp.getAttribute('maxlength')) || (inp.maxLength > 0 ? inp.maxLength : 0)) : 0
+      const hintEl = field.querySelector('.sell-component-info-wrapper-explain, .next-form-item-help, [class*="error"], [class*="help"]') as HTMLElement | null
+      const hint = (hintEl?.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 120)
+      out.push({ id: it.id, name, required, filled: !!(val || shown), kind, maxlength: ml, hint })
     }
     return out
   }).catch(() => []) as TbCatPropItem[]
@@ -921,7 +950,7 @@ async function pickPropValue(
   attrName: string,
   options: string[],
   ctx: { title: string },
-): Promise<string | null> {
+): Promise<{ value: string; hesitated: boolean; candidates: number } | null> {
   if (!options.length) return null
   const sys = '你是电商商品发布助手。根据商品标题，从「候选值」中为该属性挑选最合适的一个。\n'
     + '硬性规则：① 只能原样返回候选值中的一个，不得改写、不得创造新值；\n'
@@ -962,11 +991,13 @@ async function pickPropValue(
       console.warn(`[dsagent-taobao-publish] 属性「${attrName}」模型判定候选均不相关，跳过（由人工确认）`)
       return null
     }
-    if (!options.includes(picked)) {
+    // 犹豫信号：模型返回了值但不在候选里 —— 它想改写/编造，按放弃处理但标记犹豫
+    const hesitated = !options.includes(picked)
+    if (hesitated) {
       console.warn(`[dsagent-taobao-publish] 属性「${attrName}」模型返回「${picked}」不在候选中，按放弃处理`)
       return null
     }
-    return picked
+    return { value: picked, hesitated: false, candidates: options.length }
   } catch (e) {
     console.warn(`[dsagent-taobao-publish] 属性「${attrName}」模型请求异常：${e instanceof Error ? e.message : String(e)}`)
     return null
@@ -981,10 +1012,12 @@ async function pickPropValue(
  */
 async function fillCategoryAttrs(
   page: any,
-  ctx: { title: string },
+  ctx: { title: string; categoryKeyword: string },
 ): Promise<{ filled: string[]; missed: string[] }> {
   const filled: string[] = []
   const missed: string[] = []
+  const cat = ctx.categoryKeyword || ''
+  const PLATFORM = 'taobao'
   const all = await readCatPropItems(page)
   const todo = all.filter(i => i.name && !i.filled && !ATTR_SKIP_RE.test(i.name) && i.kind !== 'text')
   if (all.length) {
@@ -1002,19 +1035,42 @@ async function fillCategoryAttrs(
       missed.push(`${it.name}（下拉未读到选项）`)
       continue
     }
-    const picked = await pickPropValue(it.name, options, ctx)
-    if (!picked) {
+
+    // ── 缓存优先：同类目上次成功填的值，若仍在当前选项里就直接用（省模型 API）──
+    let pick: { value: string; hesitated: boolean; candidates: number } | null = null
+    let fromCache = false
+    if (cat) {
+      const cached = await attrCache.lookup(PLATFORM, cat, it.name).catch(() => null)
+      if (cached && options.includes(cached)) {
+        pick = { value: cached, hesitated: false, candidates: options.length }
+        fromCache = true
+      }
+    }
+    // ── 缓存未命中或值已不在选项里 → fallback 到模型 ──
+    if (!pick) {
+      pick = await pickPropValue(it.name, options, ctx)
+    }
+
+    if (!pick) {
       await closePropDropdown(page)
       console.log(`[dsagent-taobao-publish] 属性「${it.name}」候选：${options.join(' / ')}`)
       missed.push(`${it.name}（候选 ${options.length} 项，模型未选）`)
       continue
     }
-    const ok = await clickPropOption(page, picked)
+    const ok = await clickPropOption(page, pick.value)
     await sleep(400)
-    const confirmed = ok && await verifyPropValue(page, it.id, picked)
+    const confirmed = ok && await verifyPropValue(page, it.id, pick.value)
     await closePropDropdown(page)
-    if (confirmed) filled.push(`${it.name}=${picked}`)
-    else missed.push(`${it.name}（点选「${picked}」${ok ? '后未确认到值' : '失败'}）`)
+    if (confirmed) {
+      const tag = fromCache ? '缓存命中' : `候选${pick.candidates}项`
+      filled.push(`${it.name}=${pick.value}（${tag}）`)
+      // 只记模型选的值（缓存命中的已记过，不重复刷 hits）
+      if (!fromCache && cat) {
+        await attrCache.record(PLATFORM, cat, it.name, pick.value).catch(() => {})
+      }
+    } else {
+      missed.push(`${it.name}（点选「${pick.value}」${ok ? '后未确认到值' : '失败'}）`)
+    }
   }
   return { filled, missed }
 }
@@ -1359,6 +1415,63 @@ async function fillDetailImages(
     return { ok: true, note: `已上传 ${doneCount} 张详情图（新版详情编辑器画布已回填）` }
   }
   return { ok: false, note: `详情图部分完成（${doneCount}/${want.length}）${notes.length ? `；${notes.join('；')}` : ''}` }
+}
+
+/**
+ * 读「提交后被拦」的真实原因 —— 吸收拼多多的 readSubmitErrors 三路诊断。
+ *
+ * 淘宝提交被拦时页面不弹 toast，拦因只在三处：
+ *   ① next 组件 toast（.next-message-notice / .next-toast）—— 排除成功文案
+ *   ② 字段下方的红色校验文案（.sell-component-info-wrapper-explain 带 error/warning class）
+ *   ③ 「商品填写建议」面板（.sell-optimization-container 或 .sell-component-optimization）
+ *      —— 含错误 tab（数量 + 文案）和建议项
+ *
+ * 返回 hard = 硬拦因（有它就不必再等）；panel = 面板全文（诊断用）。
+ * ★ 旧的「拿 document.body.innerText 去正则匹配关键词」覆盖面窄，
+ *   180s 空转后只能报「未检测到成功标志」，对定位毫无帮助。
+ */
+function readSubmitErrors(page: any): Promise<{ hard: string; panel: string }> {
+  return page.evaluate(() => {
+    const hard: string[] = []
+
+    // ① next 组件 toast（排除成功文案）
+    const toastSelectors = '.next-message-notice, .next-message, .next-toast, [class*="toast"], [class*="Toast"]'
+    const toastEl = document.querySelector(toastSelectors) as HTMLElement | null
+    const toastTxt = (toastEl?.innerText || '').replace(/\s+/g, ' ').trim()
+    if (toastTxt && !/提交成功|发布成功|上架成功/.test(toastTxt)) {
+      hard.push(`页面提示：${toastTxt.slice(0, 120)}`)
+    }
+
+    // ② 字段级红色校验文案（sell 组件的 explain 区 + 通用 form error）
+    const errSelectors = '.sell-component-info-wrapper-explain, .next-form-item-help-error, [class*="Form_itemError"], [class*="error-text"], [class*="validate-error"]'
+    for (const e of Array.from(document.querySelectorAll(errSelectors)) as HTMLElement[]) {
+      if (e.offsetParent === null) continue
+      const t = (e.innerText || '').replace(/\s+/g, ' ').trim()
+      if (t && t.length <= 80) hard.push(t)
+    }
+
+    // ③ 「商品填写建议」面板（优化建议区）
+    let panel = ''
+    const optSelectors = '.sell-optimization-container, .sell-component-optimization, [class*="optimization-container"], [class*="goods-optimization"]'
+    const opt = document.querySelector(optSelectors) as HTMLElement | null
+    if (opt) {
+      const tabLabels = Array.from(opt.querySelectorAll('[class*="tabLabel"], [class*="tab-label"], .next-tabs-tab')) as HTMLElement[]
+      const errTab = tabLabels.find(l => /错误|问题|必填/.test(l.innerText || ''))
+      const errCount = Number((errTab?.innerText || '').match(/(\d+)/)?.[1] || 0)
+      const errTxt = ((opt.querySelector('[class*="TAB_content"], [class*="tab-content"], .next-tabs-content') as HTMLElement | null)?.textContent || '')
+        .replace(/\s+/g, ' ').trim()
+      const advice = (Array.from(opt.querySelectorAll('[class*="optimize-item"], [class*="advice-item"], [class*="suggest-item"]')) as HTMLElement[])
+        .map(a => (a.innerText || '').replace(/\s+/g, ' ').trim())
+        .filter(Boolean)
+      if (errCount > 0 && errTxt && !/暂无错误|暂无问题/.test(errTxt)) {
+        hard.push(`错误（${errCount}）：${errTxt.slice(0, 200)}`)
+      }
+      const header = (opt.querySelector('[class*="optimize-header"], [class*="header"]') as HTMLElement | null)?.innerText || ''
+      panel = [header.replace(/\s+/g, ' ').trim(), `错误（${errCount}）`, ...advice].filter(Boolean).join(' | ')
+    }
+
+    return { hard: Array.from(new Set(hard)).join('；'), panel }
+  }).catch(() => ({ hard: '', panel: '' })) as Promise<{ hard: string; panel: string }>
 }
 
 /** 点「提交宝贝信息 / 提交」（2026-09 实测按钮属性为 name="button-submit"，旧版为 _id） */
@@ -1728,7 +1841,7 @@ export async function taobaoPublish(
     }
 
     // ── 4.5 自动填类目属性（充值方式 / 模型或平台 / 软件类型 等）──
-    const attrs = await fillCategoryAttrs(page, { title })
+    const attrs = await fillCategoryAttrs(page, { title, categoryKeyword })
     filled.push(...attrs.filled)
     missed.push(...attrs.missed)
 
@@ -1763,6 +1876,7 @@ export async function taobaoPublish(
     let successId = ''
     let success = false
     let errText = ''
+    let errPanel = ''
     const deadline = Date.now() + PUBLISH_TIMEOUT_MS
     while (Date.now() < deadline) {
       await sleep(2000)
@@ -1798,11 +1912,25 @@ export async function taobaoPublish(
           if (err) return { kind: 'error', msg: err[0] }
           return { kind: '', id: '' }
         }) as { kind: string; id?: string; msg?: string }
-        bodyText = '' // 仅用于日志，不额外取
+        bodyText = ''
         if (probe.kind === 'success') { success = true; successId = probe.id || ''; break }
-        if (probe.kind === 'error') { errText = probe.msg || ''; break }
+        // 兜底词表命中不立即中断：真实拦因以「商品填写建议」面板为准（见下方 readSubmitErrors）
+        if (probe.kind === 'error') { errText = probe.msg || '' }
       } catch { /* 页面跳转中，下一轮再取 */ }
+
+      // ★ 诊断：读 toast + 字段级红字 +「商品填写建议」面板（三路精准诊断）
+      try {
+        const diag = await readSubmitErrors(page)
+        if (diag.panel) errPanel = diag.panel
+        if (diag.hard) {
+          console.log(`[dsagent-taobao-publish] 提交被拦：${diag.hard}`)
+          errText = diag.hard
+          break  // 硬拦因命中，不必继续等
+        }
+      } catch { /* 诊断失败不影响主流程 */ }
     }
+
+    if (errPanel) console.log(`[dsagent-taobao-publish] 填写建议面板：${errPanel}`)
 
     if (success) {
       succeeded = true
@@ -1830,6 +1958,7 @@ export async function taobaoPublish(
         shopKey,
         finalUrl,
         text: `发布失败：${errText}\n`
+          + (errPanel ? `★ 填写建议面板：${errPanel}\n` : '')
           + (missed.length ? `★ 未自动填写的字段：${missed.join('、')}\n` : '')
           + '请在浏览器窗口内补全必填项（尤其是**类目属性**与商品详情）后手动点击「提交宝贝信息」。',
       }
