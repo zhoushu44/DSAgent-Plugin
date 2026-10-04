@@ -587,17 +587,101 @@ frontmatter 内 `[src]`、title/H1/文件名不一致。
 | **签名归一化** | `商品 123456 取数失败` 与 `商品 789012 取数失败` 会变成两条独立记录，各自计数永远到不了阈值，**坑位永远无法晋升** |
 | **证据阈值（3 次）** | 单次失败可能只是网络抖动；误报的坑位会污染提示，比漏报代价更高 |
 
+## 真实运行时验证发现并修复的一个缺陷（2026-10-04）
+
+**只有真实运行时验证才能发现**的问题，也是本轮 UI 验证最大的收获。
+
+### 现象
+
+在 DSH 真实会话里调用 `dsagent_wiki_write` 写入一个
+`披露等级: 可对外` 的页面，其中含机密字段 `价格底线: 0.55元/只` ——
+**写入成功了**，机密值落进了对外页面。
+
+### 根因：两条校验路径分叉
+
+| 入口 | 走的校验函数 | 参数形状 | 机密检查 |
+|---|---|---|---|
+| `buildTemplate` + `renderPage` | `validateTemplate()` | 模板**对象** | ✅ 有 |
+| `dsagent_wiki_write` 工具 | `checkPageText()` | frontmatter **文本** | ❌ **原先没有** |
+
+工具签名收的是 `frontmatterYaml` 文本，天然走文本路径；而首版 `checkPageText()`
+只做了顶层字段 / 废弃字段 / `[src]` / 域块 / title-H1 五项，**完全没有**机密字段、
+枚举、接待域规则、域字段名这些检查。于是产生绕过路径：
+
+```
+用 dsagent_wiki_template 生成模板 → validateTemplate → 拦得住
+直接手写 frontmatterYaml 传进 write → checkPageText → 拦不住
+```
+
+### 为什么 68 个用例没抓到
+
+`dev/verify-wiki.mjs` 的机密字段用例调用的是 `validateTemplate()`（模板路径），
+而线上工具走 `checkPageText()`（文本路径）——**测了 A 却上了 B**。
+用例本身没错，错在覆盖的是另一条路径。
+
+### 修复
+
+1. 新增 `parseFieldPaths()`：把 frontmatter 文本解析成「字段路径 → 值」，
+   使文本路径也能做依赖字段位置的检查（支持顶层标量 / 两层映射，容错优先）。
+2. `checkPageText()` 补齐与 `validateTemplate()` 对齐的全部检查：
+   机密字段进可对外页、Schema 外字段/分组、实体子类型枚举与单一形态域约束、
+   接待域两条 L1 规则、建页锚点。
+3. 新增 `dev/verify-wiki-textpath.mjs`（25 用例），
+   **对同一份违规内容同时跑两条路径并要求结论一致** —— 防止再次分叉。
+
+### 教训
+
+> 同一概念有两条入口时，校验逻辑必须收敛、或至少保证两条路径被同一组用例覆盖。
+> 只测其中一条，等于另一条完全没有护栏。
+
+## 真实运行时验证发现并修复的第二个缺陷：记录策略两路径分叉
+
+### 现象
+
+在 DSH 真实会话里对一个平台技能触发 `token_expired` 失败后，
+查 `dsagent_pitfalls` 显示**零条记录**。
+
+### 根因：判定散落在两个地方
+
+| 失败路径 | `token_expired` 是否记录 |
+|---|---|
+| 预检分支（`fetchSessionHint` 返回 expired/reauth_required） | ❌ 不记 |
+| 脚本失败分支（`RECORDABLE` 白名单） | ✅ 记 |
+
+同一个 failureKind，两条路径行为相反 —— 与上一个缺陷是**同一类错误**
+（同一概念两处实现），只是从「校验」换成了「策略」。
+
+### 修法与判定原则
+
+把「什么算坑位」收口到 `pitfall-memory::isRecordableFailure()`，两条路径共用。
+判定标准明确为一句话：
+
+> **「知道它已经发生过 N 次」是否改变模型这一次该做什么？**
+
+- **收录**：`risk_control`（N 次 → 先走验证别盲重试）、`rate_limit`（N 次 → 是频控，换 mode）、
+  `no_permission`（N 次 → 换号才解决）、`api_error`/`parse_error`/`skill_error`（N 次 → 不是抖动，去读文档）
+- **排除**：`token_expired` —— 第 1 次和第 100 次的处置**完全相同**（重新登录），
+  计数不改变任何决策；且换账号即消失，属**账号状态**而非平台坑位。
+  同理排除 `not_bound` / `need_account_choice` / `skill_not_found` / `invalid_args`。
+
+### 附带修正
+
+原白名单**包含** `token_expired`，按上述原则属于误收 —— 已移除。
+`dev/verify-pitfalls.mjs` 增加一节策略用例（含「白名单恰好 6 项」防止再漂移）。
+
 ## 验证结果
 
-五套测试套件，全部通过（**211 个用例**）：
+六套测试套件，全部通过（**246 个用例**）：
 
 | 套件 | 用例数 | 覆盖 |
 |---|---|---|
 | `dev/verify-skill-governance.mjs` | **47** | 双语槽位评分、frontmatter 解析、tool_triggers 解析与匹配、注册表去重、统计并发安全、patch 合并 |
 | `dev/verify-patch-layer.mjs` | **25** | patch 参与真实执行链路、质量概览 API、使用统计 API、评分与 patch 解耦 |
 | `dev/verify-wiki.mjs` | **68** | 八域 Schema、锁定模板、**校验器拦住模型漂移**、接待域 L1 规则、render 删空值、披露过滤、文件名清洗、落盘与索引 |
-| `dev/verify-pitfalls.mjs` | **44** | 签名归一化与折叠、**证据不足不提示**、陈旧坑位退出提示、并发安全、脏数据净化、容量淘汰、提示渲染 |
+| `dev/verify-wiki-textpath.mjs` | **25** | **文本路径与模板路径的校验一致性**、机密字段泄漏回归、parseFieldPaths |
+| `dev/verify-pitfalls.mjs` | **54** | 签名归一化与折叠、**证据不足不提示**、陈旧坑位退出提示、并发安全、脏数据净化、容量淘汰、提示渲染、**记录白名单策略单一出处** |
 | `dev/verify-host-integration.mjs` | **27** | `apply()` 真实注册 34 个工具、系统提示词注入、**原有工具无回归**、`required:false` 回归、知识库工具端到端写入 |
+
 
 另有两个诊断脚本：
 

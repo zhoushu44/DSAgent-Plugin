@@ -21,7 +21,7 @@ import { createToolTriggerRegistry, type TriggerSourceSkill } from './services/t
 import { getDomain, describeDomain, domainRoutingTable, DOMAIN_NAMES, RECEPTION_INTENTS } from './services/wiki-schema.js'
 import { buildTemplate, templateToYaml, templateGuide } from './services/wiki-frontmatter.js'
 import { createWikiStore } from './services/wiki-store.js'
-import { createPitfallMemory, renderPitfallHint, exportPitfallDraft, PITFALL } from './services/pitfall-memory.js'
+import { createPitfallMemory, renderPitfallHint, exportPitfallDraft, isRecordableFailure, PITFALL } from './services/pitfall-memory.js'
 import { loadContract, contractToolName, contractToolParameters, buildContractArgv, type SkillContract } from './services/arguments.js'
 import { readdirSync, readFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -1100,10 +1100,13 @@ export function apply(ctx: Context, cfg: Config = config) {
         return { ok: false, failureKind: 'token_expired', text: `${guidedPlatform(platform)} 平台登录态疑似过期（可能是网络抖动）。可先重试一次；若仍失败，请到「账号连接」页面重新登录。`, exitCode: -1, skillId, message: '' } as any
       }
       if (ctx2.sessionHint === 'risk_control') {
-        // 平台侧风控也是「平台坑位」，记入统计 —— 反复触发说明该账号/该接口确实是高风险面
-        try {
-          await pitfalls.record({ skillId, platform, failureKind: 'risk_control', message: '会话被风控拦截（平台侧）' })
-        } catch { /* 静默 */ }
+        // 预检就撞上风控 —— 与脚本路径共用同一份「什么算坑位」判定，
+        // 避免两条路径对同一个 failureKind 给出不同行为（实测踩过）。
+        if (isRecordableFailure('risk_control')) {
+          try {
+            await pitfalls.record({ skillId, platform, failureKind: 'risk_control', message: '会话被风控拦截（平台侧）' })
+          } catch { /* 静默 */ }
+        }
         return { ok: false, failureKind: 'risk_control', text: `${platform} 平台会话被风控拦截。请调用 dsagent_risk_verify（platform=${platform}）拉起验证页完成滑块验证，凭证会自动写回账号，然后重新执行本技能。`, exitCode: -1, skillId, message: '' } as any
       }
       // 选定账号（含第 ④ 级唯一候选）→ 透传给网关，保证 host 预检与网关选号一致
@@ -1209,10 +1212,9 @@ export function apply(ctx: Context, cfg: Config = config) {
       const usageHint = result.usage ? `\n\n用法：${result.usage}\n如需参数，请补全后重新调用 ${invokedTool}。` : ''
 
       // 坑位累积（P3）：把本次真实失败记入统计。达阈值的坑位下次调用会进 pitfallHint。
-      // 只记「可归因」的失败类型 —— not_bound / need_account_choice 是流程引导而非平台坑，
-      // 记进去只会污染统计（它们由配置决定，不是需要规避的坑）。
-      const RECORDABLE = new Set(['risk_control', 'rate_limit', 'token_expired', 'no_permission', 'parse_error', 'api_error', 'skill_error'])
-      if (RECORDABLE.has(failureKind)) {
+      // 「哪些失败算坑位」的判定收口在 pitfall-memory::isRecordableFailure，
+      // 与上面预检分支共用同一份策略（原先两处各写一套，实测已分叉）。
+      if (isRecordableFailure(failureKind)) {
         try {
           await pitfalls.record({
             skillId,

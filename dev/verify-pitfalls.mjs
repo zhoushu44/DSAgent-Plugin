@@ -1,10 +1,12 @@
 /**
  * 端到端验证平台坑位记忆（P3）。
  *
- * 核心要验证的三条性质：
+ * 核心要验证的性质：
  *   ① 证据不足不提示 —— 单次失败只是偶发，不得进入提示（防止噪声污染）
  *   ② 同因不同例必须折叠 —— 商品 ID 不同的同类失败要合并计数，否则永远到不了阈值
  *   ③ 只记录事实，不做模型推断 —— 所有字段都来自机器可验证的观测
+ *   ④ 记录白名单是**单一出处** —— 预检分支与脚本分支必须共用同一份判定
+ *      （实测踩过：两处各写一套，token_expired 在两条路径行为不一致）
  */
 import fs from 'node:fs'
 import os from 'node:os'
@@ -13,6 +15,7 @@ import assert from 'node:assert'
 import {
   createPitfallMemory, normalizeSignature, pitfallKey,
   renderPitfallHint, exportPitfallDraft, PITFALL,
+  isRecordableFailure, RECORDABLE_FAILURE_KINDS,
 } from '../lib/services/pitfall-memory.js'
 
 let pass = 0, fail = 0
@@ -244,8 +247,25 @@ ok('草稿含原始错误样本', draft.includes('FAIL_SYS_ILLEGAL_ACCESS'))
 ok('草稿含建议沉淀位置', draft.includes('SKILL.patch.md'))
 ok('空草稿有明确说明', exportPitfallDraft([]).includes('暂无'))
 
-/* ══════════════ 9. 容量控制 ══════════════ */
-console.log('\n[9] 容量控制（防止长期运行无限增长）')
+/* ══════════════ 9. 记录白名单是单一出处（防两路径分叉） ══════════════ */
+console.log('\n[9] 记录白名单策略（单一出处，防预检/脚本两路径分叉）')
+
+ok('收录 risk_control（计数改变决策：别盲重试，先验证）', isRecordableFailure('risk_control'))
+ok('收录 rate_limit（计数说明是频控而非偶发）', isRecordableFailure('rate_limit'))
+ok('收录 no_permission（计数说明换号才解决）', isRecordableFailure('no_permission'))
+ok('收录 api_error / parse_error / skill_error', ['api_error', 'parse_error', 'skill_error'].every(isRecordableFailure))
+
+ok('★ 排除 token_expired（第1次与第100次处置完全相同，计数不带来新信息）',
+  !isRecordableFailure('token_expired'))
+ok('排除 not_bound（配置引导，非平台坑）', !isRecordableFailure('not_bound'))
+ok('排除 need_account_choice（流程引导）', !isRecordableFailure('need_account_choice'))
+ok('排除 skill_not_found（调用方错误）', !isRecordableFailure('skill_not_found'))
+ok('排除 invalid_args 与未知类型', !isRecordableFailure('invalid_args') && !isRecordableFailure('随便一个类型'))
+ok('白名单恰好 6 项，没有漏加或多加', RECORDABLE_FAILURE_KINDS.size === 6,
+  `实际 ${RECORDABLE_FAILURE_KINDS.size}: ${[...RECORDABLE_FAILURE_KINDS].join(',')}`)
+
+/* ══════════════ 10. 容量控制 ══════════════ */
+console.log('\n[10] 容量控制（防止长期运行无限增长）')
 await okA(`超过 ${PITFALL.MAX_ENTRIES} 条时淘汰最陈旧记录`, async () => {
   const t = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'pf-cap-')), '.pitfall.json')
   const m = createPitfallMemory(t)

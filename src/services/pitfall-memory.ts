@@ -368,6 +368,50 @@ const ACTION_HINT: Record<string, string> = {
 }
 
 /**
+ * 允许记入坑位统计的 failureKind 白名单。
+ *
+ * ★ 这份策略放在本模块而不是调用方。原先它硬写在 `index.ts` 的失败路径里，
+ *   而预检分支另有一套判断，结果是**同一个 failureKind 在两条路径上行为不一致**
+ *   （实测发现：脚本路径会记 `token_expired`，预检路径不记）。
+ *   策略只能有一个出处（与 wiki 概念域「口径的唯一出处」同一原则）。
+ *
+ * 判定标准是一句话：
+ *
+ *   > 「知道它已经发生过 N 次」是否改变模型**这一次**该做什么？
+ *
+ *   收录（计数带来新信息）：
+ *     · risk_control  —— N 次意味着别盲目重试，先走验证；N 高说明该账号/接口是高风险面
+ *     · rate_limit    —— N 次意味着这是频控而非偶发，应改走别的 mode / 退避
+ *     · no_permission —— N 次意味着不是暂时问题，换有权限的账号才解决
+ *     · api_error / parse_error / skill_error
+ *                     —— N 次意味着不是抖动，参数或实现确有问题，该去读 SKILL.md
+ *
+ *   排除（记了只是噪声）：
+ *     · token_expired —— 第 1 次和第 100 次的处置**完全相同**（重新登录），
+ *       计数不改变任何决策；且换账号即消失，属**账号状态**而非平台坑位。
+ *     · not_bound / need_account_choice / skill_not_found / invalid_args
+ *                     —— 配置与调用方错误，处置恒定，同样不因计数而改变。
+ */
+export const RECORDABLE_FAILURE_KINDS: ReadonlySet<string> = new Set([
+  'risk_control',
+  'rate_limit',
+  'no_permission',
+  'api_error',
+  'parse_error',
+  'skill_error',
+])
+
+/**
+ * 判断某个 failureKind 是否应记入坑位统计。
+ *
+ * 调用方（`index.ts` 的预检分支与脚本失败分支）统一走此函数，
+ * 避免两条路径各写一套判断而分叉。
+ */
+export function isRecordableFailure(kind: string): boolean {
+  return RECORDABLE_FAILURE_KINDS.has(kind)
+}
+
+/**
  * 把坑位渲染成注入给模型的提示块。
  *
  * 排版要点（来自实测的提示词实践）：

@@ -31,6 +31,7 @@ import {
   isSingleFormDomain,
   allFieldNames,
   RECEPTION_INTENTS,
+  DOMAIN_NAMES,
   type DomainDef,
   type FieldDef,
   type Disclosure,
@@ -395,14 +396,73 @@ function renderBlock(fields: Record<string, FieldValue>, indent = '  '): string[
   return out
 }
 
+/* ────────────────────────── 文本级解析（给 checkPageText 用） ────────────────────────── */
+
+/**
+ * 从 frontmatter 文本里解析出「字段路径 → 值」，用于文本级校验。
+ *
+ * 为什么需要它：`checkPageText()` 只拿到文本，拿不到模板对象，
+ * 因此像「机密字段是否出现在可对外页面」这类检查必须能从文本还原出字段位置。
+ *
+ * 只解析 Schema 用到的三种结构（顶层标量 / 两层映射 / 行内数组），
+ * 遇到其它结构按「忽略」处理 —— 宁可漏检也不误判（误判会挡住正常页面）。
+ *
+ * 返回的 key 形如：
+ *   '披露等级'                      顶层标量
+ *   '领域字段集/价格策略/价格底线'   两层映射
+ *   '实体识别字段/商品编号'          两层映射
+ */
+export function parseFieldPaths(fm: string): Map<string, string> {
+  const out = new Map<string, string>()
+  // 缩进栈：记录每一层的 (缩进宽度, 键名)
+  const stack: Array<{ indent: number; key: string }> = []
+
+  for (const raw of fm.split(/\r?\n/)) {
+    if (!raw.trim() || raw.trim().startsWith('#')) continue
+    const m = raw.match(/^([ \t]*)([^:]+):[ \t]*(.*)$/)
+    if (!m) continue
+    const indent = m[1].replace(/\t/g, '  ').length
+    const key = m[2].trim()
+    const value = m[3].trim()
+
+    // 弹出缩进更深的层
+    while (stack.length && stack[stack.length - 1].indent >= indent) stack.pop()
+
+    if (value === '') {
+      // 是一个映射的开头，压栈
+      stack.push({ indent, key })
+      continue
+    }
+    // 叶子节点：路径 = 栈内所有键 + 本键
+    const path = [...stack.map(s => s.key), key].join('/')
+    out.set(path, value.replace(/^["']|["']$/g, ''))
+  }
+  return out
+}
+
+/** 取「路径末段」为 name 的所有值（不关心它在哪一层） */
+function valuesByLeaf(paths: Map<string, string>, leaf: string): string[] {
+  const out: string[] = []
+  for (const [k, v] of paths) {
+    const parts = k.split('/')
+    if (parts[parts.length - 1] === leaf) out.push(v)
+  }
+  return out
+}
+
 /* ────────────────────────── 只校验不渲染（CI 用） ────────────────────────── */
 
 /**
  * 校验一个**已有的** Wiki 页面文本（而非模板）。
  *
- * 用于检查模型直接手写、绕过模板产出的历史页面 —— 这类页面正是
- * Accio 验收表要拦的对象。这里只做能静态判断的部分（顶层字段、字段名、枚举），
- * 深层结构差异需要完整 YAML 解析，超出本模块范围。
+ * 用途有二：
+ *   1. `dsagent_wiki_write` 的入口校验 —— 工具收的是 frontmatter **文本**，
+ *      而 `<域>.md` 的字段清单是模板对象，因此必须有文本级校验兜住
+ *   2. 检查模型直接手写、绕过模板产出的历史页面
+ *
+ * ★ 覆盖范围必须与 `validateTemplate()` 对齐，否则会出现
+ *   「用模板生成 → 拦得住；直接手写 YAML → 拦不住」的绕过路径。
+ *   该缺口曾导致机密字段 `价格底线` 被写进「可对外」页面（实测发现后修复）。
  */
 export function checkPageText(text: string): ValidationIssue[] {
   const issues: ValidationIssue[] = []
@@ -451,6 +511,153 @@ export function checkPageText(text: string): ValidationIssue[] {
     const h = h1M[1].trim()
     if (t !== h) {
       issues.push({ code: 'title_h1_mismatch', message: `title「${t}」与正文 H1「${h}」不一致`, severity: 'error' })
+    }
+  }
+
+  /* ── 以下为与 validateTemplate 对齐的检查（原先缺失，导致文本路径可绕过）── */
+
+  const paths = parseFieldPaths(fm)
+  const domainName = (paths.get('所属领域') ?? '').trim()
+  const kind = (paths.get('type') ?? '').trim()
+  const disclosure = (paths.get('披露等级') ?? '').trim()
+
+  const domain = domainName ? getDomain(domainName) : null
+  if (domainName && !domain) {
+    issues.push({
+      code: 'unknown_domain',
+      message: `「所属领域」取值「${domainName}」不在八域内（${DOMAIN_NAMES.join('、')}）`,
+      severity: 'error',
+    })
+  }
+
+  if (domain) {
+    const fieldDomain = kind === '概念' ? getDomain('概念')! : domain
+    const allowed = allFieldNames(fieldDomain)
+    const isConcept = kind === '概念'
+
+    // ① Schema 外字段 —— 自创字段名会让「按字段检索」永久失效，是最高频的模型漂移
+    for (const k of paths.keys()) {
+      const leaf = k.split('/').pop()!
+      // 顶层十项与块名不由域 Schema 管，跳过
+      if (TOP_ORDER.includes(k)) continue
+      if (k === '实体识别字段' || k === '领域字段集' || k === '意图字段集') continue
+      // 分组名（两层路径的中间段）
+      const parts = k.split('/')
+      if (parts.length >= 3) {
+        const groupName = parts[parts.length - 2]
+        if (!allowed.has(groupName)) {
+          issues.push({
+            code: 'unknown_group',
+            message: `字段分组「${groupName}」不在 ${fieldDomain.name} 域 Schema 内`,
+            severity: 'error',
+          })
+        }
+      }
+      if (!allowed.has(leaf)) {
+        issues.push({
+          code: 'unknown_field',
+          message: `字段「${leaf}」不在 ${fieldDomain.name} 域 Schema 内（路径 ${k}）`,
+          severity: 'error',
+        })
+      }
+    }
+
+    // ② 实体子类型：多形态域必填且取值须在枚举内；单一形态域不得出现
+    const subtype = paths.get('实体子类型') ?? ''
+    if (!isConcept) {
+      if (isSingleFormDomain(domain.name)) {
+        if (subtype) {
+          issues.push({
+            code: 'subtype_not_allowed',
+            message: `领域「${domain.name}」为单一形态域，不得出现「实体子类型」（Accio 验收项 3）`,
+            severity: 'error',
+          })
+        }
+      } else if (!subtype) {
+        issues.push({
+          code: 'missing_subtype',
+          message: `领域「${domain.name}」必须填「实体子类型」，取值：${domain.subtypes.join('、')}`,
+          severity: 'error',
+        })
+      } else if (!domain.subtypes.includes(subtype)) {
+        issues.push({
+          code: 'invalid_subtype',
+          message: `「实体子类型」取值「${subtype}」不在枚举内（可选：${domain.subtypes.join('、')}）—— 自创取值或近义改写一律不合格`,
+          severity: 'error',
+        })
+      }
+    }
+
+    // ③ ★ 机密字段不得进入「可对外」页面
+    //    这是页面的安全护栏：字段级披露等级优先于页级，靠字段名匹配域 Schema 声明。
+    if (disclosure === '可对外') {
+      for (const [groupName, fields] of Object.entries(
+        Object.fromEntries(fieldDomain.groups.map(g => [g.name, g.fields])),
+      )) {
+        for (const f of fields) {
+          if (f.disclosure !== '机密') continue
+          // 该机密字段在本页里是否被赋了值
+          for (const [k, v] of paths) {
+            const parts = k.split('/')
+            if (parts[parts.length - 1] !== f.name) continue
+            if (!v || v === 'null') continue
+            if (parts.length >= 3 && parts[parts.length - 2] !== groupName) continue
+            issues.push({
+              code: 'classified_in_public_page',
+              message: `字段「${f.name}」是机密字段（值：${v}），不得出现在「可对外」页面`,
+              severity: 'error',
+            })
+          }
+        }
+      }
+    }
+
+    // ④ 接待域两条 L1 硬规则
+    if (fieldDomain.name === '接待') {
+      const intent = paths.get('意图字段集/接待意图') ?? valuesByLeaf(paths, '接待意图')[0] ?? ''
+      const code = paths.get('意图字段集/接待意图码') ?? valuesByLeaf(paths, '接待意图码')[0] ?? ''
+      if (!intent) {
+        issues.push({ code: 'missing_reception_intent', message: '接待域「接待意图」必填，且只能填 1 个', severity: 'error' })
+      } else {
+        const hit = RECEPTION_INTENTS.find(i => i.label === intent)
+        if (!hit) {
+          issues.push({
+            code: 'invalid_reception_intent',
+            message: `「接待意图」取值「${intent}」不在受控词表的 8 个值内（${RECEPTION_INTENTS.map(i => i.label).join('、')}）`,
+            severity: 'error',
+          })
+        } else if (code && code !== hit.code) {
+          issues.push({
+            code: 'intent_code_mismatch',
+            message: `「接待意图码」为「${code}」，与「接待意图」=「${intent}」应对应的「${hit.code}」不匹配`,
+            severity: 'error',
+          })
+        }
+      }
+      const status = valuesByLeaf(paths, '策略状态')[0] ?? ''
+      const confidence = paths.get('置信度说明') ?? ''
+      if (status === '启用' && /不足|低|待补充|未验证|推测/.test(confidence)) {
+        issues.push({
+          code: 'weak_strategy_marked_enabled',
+          message: `「置信度说明」显示证据不足（${confidence}），但「策略状态」标为「启用」—— 证据不足的策略只能停在「候选」（Accio 接待域 L1 硬规则）`,
+          severity: 'error',
+        })
+      }
+    }
+
+    // ⑤ 建页锚点：第一个识别字段为必有值（Accio：拿不到就放弃建页而非编造）
+    if (!isConcept) {
+      const anchor = fieldDomain.identity[0]
+      if (anchor) {
+        const v = paths.get(`实体识别字段/${anchor.name}`) ?? ''
+        if (!v || v === 'null') {
+          issues.push({
+            code: 'missing_anchor',
+            message: `建页锚点「${anchor.name}」为空 —— 应按 Accio 规则放弃建页，而不是编造`,
+            severity: 'error',
+          })
+        }
+      }
     }
   }
 

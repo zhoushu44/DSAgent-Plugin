@@ -540,13 +540,14 @@ npm run build        # tsc + node dev/build-client.mjs
 npm run typecheck    # tsc --noEmit
 ```
 
-技能治理与知识库的验证套件（共 211 个用例）：
+技能治理与知识库的验证套件（共 246 个用例）：
 
 ```bash
 node dev/verify-skill-governance.mjs   # 47 项：双语评分 / 解析 / triggers / 统计 / patch
 node dev/verify-patch-layer.mjs        # 25 项：patch 参与真实执行链路 / 对外 API
 node dev/verify-wiki.mjs               # 68 项：八域 Schema / 锁定模板 / 漂移拦截 / 落盘
-node dev/verify-pitfalls.mjs           # 44 项：签名折叠 / 证据阈值 / 陈旧退出 / 并发安全
+node dev/verify-wiki-textpath.mjs      # 25 项：文本路径与模板路径校验一致性（机密字段泄漏回归）
+node dev/verify-pitfalls.mjs           # 54 项：签名折叠 / 证据阈值 / 陈旧退出 / 并发安全 / 记录策略
 node dev/verify-host-integration.mjs   # 27 项：apply() 注册 34 工具 / 提示词 / 无回归
 node dev/audit-skill-quality.mjs skills # 给全体技能做质量体检（可接 CI）
 node dev/verify-real-triggers.mjs      # 用真实技能文件验证 triggers 匹配
