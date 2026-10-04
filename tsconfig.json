@@ -1,4 +1,15 @@
 {
+  // ★ 本配置负责编译 **host 半区**（lib/index.js、lib/gateway-proxy.js 等，即 package.json 的 main）。
+  //
+  // ⚠️ 为什么把 src/client.ts 排除在 emit 之外：
+  //   lib/client.js 是 **browser 半区**的产物，由 esbuild 打包成 DSH ModuleLoader 工厂格式
+  //   （见 dev/build-client.mjs）。而 tsc 的规则是"src/**.ts → lib/**.js"，因此它同样会输出
+  //   lib/client.js —— 但那是一份**裸 ESM 源码**（未打包、无 ModuleLoader 外壳），会直接
+  //   覆盖 esbuild 的产物。dsh-client-hmr 每 500ms 轮询该文件，一旦被覆盖就立刻把坏 bundle
+  //   推给页面，表现为"插件 UI 静默消失"（2026-10-04 已实际发生过一次）。
+  //
+  //   两个工具写同一个路径 = 必然互踩。这里明确"lib/client.js 归 esbuild 所有"，tsc 不再输出它。
+  //   client.ts 的类型检查改由 tsconfig.typecheck.json（noEmit）覆盖，不会漏检。
   "compilerOptions": {
     "target": "ES2022",
     "module": "ESNext",
@@ -15,5 +26,6 @@
     "allowImportingTsExtensions": false,
     "types": ["node"]
   },
-  "include": ["src/**/*.ts"]
+  "include": ["src/**/*.ts"],
+  "exclude": ["src/client.ts"]
 }

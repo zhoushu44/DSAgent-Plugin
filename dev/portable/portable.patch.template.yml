@@ -1,0 +1,26 @@
+# ============================================================================
+# DSAgent 绿色版 —— 插件挂载补丁（模板）
+#
+# 启动器 launch.ps1 每次启动时会：
+#   1. 把本文件里的 __PKG__ 替换为「绿色包根目录」的真实绝对路径
+#   2. 输出到 data/portable.patch.yml
+#   3. 用 dsh web --patch 指向它
+#
+# 因此换盘符、换目录、拷到别的电脑都能直接跑，无需手工改路径。
+#
+# 说明：这里用 insert 而非 id-覆盖，因为全新的 DSH_HOME 下 profile 只加载
+#       dsh-base + dsh-web-app 两个 bundle，DSAgent 插件的自带 patch 不会生效，
+#       所以由本层负责把插件挂上（不存在重复 id 冲突）。
+# ============================================================================
+- insert:
+    - id: dsagent-plugin
+      # 指向包内插件入口（package.json 的 main = lib/index.js）
+      name: '__PKG__/plugin/lib/index.js'
+      disabled: false
+      config:
+        # 技能根目录：包内 skills/（66 个技能）
+        skillRoot: '__PKG__/plugin/skills'
+        # 账号凭证：存在包内 data/ 下，跟着绿色包走，不写对方用户目录
+        storePath: '__PKG__/data/dsagent-accounts.json'
+        # 未绑定账号时返回引导文案而不是硬报错
+        guideOnUnbound: true

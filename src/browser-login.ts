@@ -4,7 +4,8 @@
  * 动态导入 puppeteer-core，连接本机 Chrome，导航到登录页，轮询关键 Cookie。
  */
 import { CredentialStore, keyCookies, credentialPlatform, isRiskPassCookie } from './services/credential-store.js'
-import { clearRiskCooldown, probePlatformPermission } from './gateway-proxy.js'
+import { clearRiskCooldown, probePlatformPermission, invalidateGatewayCache } from './gateway-proxy.js'
+import * as authOp from './services/auth-operation.js'
 import { existsSync, mkdirSync, readdirSync, renameSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
@@ -57,23 +58,127 @@ async function closeActiveBrowser(): Promise<void> {
  * 用法：tryAcquireProfile(dir, 占用者描述) 成功后，必须在 finally 中 releaseProfile(dir)。
  * releaseProfile 幂等，可安全重复调用。
  */
-const busyProfiles = new Map<string, string>()
+/**
+ * Profile 占用表：**引用计数**（吸收 Accio 的 borrower Map 语义）。
+ *
+ * 改造前是一个 `Map<dir, owner>` 的布尔锁：同一目录被重复占用时第二次直接失败，
+ * 而重复释放会把锁**提前**解开 —— 若同一逻辑操作（如登录成功后收编目录：
+ * 先 release 旧目录、再 acquire 新目录）中途被中断，锁状态就可能与实际不符。
+ *
+ * 改为引用计数后：
+ *   - 相同 owner 重复 acquire → 计数 +1（幂等，不误报「被占用」）
+ *   - 不同 owner acquire     → 仍然失败（Chrome 的 userDataDir 是独占锁，这个不可放宽）
+ *   - release               → 计数 -1，**归零才真正释放**
+ *
+ * Accio 的 borrower 机制允许多个消费者共享同一个浏览器实例；本插件因 Chrome
+ * 独占锁的限制无法共享**进程**，但「多消费者计数、最后一个才释放」这个语义是
+ * 完全适用的，且能避免重复 release 提前解锁导致的串号风险。
+ */
+interface ProfileHold {
+  /** 占用者描述（最近一次 acquire 的名字，用于提示文案） */
+  owner: string
+  /** 引用计数：归零才真正释放 */
+  count: number
+  /** 所有占用者（Accio 的 borrowers Map 对应物），便于排障 */
+  borrowers: Set<string>
+}
 
-/** 尝试占用 Profile 目录；已被占用时返回 false（调用方应给出可读提示） */
+const busyProfiles = new Map<string, ProfileHold>()
+
+/**
+ * 尝试占用 Profile 目录。
+ *
+ * @returns true = 占用成功（含同 owner 重复占用的幂等情形）；
+ *          false = 已被**其他**占用者持有，调用方应给出可读提示
+ */
 export function tryAcquireProfile(dir: string, owner: string): boolean {
-  if (busyProfiles.has(dir)) return false
-  busyProfiles.set(dir, owner)
+  const held = busyProfiles.get(dir)
+  if (held) {
+    // 同一占用者重复 acquire：计数 +1，视为成功（避免自我阻塞）
+    if (held.owner === owner) {
+      held.count += 1
+      held.borrowers.add(owner)
+      return true
+    }
+    // 不同占用者：Chrome 的 userDataDir 独占，必须拒绝
+    return false
+  }
+  busyProfiles.set(dir, { owner, count: 1, borrowers: new Set([owner]) })
   return true
 }
 
-/** 释放 Profile 目录占用（幂等） */
+/** 释放 Profile 目录占用（**引用计数归零才真正释放**；幂等，可安全重复调用） */
 export function releaseProfile(dir: string): void {
-  busyProfiles.delete(dir)
+  const held = busyProfiles.get(dir)
+  if (!held) return
+  held.count -= 1
+  if (held.count <= 0) busyProfiles.delete(dir)
 }
 
 /** 查询 Profile 目录当前的占用者描述（用于提示文案） */
 export function profileOwner(dir: string): string | undefined {
-  return busyProfiles.get(dir)
+  return busyProfiles.get(dir)?.owner
+}
+
+/** 查询某目录的全部占用者（Accio borrower Map 的对应物，用于排障与清理决策） */
+export function profileBorrowers(dir: string): string[] {
+  const held = busyProfiles.get(dir)
+  return held ? [...held.borrowers] : []
+}
+
+/** 该目录是否正被占用（任意引用计数 > 0） */
+export function isProfileBusy(dir: string): boolean {
+  return busyProfiles.has(dir)
+}
+
+/**
+ * 记录「本 Profile 目录当前对应的 CDP 调试端口」，用于端口归属校验。
+ *
+ * 背景（吸收 Accio 的 `ChromePortOwnershipError`）：
+ * `taobao-publish` 会读 `userDataDir/DevToolsActivePort` 拿到端口后直接
+ * `puppeteer.connect({ browserURL: 'http://127.0.0.1:<port>' })` 以复用已开窗口。
+ * 但那个文件**可能是陈旧的**（上次崩溃残留、目录被复制过），
+ * 于是端口可能属于**另一个 Profile 的浏览器** —— 连上去会在错误的浏览器里操作，
+ * 后果是「在别的账号的窗口里点了发布」，属于最危险的一类串号事故。
+ *
+ * 这里记录“目录 → 端口”的归属，配合 `verifyPortOwnership()` 在 connect 前校验。
+ */
+const profilePorts = new Map<string, number>()
+
+/** 登记某 Profile 的 CDP 端口（启动浏览器后调用） */
+export function registerProfilePort(dir: string, port: number): void {
+  if (!dir || !Number.isInteger(port) || port <= 0) return
+  profilePorts.set(dir, port)
+}
+
+/** 查询某目录登记的端口（无记录返回 undefined） */
+export function registeredPortFor(dir: string): number | undefined {
+  return profilePorts.get(dir)
+}
+
+/**
+ * 校验「这个端口是否确实属于这个 Profile 目录」。
+ *
+ * 规则（从严，避免串号）：
+ *   1. 该目录**没有**登记过端口 —— 可能是上次运行留下的进程（重启后内存表为空），
+ *      此时无法证明归属。返回 `'unknown'`，由调用方决定是否仍要复用
+ *      （当前策略：允许复用，因为「用户要求不要反复开关浏览器」是明确诉求，
+ *        且 connect 前还会走 Profile 文件锁；但把结果记进日志便于排查串号）。
+ *   2. 该目录登记过端口，且与待连端口**一致** —— `'match'`，可安全复用。
+ *   3. 该目录登记过端口，但**不一致** —— `'mismatch'`，说明端口来自别的 Profile，
+ *      **必须拒绝复用**，否则会在别的账号窗口里操作。
+ */
+export type PortOwnership = 'match' | 'unknown' | 'mismatch'
+
+export function verifyPortOwnership(dir: string, port: number): PortOwnership {
+  const registered = profilePorts.get(dir)
+  if (registered === undefined) return 'unknown'
+  return registered === port ? 'match' : 'mismatch'
+}
+
+/** 释放某目录的端口登记（关闭浏览器后调用） */
+export function unregisterProfilePort(dir: string): void {
+  profilePorts.delete(dir)
 }
 
 /**
@@ -323,9 +428,27 @@ export async function doBrowserLogin(
   platform: string,
   loginUrl: string,
   store: CredentialStore,
-  opts?: { freshLogin?: boolean; replaceShopKey?: string },
+  opts?: {
+    freshLogin?: boolean
+    replaceShopKey?: string
+    /**
+     * 可选的 operation ID（见 services/auth-operation.ts）。
+     *
+     * 传了就把本次登录的各阶段上报给该 operation，模型可 poll 看进度。
+     * **不传则行为与改造前完全一致** —— 这条兼容性是刻意的：登录内核是
+     * 经过大量实测调优的路径，新增能力必须是「旁挂」而非「替换」。
+     */
+    operationId?: string
+  },
 ): Promise<{ ok: boolean; error?: string; text?: string; shopKey?: string; accountId?: string }> {
-  if (!platform || !loginUrl) return { ok: false, error: '缺少 platform 或 loginUrl' }
+  const opId = opts?.operationId
+  const rep = (phase: authOp.AuthPhase, msg: string, extra?: Parameters<typeof authOp.report>[3]) =>
+    authOp.report(opId, phase, msg, extra)
+
+  if (!platform || !loginUrl) {
+    rep('failed', '缺少 platform 或 loginUrl', { error: '缺少 platform 或 loginUrl' })
+    return { ok: false, error: '缺少 platform 或 loginUrl' }
+  }
   const freshLogin = opts?.freshLogin === true
   const replaceShopKey = opts?.replaceShopKey || undefined
 
@@ -481,7 +604,18 @@ export async function doBrowserLogin(
     let sawSlider = false
     let lastUrl = ''
 
+    // 进入等待用户阶段（上报给 operation，模型据此把控制权交还用户）
+    rep('waiting_user', '已打开登录页，等待用户完成扫码 / 滑块验证')
+    /** 滑块上报只做一次，避免每 2s 刷一条相同的阶段消息 */
+    let sliderReported = false
+
     while (Date.now() < deadline) {
+      // ★ 取消感知：模型/用户 cancel 后尽快退出循环，不要空等到超时。
+      //   退出前不关窗（与超时一致），让 cancelOperation 的 onCancel 决定怎么处理窗口。
+      if (authOp.isCancelled(opId)) {
+        rep('cancelled', '已取消登录等待')
+        return { ok: false, error: '登录已被取消' }
+      }
       await new Promise(r => setTimeout(r, pollIntervalMs))
       try {
         // 阿里系 SSO 关键修复：page.cookies() 必须指定域名，否则拿不到跨域 Cookie
@@ -510,6 +644,13 @@ export async function doBrowserLogin(
             if (/nc_1_n1z|nc_iconfont|nc-container|nocaptcha|请按住滑块|拖动滑块|slide-to-unlock/i.test(probe)) {
               sawSlider = true
               console.log(`[dsagent-login] 检测到滑块验证元素，判定为「等待人工验证」`)
+              // 把「卡在验证」这件事显式上报，模型才能给出「请拖动滑块」而不是「请扫码」
+              if (!sliderReported) {
+                sliderReported = true
+                rep('waiting_user', '检测到平台安全验证（滑块），请在浏览器窗口中手动拖动滑块完成验证', {
+                  detail: { sawSlider: true },
+                })
+              }
             }
           } catch { /* 忽略 */ }
         }
@@ -591,6 +732,12 @@ export async function doBrowserLogin(
       const waitedSec = Math.round((Date.now() - startTime) / 1000)
       const suffix = '浏览器窗口**保持打开**，你可以继续在窗口内完成扫码/验证，'
         + '完成后再点一次「重新登录」即可（无需重新扫码，登录态已写入该浏览器环境）。'
+      // ★ 上报 timed_out 而非 failed：这个阶段**可续推**（窗口还开着、进度没丢），
+      //   对应 Accio 的「可 advance 继续」语义。用 failed 会让模型以为必须从头再来。
+      rep('timed_out', `等待 ${waitedSec}s 未检测到登录凭证，浏览器窗口保持打开，可继续完成或续推`, {
+        detail: { waitedSec, sawSlider, lastUrl },
+        error: sawSlider ? '等待超时：疑似卡在滑块验证' : '等待超时：未检测到登录凭证',
+      })
       if (sawSlider) {
         return {
           ok: false,
@@ -604,6 +751,9 @@ export async function doBrowserLogin(
       }
     }
 
+    // 已抓到凭证，进入校验与落库（用户视角：已经扫完码了）
+    rep('capturing', '已获取登录凭证，正在校验并保存')
+
     // 登录成功：清理未完成会话标记（窗口即将关闭，无需保留续登上下文）
     activeLogin = null
 
@@ -614,6 +764,13 @@ export async function doBrowserLogin(
       console.log(`[dsagent-login] 登录成功，准备保存凭证...${replaceShopKey ? `（替换旧账号 ${replaceShopKey}，绑定关系继承）` : ''}`)
       const saved = await store.save(platform, jar, { replaceShopKey })
       console.log(`[dsagent-login] 凭证已保存: shopKey=${saved.shop_key}, accountId=${saved.account_id}`)
+      // ★ 重新登录后凭证已变 → 立即失效该账号的网关缓存。
+      //   凭证指纹虽已参与缓存键（键会自然改变），但显式清理能同时回收
+      //   「同一账号在旧身份下留下的条目」占用的内存，避免长期运行堆积。
+      const clearedForAccount = invalidateGatewayCache({ shopKey: saved.shop_key })
+      if (clearedForAccount > 0) {
+        console.log(`[dsagent-login] 已失效该账号的 ${clearedForAccount} 条网关缓存`)
+      }
       if (activeBrowser) {
         console.log(`[dsagent-login] 正在关闭浏览器...`)
         await closeActiveBrowser()
@@ -635,6 +792,10 @@ export async function doBrowserLogin(
       //   闲鱼复用淘宝 SSO，账号页已无闲鱼入口，这条自动同步是闲鱼唯一的可用通路。
       //   代价是登录流程多等约 10~20s（拉起一次 headless 浏览器取 goofish 域 Cookie）。
       const xianyuNote = platform === 'taobao' ? await syncXianyuAfterTaobaoLogin(store) : ''
+      rep('succeeded', `登录成功，账号 ${saved.display_label} 已保存`, {
+        result: { shopKey: saved.shop_key, accountId: saved.account_id },
+        detail: { permissionNote, xianyuNote },
+      })
       return {
         ok: true,
         text: `登录成功！账号 ${saved.display_label}（${saved.shop_key}）已保存到本地凭证库。${permissionNote}${xianyuNote}`,
@@ -644,13 +805,17 @@ export async function doBrowserLogin(
     } catch (err) {
       console.log(`[dsagent-login] 保存失败: ${err instanceof Error ? err.message : String(err)}`)
       if (activeBrowser) await closeActiveBrowser()
-      return { ok: false, error: `Cookie 提取成功但存储失败：${err instanceof Error ? err.message : String(err)}` }
+      const msg = `Cookie 提取成功但存储失败：${err instanceof Error ? err.message : String(err)}`
+      rep('failed', msg, { error: msg })
+      return { ok: false, error: msg }
     }
   } catch (err) {
     if (activeBrowser) {
       try { await closeActiveBrowser() } catch {}
     }
-    return { ok: false, error: `浏览器启动失败：${err instanceof Error ? err.message : String(err)}` }
+    const msg = `浏览器启动失败：${err instanceof Error ? err.message : String(err)}`
+    rep('failed', msg, { error: msg })
+    return { ok: false, error: msg }
   } finally {
     // 登录窗口在成功 / 超时 / 保存失败 / 启动异常各路径都会关闭浏览器，故统一在此释放锁。
     if (lockedDir) releaseProfile(lockedDir)
@@ -978,25 +1143,33 @@ export async function riskVerify(
   platform: string,
   verifyUrl: string,
   timeoutMs: number = RISK_VERIFY_TIMEOUT_MS,
+  operationId?: string,
 ): Promise<RiskVerifyResult> {
+  const rep = (phase: authOp.AuthPhase, msg: string, extra?: Parameters<typeof authOp.report>[3]) =>
+    authOp.report(operationId, phase, msg, extra)
+
   const account = store.listAccounts()
     .filter(a => a.platform === platform && a.status !== 'invalid')
     .sort((a, b) => Object.keys(b.cookies || {}).length - Object.keys(a.cookies || {}).length)[0]
 
   if (!account) {
+    const msg = `未找到平台 ${platform} 的可用账号，请先在「账号连接」页面完成登录。`
+    rep('failed', msg, { error: msg })
     return {
       ok: false,
       passed: false,
-      error: `未找到平台 ${platform} 的可用账号，请先在「账号连接」页面完成登录。`,
+      error: msg,
     }
   }
 
   const target = (verifyUrl || '').trim()
   if (!target) {
+    const msg = '缺少风控验证地址。请先执行一次原技能触发风控，插件会自动记录验证入口后再调用本工具。'
+    rep('failed', msg, { error: msg })
     return {
       ok: false,
       passed: false,
-      error: '缺少风控验证地址。请先执行一次原技能触发风控，插件会自动记录验证入口后再调用本工具。',
+      error: msg,
     }
   }
 
@@ -1139,7 +1312,15 @@ export async function riskVerify(
       let passedJar: Record<string, string> = {}
       let pageClosed = false
       let tick = 0
+      rep('waiting_user', denyPage
+        ? '验证入口是「访问被拒绝」页（无滑块），已改为在窗口内打开首页，等待平台顺势下发凭证'
+        : '验证页已打开，请在浏览器窗口中拖动滑块完成验证', { detail: { denyPage } })
       while (Date.now() < deadline) {
+        // ★ 取消感知：与登录一致，cancel 后尽快退出，不空等到超时
+        if (authOp.isCancelled(operationId)) {
+          rep('cancelled', '已取消风控验证等待')
+          return { ok: false, passed: false, error: '风控验证已被取消' }
+        }
         await new Promise(r => setTimeout(r, 2000))
         tick++
 
@@ -1175,26 +1356,35 @@ export async function riskVerify(
       }
 
       if (pageClosed) {
+        const msg = '验证浏览器已被关闭，未检测到验证通过凭证。可重新调用本工具再试一次。'
+        rep('failed', msg, { error: msg })
         return {
           ok: false,
           passed: false,
-          error: '验证浏览器已被关闭，未检测到验证通过凭证。可重新调用本工具再试一次。',
+          error: msg,
         }
       }
 
       const passedNames = Object.keys(passedJar).filter(n => isRiskPassCookie(n))
       if (passedNames.length === 0) {
+        const msg = denyPage
+          ? `平台返回的验证入口是「访问被拒绝」页（action=denycdc_forbidden），该页不提供滑块，`
+            + `无法通过本工具完成验证 —— 说明账号已被平台判定为高风险。`
+            + `建议：① 在弹出的浏览器窗口内手动登录淘宝并正常浏览几分钟；`
+            + `② 等待一段时间（风控分随时间衰减）后重试技能；`
+            + `③ 更换网络出口（切换 WiFi / 热点）后重试。`
+          : `等待 ${Math.round(effectiveTimeout / 1000)}s 仍未检测到验证通过凭证（x5sec）。`
+            + `请确认已在弹出的浏览器窗口内完成滑块验证，然后重试。`
+        // ★ 这类等待超时同样可续推（窗口开着、用户随时可能拖完滑块），
+        //   故上报 timed_out 而非 failed，与登录流程的语义保持一致。
+        rep('timed_out', msg, {
+          error: msg,
+          detail: { denyPage, effectiveTimeoutSec: Math.round(effectiveTimeout / 1000) },
+        })
         return {
           ok: false,
           passed: false,
-          error: denyPage
-            ? `平台返回的验证入口是「访问被拒绝」页（action=denycdc_forbidden），该页不提供滑块，`
-              + `无法通过本工具完成验证 —— 说明账号已被平台判定为高风险。`
-              + `建议：① 在弹出的浏览器窗口内手动登录淘宝并正常浏览几分钟；`
-              + `② 等待一段时间（风控分随时间衰减）后重试技能；`
-              + `③ 更换网络出口（切换 WiFi / 热点）后重试。`
-            : `等待 ${Math.round(effectiveTimeout / 1000)}s 仍未检测到验证通过凭证（x5sec）。`
-              + `请确认已在弹出的浏览器窗口内完成滑块验证，然后重试。`,
+          error: msg,
         }
       }
 
@@ -1203,6 +1393,9 @@ export async function riskVerify(
       // 验证已通过 → 立即解除 60s 风控冷却，下次请求就能带上 x5sec
       clearRiskCooldown(shopKey)
 
+      rep('succeeded', `风控验证已通过，凭证 ${passedNames.join('、')} 已写回账号`, {
+        result: { shopKey, cookieNames: passedNames },
+      })
       return {
         ok: true,
         passed: true,
@@ -1216,6 +1409,8 @@ export async function riskVerify(
     }
   } catch (err) {
     releaseProfile(dir)
-    return { ok: false, passed: false, error: `风控验证失败：${err instanceof Error ? err.message : String(err)}` }
+    const msg = `风控验证失败：${err instanceof Error ? err.message : String(err)}`
+    authOp.report(operationId, 'failed', msg, { error: msg })
+    return { ok: false, passed: false, error: msg }
   }
 }

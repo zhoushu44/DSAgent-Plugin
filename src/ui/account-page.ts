@@ -30,7 +30,10 @@ const PLATFORM_META: Record<string, { label: string; color: string; glyph: strin
 
 const STATUS_META: Record<AccountStatus, { label: string; cls: string }> = {
   valid: { label: '有效', cls: 'ok' },
-  expired: { label: '已失效', cls: 'warn' },
+  // expired（疑似过期，可先重试）与 reauth_required（必须重登）用**不同**标签与配色：
+  // 前者提示「可能只是抖动」，后者是确定结论，用户看到就知道该去重登而不是反复重试。
+  expired: { label: '疑似过期', cls: 'warn' },
+  reauth_required: { label: '需重新登录', cls: 'bad' },
   invalid: { label: '登录失效', cls: 'bad' },
   pending: { label: '待验证', cls: 'idle' },
 }

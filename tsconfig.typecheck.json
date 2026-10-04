@@ -1,0 +1,16 @@
+{
+  // ★ 仅做类型检查、绝不产出文件（noEmit）。
+  //
+  // 为什么需要这个文件：tsconfig.json 为了让 esbuild 独占 lib/client.js，
+  // 把 src/client.ts 排除在 emit 之外——那会让 client.ts 逃过类型检查。
+  // 本配置把 src/client.ts 重新纳入检查范围，同时用 noEmit 保证不写任何产物，
+  // 因此不会与 esbuild 争抢 lib/client.js。
+  //
+  // 用法：npm run typecheck   （等价于 tsc -p tsconfig.typecheck.json）
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": []
+}

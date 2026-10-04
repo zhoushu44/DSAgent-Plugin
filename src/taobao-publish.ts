@@ -27,7 +27,7 @@
  *             窗口内补全，若提交被校验拦住，工具会继续等待并识别用户手动提交的结果。
  */
 import { CredentialStore, resolveAccountForRequest, type StoredAccount } from './services/credential-store.js'
-import { clearProfileLocks, findChromePath, profileDir, profileOwner, releaseProfile, tryAcquireProfile } from './browser-login.js'
+import { clearProfileLocks, findChromePath, profileDir, profileOwner, releaseProfile, tryAcquireProfile, registerProfilePort, registeredPortFor, verifyPortOwnership } from './browser-login.js'
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 
@@ -1527,7 +1527,19 @@ export async function taobaoPublish(
     //   Chrome 带 --remote-debugging-port 启动时会把端口写进 userDataDir/DevToolsActivePort。
     let page: any = null
     const debugPort = readDevToolsPort(dir)
-    if (debugPort) {
+    // ★ 端口归属校验（吸收 Accio 的 ChromePortOwnershipError）：
+    //   DevToolsActivePort 可能是**陈旧残留**（上次崩溃没清、目录被复制），
+    //   于是端口实际属于**另一个 Profile 的浏览器**。直接 connect 会连到别人的窗口，
+    //   后果是「在别家账号的浏览器里点了发布」—— 最危险的一类串号事故。
+    //   mismatch 时**拒绝复用**，改为新开窗口（宁可多开一个，也不能串号）。
+    const ownership = debugPort ? verifyPortOwnership(dir, debugPort) : 'unknown'
+    if (debugPort && ownership === 'mismatch') {
+      console.warn(
+        `[dsagent-taobao-publish] 端口 ${debugPort} 不属于当前 Profile ${dir}`
+        + `（登记端口=${registeredPortFor(dir)}），拒绝复用以免操作到其他账号的窗口；改为新开窗口`,
+      )
+    }
+    if (debugPort && ownership !== 'mismatch') {
       try {
         browser = await puppeteer.connect({
           browserURL: `http://127.0.0.1:${debugPort}`,
@@ -1540,7 +1552,9 @@ export async function taobaoPublish(
         page = usable.find((p: any) => /taobao\.com|tmall\.com/.test(p.url()))
           || usable[0]
           || await browser.newPage()
-        console.log(`[dsagent-taobao-publish] 已复用现有浏览器窗口（调试端口 ${debugPort}）`)
+        // 复用成功 → 登记归属，供后续调用校验
+        registerProfilePort(dir, debugPort)
+        console.log(`[dsagent-taobao-publish] 已复用现有浏览器窗口（调试端口 ${debugPort}，归属=${ownership}）`)
       } catch (e) {
         console.warn('[dsagent-taobao-publish] 复用现有窗口失败，改为新开窗口:', e instanceof Error ? e.message : String(e))
         browser = null
@@ -1566,6 +1580,11 @@ export async function taobaoPublish(
         clearProfileLocks(dir)
         browser = await puppeteer.launch(launchOpts)
       }
+      // 新启动的窗口：把本次实际端口登记到该目录，供下次调用校验归属
+      try {
+        const newPort = readDevToolsPort(dir)
+        if (newPort) registerProfilePort(dir, newPort)
+      } catch { /* 端口未就绪不影响发布 */ }
     }
 
     if (!page) page = await browser.newPage()

@@ -19,6 +19,20 @@ import { readdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { findChromePath } from './browser-login.js'
 import { CredentialStore, credentialPlatform, isRiskPassCookie, normalizePlatform, resolveAccountForRequest, accountsForPlatform } from './services/credential-store.js'
+import {
+  cacheEnabled,
+  cacheStats,
+  clearCache,
+  invalidateCache,
+  buildCacheKey,
+  credentialFingerprint,
+  getCached,
+  setCached,
+  isCacheableRequest,
+  isCacheableResponse,
+  attachCacheMeta,
+} from './services/gateway-cache.js'
+import { smartTruncateJsonAware } from './services/smart-truncate.js'
 import type { AccountChoice } from './services/types.js'
 
 export type { AccountChoice }
@@ -120,6 +134,32 @@ export function getLastVerifyUrl(shopKey: string): string {
 /** 清除风控冷却（验证通过后立即放行，不必再等满 60s） */
 export function clearRiskCooldown(shopKey: string): void {
   riskCooldownUntil.delete(shopKey)
+  // ★ 风控验证通过 → 凭证（x5sec 等）已变化，此前缓存的响应可能是在
+  //   「未通过验证」的上下文里拿到的，应一并失效，避免读到陈旧数据。
+  //   同时这也让「验证后重试」一定打到平台而非命中旧缓存。
+  invalidateCache({ shopKey })
+}
+
+/* ─────────────── 网关响应缓存（对外接口）─────────────── */
+
+/** 缓存运行状态（供排障工具展示命中率等） */
+export function gatewayCacheStats() {
+  return cacheStats()
+}
+
+/**
+ * 失效缓存。
+ *
+ * 主要调用时机：账号重新登录后（凭证已变，旧数据不该再被读到）。
+ * 不传参数则清空全部。
+ */
+export function invalidateGatewayCache(filter?: { shopKey?: string; platform?: string }): number {
+  return invalidateCache(filter)
+}
+
+/** 清空全部网关缓存 */
+export function clearGatewayCache(): number {
+  return clearCache()
 }
 
 /**
@@ -289,7 +329,12 @@ export function startGatewayProxy(store: CredentialStore): Promise<GatewayProxy>
         res.end(JSON.stringify({
           shop_key: a.shop_key,
           platform: a.platform,
-          session_hint: a.status === 'valid' ? 'ok' : a.status === 'pending' ? 'none' : 'expired',
+          // sessionHint 必须与 account-service.ts 的映射保持**逐字一致**，
+          // 否则 host 预检与网关会对同一账号给出不同的失败类型（引导文案随之错位）。
+          session_hint: a.status === 'valid' ? 'ok'
+            : a.status === 'pending' ? 'none'
+            : a.status === 'reauth_required' ? 'reauth_required'
+            : 'expired',
           display_label: a.display_label,
           tb_token: a.tb_token || null,
           alimama_csrf_id: a.csrf_id || null,
@@ -502,6 +547,34 @@ export async function handleProxy(body: any, store: CredentialStore): Promise<an
   }
 
   // 账号级节流：同一账号两次请求间隔 ≥ 4~6s（并发技能共享同一账号配额）
+  //
+  // ★ 缓存查找刻意放在节流**之前**：命中缓存就不必等节流、也不必发请求 ——
+  //   这正是缓存的主要收益（省掉 4~6s 等待 + 一次平台请求的风控风险）。
+  const cacheLookup = (() => {
+    if (!cacheEnabled()) return { key: '', hit: false as const }
+    const reqOk = isCacheableRequest(kind, targetUrl)
+    if (!reqOk.ok) {
+      return { key: '', hit: false as const, skip: reqOk.reason }
+    }
+    const key = buildCacheKey({
+      kind,
+      platform,
+      shopKey: account.shop_key,
+      url: targetUrl,
+      params,
+      postBody,
+      credentialFingerprint: credentialFingerprint(cookieStr, account.tb_token),
+    })
+    const cached = getCached(key)
+    if (cached) return { key, hit: true as const, cached }
+    return { key, hit: false as const }
+  })()
+
+  if (cacheLookup.hit && cacheLookup.cached) {
+    console.log(`[dsagent-gateway] 缓存命中（跳过节流与请求）: ${kind} ${targetUrl.substring(0, 120)} shopKey=${account.shop_key}`)
+    return cacheLookup.cached
+  }
+
   const waitedMs = await throttleAccount(account.shop_key)
   if (waitedMs > 0) {
     console.log(`[dsagent-gateway] 账号节流等待 ${waitedMs}ms: ${account.shop_key}`)
@@ -525,10 +598,11 @@ export async function handleProxy(body: any, store: CredentialStore): Promise<an
       payload = JSON.parse(bodyToParse)
     } catch { /* 非 JSON，原样返回字符串 */ }
 
-    // 对非 JSON 的字符串 payload 做清洗（移除控制字符 + 截断）
+    // 对非 JSON 的字符串 payload 做清洗（移除控制字符 + 智能截断）
     if (typeof payload === 'string') {
       payload = payload.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '')
-      if (payload.length > 5000) payload = payload.slice(0, 5000) + '...(截断)'
+      // 智能头尾保留：日志/HTML 类响应的尾部常有错误信息或结论
+      if (payload.length > 5000) payload = smartTruncateJsonAware(payload, 5000)
     }
 
     // 提取 Set-Cookie 头（用于闲鱼 _m_h5_tk 等 token 获取）
@@ -762,7 +836,7 @@ export async function handleProxy(body: any, store: CredentialStore): Promise<an
           const retryHasRisk = retryScan.includes('rgv587_error') || retryScan.includes('fail_sys_user_validate')
           if (!retryHasRisk && retryResult.status < 400) {
             console.log(`[dsagent-gateway] 自动重试成功: ${account.shop_key}`)
-            return {
+            const retryOk = {
               status: 'success',
               status_code: retryResult.status,
               payload: retryPayload,
@@ -772,6 +846,19 @@ export async function handleProxy(body: any, store: CredentialStore): Promise<an
               error_message: '',
               auto_retried: true,
             }
+            // 重试成功的结果同样入缓存：这是「用户过完验证后的正常数据」，
+            // 缓存它可让随后几分钟的重复请求免于再次触发风控。
+            if (cacheEnabled() && cacheLookup.key) {
+              const respOk = isCacheableResponse(retryOk)
+              if (respOk.ok) {
+                setCached(
+                  cacheLookup.key,
+                  attachCacheMeta(retryOk as unknown as Record<string, unknown>, account.shop_key, account.platform),
+                  retryPayload,
+                )
+              }
+            }
+            return retryOk
           }
           // 重试仍失败 → 返回重试结果
           return {
@@ -790,7 +877,7 @@ export async function handleProxy(body: any, store: CredentialStore): Promise<an
       console.log(`[dsagent-gateway] 自动重试等待超时，返回风控错误: ${account.shop_key}`)
     }
 
-    return {
+    const finalResponse = {
       status: failureKind ? 'error' : 'success',
       status_code: result.status,
       payload,
@@ -805,6 +892,23 @@ export async function handleProxy(body: any, store: CredentialStore): Promise<an
             : `平台返回 HTTP ${result.status}${bodySnippet}`)
         : '',
     }
+
+    // ★ 写入缓存（仅当请求可缓存 + 响应可缓存）。
+    //   两道闸门缺一不可：
+    //     · isCacheableRequest  —— 排除写操作（http_post / 写语义 URL）
+    //     · isCacheableResponse —— 排除失败响应（尤其风控/登录失效，缓存住会让故障持续整个 TTL）
+    if (cacheEnabled() && cacheLookup.key && !cacheLookup.hit) {
+      const respOk = isCacheableResponse(finalResponse)
+      if (respOk.ok) {
+        setCached(
+          cacheLookup.key,
+          attachCacheMeta(finalResponse as unknown as Record<string, unknown>, account.shop_key, account.platform),
+          payload,
+        )
+      }
+    }
+
+    return finalResponse
   } catch (err: any) {
     return {
       status: 'error',

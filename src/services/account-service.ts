@@ -10,7 +10,7 @@
  * 安全：Cookie 只存在 CredentialStore 中，不出插件。
  */
 
-import { CredentialStore, type StoredAccount, keyCookies, credentialPlatform, isPseudoNick, PLATFORM_PREFIX, resolveAccountForRequest, normalizePlatform, accountsForPlatform } from './credential-store.js'
+import { CredentialStore, type StoredAccount, keyCookies, credentialPlatform, isPseudoNick, PLATFORM_PREFIX, resolveAccountForRequest, normalizePlatform, accountsForPlatform, planCascadeDisconnect } from './credential-store.js'
 import type { AccountRow, AccountStatus, HealthRow, BindingContext } from './types.js'
 
 /** 掩码 AppSecret：前 4 位明文 + •••• */
@@ -89,7 +89,17 @@ function toRow(a: StoredAccount): AccountRow {
     syncServices: [],
     boundAgentName: a.bound_agent_ids?.join(', ') || '—',
     boundAgentIds: [...(a.bound_agent_ids || [])],
-    expireReason: a.status === 'expired' ? '登录态已过期，需重新登录' : a.status === 'invalid' ? 'Cookie 已失效，请重新登录' : null,
+    // 三种异常态各给**不同**的 reason（用户据此知道该做什么）：
+    //   reauth_required —— 确定要重登，重试无用
+    //   expired         —— 疑似失效，可先重试
+    //   invalid         —— Cookie 结构坏了，需删除重加
+    expireReason: a.status === 'reauth_required'
+      ? '登录态已失效，必须重新登录'
+      : a.status === 'expired'
+        ? '登录态疑似过期，可先重试；仍失败请重新登录'
+        : a.status === 'invalid'
+          ? 'Cookie 已失效，请重新登录'
+          : null,
     authType: a.auth_type || 'cookie',
     appId: isApiKey ? (a.app_id || '') : undefined,
     secretHint: isApiKey ? maskSecret(a.app_secret || '') : undefined,
@@ -139,8 +149,9 @@ export function createAccountService(storePath: string) {
             appId: r.appId || undefined,
             secretHint: r.secretHint || undefined,
             // 与本地 toRow 保持一致的失效原因推导，供 UI 悬停提示
-            expireReason: r.status === 'expired' ? (r.expireReason || '登录态已过期，需重新登录')
-              : r.status === 'invalid' ? 'Cookie 已失效，请重新登录' : null,
+            expireReason: r.status === 'reauth_required' ? (r.expireReason || '登录态已失效，必须重新登录')
+              : r.status === 'expired' ? (r.expireReason || '登录态疑似过期，可先重试；仍失败请重新登录')
+                : r.status === 'invalid' ? 'Cookie 已失效，请重新登录' : null,
           }
         })
         return platform ? rows.filter(r => r.platformId === platform || toCredentialPlatform(r.platformId) === toCredentialPlatform(platform)) : rows
@@ -257,8 +268,15 @@ export function createAccountService(storePath: string) {
       }
 
       const picked = resolved.account
-      // sessionHint 细化（吸收 QIWork）：valid→ok, pending→none, expired→expired
-      const sessionHint = picked.status === 'valid' ? 'ok' : picked.status === 'pending' ? 'none' : 'expired'
+      // sessionHint 细化：valid→ok, pending→none, reauth_required→reauth_required, 其余→expired
+      //
+      // ★ `reauth_required` 单独一档：它表示连续探测失败已达阈值、重试无用。
+      //   下游据此报 failureKind='token_expired' 且文案明确要求「重新登录」，
+      //   而 `expired`（疑似失效）仍走原来的模糊引导，两者不再混同。
+      const sessionHint = picked.status === 'valid' ? 'ok'
+        : picked.status === 'pending' ? 'none'
+        : picked.status === 'reauth_required' ? 'reauth_required'
+        : 'expired'
       const row = rows.find(r => r.shopKey === picked.shop_key)
       return {
         shopKey: picked.shop_key,
@@ -403,9 +421,26 @@ export function createAccountService(storePath: string) {
     /** 删除账号 —— browser 半区不能读写本地文件，必须走 host 路由 */
     async deleteAccount(shopKey: string): Promise<{ ok: boolean; error?: string; profileCleaned?: boolean; profileNote?: string }> {
       if (!shopKey) return { ok: false, error: '无效的 shopKey' }
-      const res = await callHostTool<{ ok: boolean; error?: string; profileCleaned?: boolean; profileNote?: string }>('delete_account', { shopKey })
+      const res = await callHostTool<{ ok: boolean; error?: string; profileCleaned?: boolean; profileNote?: string; cascadeSummary?: string }>('delete_account', { shopKey })
       if (!res) return { ok: false, error: '删除失败：无法连接 host 半区' }
       return res
+    },
+
+    /**
+     * 预演「断开该账号会影响谁」—— 供删除前的二次确认展示。
+     *
+     * 对应 Accio 的 `managedShopDisconnectGroup`（按逻辑店铺整组断开的提示语义）：
+     * 删掉淘宝账号会连带影响生意参谋系（凭证层借用）与闲鱼（自动派生），
+     * 用户应当在确认前就知道，而不是删完发现别的技能也不能用了。
+     */
+    async planDisconnect(shopKey: string): Promise<{ ok: boolean; summary: string; affected: string[] }> {
+      const accounts = store.listAccounts()
+      const plan = planCascadeDisconnect(shopKey, accounts)
+      return {
+        ok: true,
+        summary: plan.summary,
+        affected: plan.affected.map(a => a.shop_key),
+      }
     },
 
     /** 绑定会话（= 智能体，同一个 id）—— 必须走 host 路由 */
@@ -485,13 +520,21 @@ export function createAccountService(storePath: string) {
         }>('probe_session', { shopKey: stored.shop_key })
         if (probe?.ok && probe.result === 'expired') {
           // 未达阈值时 host 侧不落库，页面保持原状态，只在 reason 里提示进度
-          const reached = probe.status === 'expired'
+          //
+          // ★ 达阈值后 host 侧落的是 `reauth_required`（不是 `expired`），故这里
+          //   必须按 probe.status 原样透出 —— 写死 'expired' 会把「必须重登」降级成
+          //   「疑似过期」，用户又回到反复重试的老路。
+          const reached = probe.status === 'reauth_required' || probe.status === 'expired'
           if (reached) {
+            const finalStatus: AccountStatus = probe.status === 'reauth_required' ? 'reauth_required' : 'expired'
             results.push({
               platformId: row.platformId,
               nickname: row.nickname,
-              status: 'expired',
-              reason: probe.reason || '登录态已失效（远端判定为游客）',
+              status: finalStatus,
+              reason: probe.reason
+                || (finalStatus === 'reauth_required'
+                  ? '登录态已失效，必须重新登录'
+                  : '登录态疑似过期（可先重试）'),
             })
             continue
           }

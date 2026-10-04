@@ -2,7 +2,24 @@
  * 共享类型定义 —— host 半区和 browser 半区共用
  */
 
-export type AccountStatus = 'valid' | 'expired' | 'invalid' | 'pending'
+/**
+ * 账号状态。
+ *
+ * ★ `expired` 与 `reauth_required` 的分工（吸收 Accio 的 `error` / `reconnect_required` 二分）：
+ *
+ *   | 状态               | 含义                                             | 正确引导           |
+ *   |--------------------|--------------------------------------------------|--------------------|
+ *   | `valid`            | 正常可用                                          | 直接用             |
+ *   | `pending`          | 已建条目、尚未完成首次登录校验                     | 引导完成登录       |
+ *   | `expired`          | 登录态**疑似**失效（探测失败计数中/历史遗留标记）  | 可先重试，再重登   |
+ *   | `reauth_required`  | 已确认**必须人工重新登录**，重试无用               | 直接引导重新登录   |
+ *   | `invalid`          | Cookie 结构不完整/已损坏，不可恢复                 | 删除并重新添加     |
+ *
+ * 为什么要把后两者分开：`expired` 只表示「探测到疑似失效」，此时重试或换个网络
+ * 仍可能成功；而 `reauth_required` 是**连续失败达阈值后的确定结论**，重试纯属浪费。
+ * 把两者混成一个状态，模型只能给出模糊的「登录态已过期」，用户于是反复重试而不是去重登。
+ */
+export type AccountStatus = 'valid' | 'expired' | 'reauth_required' | 'invalid' | 'pending'
 
 /** 鉴权方式 */
 export type AuthType = 'cookie' | 'apikey'

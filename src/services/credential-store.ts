@@ -29,16 +29,44 @@
  *   1. cookies / cookie_str 只在本模块出现，出网关一律剥掉
  *   2. 写盘用临时文件 + 原子替换，避免半截 JSON
  *   3. 读写都加进程内锁——host 半区可能并发调用
+ *
+ * ## 第四条约束（凭证加密，见 secure-store.ts）
+ *
+ * 落盘**默认加密**：`cookies` / `cookie_str` / `app_secret` 等同于账号登录态，
+ * 明文 JSON 意味着同机任何进程都能直接读走。
+ *
+ *   - 加密信封与密钥文件格式见 `secure-store.ts` 顶部说明
+ *   - **存量明文库自动迁移**：首次读取到明文时正常解析，写回时即变成密文（无需用户操作）
+ *   - 模式可用 `DSAGENT_CREDENTIALS_MODE=safe|plaintext|auto` 覆盖（见 secure-store.ts）
+ *   - 加载失败带 reason code（`decrypt_failed` / `safe_unavailable` / …），
+ *     **绝不静默当空库** —— 静默空库会让用户以为「账号凭空消失」
  */
 
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import * as crypto from 'node:crypto'
 import type { AccountChoice } from './types.js'
+import {
+  decodeCredentialsFile,
+  encodeCredentials,
+  getStorageMode,
+  isEncryptionAvailable,
+  markInvalidated,
+  clearInvalidated,
+  isInvalidated,
+  keyFilePathFor,
+  type LoadFailureReason,
+} from './secure-store.js'
 
 // ── 类型定义 ──────────────────────────────────────────────
 
-export type AccountStatus = 'valid' | 'expired' | 'invalid' | 'pending'
+/**
+ * 账号状态（与 services/types.ts 的 AccountStatus 保持一致）。
+ *
+ * `expired` = 疑似失效（可重试）；`reauth_required` = 确认必须重登（重试无用）。
+ * 二者分离的动机见 types.ts 的 AccountStatus 注释。
+ */
+export type AccountStatus = 'valid' | 'expired' | 'reauth_required' | 'invalid' | 'pending'
 
 /** 鉴权方式：Cookie 扫码 vs API Key（AppID + Secret） */
 export type AuthType = 'cookie' | 'apikey'
@@ -261,6 +289,142 @@ export function loginOwnerPlatform(platform: string): string {
   return SHARED_LOGIN_PLATFORM[normalizePlatform(platform)] ?? ''
 }
 
+// ── 派生关系注册表（数据驱动，吸收 Accio 的 logicalStoreKey 分组语义）──────
+
+/**
+ * 平台间的**登录态派生关系**及其级联影响，单一真源。
+ *
+ * ## 为什么要把关系从代码里提出来
+ *
+ * 改造前，「淘宝登录 → 生意参谋可用」「淘宝登录 → 闲鱼自动派生」这两件事的真相
+ * 分散在三处：`CREDENTIAL_PLATFORM`（凭证落哪）、`SHARED_LOGIN_PLATFORM`（谁能独立登录）、
+ * 以及 `ensureXianyuFromTaobao()` 里的硬编码判断。
+ *
+ * 后果是**断开一个账号时无法预知会波及谁**：用户删掉淘宝账号，生意参谋系与闲鱼的
+ * 凭证行会变成孤儿（`credential_platform` 仍指向已不存在的 taobao），
+ * 直到下次跑技能才报「未绑定」，用户完全不知道原因。
+ *
+ * Accio 用 `logicalStoreKey` 把多区域/多子店收敛成一个逻辑店铺，并支持
+ * `managedShopDisconnectGroup` 按逻辑店铺**整组断开** —— 正是为了解决同一类问题。
+ *
+ * 本注册表把这层关系显式化，从而支持：
+ *   1. `derivedPlatformsOf(platform)` —— 断开会波及谁（用于删前提示与级联清理）
+ *   2. `derivationChainFor(platform)` —— 该平台的完整上游链（用于引导文案）
+ *
+ * ## 字段语义
+ *
+ * - `owner`：登录态的**所有者**平台（用户应当去登录的那个）
+ * - `derived`：依赖 owner 登录态的**下游**平台
+ * - `keepsOwnRow`：下游是否保留独立凭证行
+ *     · `false`（生意参谋系）—— 凭证层直接复用 owner 的 Cookie，无独立行
+ *     · `true`（闲鱼）—— 必须保留独立行（goofish 域 Cookie 要落在自己的条目上），
+ *       但由 owner 登录成功后自动派生；账号页隐藏该行
+ * - `note`：面向用户的一句话解释（引导文案与删除提示复用）
+ */
+export interface DerivationRelation {
+  owner: string
+  derived: string
+  keepsOwnRow: boolean
+  note: string
+}
+
+export const DERIVATION_REGISTRY: readonly DerivationRelation[] = [
+  // 阿里系 SSO：登录淘宝后，生意参谋 / 万相台 / 达摩盘 / 天猫洞察立即可用。
+  // 这些平台在凭证层「借用」淘宝的 Cookie，不落自己的凭证行（keepsOwnRow=false）。
+  { owner: 'taobao', derived: 'sycm', keepsOwnRow: false, note: '生意参谋复用淘宝登录态' },
+  { owner: 'taobao', derived: 'alimama', keepsOwnRow: false, note: '万相台复用淘宝登录态' },
+  { owner: 'taobao', derived: 'dmp', keepsOwnRow: false, note: '达摩盘复用淘宝登录态' },
+  { owner: 'taobao', derived: 'sycm_insight', keepsOwnRow: false, note: '天猫洞察复用淘宝登录态' },
+  { owner: 'taobao', derived: 'tmall', keepsOwnRow: false, note: '天猫与淘宝共用同一套登录态' },
+  // 闲鱼是特例：身份同源（unb 一致），但 mtop 网关只认 goofish 域 Cookie，
+  // 故必须保留独立凭证行 —— 只是该行由淘宝登录成功后自动派生，账号页不提供入口。
+  { owner: 'taobao', derived: 'xianyu', keepsOwnRow: true, note: '闲鱼复用淘宝登录态（自动同步 goofish 域 Cookie）' },
+] as const
+
+/** 该平台派生出了哪些下游平台（断开它会影响谁） */
+export function derivedPlatformsOf(platform: string): DerivationRelation[] {
+  const p = normalizePlatform(platform)
+  const cred = credentialPlatform(p)
+  return DERIVATION_REGISTRY.filter(r => normalizePlatform(r.owner) === cred)
+}
+
+/** 该平台的登录态所有者（没有则返回自身） */
+export function ownerPlatformOf(platform: string): string {
+  const p = normalizePlatform(platform)
+  const own = loginOwnerPlatform(p)
+  if (own) return own
+  return credentialPlatform(p)
+}
+
+/**
+ * 该平台的完整上游链（用于引导文案：「生意参谋 依赖 淘宝」）。
+ * 返回从「直接所有者」到「最顶层所有者」的列表；自身可独立登录时返回空数组。
+ */
+export function derivationChainFor(platform: string): string[] {
+  const chain: string[] = []
+  let cur = normalizePlatform(platform)
+  const seen = new Set<string>([cur])
+  for (let i = 0; i < 8; i++) {
+    const owner = ownerPlatformOf(cur)
+    if (!owner || owner === cur || seen.has(owner)) break
+    chain.push(owner)
+    seen.add(owner)
+    cur = owner
+  }
+  return chain
+}
+
+/**
+ * 断开某账号的**级联影响**规划。
+ *
+ * 用于「删除 / 断开」前的提示与善后：删掉淘宝账号后，同 `unb` 的闲鱼派生行
+ * 会失去依托（它的 Cookie 来自 goofish 域，删除淘宝行本身不会让闲鱼立即失效，
+ * 但它再也不会被自动刷新，且用户无法从账号页重新登录它 —— 因为闲鱼没有独立入口）。
+ *
+ * @returns
+ *   - `relations`：会被波及的派生关系（含说明）
+ *   - `affected`：库中实际会受影响的其它账号行（同 owner 身份的下游行）
+ *   - `summary`：一句话说明，可直接展示给用户
+ */
+export function planCascadeDisconnect(
+  shopKey: string,
+  accounts: StoredAccount[],
+): { relations: DerivationRelation[]; affected: StoredAccount[]; summary: string } {
+  const target = accounts.find(a => a.shop_key === shopKey)
+  if (!target) return { relations: [], affected: [], summary: '' }
+
+  const relations = derivedPlatformsOf(target.platform)
+  if (!relations.length) return { relations: [], affected: [], summary: '' }
+
+  // 身份判据：阿里系用 unb（SSO 身份，恒定）。拿不到 unb 就无法证明是同号，
+  // 此时**不**把下游行算作受影响 —— 宁可漏报，也不要把别家店铺的行误列进删除提示。
+  const unb = String(target.cookies?.['unb'] ?? '').trim()
+
+  const derivedNames = new Set(relations.map(r => normalizePlatform(r.derived)))
+  const affected = unb
+    ? accounts.filter(a =>
+        a.shop_key !== shopKey
+        && derivedNames.has(normalizePlatform(a.platform))
+        && String(a.cookies?.['unb'] ?? '').trim() === unb,
+      )
+    : []
+
+  const pieces: string[] = []
+  if (affected.length) {
+    pieces.push(`同时影响 ${affected.length} 个派生账号：${affected.map(a => a.platform).join('、')}`)
+  }
+  const autoSynced = relations.filter(r => r.keepsOwnRow)
+  if (autoSynced.length) {
+    pieces.push(`${autoSynced.map(r => r.derived).join('、')} 由本账号自动派生，删除后需重新登录本账号才能恢复`)
+  }
+  const borrowed = relations.filter(r => !r.keepsOwnRow)
+  if (borrowed.length) {
+    pieces.push(`${borrowed.map(r => r.derived).join('、')} 复用本账号登录态，删除后将立即不可用`)
+  }
+
+  return { relations, affected, summary: pieces.join('；') }
+}
+
 export function keyCookies(platform: string): string[] {
   return [...(KEY_COOKIES[credentialPlatform(platform)] ?? [])]
 }
@@ -454,7 +618,10 @@ export const DEFAULT_AGENT_ID = 'default'
  * 若按顺序取会选中它，导致请求被平台判为未登录。
  */
 export function sortAccountsByPreference<T extends { status: string; cookies?: Record<string, string> }>(list: T[]): T[] {
-  const order: Record<string, number> = { valid: 0, pending: 1, expired: 2 }
+  // 排序意图：可用的排前面，且「疑似失效」优于「确认失效」——
+  // expired 还有重试价值（可能是网络抖动），reauth_required 则确定要重登，
+  // 兜底选号时应优先把还能抢救的排前面。
+  const order: Record<string, number> = { valid: 0, pending: 1, expired: 2, reauth_required: 3 }
   const cookieCount = (a: T) => Object.keys(a.cookies || {}).length
   return [...list].sort((a, b) => {
     const byStatus = (order[a.status] ?? 3) - (order[b.status] ?? 3)
@@ -483,9 +650,26 @@ export interface AccountResolution {
   level: number
 }
 
-/** 可用账号：valid / pending。expired / invalid 不可用（发请求必失败）。 */
+/**
+ * 可用账号：valid / pending。
+ *
+ * `expired` / `reauth_required` / `invalid` 都不可用 —— 发请求必失败。
+ * ★ 注意 `expired` 也在此列：它虽只代表「疑似失效」，但既然上一轮探测已失败，
+ *   就不该被静默选中继续用；同样地它仍留在候选集里（下游 filter 用 `!== 'invalid'`），
+ *   以便「全是失效号」时能报出正确的引导（token_expired / reauth_required）。
+ */
 export function isUsableAccount(a: { status: string }): boolean {
   return a.status === 'valid' || a.status === 'pending'
+}
+
+/**
+ * 该状态是否代表「必须人工重新登录，重试无用」。
+ *
+ * 用于把 `reauth_required` 与 `expired` 映射到**不同**的 failureKind / 引导文案：
+ * 前者直接说「请重新登录」，后者允许「先重试或稍后再试」。
+ */
+export function needsReauth(status: string): boolean {
+  return status === 'reauth_required'
 }
 
 /** 候选唯一则选中，多个则交给模型问用户 */
@@ -609,7 +793,13 @@ export class CredentialStore {
   private cache: VaultData | null = null
   /** 上次缓存对应文件的 mtime；read() 时比对以感知外部写入（跨实例/跨半区） */
   private cacheMtimeMs = 0
+  /** 上次缓存对应的**密钥文件** mtime；密钥文件被替换（换机器恢复）时同样要重读 */
+  private cacheKeyMtimeMs = 0
   private lock: Promise<void> = Promise.resolve()
+  /** 上次加载失败原因（null = 正常），供上层给出准确引导 */
+  private lastLoadFailure: LoadFailureReason | null = null
+  /** 磁盘上仍是明文、等待下一次写入时自动加密迁移 */
+  private pendingMigration = false
 
   constructor(filePath: string) {
     this.filePath = filePath
@@ -621,35 +811,138 @@ export class CredentialStore {
     // FIX：缓存失效检查 —— host/web 两个半区各持一个实例 + 页面写盘后，
     // 仅凭内存缓存会把新添加的账号永久屏蔽（本次故障根因）。
     // 每次读前 stat 一次（微秒级），文件 mtime 变化则重读磁盘。
+    //
+    // ★ 加密迁移后 mtime 判定要带上密钥文件的 mtime：密钥文件被替换（换机器恢复）
+    //   而凭证文件没动时，也必须重读，否则内存缓存里的旧账号会继续被使用。
     let mtimeMs = 0
+    let keyMtimeMs = 0
     try {
       if (fs.existsSync(this.filePath)) mtimeMs = fs.statSync(this.filePath).mtimeMs
     } catch { /* stat 失败按 0 处理 → 触发重读 */ }
-    if (this.cache !== null && mtimeMs === this.cacheMtimeMs) return this.cache
-    let data: VaultData = { accounts: {} }
     try {
-      if (fs.existsSync(this.filePath)) {
-        const raw = JSON.parse(fs.readFileSync(this.filePath, 'utf-8'))
-        if (raw && typeof raw === 'object' && raw.accounts && typeof raw.accounts === 'object') {
-          data = raw as VaultData
-        }
+      const kp = keyFilePathFor(this.filePath)
+      if (fs.existsSync(kp)) keyMtimeMs = fs.statSync(kp).mtimeMs
+    } catch { /* 同上 */ }
+    if (this.cache !== null && mtimeMs === this.cacheMtimeMs && keyMtimeMs === this.cacheKeyMtimeMs) {
+      return this.cache
+    }
+
+    // 走加密层解码（内部处理：硬失效标记 → 信封解密 → 旧明文兼容）
+    const decoded = decodeCredentialsFile<VaultData>(this.filePath, raw => {
+      if (raw && typeof raw === 'object' && (raw as VaultData).accounts && typeof (raw as VaultData).accounts === 'object') {
+        return raw as VaultData
       }
-    } catch {
-      // 文件损坏不致命：当作空库，但把坏文件留档避免静默丢数据
-      try {
-        if (fs.existsSync(this.filePath)) {
-          const corruptPath = this.filePath.replace(/\.json$/, '.corrupt.json')
-          fs.copyFileSync(this.filePath, corruptPath)
-        }
-      } catch {
-        // 忽略备份失败
+      return null
+    })
+
+    let data: VaultData = { accounts: {} }
+
+    if (decoded.ok) {
+      data = decoded.data
+      // ★ 存量明文 → 择机回写为密文（自动迁移）。
+      //   刻意**不在这里**立刻回写：read() 是同步热路径且可能被并发调用，
+      //   在其中落盘会和外层 withLock 的写操作竞争。改为登记待迁移，
+      //   由下一次 write()（任何保存动作）自然完成，或由 migrateIfNeeded() 显式触发。
+      if (decoded.migrated && getStorageMode() !== 'plaintext') {
+        this.pendingMigration = true
+      }
+      this.lastLoadFailure = null
+    } else {
+      // 失败**不静默**：记录 reason，供 account-service / UI 给出准确引导
+      this.lastLoadFailure = decoded.reason
+      if (decoded.reason !== 'not_found' && decoded.reason !== 'invalidated') {
+        // 文件确实存在却读不出来 —— 留档坏文件，避免下一次 write() 覆盖掉可抢救的数据
+        try {
+          if (fs.existsSync(this.filePath)) {
+            const corruptPath = this.filePath.replace(/\.json$/, '.corrupt.json')
+            fs.copyFileSync(this.filePath, corruptPath)
+          }
+        } catch { /* 忽略备份失败 */ }
       }
     }
+
     this.cache = data
     this.cacheMtimeMs = mtimeMs
+    this.cacheKeyMtimeMs = keyMtimeMs
     this.migrateIllegalKeys(data)
     this.migrateDriftedKeys(data)
     return data
+  }
+
+  /**
+   * 上次加载失败的原因（null = 正常）。
+   *
+   * 对应 Accio `ElectronSafeAuthStorage` 的 reason code：调用方据此区分
+   * 「需要重新登录」（decrypt_failed / invalidated）与「本机环境有问题」
+   * （safe_unavailable）与「文件坏了」（parse_failed），而不是笼统报读取失败。
+   */
+  loadFailureReason(): LoadFailureReason | null {
+    // 触发一次读，确保 reason 是最新的
+    try { this.read() } catch { /* read 内部已吞异常 */ }
+    return this.lastLoadFailure
+  }
+
+  /** 加密能力与模式信息，供账号页展示「凭证已加密」状态 */
+  storageSecurityInfo(): {
+    mode: string
+    encrypted: boolean
+    loadFailure: LoadFailureReason | null
+    invalidated: boolean
+  } {
+    return {
+      mode: getStorageMode(),
+      encrypted: isEncryptionAvailable(this.filePath),
+      loadFailure: this.loadFailureReason(),
+      invalidated: isInvalidated(this.filePath),
+    }
+  }
+
+  /**
+   * 存量明文库的自动迁移入口（可选显式调用）。
+   *
+   * read() 只登记 `pendingMigration`，真正落盘在这里做 —— 便于：
+   *   - 账号页打开时主动触发一次，用户立刻得到「已加密」状态
+   *   - 单测里确定性验证迁移结果
+   *
+   * @returns true 表示本次确实完成了明文→密文迁移
+   */
+  async migrateIfNeeded(): Promise<boolean> {
+    return this.withLock(() => {
+      // ★ 必须先作废缓存再 read()：read() 在「缓存有效」时会直接返回内存副本、
+      //   不重新判定磁盘形态，于是 pendingMigration 永远是上一次的值，
+      //   迁移会被静默跳过（单测里表现为 migrateIfNeeded 恒返回 false）。
+      this.cache = null
+      this.cacheMtimeMs = 0
+      this.pendingMigration = false
+      const data = this.read()
+      if (!this.pendingMigration) return false
+      this.write(data)
+      return true
+    })
+  }
+
+  /** 置硬失效标记：此后所有读取都返回空库，强制用户重新登录（对应 Accio 的 auth-session-invalidated） */
+  invalidateSession(): void {
+    markInvalidated(this.filePath)
+    this.cache = null
+    this.cacheMtimeMs = 0
+    this.cacheKeyMtimeMs = 0
+    this.lastLoadFailure = 'invalidated'
+  }
+
+  /**
+   * 清除硬失效标记（用户成功重新登录后调用）。
+   *
+   * ★ 必须同时作废缓存：置标记时缓存已被清成空库，若这里只删标记文件而不清缓存，
+   *   后续 read() 会因为「缓存非 null 且 mtime 未变」而继续返回那个空库，
+   *   表现为「重新登录成功了但账号列表还是空的」。
+   */
+  clearInvalidation(): void {
+    clearInvalidated(this.filePath)
+    this.cache = null
+    this.cacheMtimeMs = 0
+    this.cacheKeyMtimeMs = 0
+    this.lastLoadFailure = null
   }
 
   /**
@@ -749,18 +1042,40 @@ export class CredentialStore {
   private write(data: VaultData): void {
     const dir = path.dirname(this.filePath)
     fs.mkdirSync(dir, { recursive: true })
-    const payload = JSON.stringify(data, null, 2)
+
+    // ★ 走加密层编码：默认产出密文信封；`auto` 模式下密钥不可得会退回明文
+    //   （宁可明文可用，也不要因环境缺机器标识导致整个插件无法保存账号）。
+    const { payload, encrypted, reason } = encodeCredentials(this.filePath, data)
+    if (!encrypted && getStorageMode() !== 'plaintext' && reason) {
+      console.warn(`[dsagent] 凭证以**明文**落盘（加密不可用：${reason}）。如需强制加密请设 DSAGENT_CREDENTIALS_MODE=safe`)
+    }
+
     const tmpName = `.${path.basename(this.filePath)}.${crypto.randomBytes(6).toString('hex')}.tmp`
     const tmpPath = path.join(dir, tmpName)
     try {
-      fs.writeFileSync(tmpPath, payload, 'utf-8')
+      fs.writeFileSync(tmpPath, payload, { encoding: 'utf-8', mode: 0o600 })
       fs.renameSync(tmpPath, this.filePath)
     } catch (err) {
       try { fs.unlinkSync(tmpPath) } catch { /* 忽略 */ }
       throw err
     }
+    // rename 之后补 chmod：Windows 上 mode 参数不生效，POSIX 上确保不被 umask 放宽
+    try { fs.chmodSync(this.filePath, 0o600) } catch { /* 平台不支持则忽略 */ }
+
+    // 写入成功后清除硬失效标记：能成功写入说明用户已完成一次有效登录/操作。
+    // ★ 顺序要紧：必须在设置 this.cache 之前清标记 ——
+    //   clearInvalidation() 会作废缓存（因为置标记时缓存被清成了空库），
+    //   若放在赋值之后会把刚写好的内存副本一起清掉。
+    if (isInvalidated(this.filePath)) clearInvalidated(this.filePath)
+
     this.cache = data
+    this.pendingMigration = false
+    this.lastLoadFailure = null
     try { this.cacheMtimeMs = fs.statSync(this.filePath).mtimeMs } catch { this.cacheMtimeMs = 0 }
+    try {
+      const kp = keyFilePathFor(this.filePath)
+      this.cacheKeyMtimeMs = fs.existsSync(kp) ? fs.statSync(kp).mtimeMs : 0
+    } catch { this.cacheKeyMtimeMs = 0 }
   }
 
   /** 串行化所有写操作，避免并发竞争 */
@@ -973,10 +1288,13 @@ export class CredentialStore {
       const item = data.accounts[shopKey]
       if (!item) return
       item.status = status
+      // session_hint 是下游（网关 / host 预检 / 账号页）判定失败类型的唯一依据，
+      // 故 `reauth_required` 必须映射成独立的 hint 值，不能被并进 'expired'。
       const hintMap: Record<string, string> = {
         valid: 'ok',
         pending: 'none',
         expired: 'expired',
+        reauth_required: 'reauth_required',
         invalid: 'expired',
       }
       item.session_hint = hintMap[status] || 'expired'
@@ -988,12 +1306,21 @@ export class CredentialStore {
   }
 
   /**
-   * 记录一次远端登录态探测结果，并按**连续失败计数**决定是否落 `expired`（规范 §5.0）。
+   * 记录一次远端登录态探测结果，并按**连续失败计数**决定落 `expired` 还是 `reauth_required`。
    *
    * - `valid`：探测成功 → 计数清零，同时把状态拉回 `valid`（覆盖历史误标）
-   * - `expired`：计数 +1；未达阈值只记数不落库（避免网络抖动误标），
-   *   达到阈值才 `setStatus(expired)`；`last_checked_at` 每次都刷新留痕
+   * - `expired`：计数 +1
+   *     · 未达阈值 —— 只记数不落库（避免网络抖动误标，符合 §5.0「不得由单次失败触发」）
+   *     · 达阈值   —— 落 `reauth_required`（**不是** `expired`）
    * - `unknown`：无法判定 → 计数保持不变，不动状态
+   *
+   * ★ 达阈值落 `reauth_required` 而非 `expired` 的理由：
+   *   连续 N 次探测都失败，已足以判定「登录态确实废了，重试无用」。
+   *   此时若仍标 `expired`（语义是「疑似失效」），模型给出的引导会是模糊的
+   *   「登录态已过期」，用户倾向于反复重试；标 `reauth_required` 才能让引导明确成
+   *   「请重新登录」。这正是 FIX-LOG #66 那类「明明有账号却怎么都不行」的根治点。
+   *
+   * 已处于 `reauth_required` 时不再重复 flip（避免每次探测都触发一次写盘 + 一次提示）。
    *
    * @returns 本次判定后的实际状态与计数，供调用方决定是否提示用户
    */
@@ -1022,9 +1349,9 @@ export class CredentialStore {
       } else if (result === 'expired') {
         failCount = prevCount + 1
         // 达到阈值才落库：单次失败只记数，符合 §5.0「不得由单次失败触发」
-        if (failCount >= threshold && item.status !== 'expired') {
-          item.status = 'expired'
-          item.session_hint = 'expired'
+        if (failCount >= threshold && item.status !== 'reauth_required') {
+          item.status = 'reauth_required'
+          item.session_hint = 'reauth_required'
           flipped = true
         }
         item.last_checked_at = now()

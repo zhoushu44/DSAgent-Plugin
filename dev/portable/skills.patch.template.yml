@@ -1,0 +1,21 @@
+# ============================================================================
+# DSAgent 绿色版 —— DSH 技能发现补丁（模板）
+#
+# 与 portable.patch.template.yml 的区别：
+#   - portable.*  ：把 DSAgent 插件本体（账号连接页 + 工具注册）挂上
+#   - skills.*    ：让 DSH 的技能系统发现包内 skills/，使技能在系统提示词里可见
+#
+# 两者是不同机制，都需要。启动器同样会替换 __PKG__ 为真实路径，
+# 输出到 data/skills.patch.yml。
+# ============================================================================
+- insert:
+    - id: dsagent-skills
+      name: '@deepseek-ai/dsh-skill-filesystem'
+      disabled: false
+      config:
+        # 只认包内技能目录，与 DSH 自带技能双向隔离
+        includeDefaultRoots: false
+        customSkillDirs:
+          - '__PKG__/plugin/skills'
+        # 技能文件改动免重启生效
+        watch: true

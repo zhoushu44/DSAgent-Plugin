@@ -42,56 +42,99 @@ export function apply(ctx: ClientContext, cfg?: Config) {
   /* ─── HTTP 路由已由 host 半区 (index.ts) 通过 ctx.inject(['webServer']) 注册 ─── */
 
   const NS = 'dsagent'
-  ctx.locale.register(NS, {
-    zh: {
-      'entry.label': 'DSAgent',
-      'entry.tooltip': '账号连接与业务技能',
-      'tab.account': '账号连接',
-      'tab.market': 'DSAgent 技能',
-    },
-    en: {
-      'entry.label': 'DSAgent',
-      'entry.tooltip': 'Account & Business Skills',
-      'tab.account': 'Accounts',
-      'tab.market': 'DSAgent Skills',
-    },
+
+  /**
+   * 隔离执行一个挂载步骤。
+   *
+   * 背景（这是本插件最脆弱的一环）：DSH 的 slots / locale 在**重复注册**时一律抛错
+   * （`list slot "sidebar.panellist" already has an entry with id "dsagent"`、
+   * `locale namespace "dsagent" already has locale "zh"` …），而客户端热重载
+   * （dsh-client-hmr 轮询 lib/client.js，重建后自动 dispose 旧 fiber 再重新 apply）
+   * 恰好会走到"重复注册"这条路径。apply() 是顺序执行的，任何一步抛错都会让
+   * **后面所有步骤都不执行**——侧边栏图标和面板一起消失，且界面不报错、插件管理页
+   * 也不显示失败，只有 DevTools Console 有 `[cordis-client-runner] ... failed`。
+   *
+   * 所以每个步骤独立 try/catch：某一步失败只损失它对应的功能，不会殃及其它步骤。
+   * 失败一律 console.error 带步骤名，保证"看得见"。
+   */
+  function step(label: string, run: () => void) {
+    try {
+      run()
+    } catch (error) {
+      console.error(`[dsagent] 挂载步骤失败（${label}）：`, error)
+    }
+  }
+
+  // ★ 必须放进 ctx.effect：locale.register 返回的 disposer 只有在 effect 里才会
+  //   被 Cordis 登记，dispose 时才会撤下字典。裸调用会把 disposer 丢掉，于是热重载
+  //   时 locale.register 会抛 `already has locale "zh"`。
+  //   try/catch 兜住"由旧版本裸注册遗留、无法撤下"的字典，保证这种情况也能挂载。
+  step('locale 字典', () => {
+    ctx.effect(() => {
+      const dicts = {
+        zh: {
+          'entry.label': 'DSAgent',
+          'entry.tooltip': '账号连接与业务技能',
+          'tab.account': '账号连接',
+          'tab.market': 'DSAgent 技能',
+        },
+        en: {
+          'entry.label': 'DSAgent',
+          'entry.tooltip': 'Account & Business Skills',
+          'tab.account': 'Accounts',
+          'tab.market': 'DSAgent Skills',
+        },
+      }
+      try {
+        const disposeDicts = ctx.locale.register(NS, dicts)
+        return typeof disposeDicts === 'function' ? disposeDicts : () => {}
+      } catch (error) {
+        // 已存在同命名空间字典（旧 fiber 遗留）：沿用已有字典，不阻断 UI 挂载
+        console.warn('[dsagent] locale 字典已存在，跳过注册：', error)
+        return () => {}
+      }
+    }, 'dsagent: dictionaries')
   })
 
   const tt = ctx.locale.bind(NS)
 
   // ── 侧边栏图标按钮 ──
-  ctx.effect(() => {
-    const disposeSidebar = ctx.slots.inject('sidebar.panellist', () =>
-      ctx.slots.register(
-        {
-          name: 'sidebar.panellist',
-          id: 'dsagent',
-          order: 80,
-          locale: NS,
-          label: () => tt('entry.label'),
-        },
-        SidebarButton,
-      ),
-    )
+  step('侧边栏入口', () => {
+    ctx.effect(() => {
+      const disposeSidebar = ctx.slots.inject('sidebar.panellist', () =>
+        ctx.slots.register(
+          {
+            name: 'sidebar.panellist',
+            id: 'dsagent',
+            order: 80,
+            locale: NS,
+            label: () => tt('entry.label'),
+          },
+          SidebarButton,
+        ),
+      )
+      return () => disposeSidebar()
+    }, 'dsagent: sidebar entry')
+  })
 
-    // ── 中心面板（keyed slot，key=dsagent）──
-    const disposeMain = ctx.slots.inject('main', () =>
-      ctx.slots.register(
-        {
-          name: 'main',
-          key: 'dsagent',
-          locale: NS,
-          label: () => tt('entry.label'),
-        },
-        DSAgentPanel,
-      ),
-    )
-
-    return () => {
-      disposeSidebar()
-      disposeMain()
-    }
-  }, 'dsagent: client UI')
+  // ── 中心面板（keyed slot，key=dsagent）──
+  // 与侧边栏入口分开成独立步骤：即使入口注册失败，面板仍可挂载（反之亦然）。
+  step('中心面板', () => {
+    ctx.effect(() => {
+      const disposeMain = ctx.slots.inject('main', () =>
+        ctx.slots.register(
+          {
+            name: 'main',
+            key: 'dsagent',
+            locale: NS,
+            label: () => tt('entry.label'),
+          },
+          DSAgentPanel,
+        ),
+      )
+      return () => disposeMain()
+    }, 'dsagent: main panel')
+  })
 
   // ── 侧边栏图标组件 ──
   // ★ 必须渲染 span 而非 button：宿主 PanelRow 外层已是 <button onClick=selectPanel>，

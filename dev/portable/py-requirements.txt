@@ -1,0 +1,28 @@
+# 绿色包 Python 依赖清单 —— 由 dev/portable/scan-py-deps.mjs 自动生成
+#
+# 组成：skills/ 下 315 个 .py 的静态 import  ∪  src/services/skill-service.ts 的 SKILL_DEPS
+# 原因：插件 resolvePython() 会按「能 import 多少个 SKILL_DEPS」给候选解释器打分，
+#       包内 Python 必须命中数最高才会被自动选中，否则技能仍会 ModuleNotFoundError。
+#
+# 安装：dev/portable/prepare-pydeps.ps1 （装进包内 Python，不污染系统）
+akshare
+beautifulsoup4
+defusedxml
+httpx
+jieba
+lxml
+markdown
+matplotlib
+numpy
+openpyxl
+pandas
+pdf2image
+pdfplumber
+Pillow
+pypdf
+python-docx
+python-pptx
+pywencai
+PyYAML
+requests
+validators
