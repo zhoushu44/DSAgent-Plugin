@@ -2447,18 +2447,41 @@ export function apply(ctx: Context, cfg: Config = config) {
 
     defineTool({
       name: 'dsagent_wiki_write',
-      description: '校验并写入一个 Wiki 页面。frontmatter 必须来自 dsagent_wiki_template 的锁定模板（只填值、不改 key），'
-        + '正文写在 body 参数里。校验不过会拒绝写入并列出问题。',
+      description: '校验并写入一个 Wiki 页面（action=write，默认），或删除一个页面（action=delete）。'
+        + '写入时 frontmatter 必须来自 dsagent_wiki_template 的锁定模板（只填值、不改 key），正文写在 body 参数里；'
+        + '校验不过会拒绝写入并列出问题。删除时只需给 path。',
       parameters: {
-        domain: { type: 'string', required: true, description: '域中文名' },
+        action: { type: 'string', description: '可选：write（默认，写入）/ delete（删除页面，删除时只认 path）' },
+        path: { type: 'string', description: '要删除的页面相对路径（action=delete 时必填，如「商品/entities/xxx.md」）' },
+        domain: { type: 'string', description: '域中文名（action=write 时必填）' },
         kind: { type: 'string', description: '页面形态（可选）：实体（默认）/ 概念' },
-        title: { type: 'string', required: true, description: '页面标题，将作为文件名（须与正文 H1 一致）' },
-        frontmatterYaml: { type: 'string', required: true, description: '填充后的 frontmatter 内容（不含首尾 --- 行），须与模板 key 完全一致' },
+        title: { type: 'string', description: '页面标题，将作为文件名（action=write 时必填，须与正文 H1 一致）' },
+        frontmatterYaml: { type: 'string', description: '填充后的 frontmatter 内容（action=write 时必填，不含首尾 --- 行），须与模板 key 完全一致' },
         body: { type: 'string', description: '正文 Markdown（可选，建议以 # 标题 开头）' },
         force: { type: 'boolean', description: '校验不通过时是否强制写入（默认 false；强制会记日志）' },
       },
       output: { schema: { type: 'json' }, render: renderToolOutput },
       async execute(args) {
+        const action = String(args.action ?? 'write').trim().toLowerCase()
+
+        // ── 删除分支：只认 path，不做 frontmatter 校验 ──
+        if (action === 'delete') {
+          const p = String(args.path ?? '').trim()
+          if (!p) return { ok: false, text: 'action=delete 时必须提供 path（如「商品/entities/xxx.md」）' }
+          const del = await wiki.deletePage(p)
+          if (!del.ok) {
+            return {
+              ok: false,
+              text: [`页面未删除：${del.error}`, '', '用 dsagent_wiki_search 确认正确的页面路径。'].join('\n'),
+            } as any
+          }
+          return {
+            ok: true,
+            text: `页面已删除：${del.path}\nINDEX.md 已同步刷新（不会留死链）。`,
+            path: del.path,
+          } as any
+        }
+
         const domain = String(args.domain ?? '').trim()
         const kind = String(args.kind ?? '实体').trim() === '概念' ? '概念' : '实体'
         const title = String(args.title ?? '').trim()

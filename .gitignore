@@ -9,6 +9,14 @@ __pycache__/
 lib/
 dist/
 
+# 绿色版打包的中间产物与产物
+# 仓库里只放「能重建出绿色包的脚本」（dev/portable/），产物一律不入库：
+#   · 完整包 ~1.2 GB，入库会让 clone/pull 变得不可用
+#   · 内含 DSH Desktop 程序与便携 Python，版权不属于本项目
+dist/DSAgent-Portable/
+dist/DSAgent-Portable.zip
+*.tgz
+
 # 敏感数据
 *.env
 .env*
@@ -42,3 +50,14 @@ artifacts/
 *_payload_*.json
 .skill-stats.json
 .pitfall-memory.json
+
+# verify-commit-tree.mjs 的隔离 worktree 临时目录
+# 放在工作区内是刻意的：系统临时目录下 esbuild 写 bundle 会被拒（Access is denied）
+.commit-verify-*/
+
+# 其它会话的暂存目录
+kb-stage/
+accio-staging/
+
+# npm 本地缓存（某些环境会把 cache 落在仓库内）
+.npm-cache/

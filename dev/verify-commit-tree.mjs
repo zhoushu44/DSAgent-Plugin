@@ -22,7 +22,18 @@ if (!ref) {
   process.exit(2)
 }
 
-const scratch = mkdtempSync(join(tmpdir(), 'dsagent-cv-'))
+const root = process.cwd()
+/**
+ * worktree 的落点必须是「本进程确定可写」的目录。
+ *
+ * ★ 不能放系统临时目录（%TEMP% / AppData\Local\Temp）：
+ *   实测 esbuild 在那里写 `lib/client.js.building` 会被拒（Access is denied），
+ *   于是客户端 bundle 步骤稳定失败 —— 那是环境权限问题，**不是被验证代码的问题**。
+ *   放在工作区内的临时目录则可写（工作区本身可写，且已在 .gitignore 覆盖范围内）。
+ *
+ * git worktree add 要求目标目录**不存在或为空**，所以先建父目录、把 tree 作为子路径。
+ */
+const scratch = mkdtempSync(join(root, '.commit-verify-'))
 let seq = 0
 
 /** 跑命令并把 stdout/stderr 落到临时文件（绕开沙箱的匿名管道限制） */

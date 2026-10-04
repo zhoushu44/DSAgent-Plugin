@@ -24,11 +24,12 @@
  * 安全：所有读写都限制在 wikiRoot 内，越界一律拒绝。
  */
 
-import { readdir, readFile, writeFile, mkdir, stat } from 'node:fs/promises'
+import { readdir, readFile, writeFile, mkdir, stat, unlink } from 'node:fs/promises'
 import { existsSync, readdirSync, type Dirent } from 'node:fs'
 import { join, resolve, sep, relative } from 'node:path'
 import { DOMAIN_NAMES, getDomain } from './wiki-schema.js'
 import { checkPageText, type ValidationIssue } from './wiki-frontmatter.js'
+import { readFrontmatterField } from './skill-quality.js'
 
 /** 索引条目 */
 export interface WikiEntry {
@@ -174,6 +175,60 @@ export function createWikiStore(wikiRoot: string) {
       }
     },
 
+    /**
+     * 删除一个页面。
+     *
+     * 为什么需要它：知识库必然要能删页 —— 写错了、口径过时了、测试残留。
+     * 缺这个能力时用户只能去文件系统手工删，而 wiki 根目录常在应用数据区
+     * （如 DSH 的 `launch-root/wiki`），受沙箱与权限限制未必删得掉。
+     *
+     * ★ 安全约束（与读写同源）：
+     *   1. 只允许删 wikiRoot 内的 `.md` 文件 —— 路径必须过 assertInside
+     *   2. 拒绝删根级治理文件（INDEX.md / PRINCIPLES.md / log.md）：
+     *      它们是 wiki 骨架，删掉会让索引与披露边界失效；
+     *      其中 INDEX.md 本来就会随写入自动重建，无需手删
+     *   3. 只删文件，不删目录（避免误删整个域）
+     */
+    async deletePage(relPath: string): Promise<{ ok: boolean; path?: string; error?: string }> {
+      const rel = String(relPath ?? '').trim().replace(/\\/g, '/')
+      if (!rel) return { ok: false, error: '缺少要删除的页面路径' }
+      if (!rel.toLowerCase().endsWith('.md')) {
+        return { ok: false, error: `只允许删除 .md 页面文件，收到：${rel}` }
+      }
+      // 根级治理文件保护
+      const PROTECTED = new Set(['INDEX.md', 'PRINCIPLES.md', 'log.md'])
+      if (PROTECTED.has(rel)) {
+        return {
+          ok: false,
+          error: `「${rel}」是 wiki 骨架文件，不允许删除（INDEX.md 会随写入自动重建）`,
+        }
+      }
+
+      let abs: string
+      try {
+        abs = assertInside(join(root, rel))
+      } catch (e) {
+        return { ok: false, error: e instanceof Error ? e.message : String(e) }
+      }
+
+      // 必须确实存在且是文件（不是目录）
+      try {
+        const st = await stat(abs)
+        if (!st.isFile()) return { ok: false, error: `不是文件，拒绝删除：${rel}` }
+      } catch {
+        return { ok: false, error: `页面不存在：${rel}` }
+      }
+
+      try {
+        await unlink(abs)
+      } catch (e) {
+        return { ok: false, error: `删除失败：${e instanceof Error ? e.message : String(e)}` }
+      }
+      // 索引随删除刷新，避免 INDEX.md 留下死链（Accio 验收项 1：链接必须可达）
+      await this.buildIndex()
+      return { ok: true, path: rel }
+    },
+
     /** 列出全部页面（含 frontmatter 摘要） */
     async listEntries(opts?: { domain?: string; kind?: '实体' | '概念' }): Promise<WikiEntry[]> {
       if (!existsSync(root)) return []
@@ -315,13 +370,29 @@ export type WikiStore = ReturnType<typeof createWikiStore>
 
 /* ────────────────────────── 辅助 ────────────────────────── */
 
-/** 从 frontmatter 文本取字段值（支持引号剥离；与 skill-quality 同一套口径） */
+/**
+ * 从 frontmatter 文本取字段值。
+ *
+ * ★ 必须复用 wiki-frontmatter::readFrontmatterField，不要在这里另写一套正则。
+ *   本函数原先自己写了个「只读同一行」的版本，注释还声称「与 skill-quality 同一套口径」，
+ *   但实际并不一致 —— 于是遇到 YAML 块标量时读出字面量：
+ *
+ *     description: >-          ← 折叠块标量
+ *       第一行
+ *       第二行
+ *
+ *   `pick('description')` 返回的是字符串 ">-"，并把它当成描述渲染进 INDEX.md，
+ *   表现为索引每条都显示「— >-」（实测发现的真实缺陷）。
+ *
+ *   这与「机密字段泄漏」「记录策略分叉」是同一类错误：
+ *   同一个概念在两处实现，只有一处是对的。
+ *
+ * 另外保留原有行为：行内数组 `[a, b]` 去掉外层方括号。
+ */
 function pick(fm: string, key: string): string {
   if (!fm) return ''
-  const re = new RegExp(`^[ \\t]*${key}[ \\t]*:[ \\t]*(.*?)[ \\t]*$`, 'm')
-  const hit = fm.match(re)
-  if (!hit) return ''
-  let v = hit[1].trim()
+  let v = readFrontmatterField(fm, key) ?? ''
+  v = v.trim()
   if (v.startsWith('[') && v.endsWith(']')) v = v.slice(1, -1).trim()
   return v.replace(/^["']|["']$/g, '')
 }
