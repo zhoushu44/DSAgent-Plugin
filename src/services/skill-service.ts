@@ -18,6 +18,16 @@ import { existsSync, readdirSync, type Dirent } from 'node:fs'
 import { delimiter, join, resolve, sep } from 'node:path'
 import { spawn, execSync } from 'node:child_process'
 import { extractTokens } from './account-service.js'
+import {
+  validateSkill,
+  scoreSkill,
+  readFrontmatterField,
+  splitSkillMarkdown,
+  type SkillValidation,
+  type ValidationIssue,
+} from './skill-quality.js'
+import { createSkillStats, type SkillStats } from './skill-stats.js'
+import { readSkillPatch, renderBodyWithPatch, PATCH_FILENAME, type PatchResult } from './skill-patch.js'
 
 /**
  * 技能脚本实际用到的第三方依赖全集（扫技能目录下所有 .py 的 import 得到）。
@@ -135,6 +145,18 @@ export interface SkillRow {
   dir: string
   /** SKILL.md 正文（用于入口判定和指令型技能） */
   body: string
+  /** frontmatter 原文 —— 供 tool_triggers 解析使用（见 tool-triggers.ts） */
+  frontmatter: string
+  /** 文档质量分 0.00~1.00（Accio 同量表，槽位双语化，见 skill-quality.ts） */
+  quality: number
+  /** 校验问题清单（空数组 = 通过全部 error 级校验） */
+  issues: ValidationIssue[]
+  /** patch 是否存在（SKILL.patch.md 现场修正层） */
+  hasPatch: boolean
+  /** 使用次数（来自 .skill-stats.json；无记录为 0） */
+  useCount: number
+  /** 最近使用时间（epoch ms；无记录为 0） */
+  lastUsedAt: number
 }
 
 /** 技能执行结果 —— 对应原项目 SkillResult */
@@ -285,29 +307,15 @@ function inferCapability(id: string): string {
 /**
  * 从 SKILL.md 抽取 frontmatter 字段（不引入 YAML 依赖）。
  *
- * 必须支持 YAML 块标量：`description: |` / `>` 的取值是后续缩进行，不是那个竖线本身。
- * 只按单行正则取会把 description 解析成字面量 "|"，技能页的「功能说明」就变成一根竖线。
- * 解析逻辑与 index.ts::scanSkillCatalog() 保持一致（那边一直是正确的）。
+ * 实现已收敛到 skill-quality::readFrontmatterField，避免「解析」与「校验/打分」
+ * 两处对同一份 frontmatter 给出不同结果（那会让质量分与实际解析行为对不上）。
+ * 这里保留原函数名与签名，供既有调用点无感迁移。
+ *
+ * 支持 YAML 块标量：`description: |` / `>` 的取值是后续缩进行，不是那个竖线本身。
  */
 function pickFrontmatter(raw: string, key: string): string | null {
-  const fm = raw.match(/^---\r?\n([\s\S]*?)\r?\n---/)
-  if (!fm) return null
-  const block = fm[1]
-  const re = new RegExp(`^[ \\t]*${key}[ \\t]*:[ \\t]*(.+?)[ \\t]*$`, 'm')
-  const hit = block.match(re)
-  if (!hit) return null
-  const inline = hit[1].replace(/^["']|["']$/g, '').trim()
-  // 非块标量：直接就是值
-  if (!/^[|>][+-]?$/.test(inline)) return inline
-  // 块标量：从下一行起收集缩进行，遇到顶格行（下一个 frontmatter 键）即结束
-  const rest = block.slice(block.indexOf(hit[0]) + hit[0].length)
-  const lines: string[] = []
-  for (const line of rest.split(/\r?\n/)) {
-    if (line.trim() === '') { lines.push(''); continue }
-    if (!/^[ \t]/.test(line)) break
-    lines.push(line.trim())
-  }
-  return lines.join(' ').trim() || null
+  const { frontmatter } = splitSkillMarkdown(raw)
+  return readFrontmatterField(frontmatter, key)
 }
 
 /** 判断技能是否启用（disable-model-invocation 为 true 时视为停用） */
@@ -362,17 +370,29 @@ async function fetchHostSkills(): Promise<SkillRow[] | null> {
     if (!resp.ok) return null
     const data = await resp.json() as { ok?: boolean; rows?: SkillRow[] }
     if (!data?.ok || !Array.isArray(data.rows)) return null
-    return data.rows.map(r => ({ ...r, body: r.body || '' }))
+    return data.rows.map(r => ({
+      ...r,
+      body: r.body || '',
+      // browser 半区没有文件系统，这里只做字段兜底；真实值由 host 半区扫描时算好
+      frontmatter: r.frontmatter || '',
+      quality: typeof r.quality === 'number' ? r.quality : 0,
+      issues: Array.isArray(r.issues) ? r.issues : [],
+      hasPatch: r.hasPatch === true,
+      useCount: typeof r.useCount === 'number' ? r.useCount : 0,
+      lastUsedAt: typeof r.lastUsedAt === 'number' ? r.lastUsedAt : 0,
+    }))
   } catch {
     return null
   }
 }
 
-export function createSkillService(skillRoot: string) {
+export function createSkillService(skillRoot: string, opts?: { statsPath?: string }) {
   const root = resolve(skillRoot || '.')
   let cache: SkillRow[] | null = null
   /** 缓存写入时间：超过 CACHE_TTL 视为过期，下次 list() 重扫 */
   let cacheAt = 0
+  /** 技能使用统计（可选；未给 statsPath 时不记录，保持旧行为） */
+  const stats: SkillStats | null = opts?.statsPath ? createSkillStats(opts.statsPath) : null
 
   /** 越界防护：目标路径必须落在 skillRoot 内 */
   function assertInsideRoot(target: string) {
@@ -393,6 +413,8 @@ export function createSkillService(skillRoot: string) {
     }
 
     const rows: SkillRow[] = []
+    // 使用统计一次性读入，供每行附加 useCount / lastUsedAt
+    const statsMap = stats ? await stats.readAll() : {}
     for (const entry of entries) {
       const dir = join(root, entry)
       const skillFile = join(dir, 'SKILL.md')
@@ -401,8 +423,11 @@ export function createSkillService(skillRoot: string) {
         if (!st.isFile()) continue
         const raw = await readFile(skillFile, 'utf8')
         const id = pickFrontmatter(raw, 'name') || entry
-        const fmMatch = raw.match(/^---\r?\n([\s\S]*?)\r?\n---/)
-        const body = fmMatch ? raw.slice(fmMatch[0].length) : raw
+        const split = splitSkillMarkdown(raw)
+        const body = split.body
+        // 质量门禁：校验 + 打分（纯函数，不额外读盘）
+        const validation: SkillValidation = validateSkill(raw)
+        const st1 = statsMap[id]
         rows.push({
           id,
           name: pickFrontmatter(raw, 'display_name') || pickFrontmatter(raw, 'name') || entry,
@@ -414,6 +439,12 @@ export function createSkillService(skillRoot: string) {
           enabled: readEnabled(raw),
           dir,
           body,
+          frontmatter: split.frontmatter,
+          quality: validation.score.score,
+          issues: validation.issues,
+          hasPatch: existsSync(join(dir, PATCH_FILENAME)),
+          useCount: st1?.useCount ?? 0,
+          lastUsedAt: st1?.lastUsedAt ?? 0,
         })
       } catch (e) {
         // 不是合法技能目录，跳过（但记录调试信息）
@@ -421,7 +452,11 @@ export function createSkillService(skillRoot: string) {
       }
     }
     rows.sort((a, b) => a.id.localeCompare(b.id))
-    console.log(`[dsagent] scan() 完成：扫描 ${entries.length} 个条目，找到 ${rows.length} 个技能`)
+    const warnCount = rows.filter(r => r.issues.some(i => i.severity === 'error')).length
+    console.log(
+      `[dsagent] scan() 完成：扫描 ${entries.length} 个条目，找到 ${rows.length} 个技能`
+      + (warnCount ? `（${warnCount} 个存在 error 级质量校验问题，均分 ${(rows.reduce((a, r) => a + r.quality, 0) / (rows.length || 1)).toFixed(2)}）` : ''),
+    )
     return rows
   }
 
@@ -521,16 +556,26 @@ export function createSkillService(skillRoot: string) {
 
       const explicitArgs = opts?.args && opts.args.length > 0 ? opts.args : undefined
 
+      // 现场修正层：SKILL.patch.md 必须参与**入口判定**，否则 patch 里新增的
+      // 脚本用法/子命令不会被识别（buildCommand 只看 skill.body）。
+      // 用合并后的正文做判定，但把原始 body 留给 usage 提取兜底。
+      const patch = await readSkillPatch(skill.dir)
+      const effectiveSkill: SkillRow = patch.present
+        ? { ...skill, body: renderBodyWithPatch(skill.body, patch) }
+        : skill
+
       // 判定入口形态
-      const command = buildCommand(skill, request, explicitArgs, opts?.fromContract === true)
+      const command = buildCommand(effectiveSkill, request, explicitArgs, opts?.fromContract === true)
       if (command === null) {
         // 纯指令型技能：没有可执行入口，把正文交给模型自己照做。
         // 正文里的 {baseDir} / {this_skill_dir} 必须替换成技能真实绝对路径，
         // 否则模型会按「工作区相对路径」去找 docs/、references/ 等资源，
         // 找不到就静默降级成自造内容（如 customer-service-reply 找不到话术模板）。
+        // patch 已在 effectiveSkill.body 里合并，renderInstructionBody 会一并输出。
+        await stats?.recordUse(id)
         return {
           ok: true,
-          payload: { mode: 'instructions', body: renderInstructionBody(skill) },
+          payload: { mode: 'instructions', body: renderInstructionBody(effectiveSkill), patchApplied: patch.present },
           stdout: '',
           stderr: '',
           exitCode: 0,
@@ -659,7 +704,8 @@ export function createSkillService(skillRoot: string) {
             message = '技能未输出结果（通常表示缺少参数），请参考用法补 args 后重试'
           }
           // 失败时回传技能用法，模型可据此补 args 重试
-          const usage = ok ? undefined : (extractUsage(skill.body, detectEntry(skill.dir, skill.id, skill.body)) ?? undefined)
+          // 用合并 patch 后的正文提取：patch 里可能补了新的用法行
+          const usage = ok ? undefined : (extractUsage(effectiveSkill.body, detectEntry(effectiveSkill.dir, effectiveSkill.id, effectiveSkill.body)) ?? undefined)
           // 提取脚本自报的失败类型（脚本按 runtime 规范输出 failure_kind / failureKind），
           // 供上层直接采用，避免靠 stderr 关键词反推导致业务码失败被降级为 skill_error
           let failureKind: string | undefined
@@ -668,6 +714,10 @@ export function createSkillService(skillRoot: string) {
             const fk = p.failure_kind ?? p.failureKind
             if (typeof fk === 'string' && fk) failureKind = fk
           }
+
+          // 成功才计数：失败也计数会让「从未成功过」的技能看起来被频繁使用，
+          // 污染「长期未用」候选的判定（见 skill-stats.ts 的设计说明）。
+          if (ok) void stats?.recordUse(id)
 
           resolve({
             ok,
@@ -704,7 +754,17 @@ export function createSkillService(skillRoot: string) {
      *   3. 写入 SKILL.md
      *   4. 失效缓存，下次 list 重新扫描
      */
-    async importSkill(mdContent: string): Promise<{ ok: boolean; skillId?: string; error?: string }> {
+    async importSkill(
+      mdContent: string,
+      opts?: { force?: boolean },
+    ): Promise<{
+      ok: boolean
+      skillId?: string
+      error?: string
+      /** 质量门禁结果：即便写入成功也会返回，供 UI 提示作者改进 */
+      quality?: number
+      issues?: ValidationIssue[]
+    }> {
       // 校验 frontmatter
       const fmMatch = mdContent.match(/^---\r?\n([\s\S]*?)\r?\n---/)
       if (!fmMatch) {
@@ -717,6 +777,22 @@ export function createSkillService(skillRoot: string) {
       // 拒绝不安全的 name（路径遍历、特殊字符等）
       if (!/^[A-Za-z0-9][\w.-]*$/.test(name)) {
         return { ok: false, error: `技能 name 不合法（仅允许字母数字开头，含字母数字下划线短横线点号）：${name}` }
+      }
+
+      // ── 质量门禁（吸收 Accio 的硬校验，但可 force 绕过）──
+      // Accio 是封闭市场，能直接拒绝不合格技能写入；本项目技能目录是用户资产，
+      // 默认允许**保存半成品**，但把问题原样报回去，让作者知道差在哪。
+      // 传 force=false 且存在 error 级问题时，仍然写入，只是 ok 保持 true 并附 issues。
+      const validation = validateSkill(mdContent)
+      const blocking = validation.issues.filter(i => i.severity === 'error')
+      if (blocking.length && opts?.force === false) {
+        return {
+          ok: false,
+          error: `技能未通过质量校验（${blocking.length} 项 error）：\n`
+            + blocking.map(i => `- [${i.code}] ${i.message}`).join('\n'),
+          quality: validation.score.score,
+          issues: validation.issues,
+        }
       }
 
       let skillDir: string
@@ -750,7 +826,14 @@ export function createSkillService(skillRoot: string) {
       cache = null
       cacheAt = 0
 
-      return { ok: true, skillId: name }
+      if (blocking.length) {
+        console.warn(
+          `[dsagent] 技能 ${name} 已写入，但存在 ${blocking.length} 项质量 error：`
+          + blocking.map(i => i.code).join(', '),
+        )
+      }
+
+      return { ok: true, skillId: name, quality: validation.score.score, issues: validation.issues }
     },
 
     /**
@@ -817,9 +900,109 @@ export function createSkillService(skillRoot: string) {
       return hasDirectReport(skill)
     },
 
+    /* ─────────── 质量治理 / 使用统计 / 补丁层（吸收 Accio） ─────────── */
+
+    /**
+     * 质量总览 —— 供技能市场页展示与 CI 断言。
+     *
+     * 返回按分数升序排列（最需要修的排在最前），并汇总问题码计数，
+     * 让「55 个技能都 0.60」这类全局问题一眼可见。
+     */
+    async qualityOverview(): Promise<{
+      total: number
+      average: number
+      failing: number
+      issueCounts: Record<string, number>
+      rows: Array<{ id: string; quality: number; issues: ValidationIssue[]; hasPatch: boolean; useCount: number; lastUsedAt: number }>
+    }> {
+      const rows = await this.list()
+      const issueCounts: Record<string, number> = {}
+      for (const r of rows) {
+        for (const i of r.issues) issueCounts[i.code] = (issueCounts[i.code] ?? 0) + 1
+      }
+      const average = rows.length ? rows.reduce((a, r) => a + r.quality, 0) / rows.length : 0
+      return {
+        total: rows.length,
+        average,
+        failing: rows.filter(r => r.issues.some(i => i.severity === 'error')).length,
+        issueCounts,
+        rows: [...rows]
+          .sort((a, b) => a.quality - b.quality || a.id.localeCompare(b.id))
+          .map(r => ({
+            id: r.id,
+            quality: r.quality,
+            issues: r.issues,
+            hasPatch: r.hasPatch,
+            useCount: r.useCount,
+            lastUsedAt: r.lastUsedAt,
+          })),
+      }
+    },
+
+    /**
+     * 逐技能详情校验 —— 供 dsagent_get_skill_detail 与 CI 使用。
+     * 返回 issues（有问题）与 hazards（YAML 陷阱）两份清单。
+     */
+    async validate(id: string): Promise<{ id: string; quality: number; ok: boolean; issues: ValidationIssue[] } | null> {
+      const row = await this.get(id)
+      if (!row) return null
+      return {
+        id: row.id,
+        quality: row.quality,
+        ok: !row.issues.some(i => i.severity === 'error'),
+        issues: row.issues,
+      }
+    },
+
+    /**
+     * 使用统计排行 —— 供市场页「按使用率排序」。
+     * qualityOf 取自扫描结果，无需调用方自己提供。
+     */
+    async usageRanking(): Promise<Array<{ id: string; useCount: number; lastUsedAt: number; quality: number }>> {
+      const rows = await this.list()
+      return rows
+        .map(r => ({ id: r.id, useCount: r.useCount, lastUsedAt: r.lastUsedAt, quality: r.quality }))
+        .sort((a, b) => b.useCount - a.useCount || b.lastUsedAt - a.lastUsedAt)
+    },
+
+    /**
+     * 「长期未用」候选清单 —— **仅供人工复核，本插件绝不自动删除技能**。
+     *
+     * Accio 会自动淘汰它自己从对话里提炼的 `[Harvest]` 技能（副产品，误删代价低）；
+     * 本项目的技能是人工精编的连接器，误删是用户资产损失且不可恢复，
+     * 因此这里只把候选列出来，删除动作永远由人决定（见 ACCIO-REVERSE-ANALYSIS.md §10）。
+     */
+    async idleCandidates(): Promise<Array<{ id: string; useCount: number; lastUsedAt: number; idleDays: number }>> {
+      if (!stats) return []
+      const rows = await this.list()
+      const qualityById = new Map(rows.map(r => [r.id, r.quality]))
+      const cands = await stats.idleCandidates(id => qualityById.get(id) ?? 0)
+      return cands.map(c => ({
+        id: c.id,
+        useCount: c.useCount,
+        lastUsedAt: c.lastUsedAt ?? 0,
+        idleDays: Math.round(c.idleDays ?? 0),
+      }))
+    },
+
+    /** 读取技能的使用统计（供 UI 显示「用过 N 次 / 上次 3 天前」） */
+    async statsOf(id: string): Promise<{ useCount: number; lastUsedAt: number }> {
+      if (!stats) return { useCount: 0, lastUsedAt: 0 }
+      const map = await stats.readAll()
+      return map[id] ?? { useCount: 0, lastUsedAt: 0 }
+    },
+
+    /** 读取技能的 SKILL.patch.md（供 UI 展示现场修正内容） */
+    async patchOf(id: string): Promise<PatchResult | null> {
+      const row = await this.get(id)
+      if (!row?.dir) return null
+      return readSkillPatch(row.dir)
+    },
+
     dispose() {
       cache = null
       cacheAt = 0
+      stats?.invalidate()
     },
   }
 }

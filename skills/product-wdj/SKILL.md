@@ -6,6 +6,17 @@ description: |
   适合「导出762128994852的问大家」「获取这个商品的全部问答」。
   凭证：必须使用平台连接里绑定的 **taobao（淘宝买家）** 账号。
 license: MIT
+# 工具触发声明（见 tool-triggers.ts）：调用下列工具时自动提示先读本 SKILL.md。
+# 本技能的关键坑位都写在正文里（240s 时间预算、answers_truncated 语义），
+# 不提示的话模型会以为「漏抓的回答」是失败。
+tool_triggers:
+  - tool: dsagent_execute_skill
+    args:
+      id: /^product-wdj$/
+  - tool: dsagent_product_wdj
+  - tool: dsagent_proxy
+    args:
+      url: /qa\.taobao\.com|wdj/
 metadata:
   builtin_skill_version: "1.2"
   dsagent:

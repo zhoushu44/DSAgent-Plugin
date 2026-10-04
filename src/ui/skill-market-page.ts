@@ -147,8 +147,15 @@ function askExamples(s: SkillRow): { asks: string[]; triggers: string[]; fromQuo
   return { asks, triggers, fromQuote: fromQuote.length > 0 }
 }
 
-/** 内置回退数据：宿主与技能目录都不可用时用于预览 */
-const FALLBACK_SKILLS: SkillRow[] = [
+/**
+ * 内置回退数据：宿主与技能目录都不可用时用于预览。
+ *
+ * 类型上只要求 SkillRow 的「展示必需字段」——质量/统计/补丁这些新增字段
+ * 由 normalizeFallback() 统一补默认值，避免 50+ 条字面量逐个维护。
+ */
+type FallbackSkill = Omit<SkillRow, 'frontmatter' | 'quality' | 'issues' | 'hasPatch' | 'useCount' | 'lastUsedAt'>
+
+const FALLBACK_SKILLS_RAW: FallbackSkill[] = [
   /* ── 内置技能（7 个，platform: common）── */
   { id: 'content-repurpose', name: '一稿多平台改写', description: '输入一份素材，自动改写为各平台风格的标题、正文与话题标签，适配字数与调性差异。', version: '1.0.0', platform: 'common', capability: 'copywriting', risk: 'L0', enabled: true, dir: '', body: '' },
   { id: 'publish-scheduler', name: '跨平台定时发布', description: '统一调度多平台发布队列，自动避开平台限流窗口，冲突检测与失败自动重排。', version: '1.0.0', platform: 'common', capability: 'shop-ops', risk: 'L2', enabled: true, dir: '', body: '' },
@@ -250,6 +257,24 @@ const FALLBACK_SKILLS: SkillRow[] = [
   { id: 'customer-service-reply', name: '电商客服话术生成', description: '根据场景与商品信息生成客服话术，支持售前咨询、售后安抚与催单场景。', version: '1.0.0', platform: 'common', capability: 'vertical', risk: 'L0', enabled: true, dir: '', body: '' },
 ]
 
+/**
+ * 给回退数据补上新增字段的默认值。
+ *
+ * 回退数据只在「宿主与技能目录都不可用」时用于预览，因此质量分/统计/补丁
+ * 一律取中性默认值（0 分、未用过、无补丁），不臆造任何看起来像真实数据的东西。
+ */
+function normalizeFallback(list: FallbackSkill[]): SkillRow[] {
+  return list.map(s => ({
+    ...s,
+    frontmatter: '',
+    quality: 0,
+    issues: [],
+    hasPatch: false,
+    useCount: 0,
+    lastUsedAt: 0,
+  }))
+}
+
 type Tab = 'vertical' | 'builtin' | 'installed'
 
 export interface SkillMarketPageDeps {
@@ -265,6 +290,8 @@ export function skillMarketPage(deps: SkillMarketPageDeps) {
   let cap = 'all'
   let plat = 'all'
   let kw = ''
+  /** 排序模式：default（技能目录顺序）/ quality（最需修的在前）/ usage（真在用的在前） */
+  let sortBy: 'default' | 'quality' | 'usage' = 'default'
 
   async function load() {
     const host = (globalThis as { __PLUGIN__?: { skills?: SkillRow[] } }).__PLUGIN__
@@ -274,7 +301,7 @@ export function skillMarketPage(deps: SkillMarketPageDeps) {
     } else if (skill) {
       try { scanned = await skill.list() } catch { scanned = [] }
     }
-    all = scanned.length ? scanned : FALLBACK_SKILLS
+    all = scanned.length ? scanned : normalizeFallback(FALLBACK_SKILLS_RAW)
   }
 
   /** 三页签的过滤差异 */
@@ -289,17 +316,44 @@ export function skillMarketPage(deps: SkillMarketPageDeps) {
   }
 
   function visible(): SkillRow[] {
-    return all.filter(s =>
+    const rows = all.filter(s =>
       inTab(s) &&
       (plat === 'all' || normPlatform(s.platform) === normPlatform(plat)) &&
       (!kw || s.name.includes(kw) || s.id.includes(kw) || s.description.includes(kw)))
+    // 排序模式：默认按 id；质量升序把「最需要修的」排最前；使用率降序把「真在用」排最前
+    if (sortBy === 'quality') {
+      return [...rows].sort((a, b) => a.quality - b.quality || a.id.localeCompare(b.id))
+    }
+    if (sortBy === 'usage') {
+      return [...rows].sort((a, b) => b.useCount - a.useCount || b.lastUsedAt - a.lastUsedAt || a.id.localeCompare(b.id))
+    }
+    return rows
   }
 
   function esc(s: string): string {
     return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;')
   }
 
+  /**
+   * 质量徽标 —— 把 Accio 同量表的文档质量分可视化。
+   *
+   * 阈值口径：
+   *   ≥1.00 完整（绿）｜ ≥0.85 良好（蓝）｜ ≥0.70 可改进（黄）｜ <0.70 有结构缺陷（红）
+   * 后两档同时给出 error 计数，因为「0.60 且没有任何 error」与
+   * 「0.60 且缺 Workflow」是两种完全不同的状态，只看分数分不出来。
+   */
+  function qualityBadge(s: SkillRow): string {
+    // 回退数据（无真实扫描）不显示质量徽标 —— 那 0.00 分不是真实结论，显示出来会误导
+    if (!s.frontmatter) return ''
+    const errs = s.issues.filter(i => i.severity === 'error').length
+    const level = s.quality >= 1 ? 'good' : s.quality >= 0.85 ? 'ok' : s.quality >= 0.70 ? 'warn' : 'bad'
+    const label = errs ? `质量 ${s.quality.toFixed(2)} · ${errs} 项缺陷` : `质量 ${s.quality.toFixed(2)}`
+    return `<span class="dsm-q dsm-q-${level}" title="文档质量分（Accio 同量表，槽位中英双语匹配）">${esc(label)}</span>`
+  }
+
   function card(s: SkillRow): string {
+    const patch = s.hasPatch ? `<span class="dsm-q dsm-q-patch" title="存在 SKILL.patch.md 现场修正">补丁</span>` : ''
+    const used = s.useCount > 0 ? `<span class="dsm-q dsm-q-use" title="成功执行次数（本地统计）">用过 ${s.useCount} 次</span>` : ''
     return `
       <article class="dsm-card" data-id="${esc(s.id)}">
         <div class="dsm-card-hd">
@@ -309,6 +363,7 @@ export function skillMarketPage(deps: SkillMarketPageDeps) {
           </div>
         </div>
         <p class="dsm-desc">${esc(s.description || '暂无描述')}</p>
+        <div class="dsm-q-row">${qualityBadge(s)}${patch}${used}</div>
         <div class="dsm-card-ft">
           <label class="dsm-switch" title="改写 SKILL.md 的 disable-model-invocation">
             <input type="checkbox" data-toggle="${esc(s.id)}" ${s.enabled ? 'checked' : ''}>
@@ -365,6 +420,11 @@ export function skillMarketPage(deps: SkillMarketPageDeps) {
           ${renderChips()}
           <div class="dsm-search">
             <input type="search" placeholder="搜索技能名称或功能…" data-kw>
+            <div class="dsm-sort">
+              <button class="dsm-chip ${sortBy === 'default' ? 'on' : ''}" data-sort="default">默认</button>
+              <button class="dsm-chip ${sortBy === 'quality' ? 'on' : ''}" data-sort="quality" title="文档质量分升序，最需要修的排前面">待修优先</button>
+              <button class="dsm-chip ${sortBy === 'usage' ? 'on' : ''}" data-sort="usage" title="按成功执行次数降序">常用优先</button>
+            </div>
           </div>
           <div class="dsm-body" data-body>${renderGrid()}</div>
 
@@ -430,11 +490,41 @@ export function skillMarketPage(deps: SkillMarketPageDeps) {
                 <div class="dsm-tags">${triggers.map(t => `<span class="dsm-tag">${esc(t)}</span>`).join('')}</div>
               </div>`
             : ''}`
+        // 质量与统计段：仅对真实扫描到的技能显示（回退数据没有真实分数）
+        let qualitySec = ''
+        if (s.frontmatter) {
+          const errs = s.issues.filter(i => i.severity === 'error')
+          const warns = s.issues.filter(i => i.severity === 'warn')
+          const usedTxt = s.useCount > 0
+            ? `成功 ${s.useCount} 次${s.lastUsedAt ? `，最近 ${new Date(s.lastUsedAt).toLocaleDateString()}` : ''}`
+            : '尚未成功使用过'
+          qualitySec = `
+          <div class="dsm-d-sec">
+            <h4>文档质量 ${s.quality.toFixed(2)} / 1.00</h4>
+            <div class="dsm-meta">
+              <span>成功使用</span><b>${esc(usedTxt)}</b>
+              <span>现场修正</span><b>${s.hasPatch ? '有 SKILL.patch.md' : '无'}</b>
+            </div>
+            ${errs.length
+              ? `<p class="dsm-hint"><b>结构性问题（${errs.length}）</b></p>
+                 <ul class="dsm-asks">${errs.map(i => `<li><span>${esc(i.message)}</span></li>`).join('')}</ul>`
+              : ''}
+            ${warns.length
+              ? `<p class="dsm-hint"><b>可改进（${warns.length}）</b></p>
+                 <ul class="dsm-asks">${warns.map(i => `<li><span>${esc(i.message)}</span></li>`).join('')}</ul>`
+              : ''}
+            ${!errs.length && !warns.length ? '<p class="dsm-hint">文档结构完整，无校验问题。</p>' : ''}
+            <p class="dsm-hint">评分口径与 Accio 一致：Workflow 权重最高（0.20），
+              槽位中英双语匹配（「## 工作流」与「## Workflow」等价）。</p>
+          </div>`
+        }
+
         q('[data-d-content]').innerHTML = `
           <div class="dsm-d-sec">
             <h4>功能说明</h4><p>${esc(s.description || '暂无描述')}</p>
           </div>
           ${askSec}
+          ${qualitySec}
           <div class="dsm-d-sec">
             <h4>元信息</h4>
             <div class="dsm-meta">
@@ -465,6 +555,13 @@ disable-model-invocation: ${s.enabled ? 'false' : 'true'}</pre>
         if (platEl) {
           plat = platEl.dataset.plat as string
           root.querySelectorAll('[data-plat]').forEach(el => el.classList.toggle('on', (el as HTMLElement).dataset.plat === plat))
+          repaint(); return
+        }
+
+        const sortEl = t.closest('[data-sort]') as HTMLElement | null
+        if (sortEl) {
+          sortBy = (sortEl.dataset.sort as typeof sortBy) || 'default'
+          root.querySelectorAll('[data-sort]').forEach(el => el.classList.toggle('on', (el as HTMLElement).dataset.sort === sortBy))
           repaint(); return
         }
 
@@ -576,7 +673,19 @@ const MARKET_CSS = `
 .dsm-chip:hover{border-color:#b9c2d4}
 .dsm-chip.on{background:#2b6cff;border-color:#2b6cff;color:#fff}
 .dsm-chip-plat.on{background:#8a94a6;border-color:#8a94a6}
-.dsm-search{margin-bottom:14px}
+.dsm-search{margin-bottom:14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.dsm-search input[type=search]{flex:1;min-width:180px}
+.dsm-sort{display:flex;gap:6px;flex:none}
+
+/* 质量徽标：阈值同 qualityBadge()，四档 + 补丁 + 使用次数 */
+.dsm-q-row{display:flex;gap:6px;flex-wrap:wrap;margin:0 0 10px}
+.dsm-q{display:inline-block;border-radius:4px;padding:1px 7px;font-size:11px;line-height:18px;border:1px solid transparent}
+.dsm-q-good{background:#e8f7ee;color:#1a7f47;border-color:#b9e6cb}
+.dsm-q-ok{background:#eaf1ff;color:#2b5fd9;border-color:#c4d6fb}
+.dsm-q-warn{background:#fff6e5;color:#a26a00;border-color:#f5dca6}
+.dsm-q-bad{background:#fdeceb;color:#c0362c;border-color:#f6c8c4}
+.dsm-q-patch{background:#f0ecff;color:#5b3fbe;border-color:#d8cffa}
+.dsm-q-use{background:#f2f4f9;color:#5a6377;border-color:#e2e7f0}
 .dsm-search input{width:260px;border:1px solid #e4e8f0;border-radius:6px;padding:6px 12px;font-size:13px;outline:none}
 .dsm-search input:focus{border-color:#2b6cff}
 .dsm-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px}

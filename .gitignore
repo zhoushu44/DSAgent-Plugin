@@ -24,3 +24,21 @@ dist/
 # 系统文件
 .DS_Store
 Thumbs.db
+
+# ── Accio 逆向分析的临时解包目录 ──
+# 这些是 Electron 应用（app.asar）的解包产物，属第三方厂商代码：
+#   · 体积巨大（合计 ~320MB），不该进仓库
+#   · 版权不属于本项目，入库有合规风险
+#   · 需要重读时用 dev/accio-analysis/unpack-asar.mjs 重新解包即可
+.tmp-accio/
+_accio_probe/
+accio-app/
+accio_extracted/
+dev/accio-analysis/
+accio_files.txt
+
+# 分析与验证的落盘产物（每次运行都会重建）
+artifacts/
+*_payload_*.json
+.skill-stats.json
+.pitfall-memory.json

@@ -17,11 +17,17 @@ import type { Context } from '@deepseek-ai/cordis'
 import { defineTool as dshDefineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { createAccountService } from './services/account-service.js'
 import { createSkillService, detectEntry, extractUsage, parseArgString, renderSkillDirHint, type SkillRow } from './services/skill-service.js'
+import { createToolTriggerRegistry, type TriggerSourceSkill } from './services/tool-triggers.js'
+import { getDomain, describeDomain, domainRoutingTable, DOMAIN_NAMES, RECEPTION_INTENTS } from './services/wiki-schema.js'
+import { buildTemplate, templateToYaml, templateGuide } from './services/wiki-frontmatter.js'
+import { createWikiStore } from './services/wiki-store.js'
+import { createPitfallMemory, renderPitfallHint, exportPitfallDraft, PITFALL } from './services/pitfall-memory.js'
 import { loadContract, contractToolName, contractToolParameters, buildContractArgv, type SkillContract } from './services/arguments.js'
 import { readdirSync, readFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { CredentialStore, parseCookieStr, keyCookies, credentialPlatform, resolveDisplayNick, loginOwnerPlatform } from './services/credential-store.js'
+import { CredentialStore, parseCookieStr, keyCookies, credentialPlatform, resolveDisplayNick, loginOwnerPlatform, planCascadeDisconnect } from './services/credential-store.js'
 import { doBrowserLogin, closeBrowser, ensureXianyuFromTaobao, riskVerify, removeAccountProfile } from './browser-login.js'
+import * as authOp from './services/auth-operation.js'
 import { douyinPublish } from './douyin-publish.js'
 import { zhihuPublish } from './zhihu-publish.js'
 import { bilibiliPublish } from './bilibili-publish.js'
@@ -32,7 +38,8 @@ import { xianyuPublish } from './xianyu-publish.js'
 import { xianyuAnalytics } from './xianyu-analytics.js'
 import { taobaoPublish } from './taobao-publish.js'
 import { pddPublish } from './pdd-publish.js'
-import { startGatewayProxy, handleProxy, ensureAlimamaTokens, getLastVerifyUrlByPlatform, probeRemoteSession } from './gateway-proxy.js'
+import { startGatewayProxy, handleProxy, ensureAlimamaTokens, getLastVerifyUrlByPlatform, probeRemoteSession, gatewayCacheStats, clearGatewayCache } from './gateway-proxy.js'
+import { smartTruncateJsonAware } from './services/smart-truncate.js'
 import * as nodePath from 'node:path'
 import * as nodeOs from 'node:os'
 
@@ -59,8 +66,8 @@ function sanitizeForLosslessJson(s: string): string {
   cleaned = cleaned.replace(/[\uD800-\uDFFF]/g, '')
   // 移除 BOM 和零宽字符
   cleaned = cleaned.replace(/\uFEFF/g, '').replace(/[\u200B-\u200D\u2060]/g, '')
-  // 截断过长文本
-  if (cleaned.length > TOOL_TEXT_LIMIT) cleaned = cleaned.slice(0, TOOL_TEXT_LIMIT) + '...(截断)'
+  // 截断过长文本：智能头尾保留（尾部常有 summary/total/结论），见 smart-truncate.ts
+  if (cleaned.length > TOOL_TEXT_LIMIT) cleaned = smartTruncateJsonAware(cleaned, TOOL_TEXT_LIMIT)
   return cleaned
 }
 
@@ -149,7 +156,9 @@ function toLosslessJson(v: unknown, depth = 0): unknown {
  */
 function spillPayload(skillId: string, payloadStr: string): string {
   if (payloadStr.length <= TOOL_TEXT_LIMIT) return payloadStr
-  const preview = payloadStr.slice(0, TOOL_TEXT_LIMIT) + '\n...(已截断)'
+  // 预览改用智能截断：尾部保留——total/summary/分页字段常在 JSON 末尾，
+  // 纯头部预览会让模型误以为数据「到此为止」而漏看统计字段（false PASS）。
+  const preview = smartTruncateJsonAware(payloadStr, TOOL_TEXT_LIMIT)
   try {
     const ws = process.env.DSAGENT_WORKSPACE ?? process.cwd()
     const dir = join(ws, 'artifacts')
@@ -201,12 +210,15 @@ export interface Config {
   storePath: string
   /** 未绑定账号时是否返回引导文案而非硬报错 */
   guideOnUnbound: boolean
+  /** 商家知识 Wiki 根目录；留空则用 <工作区>/wiki */
+  wikiRoot?: string
 }
 
 export const config: Config = {
   skillRoot: '',
   storePath: '',
   guideOnUnbound: true,
+  wikiRoot: '',
 }
 
 /**
@@ -329,8 +341,55 @@ export function apply(ctx: Context, cfg: Config = config) {
     'dsagent-accounts.json',
   )
   const account = createAccountService(storePath)
-  const skill = createSkillService(cfg.skillRoot)
+  // 技能使用统计落在凭证库同级的 .skill-stats.json —— 不放技能目录内，
+  // 避免被 Harness 的技能扫描当成技能资源（见 skill-stats.ts 的设计说明）。
+  const statsPath = nodePath.join(nodePath.dirname(storePath), '.skill-stats.json')
+  const skill = createSkillService(cfg.skillRoot, { statsPath })
   const store = new CredentialStore(storePath)
+
+  /* ─────────────── 商家知识 Wiki（八域本体，移植自 Accio） ─────────────── */
+  // 落盘位置：工作区下的 wiki/ 目录。选这里而非插件数据目录，是因为
+  // 知识是**用户资产**，应当与工作区一起被看到、备份、搬迁；
+  // 而凭证库是机器本地状态，两者生命周期不同。
+  const wikiRoot = cfg.wikiRoot
+    || nodePath.join(process.env.DSAGENT_WORKSPACE ?? process.cwd(), 'wiki')
+  const wiki = createWikiStore(wikiRoot)
+
+  /* ─────────────── 平台坑位记忆（P3，从真实失败中累积） ─────────────── */
+  // 与技能统计同放插件数据目录：这是**机器本地状态**，不是用户知识资产。
+  // 用户资产（wiki）放工作区，机器状态（凭证/统计/坑位）放数据目录 —— 两者生命周期不同。
+  const pitfalls = createPitfallMemory(nodePath.join(nodePath.dirname(storePath), '.pitfall-memory.json'))
+
+  /**
+   * 工具触发注册表（吸收 Accio 的 ToolTriggerRegistry）。
+   *
+   * 在工具被调用的瞬间，把「本次操作与哪些技能相关」注入到工具返回里，
+   * 逼模型先读 SKILL.md 再动手 —— 解决「包了一层工具的技能，其坑位信息
+   * 在调用前不可见」的问题（见 tool-triggers.ts 的设计说明）。
+   */
+  const triggers = createToolTriggerRegistry()
+  /** 注册表最近一次重建时间，用于避免每轮对话都重建 */
+  let triggersBuiltAt = 0
+  const TRIGGER_REBUILD_TTL = 60_000
+
+  /** 扫描技能目录，为触发注册表提供 tool_triggers 来源 */
+  async function rebuildTriggers(): Promise<void> {
+    try {
+      const rows = await skill.list()
+      const sources: TriggerSourceSkill[] = rows
+        .filter(r => r.dir && r.frontmatter)
+        .map(r => ({
+          id: r.id,
+          description: r.description,
+          skillPath: nodePath.join(r.dir, 'SKILL.md'),
+          frontmatter: r.frontmatter,
+        }))
+      triggers.rebuild(sources)
+      triggersBuiltAt = Date.now()
+    } catch (e) {
+      console.warn('[dsagent] 触发注册表重建失败（不影响技能执行）:', e instanceof Error ? e.message : String(e))
+    }
+  }
 
   /* ─────────────── 0. 扫描技能清单，注入系统提示词 ─────────────── */
   // 有 contract.json 的技能已作为「独立工具」注册（一技能一工具、参数表由契约生成），
@@ -553,6 +612,16 @@ export function apply(ctx: Context, cfg: Config = config) {
                   risk: s.risk,
                   enabled: s.enabled,
                   dir: s.dir,
+                  // 质量门禁结果（Accio 同量表）—— 供市场页展示分数与缺陷清单
+                  quality: s.quality,
+                  issues: s.issues,
+                  // 现场修正层标记
+                  hasPatch: s.hasPatch,
+                  // 使用统计（本地 .skill-stats.json）
+                  useCount: s.useCount,
+                  lastUsedAt: s.lastUsedAt,
+                  // 注意：刻意不回传 body 与 frontmatter —— 两者体积大且页面不需要，
+                  // 回传会让技能列表响应膨胀数十倍（body 是整篇 SKILL.md）。
                 })),
               }))
             } else if (action === 'set_skill_enabled') {
@@ -565,6 +634,8 @@ export function apply(ctx: Context, cfg: Config = config) {
               } else {
                 try {
                   await skill.setEnabled(skillId, enabled)
+                  // 启停改写了 frontmatter（可能带 tool_triggers），触发注册表要跟着失效重建
+                  triggersBuiltAt = 0
                   console.log(`[dsagent-http] set_skill_enabled: skillId=${skillId}, enabled=${enabled}`)
                   res.writeHead(200, { 'Content-Type': 'application/json' })
                   res.end(JSON.stringify({ ok: true }))
@@ -573,6 +644,54 @@ export function apply(ctx: Context, cfg: Config = config) {
                   res.end(JSON.stringify({ ok: false, error: err?.message || String(err) }))
                 }
               }
+            } else if (action === 'skill_quality') {
+              // 质量总览：技能市场页的「质量」视图 + CI 断言的数据源
+              try {
+                const overview = await skill.qualityOverview()
+                res.writeHead(200, { 'Content-Type': 'application/json' })
+                res.end(JSON.stringify({ ok: true, ...overview }))
+              } catch (err: any) {
+                res.writeHead(200, { 'Content-Type': 'application/json' })
+                res.end(JSON.stringify({ ok: false, error: err?.message || String(err) }))
+              }
+            } else if (action === 'skill_stats') {
+              // 使用统计排行 + 长期未用候选（**仅列出，绝不自动删除**）
+              try {
+                const ranking = await skill.usageRanking()
+                const idle = await skill.idleCandidates()
+                res.writeHead(200, { 'Content-Type': 'application/json' })
+                res.end(JSON.stringify({ ok: true, ranking, idle }))
+              } catch (err: any) {
+                res.writeHead(200, { 'Content-Type': 'application/json' })
+                res.end(JSON.stringify({ ok: false, error: err?.message || String(err) }))
+              }
+            } else if (action === 'skill_patch') {
+              // 读取某技能的 SKILL.patch.md（现场修正层）
+              const patchSkillId = String(rest.skillId ?? '')
+              try {
+                const patch = patchSkillId ? await skill.patchOf(patchSkillId) : null
+                res.writeHead(200, { 'Content-Type': 'application/json' })
+                res.end(JSON.stringify({ ok: true, patch }))
+              } catch (err: any) {
+                res.writeHead(200, { 'Content-Type': 'application/json' })
+                res.end(JSON.stringify({ ok: false, error: err?.message || String(err) }))
+              }
+            } else if (action === 'trigger_stats') {
+              // 触发注册表诊断：命中规则数 / 已提示会话数
+              res.writeHead(200, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({ ok: true, stats: triggers.stats() }))
+            } else if (action === 'pitfall_stats') {
+              // 平台坑位记忆诊断
+              try {
+                const stats = await pitfalls.stats()
+                const active = await pitfalls.activeFor({ skillId: String(rest.skillId ?? '') || undefined })
+                const all = await pitfalls.list()
+                res.writeHead(200, { 'Content-Type': 'application/json' })
+                res.end(JSON.stringify({ ok: true, stats, active, all: all.slice(0, 100) }))
+              } catch (err: any) {
+                res.writeHead(200, { 'Content-Type': 'application/json' })
+                res.end(JSON.stringify({ ok: false, error: err?.message || String(err) }))
+              }
             } else if (action === 'delete_account') {
               // 删除账号：按凭证库主键 shopKey 删除（browser 半区不能读写本地文件，必须走此路由）
               const shopKey = String(rest.shopKey ?? '')
@@ -580,14 +699,25 @@ export function apply(ctx: Context, cfg: Config = config) {
                 res.writeHead(200, { 'Content-Type': 'application/json' })
                 res.end(JSON.stringify({ ok: false, error: '缺少 shopKey' }))
               } else {
+                // ★ 删除前先算出级联影响（数据驱动的派生关系，见 credential-store.ts 的
+                //   DERIVATION_REGISTRY / planCascadeDisconnect）：删淘宝会波及生意参谋系与闲鱼。
+                //   必须在**删除前**算 —— 删完目标行就查不到 unb，身份无从判定。
+                const cascade = planCascadeDisconnect(shopKey, store.listAccounts())
                 const ok = await store.deleteByShopKey(shopKey)
                 // ★ 凭证删除成功后再清账号专属 Profile（browser-profiles/accounts/{shopKey}）。
                 //   顺序不能反：Profile 被占用删不掉时，账号必须仍然删得掉，所以这里只记结果不抛错。
                 const profile = ok ? removeAccountProfile(shopKey) : { cleaned: false, note: '账号不存在' }
-                console.log(`[dsagent-http] delete_account: shopKey=${shopKey}, ok=${ok}, profile=${profile.cleaned ? 'cleaned' : profile.note}`)
+                console.log(`[dsagent-http] delete_account: shopKey=${shopKey}, ok=${ok}, profile=${profile.cleaned ? 'cleaned' : profile.note}${cascade.summary ? `, cascade=${cascade.summary}` : ''}`)
                 res.writeHead(200, { 'Content-Type': 'application/json' })
                 res.end(JSON.stringify(ok
-                  ? { ok: true, profileCleaned: profile.cleaned, profileNote: profile.cleaned ? undefined : profile.note }
+                  ? {
+                      ok: true,
+                      profileCleaned: profile.cleaned,
+                      profileNote: profile.cleaned ? undefined : profile.note,
+                      // 把级联影响回传给 UI / 模型，让用户知道「还影响了什么」
+                      ...(cascade.summary ? { cascadeSummary: cascade.summary } : {}),
+                      ...(cascade.affected.length ? { cascadeAffected: cascade.affected.map(a => a.shop_key) } : {}),
+                    }
                   : { ok: false, error: '账号不存在' }))
               }
             } else if (action === 'bind_agent') {
@@ -708,6 +838,9 @@ export function apply(ctx: Context, cfg: Config = config) {
   ctx.effect(() => {
     // 扫描技能清单，拼进系统提示词——这是模型触发技能调用的唯一入口
     const catalog = scanSkillCatalog()
+    // 启动时构建一次工具触发注册表（异步，不阻塞提示词注入；
+    // 首次工具调用若早于构建完成，executeSkillCore 里会按 TTL 再补建一次）
+    void rebuildTriggers()
     const skillLines: string[] = [
       '【技能调用方式】',
       '业务技能有两种暴露方式，按以下优先级选择：',
@@ -873,6 +1006,8 @@ export function apply(ctx: Context, cfg: Config = config) {
     agentId: string
     fromContract: boolean
     invokedTool: string
+    /** 契约工具路径下的原始具名参数 —— 供 tool_triggers 的 args 条件匹配使用 */
+    contractArgs?: Record<string, unknown>
   }): Promise<any> {
     const { skillId, requestStr, explicitArgs, chosenShopKey, agentId, fromContract, invokedTool } = opts
 
@@ -887,6 +1022,32 @@ export function apply(ctx: Context, cfg: Config = config) {
     // 技能目录 + 自带资源清单：可执行技能失败或数据层为空时，模型要读技能自带
     // references/、scripts/ 才能排查。缺这段会让模型满盘搜索文件系统找技能安装位置。
     const skillDirHint = skillInfo.dir ? renderSkillDirHint(skillInfo.dir) : ''
+
+    // 工具触发提示（吸收 Accio 的 tool_triggers）：把与该技能相关的**其他**技能、
+    // 以及插件内置的风控预提示挂到返回里，让模型在动手前先读相关 SKILL.md。
+    // 会话级去重：同一技能在同一会话只提示一次，避免多轮对话反复刷屏。
+    // 用实际被调用的工具名（invokedTool）匹配，这样声明了 `tool: dsagent_<技能>` 的
+    // 规则在契约工具路径下也能命中，而不只在 dsagent_execute_skill 路径下生效。
+    let triggerHint = ''
+    try {
+      if (Date.now() - triggersBuiltAt > TRIGGER_REBUILD_TTL) await rebuildTriggers()
+      const callArgs = { id: skillId, ...(opts.contractArgs ?? {}) }
+      const hits = [
+        ...triggers.match('dsagent_execute_skill', callArgs, agentId),
+        ...triggers.match(invokedTool, callArgs, agentId),
+      // 去掉「本次正在执行的技能自己」——提示它去读自己正在跑的文件没有意义
+      ].filter(h => h.skillId !== skillId)
+      // 同一个技能可能被两条规则命中（通用规则 + 具名工具规则），去重
+      const seen = new Set<string>()
+      const unique = hits.filter(h => (seen.has(h.skillId) ? false : (seen.add(h.skillId), true)))
+      if (unique.length) triggerHint = triggers.formatHint(unique)
+    } catch (e) {
+      console.warn('[dsagent] 触发匹配失败（不影响技能执行）:', e instanceof Error ? e.message : String(e))
+    }
+
+    /**
+     * 坑位提示（P3）是惰性计算的，见 platform 解析之后的 `ensurePitfallHint()`。
+     */
 
     const platform = requiredPlatform(skillId)
     let resolvedShopKey = chosenShopKey
@@ -917,15 +1078,74 @@ export function apply(ctx: Context, cfg: Config = config) {
           message: '',
         } as any
       }
-      // 会话状态检查：过期或风控
+      // 会话状态检查：过期 / 必须重登 / 风控
+      //
+      // ★ `reauth_required` 与 `expired` 给出**不同**的文案（吸收 Accio 的
+      //   error / reconnect_required 二分）：
+      //     · reauth_required —— 连续探测失败已达阈值，重试无用，必须人工重登
+      //     · expired         —— 疑似失效，可能是网络抖动，允许先重试
+      //   两者都映射到 failureKind='token_expired'（对模型而言动作都是「让用户重登」），
+      //   但文案把确定性说清楚，避免用户在「疑似过期」上反复重试。
+      if (ctx2.sessionHint === 'reauth_required') {
+        return {
+          ok: false,
+          failureKind: 'token_expired',
+          text: `${guidedPlatform(platform)} 平台登录态已失效（连续探测失败，重试无法恢复）。请引导用户到「账号连接」页面重新登录${guidedPlatformExtra(platform)}。`,
+          exitCode: -1,
+          skillId,
+          message: '',
+        } as any
+      }
       if (ctx2.sessionHint === 'expired') {
-        return { ok: false, failureKind: 'token_expired', text: `${guidedPlatform(platform)} 平台登录态已过期，请到「账号连接」页面重新登录。`, exitCode: -1, skillId, message: '' } as any
+        return { ok: false, failureKind: 'token_expired', text: `${guidedPlatform(platform)} 平台登录态疑似过期（可能是网络抖动）。可先重试一次；若仍失败，请到「账号连接」页面重新登录。`, exitCode: -1, skillId, message: '' } as any
       }
       if (ctx2.sessionHint === 'risk_control') {
+        // 平台侧风控也是「平台坑位」，记入统计 —— 反复触发说明该账号/该接口确实是高风险面
+        try {
+          await pitfalls.record({ skillId, platform, failureKind: 'risk_control', message: '会话被风控拦截（平台侧）' })
+        } catch { /* 静默 */ }
         return { ok: false, failureKind: 'risk_control', text: `${platform} 平台会话被风控拦截。请调用 dsagent_risk_verify（platform=${platform}）拉起验证页完成滑块验证，凭证会自动写回账号，然后重新执行本技能。`, exitCode: -1, skillId, message: '' } as any
       }
       // 选定账号（含第 ④ 级唯一候选）→ 透传给网关，保证 host 预检与网关选号一致
       resolvedShopKey = ctx2.shopKey || resolvedShopKey
+    }
+
+    /**
+     * 坑位提示（P3）：把**已复现达阈值**的历史坑位挂到返回里。
+     *
+     * 必须是**惰性**的 —— 只在失败路径上才计算。原因：
+     *   · 成功路径不需要它（成功时附一段「这技能历史上老失败」纯属噪声）
+     *   · `activeFor()` 要读盘 + 过滤，成功是常态，白做一次 IO 不划算
+     *
+     * 必须在 platform 解析之后定义 —— 平台维度的坑（同平台所有技能共享，
+     * 如频控）需要 platform 才能取到。
+     *
+     * 与 tool_triggers 是互补关系：
+     *   - tool_triggers 来自技能**作者声明**（静态、人工维护）→ 管「事先该读哪个文件」
+     *   - 坑位提示来自**真实失败统计**（动态、机器累积）→ 管「事后这是什么问题」
+     *
+     * 只取 confirmed（证据 ≥ 阈值）且未陈旧的条目 —— 单次偶发失败不会进入提示。
+     */
+    let pitfallHint: string | null = null
+    async function ensurePitfallHint(): Promise<string> {
+      if (pitfallHint !== null) return pitfallHint
+      try {
+        const active = await pitfalls.activeFor({ skillId })
+        // 平台维度的坑也一并带出（同一平台下所有技能共享的坑，如频控）
+        const byPlatform = platform ? await pitfalls.activeFor({ platform }) : []
+        const uniqSeen = new Set<string>()
+        const deduped = [...active, ...byPlatform].filter(e => {
+          const k = `${e.platform}::${e.failureKind}::${e.signature}`
+          if (uniqSeen.has(k)) return false
+          uniqSeen.add(k)
+          return true
+        }).slice(0, PITFALL.MAX_HINT_ITEMS)
+        pitfallHint = deduped.length ? renderPitfallHint(deduped) : ''
+      } catch (e) {
+        console.warn('[dsagent] 坑位提示生成失败（不影响技能执行）:', e instanceof Error ? e.message : String(e))
+        pitfallHint = ''
+      }
+      return pitfallHint
     }
 
     // 从本地凭证库获取 Cookie 注入环境变量
@@ -987,10 +1207,31 @@ export function apply(ctx: Context, cfg: Config = config) {
       }
       // 附上技能用法：多数失败是参数没给对，模型可据此补参数重试
       const usageHint = result.usage ? `\n\n用法：${result.usage}\n如需参数，请补全后重新调用 ${invokedTool}。` : ''
+
+      // 坑位累积（P3）：把本次真实失败记入统计。达阈值的坑位下次调用会进 pitfallHint。
+      // 只记「可归因」的失败类型 —— not_bound / need_account_choice 是流程引导而非平台坑，
+      // 记进去只会污染统计（它们由配置决定，不是需要规避的坑）。
+      const RECORDABLE = new Set(['risk_control', 'rate_limit', 'token_expired', 'no_permission', 'parse_error', 'api_error', 'skill_error'])
+      if (RECORDABLE.has(failureKind)) {
+        try {
+          await pitfalls.record({
+            skillId,
+            platform: platform ?? undefined,
+            failureKind,
+            message: result.message || result.stderr || '',
+          })
+        } catch { /* 记忆写入失败不能影响错误上报 */ }
+      }
+
+      // 坑位提示（惰性计算：只在失败路径上真的读盘取一次）
+      const pitfallHint = await ensurePitfallHint()
+
       return {
         ok: false,
         failureKind,
-        text: `技能执行失败：${result.message || result.stderr || '未知错误'}${usageHint}\n\n${skillDirHint}`,
+        text: `技能执行失败：${result.message || result.stderr || '未知错误'}${usageHint}\n\n${skillDirHint}`
+          + (triggerHint ? `\n\n${triggerHint}` : '')
+          + (pitfallHint ? `\n\n${pitfallHint}` : ''),
         usage: result.usage ?? null,
         exitCode: result.exitCode,
         skillId,
@@ -1026,6 +1267,8 @@ export function apply(ctx: Context, cfg: Config = config) {
     if (supportsReport && !reportPath) textParts.push(`\n\n💡 该技能支持生成 HTML 报告，请基于数据撰写洞察后调用 dsagent_generate_report。`)
     // 技能目录 + 资源清单：数据层为空/结果异常时，模型据此读技能自带 references/ 排查
     textParts.push(`\n\n${skillDirHint}`)
+    // 工具触发提示：相关技能 + 内置风控预提示
+    if (triggerHint) textParts.push(`\n\n${triggerHint}`)
 
     return { ok: true, text: textParts.join(''), exitCode: result.exitCode, skillId, message: result.message, reportPath: reportPath ?? null, csvPath: csvPath ?? null, supportsReport } as any
   }
@@ -1078,6 +1321,7 @@ export function apply(ctx: Context, cfg: Config = config) {
           agentId: agentIdOf(exec),
           fromContract: true,
           invokedTool: name,
+          contractArgs: rawArgs,
         })
       },
     })
@@ -1171,11 +1415,30 @@ export function apply(ctx: Context, cfg: Config = config) {
           } as any
         }
         const loginUrl = String(args.loginUrl ?? '')
+        // ★ 授权流程 operation 化（吸收 Accio 的 managed-auth start/advance/poll/cancel）：
+        //   每次登录都登记一个 operation，模型可 poll 进度、resume 续推、cancel 放弃。
+        //   同平台重复 start 会**复用**未结束的 operation（幂等），
+        //   避免模型重试时拉起第二个浏览器撞上 Chrome 的 userDataDir 独占锁。
+        const op = authOp.startOperation({
+          kind: 'login',
+          platform,
+          onCancel: async () => {
+            // 取消 = 关掉浏览器窗口。窗口一关，登录进度自然作废，无需额外状态。
+            await closeBrowser()
+          },
+        })
         const result = await doBrowserLogin(platform, loginUrl, store, {
           freshLogin: args.freshLogin === true,
           replaceShopKey: String(args.shopKey ?? '') || undefined,
+          operationId: op.operationId,
         })
-        return result as any
+        // 把 operationId 一并返回，模型后续可据此 poll / cancel
+        const finalOp = authOp.getOperation(op.operationId)
+        return {
+          ...result,
+          operationId: op.operationId,
+          ...(finalOp ? { phase: finalOp.phase, awaitingUser: finalOp.awaitingUser } : {}),
+        } as any
       },
     }),
 
@@ -1189,6 +1452,139 @@ export function apply(ctx: Context, cfg: Config = config) {
       async execute() {
         const result = await closeBrowser()
         return result as any
+      },
+    }),
+
+    /* ─── 授权流程查询 / 续推 / 取消（吸收 Accio 的 managed-auth advance/poll/cancel） ───
+     *
+     * 登录与风控验证都是「需要用户参与、可能中途停顿、超时后窗口仍开着」的长流程。
+     * 改造前它们是一次阻塞调用，中途状态对模型是黑盒；现在各有 operationId，
+     * 模型可据此查询进度、续推、取消 —— 而不必重新走一遍登录（会重开浏览器）。
+     */
+
+    defineTool({
+      name: 'dsagent_auth_status',
+      description:
+        '查询登录 / 风控验证流程的当前进度（不传 operationId 则列出所有进行中的流程）。'
+        + '当 dsagent_browser_login 或 dsagent_risk_verify 返回「等待用户操作」或「等待超时」时，'
+        + '用本工具查看当前阶段：是在等用户扫码 / 拖滑块，还是需要补充输入，还是已经完成。',
+      parameters: {
+        // DSH 校验器要求：可选参数必须整体省略 required 字段
+        operationId: { type: 'string', description: '流程 ID（login / risk_verify 返回的 operationId）；省略则列出全部进行中流程' },
+        platform: { type: 'string', description: '按平台过滤（仅列出模式下有效）' },
+      },
+      output: { schema: { type: 'json' }, render: renderToolOutput },
+      async execute(args) {
+        const operationId = String(args.operationId ?? '').trim()
+        if (operationId) {
+          const op = authOp.getOperation(operationId)
+          if (!op) {
+            return { ok: false, error: `未找到授权流程 ${operationId}（可能已过期，请重新发起登录）` } as any
+          }
+          return { ok: true, text: authOp.describeOperation(op), operation: op } as any
+        }
+        const platform = String(args.platform ?? '').trim() || undefined
+        const list = authOp.listOperations({ platform, liveOnly: false })
+        if (!list.length) {
+          return { ok: true, text: '当前没有进行中的登录 / 风控验证流程。' } as any
+        }
+        return {
+          ok: true,
+          text: list.map(authOp.describeOperation).join('\n\n'),
+          operations: list,
+        } as any
+      },
+    }),
+
+    defineTool({
+      name: 'dsagent_auth_advance',
+      description:
+        '推进一个已暂停的登录 / 风控验证流程（对应 Accio 的 managed-auth advance）。'
+        + '典型用法：① 流程显示「等待超时」但用户其实已经完成了扫码 → action=resume 让它重新检查；'
+        + '② 流程要求补充输入 → action=submit 并传 value；'
+        + '③ 流程要求在多选项中选一个 → action=choose 并传 value；'
+        + '④ action=retry 让它重试一次。',
+      parameters: {
+        operationId: { type: 'string', required: true, description: '流程 ID（来自 dsagent_browser_login / dsagent_risk_verify / dsagent_auth_status）' },
+        action: { type: 'string', required: true, description: '动作：resume（超时后继续检查）/ submit（提交输入）/ choose（选择候选）/ confirm（确认）/ retry（重试）' },
+        // DSH 校验器要求：可选参数必须整体省略 required 字段
+        value: { type: 'string', description: 'action=submit / choose 时的值（验证码、候选项 id 等）' },
+      },
+      output: { schema: { type: 'json' }, render: renderToolOutput },
+      async execute(args) {
+        const operationId = String(args.operationId ?? '').trim()
+        const action = String(args.action ?? '').trim()
+        if (!operationId || !action) {
+          return { ok: false, error: '缺少 operationId 或 action' } as any
+        }
+        const res = await authOp.advanceOperation(operationId, {
+          action,
+          value: String(args.value ?? '') || undefined,
+        })
+        if (!res.ok) {
+          return { ok: false, error: res.error, operation: res.operation } as any
+        }
+        return {
+          ok: true,
+          text: res.operation ? authOp.describeOperation(res.operation) : '已推进',
+          operation: res.operation,
+        } as any
+      },
+    }),
+
+    defineTool({
+      name: 'dsagent_auth_cancel',
+      description:
+        '取消一个进行中的登录 / 风控验证流程，并关闭其浏览器窗口。'
+        + '用于用户明确放弃、或在错误的平台上发起了登录时清理，避免浏览器窗口一直开着占用 Profile 锁。',
+      parameters: {
+        operationId: { type: 'string', required: true, description: '流程 ID' },
+      },
+      output: { schema: { type: 'json' }, render: renderToolOutput },
+      async execute(args) {
+        const operationId = String(args.operationId ?? '').trim()
+        if (!operationId) return { ok: false, error: '缺少 operationId' } as any
+        const res = await authOp.cancelOperation(operationId)
+        if (!res.ok) return { ok: false, error: res.error, operation: res.operation } as any
+        return { ok: true, text: '已取消该授权流程并关闭浏览器窗口。', operation: res.operation } as any
+      },
+    }),
+
+    /* ─── 网关响应缓存观测（吸收 Accio 本地快照体系的核心目的：不重复打平台）─── */
+
+    defineTool({
+      name: 'dsagent_gateway_cache',
+      description:
+        '查看或清理网关响应缓存。网关会对「参数完全相同的 GET 请求」在短时间内复用上一次的结果，'
+        + '从而减少对平台的重复请求（降低风控风险、省掉账号级节流的等待）。'
+        + '本工具用于查看缓存命中情况；当怀疑读到的是陈旧数据时可用 action=clear 强制刷新。'
+        + '注意：POST（发布/提交类）与失败响应从不进入缓存。',
+      parameters: {
+        // DSH 校验器要求：可选参数必须整体省略 required 字段
+        action: { type: 'string', description: 'stats（默认，查看命中率）/ clear（清空全部缓存）' },
+      },
+      output: { schema: { type: 'json' }, render: renderToolOutput },
+      async execute(args) {
+        const action = String(args.action ?? 'stats').trim().toLowerCase()
+        if (action === 'clear') {
+          const n = clearGatewayCache()
+          console.log(`[dsagent] 网关缓存已手动清空（${n} 条）`)
+          return { ok: true, cleared: n, text: `已清空网关缓存（${n} 条）。后续请求将重新向平台取数。` } as any
+        }
+        const s = gatewayCacheStats()
+        const skipLines = Object.entries(s.skips).length
+          ? Object.entries(s.skips).map(([k, v]) => `${k}=${v}`).join('，')
+          : '（无）'
+        return {
+          ok: true,
+          ...s,
+          text: [
+            `网关缓存：${s.enabled ? '已启用' : '已关闭（DSAGENT_GATEWAY_CACHE=off）'}`,
+            `条目 ${s.entries}/${s.maxEntries}，TTL ${s.ttlMs / 1000}s`,
+            `命中 ${s.hits} / 未命中 ${s.misses}（命中率 ${s.hitRate}），写入 ${s.stores}，LRU 淘汰 ${s.evictions}`,
+            `未缓存原因：${skipLines}`,
+          ].join('\n'),
+        } as any
       },
     }),
 
@@ -1219,8 +1615,20 @@ export function apply(ctx: Context, cfg: Config = config) {
               + `请先执行一次失败的技能以触发风控（插件会自动记录入口），再调用本工具。`,
           } as any
         }
-        const result = await riskVerify(store, platform, url)
-        return result as any
+        // ★ 与登录一致地登记 operation：风控验证同样是「需要用户拖滑块、可能超时后继续」
+        //   的长流程，operation 让模型能 poll 进度、cancel 放弃。
+        const op = authOp.startOperation({
+          kind: 'risk_verify',
+          platform,
+          onCancel: async () => { await closeBrowser() },
+        })
+        const verified = await riskVerify(store, platform, url, undefined, op.operationId)
+        const finalOp = authOp.getOperation(op.operationId)
+        return {
+          ...verified,
+          operationId: op.operationId,
+          ...(finalOp ? { phase: finalOp.phase, awaitingUser: finalOp.awaitingUser } : {}),
+        } as any
       },
     }),
 
@@ -1840,13 +2248,20 @@ export function apply(ctx: Context, cfg: Config = config) {
       async execute(args) {
         const rows = await skill.list({ platform: args.platform, onlyEnabled: args.onlyEnabled })
         if (!rows.length) return { text: '没有匹配的业务技能。', count: 0 }
-        return { text: rows.map(s => `- ${s.name}（${s.id}）| ${s.enabled ? '已启用' : '已停用'} | ${s.platform}`).join('\n'), count: rows.length }
+        return {
+          text: rows.map(s => {
+            const patch = s.hasPatch ? ' [有补丁]' : ''
+            const used = s.useCount > 0 ? ` | 用过 ${s.useCount} 次` : ''
+            return `- ${s.name}（${s.id}）| ${s.enabled ? '已启用' : '已停用'} | ${s.platform} | 质量 ${s.quality.toFixed(2)}${patch}${used}`
+          }).join('\n'),
+          count: rows.length,
+        }
       },
     }),
 
     defineTool({
       name: 'dsagent_get_skill_detail',
-      description: '查看单个业务技能详情。',
+      description: '查看单个业务技能详情，含文档质量分与校验问题清单。',
       parameters: {
         id: { type: 'string', required: true, description: '技能 id' },
       },
@@ -1855,6 +2270,29 @@ export function apply(ctx: Context, cfg: Config = config) {
         const s = await skill.get(args.id)
         if (!s) return { text: `未找到技能：${args.id}` }
         const bound = s.platform === 'common' ? true : await account.isBound(s.platform)
+
+        // 质量诊断：把 error（结构性缺陷）与 warn（可改进）分开列，
+        // 让模型/用户能直接知道这个技能差在哪、怎么改。
+        const errors = s.issues.filter(i => i.severity === 'error')
+        const warns = s.issues.filter(i => i.severity === 'warn')
+        const qualityLines: string[] = [`文档质量：${s.quality.toFixed(2)} / 1.00`]
+        if (errors.length) {
+          qualityLines.push(`结构性问题（${errors.length}）：`)
+          qualityLines.push(...errors.map(i => `  ✗ ${i.message}`))
+        }
+        if (warns.length) {
+          qualityLines.push(`可改进（${warns.length}）：`)
+          qualityLines.push(...warns.map(i => `  • ${i.message}`))
+        }
+        if (!errors.length && !warns.length) qualityLines.push('文档结构完整，无校验问题。')
+
+        // 现场修正层：patch 存在时给出内容，因为它是「与主文档冲突时以它为准」的部分
+        const patchLines: string[] = []
+        if (s.hasPatch) {
+          const p = await skill.patchOf(s.id)
+          patchLines.push('', `现场修正（SKILL.patch.md${p?.truncated ? '，已截断' : ''}）：`, p?.content || '（读取失败）')
+        }
+
         return {
           text: [
             `技能：${s.name}（${s.id}）`,
@@ -1862,6 +2300,9 @@ export function apply(ctx: Context, cfg: Config = config) {
             `状态：${s.enabled ? '已启用' : '已停用'}`,
             `所需平台：${s.platform === 'common' ? '无' : s.platform}`,
             `授权：${bound ? '已授权' : '未授权'}`,
+            `使用：${s.useCount > 0 ? `成功 ${s.useCount} 次` : '尚未成功使用过'}`,
+            ...qualityLines,
+            ...patchLines,
             '', s.description,
           ].join('\n'),
         }
@@ -1931,6 +2372,275 @@ export function apply(ctx: Context, cfg: Config = config) {
         if (result.csvPath) textParts.push(`\n📎 CSV：${result.csvPath}`)
 
         return { ok: true, text: textParts.join(''), exitCode: result.exitCode, skillId, reportPath: result.reportPath ?? null, csvPath: result.csvPath ?? null } as any
+      },
+    }),
+
+    defineTool({
+      name: 'dsagent_wiki_schema',
+      description: '查看商家知识 Wiki 的八域本体 Schema（商品/店铺/客户/经营/平台/资产/接待/概念）。'
+        + '不传 domain 返回八域路由表；传 domain 返回该域完整字段定义（含必抓标记与披露等级）。',
+      parameters: {
+        domain: { type: 'string', description: '可选，域中文名（商品/店铺/客户/经营/平台/资产/接待/概念）。不传则返回八域路由表' },
+      },
+      output: { schema: { type: 'json' }, render: renderToolOutput },
+      async execute(args) {
+        const domain = args.domain ? String(args.domain).trim() : ''
+        if (!domain) {
+          return {
+            text: [
+              '商家知识 Wiki 八域本体（移植自 Accio merchant-wiki-compiler）。',
+              '',
+              '【总原则】实时数据不入 wiki —— 平台能直接导出的价格/库存/当日流量走实时工具；',
+              'wiki 只存对这些数据的理解、口径与策略。',
+              '',
+              domainRoutingTable(),
+              '',
+              `受控接待意图（8 个，封闭词表）：${RECEPTION_INTENTS.map(i => i.label).join('、')}`,
+              '',
+              '用 dsagent_wiki_schema(domain="商品") 查看某域的完整字段定义。',
+            ].join('\n'),
+          }
+        }
+        const d = getDomain(domain)
+        if (!d) return { text: `未知领域「${domain}」。可选：${DOMAIN_NAMES.join('、')}` }
+        return { text: describeDomain(domain) }
+      },
+    }),
+
+    defineTool({
+      name: 'dsagent_wiki_template',
+      description: '生成指定域的 Wiki 页面「锁定模板」。'
+        + '★ 硬规则：frontmatter 必须经本工具生成，模型只替换模板中的 null 为有依据的值，'
+        + '不得增加、删除、改名或移动任何 key，再用 dsagent_wiki_write 渲染写入。',
+      parameters: {
+        domain: { type: 'string', required: true, description: '域中文名（商品/店铺/客户/经营/平台/资产/接待/概念）' },
+        kind: { type: 'string', description: '页面形态（可选）：实体（默认）/ 概念' },
+        subtype: { type: 'string', description: '实体子类型（可选）。经营/平台/资产/接待/概念五域必填，取值须落在该域枚举内；商品/店铺/客户为单一形态域，不要传' },
+      },
+      output: { schema: { type: 'json' }, render: renderToolOutput },
+      async execute(args) {
+        const domain = String(args.domain ?? '').trim()
+        const kindRaw = String(args.kind ?? '实体').trim()
+        const kind = kindRaw === '概念' ? '概念' : '实体'
+        const subtype = args.subtype ? String(args.subtype).trim() : undefined
+        try {
+          const tpl = buildTemplate(domain, kind, subtype)
+          return {
+            text: [
+              templateGuide(tpl),
+              '',
+              '## 空白模板（复制后只改值）',
+              '```yaml',
+              templateToYaml(tpl),
+              '```',
+              '',
+              '填好后调用 dsagent_wiki_write(domain, kind, title, frontmatterYaml, body) 写入。',
+            ].join('\n'),
+          }
+        } catch (e) {
+          return { ok: false, text: `生成模板失败：${e instanceof Error ? e.message : String(e)}` }
+        }
+      },
+    }),
+
+    defineTool({
+      name: 'dsagent_wiki_write',
+      description: '校验并写入一个 Wiki 页面。frontmatter 必须来自 dsagent_wiki_template 的锁定模板（只填值、不改 key），'
+        + '正文写在 body 参数里。校验不过会拒绝写入并列出问题。',
+      parameters: {
+        domain: { type: 'string', required: true, description: '域中文名' },
+        kind: { type: 'string', description: '页面形态（可选）：实体（默认）/ 概念' },
+        title: { type: 'string', required: true, description: '页面标题，将作为文件名（须与正文 H1 一致）' },
+        frontmatterYaml: { type: 'string', required: true, description: '填充后的 frontmatter 内容（不含首尾 --- 行），须与模板 key 完全一致' },
+        body: { type: 'string', description: '正文 Markdown（可选，建议以 # 标题 开头）' },
+        force: { type: 'boolean', description: '校验不通过时是否强制写入（默认 false；强制会记日志）' },
+      },
+      output: { schema: { type: 'json' }, render: renderToolOutput },
+      async execute(args) {
+        const domain = String(args.domain ?? '').trim()
+        const kind = String(args.kind ?? '实体').trim() === '概念' ? '概念' : '实体'
+        const title = String(args.title ?? '').trim()
+        const fmYaml = String(args.frontmatterYaml ?? '').trim()
+        const body = String(args.body ?? '').trim() || `# ${title}\n`
+        if (!getDomain(domain)) return { ok: false, text: `未知领域「${domain}」。可选：${DOMAIN_NAMES.join('、')}` }
+        if (!title) return { ok: false, text: 'title 必填' }
+        if (!fmYaml) return { ok: false, text: 'frontmatterYaml 必填 —— 请先用 dsagent_wiki_template 生成锁定模板' }
+
+        const content = `---\n${fmYaml}\n---\n\n${body}\n`
+        const res = await wiki.savePage({ domain, kind, title, content, force: args.force === true })
+        if (!res.ok) {
+          return {
+            ok: false,
+            text: [`页面未写入：${res.error}`, '', '修正后重新调用本工具。', '', `提示：用 dsagent_wiki_template(domain="${domain}") 重新取模板，确保 key 与 Schema 完全一致。`].join('\n'),
+            issues: res.issues ?? [],
+          } as any
+        }
+        // 索引随写入自动刷新，保证 INDEX.md 的链接始终可达（Accio 验收项 1）
+        await wiki.buildIndex()
+        return {
+          ok: true,
+          text: `页面已写入：${res.path}\nINDEX.md 已同步刷新。`,
+          path: res.path,
+          issues: res.issues ?? [],
+        } as any
+      },
+    }),
+
+    defineTool({
+      name: 'dsagent_wiki_search',
+      description: '检索商家知识 Wiki：列出全部页面（可按域 / 形态过滤），或读取指定页面全文。',
+      parameters: {
+        domain: { type: 'string', description: '可选，按域过滤' },
+        kind: { type: 'string', description: '可选，按形态过滤：实体 / 概念' },
+        path: { type: 'string', description: '可选，传入页面相对路径则返回该页全文' },
+        keyword: { type: 'string', description: '可选，按标题/描述关键词过滤' },
+      },
+      output: { schema: { type: 'json' }, render: renderToolOutput },
+      async execute(args) {
+        const pathArg = args.path ? String(args.path).trim() : ''
+        if (pathArg) {
+          const r = await wiki.readPage(pathArg)
+          if (!r.ok) return { ok: false, text: `读取失败：${r.error}` }
+          return { text: r.content ?? '', path: pathArg }
+        }
+        const kindArg = args.kind ? String(args.kind).trim() : ''
+        const kind = kindArg === '实体' || kindArg === '概念' ? kindArg : undefined
+        const domainArg = args.domain ? String(args.domain).trim() : ''
+        const kw = args.keyword ? String(args.keyword).trim() : ''
+        let entries = await wiki.listEntries({ domain: domainArg || undefined, kind })
+        if (kw) entries = entries.filter(e => e.title.includes(kw) || e.description.includes(kw))
+        if (!entries.length) {
+          const st = await wiki.stats()
+          return {
+            text: st.total === 0
+              ? `Wiki 暂无页面（根目录：${wiki.root}）。用 dsagent_wiki_schema 了解八域，再用 dsagent_wiki_template + dsagent_wiki_write 写入。`
+              : '没有匹配的页面。',
+            count: 0,
+            root: wiki.root,
+          }
+        }
+        return {
+          text: entries.map(e =>
+            `- [${e.domain}/${e.kind}] ${e.title}\n  path=${e.path}\n  ${e.description || '(无描述)'}${e.disclosure ? `　披露=${e.disclosure}` : ''}`,
+          ).join('\n'),
+          count: entries.length,
+          root: wiki.root,
+        }
+      },
+    }),
+
+    defineTool({
+      name: 'dsagent_wiki_stats',
+      description: '商家知识 Wiki 概览：总页数、各域分布、实体/概念占比、有校验问题的页面数，并重建 INDEX.md。',
+      parameters: {},
+      output: { schema: { type: 'json' }, render: renderToolOutput },
+      async execute() {
+        await wiki.init()
+        const st = await wiki.stats()
+        const idx = await wiki.buildIndex()
+        if (!st.total) {
+          return {
+            text: [
+              `Wiki 根目录：${wiki.root}`,
+              '暂无页面。',
+              '',
+              '入门：dsagent_wiki_schema → 了解八域边界；',
+              'dsagent_wiki_template(domain="商品") → 取锁定模板；',
+              'dsagent_wiki_write(...) → 校验并写入。',
+            ].join('\n'),
+            ...st,
+          }
+        }
+        return {
+          text: [
+            `Wiki 根目录：${wiki.root}`,
+            `总页数：${st.total}（实体 ${st.entities} / 概念 ${st.concepts}）`,
+            `有校验问题：${st.invalid}`,
+            '',
+            '各域分布：',
+            ...DOMAIN_NAMES.map(d => `  ${d}：${st.byDomain[d] ?? 0}`),
+            '',
+            `INDEX.md 已重建：${idx.path}`,
+          ].join('\n'),
+          ...st,
+        }
+      },
+    }),
+
+    defineTool({
+      name: 'dsagent_pitfalls',
+      description: '查看本机累积的「平台坑位记忆」：从真实执行失败中统计出的可复现问题'
+        + '（证据 ≥3 次才计入），可导出草稿供人工审核后沉淀到 SKILL.patch.md。',
+      parameters: {
+        skillId: { type: 'string', description: '可选，只看该技能相关的坑位' },
+        platform: { type: 'string', description: '可选，只看该平台的坑位（如 taobao / pdd_mms）' },
+        mode: { type: 'string', description: '可选：summary（默认，概览）/ all（全部记录）/ draft（导出可粘贴的草稿）' },
+        clear: { type: 'boolean', description: '可选，清空全部坑位记录（谨慎使用）' },
+      },
+      output: { schema: { type: 'json' }, render: renderToolOutput },
+      async execute(args) {
+        if (args.clear === true) {
+          await pitfalls.clear()
+          return { ok: true, text: '坑位记忆已清空。' }
+        }
+        const mode = String(args.mode ?? 'summary').trim()
+        const skillId = args.skillId ? String(args.skillId).trim() : undefined
+        const platform = args.platform ? String(args.platform).trim() : undefined
+
+        if (mode === 'all') {
+          const all = await pitfalls.list()
+          if (!all.length) return { text: '暂无坑位记录。', count: 0 }
+          return {
+            text: all.map(e =>
+              `- [${e.confirmed ? '已确认' : '观察中'}] ${e.platform} / ${e.failureKind}　复现 ${e.count} 次\n`
+              + `  签名：${e.signature || '(无)'}\n`
+              + `  最近：${new Date(e.lastSeenAt).toISOString().slice(0, 16).replace('T', ' ')}　涉及：${e.skillIds.join('、') || '—'}`,
+            ).join('\n'),
+            count: all.length,
+          }
+        }
+
+        if (mode === 'draft') {
+          const entries = skillId
+            ? (await pitfalls.list()).filter(e => e.skillIds.includes(skillId) && e.confirmed)
+            : await pitfalls.listConfirmed()
+          return {
+            text: exportPitfallDraft(entries, skillId ? { skillId } : undefined),
+            count: entries.length,
+            hint: '审核后可直接粘贴到对应技能的 SKILL.patch.md。',
+          }
+        }
+
+        // summary：默认只给「当前有效」的坑位（已确认 + 未陈旧）
+        const active = await pitfalls.activeFor({ skillId, platform })
+        const st = await pitfalls.stats()
+        if (!active.length) {
+          return {
+            text: [
+              '当前没有达到阈值的活跃坑位。',
+              '',
+              `统计：共 ${st.total} 条记录，其中已确认 ${st.confirmed} 条，已陈旧（>${PITFALL.STALE_DAYS} 天未复现）${st.stale} 条。`,
+              '',
+              `坑位在技能失败时自动累积，同一问题复现 ${PITFALL.PROMOTE_THRESHOLD} 次后才会进入提示。`,
+              '用 mode=all 查看全部记录（含观察中的），用 mode=draft 导出可粘贴的草稿。',
+            ].join('\n'),
+            ...st,
+          }
+        }
+        return {
+          text: [
+            `活跃坑位 ${active.length} 条（已确认 + ${PITFALL.STALE_DAYS} 天内复现过）：`,
+            '',
+            ...active.map(e =>
+              `- [${e.platform} / ${e.failureKind}] 复现 ${e.count} 次，最近 ${new Date(e.lastSeenAt).toISOString().slice(0, 10)}\n`
+              + `  ${e.signature || '(无签名)'}`,
+            ),
+            '',
+            `总计 ${st.total} 条记录 / 已确认 ${st.confirmed} 条。用 mode=draft 导出草稿沉淀到 SKILL.patch.md。`,
+          ].join('\n'),
+          active,
+          ...st,
+        }
       },
     }),
 
@@ -2036,9 +2746,16 @@ export function apply(ctx: Context, cfg: Config = config) {
       await ensureAlimamaTokens(store)
       try {
         const results = await account.checkHealthReal()
-        const bad = results.filter(r => r.status === 'expired' || r.status === 'invalid')
+        // reauth_required 也算「失效」——它表示连续探测失败已达阈值，必须重登。
+        // 漏掉它会让巡检对这批发不报警（问题只能等用户撞上）。
+        const bad = results.filter(r =>
+          r.status === 'expired' || r.status === 'invalid' || r.status === 'reauth_required')
         if (bad.length) {
-          console.warn(`[dsagent] 巡检发现 ${bad.length} 个账号失效: ${bad.map(r => r.platformId).join(', ')}`)
+          const needReauth = bad.filter(r => r.status === 'reauth_required')
+          console.warn(
+            `[dsagent] 巡检发现 ${bad.length} 个账号失效: ${bad.map(r => r.platformId).join(', ')}` +
+            (needReauth.length ? `（其中 ${needReauth.length} 个必须重新登录）` : ''),
+          )
         }
       } catch { /* 忽略 */ }
     }

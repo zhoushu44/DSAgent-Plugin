@@ -3,8 +3,10 @@
 把「账号连接器」+「业务技能」装进 DSH：在界面上连接你在各平台的账号，然后直接在对话里让模型调用技能去采集数据、发布内容、做分析。
 
 - **账号连接页** —— 手动扫码 / 导入 Cookie 连账号，查看登录态，绑定会话
-- **技能市场页** —— 浏览、筛选、启用 / 停用技能
-- **24 个工具** —— 注册给模型，覆盖账号查询、技能执行、平台代理、发布、采集
+- **技能市场页** —— 浏览、筛选、启用 / 停用技能，带**文档质量分**与缺陷清单
+- **34 个工具** —— 注册给模型，覆盖账号查询、技能执行、平台代理、发布、采集、知识库
+- **技能质量治理** —— 双语质量门禁、工具触发路由、使用统计、`SKILL.patch.md` 现场修正
+- **八域知识库** —— 商家私域知识沉淀（商品/店铺/客户/经营/平台/资产/接待/概念）
 
 ---
 
@@ -56,7 +58,7 @@ pnpm dsh web --patch ./plugins/dsagent-plugin/cordis.yml
 
 | id | 作用 |
 |---|---|
-| `dsagent-plugin` | 插件本体：2 个页面 + 24 个工具 + 前置校验 + 定时巡检 |
+| `dsagent-plugin` | 插件本体：2 个页面 + 34 个工具 + 前置校验 + 定时巡检 |
 | `dsagent-skills` | 技能发现：`includeDefaultRoots: false` + `customSkillDirs` 指向本项目 `skills/`，与 DSH 自带技能**双向隔离** |
 
 把 `dsagent-plugin` 的 `disabled: true` 即可整套卸载（页面 + 工具），配置项保留，改回 `false` 恢复。
@@ -188,7 +190,7 @@ Harness 要求 `name` 必须是**绝对路径**，且本项目**不支持** YAML
 
 ---
 
-## 6. 工具清单（24 个）
+## 6. 工具清单（34 个）
 
 ### 账号类
 
@@ -206,6 +208,9 @@ Harness 要求 `name` 必须是**绝对路径**，且本项目**不支持** YAML
 | `dsagent_browser_close` | 关闭登录浏览器 |
 | `dsagent_risk_verify` | 拉起平台验证页处理风控 |
 | `dsagent_save_cookie` | 手动导入 Cookie 字符串 |
+| `dsagent_auth_status` | 查询登录 / 风控验证流程的当前进度（不传 operationId 则列出全部进行中的流程） |
+| `dsagent_auth_advance` | 推进一个已暂停的登录 / 风控验证流程 |
+| `dsagent_auth_cancel` | 取消进行中的流程并关闭其浏览器窗口 |
 
 ### 技能类
 
@@ -222,6 +227,7 @@ Harness 要求 `name` 必须是**绝对路径**，且本项目**不支持** YAML
 |---|---|
 | `dsagent_list_platforms` | 列出支持连接的平台及授权状态 |
 | `dsagent_proxy` | 向平台发 HTTP 请求，自动注入 Cookie（`http_get` / `http_post` / `mtop_jsonp`） |
+| `dsagent_gateway_cache` | 查看 / 清理网关响应缓存（相同参数的 GET 短时复用，降低风控与节流等待） |
 | `dsagent_chat_with_context` | 基于技能执行结果生成自然语言回复 |
 
 ### 发布类（L2，两步式）
@@ -246,6 +252,162 @@ Harness 要求 `name` 必须是**绝对路径**，且本项目**不支持** YAML
 
 > `dsagent_proxy` 是兜底手段：只有当已注册技能都满足不了需求时才用，不要拿它手拼 API（技能已封装签名、分页、数据清洗）。
 
+### 知识库类（八域本体，移植自 Accio）
+
+| 工具 | 用途 |
+|---|---|
+| `dsagent_wiki_schema` | 查看八域本体 Schema（不传 domain 返回路由表） |
+| `dsagent_wiki_template` | 生成页面**锁定模板**（frontmatter 必须经此生成） |
+| `dsagent_wiki_write` | 校验并写入页面（校验不过拒绝写入） |
+| `dsagent_wiki_search` | 检索 / 读取 Wiki 页面 |
+| `dsagent_wiki_stats` | Wiki 概览 + 重建 `INDEX.md` |
+| `dsagent_pitfalls` | 查看平台坑位记忆 / 导出可审核草稿（`summary` / `all` / `draft`） |
+
+---
+
+## 6.5 技能质量治理（新增）
+
+吸收自 Accio 的三套机制，详见 [ACCIO-REVERSE-ANALYSIS.md](./ACCIO-REVERSE-ANALYSIS.md)。
+
+### 6.5.1 文档质量门禁
+
+每个技能按 **0.00–1.00** 打分（与 Accio 同量表），市场页显示徽标，详情页列出缺陷：
+
+| 权重 | 检查项 |
+|---|---|
+| 0.20 | 有「工作流 / Workflow」小节（权重最高：技能的价值在于沉淀可复用路径） |
+| 0.15 | 有 `name` / 有 `description` / 正文 ≥200 字符 / 至少一个 `##` 小节 |
+| 0.10 | 有「错误处理 / Pitfalls」、有「前置条件 / Preconditions」 |
+
+**槽位匹配是中英双语的** —— `## 工作流` 与 `## Workflow` 等价，
+`## 完整 HTML 报告工作流（含分析结论）` 这类描述式标题也能命中。
+
+附加约束：description 长度 72–420 字符（甜区 120–380），
+工作流 ≤7 步，Fallback / Pitfalls / Suggestions 各 ≤3 条。
+
+> 实测：56 个技能平均分从 Accio 英文口径的 **0.600** 提升到 **0.807**（Workflow 命中 0→39）。
+> 跑一次完整体检：`node dev/audit-skill-quality.mjs skills`
+
+### 6.5.2 工具触发路由（`tool_triggers`）
+
+技能可在 `SKILL.md` frontmatter 里声明「哪个工具 + 什么参数被调用时，提示模型先读我」：
+
+```yaml
+tool_triggers:
+  - tool: dsagent_execute_skill
+    args:
+      id: /^product-reviews$/          # 支持 /正则/flags
+  - tool: dsagent_product_reviews
+  - tool: dsagent_proxy
+    args:
+      url: /rate\.taobao\.com/
+```
+
+解决的是「包了一层工具的技能，其坑位信息在调用前不可见」的问题：
+模型调用工具时，插件把「先读该技能」的提示注入返回，逼它先加载 SKILL.md。
+
+插件另带 **2 条内置规则**（无需改技能）：阿里系技能的风控预提示、
+`dsagent_risk_verify` 通过后必须重试原技能的提示。
+
+### 6.5.3 使用统计（`.skill-stats.json`）
+
+技能**成功执行**后计数（失败不计，避免「从未成功」的技能看起来被频繁使用）。
+市场页可按「待修优先 / 常用优先」排序。
+
+> **本插件绝不自动删除技能**。Accio 会自动淘汰它自己从对话里提炼的副产品，
+> 而本项目的技能是人工精编的连接器，误删是用户资产损失。
+> 「长期未用」只作为候选列出，删除永远由人决定。
+
+### 6.5.4 `SKILL.patch.md` 现场修正层
+
+技能目录下可放 `SKILL.patch.md`。读取时自动合并到正文之后，并声明「与主文档冲突时以它为准」。
+
+用途：**主文档保持出厂版本，现场修正单独成文件** —— 上游技能升级时不会覆盖你的现场经验。
+已在 `product-reviews`（tmall 域修正）与 `product-wdj`（240s 时间预算）落地真实范例。
+
+### 6.5.5 平台坑位记忆（从真实失败中累积）
+
+技能**执行失败**时自动记录一条观测：失败类型、归一化后的错误签名、平台、时间。
+同一问题**复现 ≥3 次**才晋升为「已确认坑位」，此后该技能**再次失败**时会随失败信息一并注入：
+
+```
+技能执行失败：商品 <ID> 详情接口被拒
+
+---
+
+【历史坑位提示】以下问题在本机真实复现过，请在动手前规避：
+
+- [平台 taobao / risk_control] 已复现 5 次（最近 3 小时前）
+  现象：商品 <ID> 详情接口被拒
+  处置：调 dsagent_risk_verify(platform=该平台) 过滑块后再重试
+  涉及技能：product-reviews
+
+这些是历史统计，不是本次调用已发生的事实 —— 若本次顺利则忽略。
+```
+
+**注入位置是刻意的**：只在**失败路径**注入，成功路径不注入。
+理由是成功时附一段「这技能历史上老失败」纯属噪声；
+而失败当下正是模型需要「这问题第 5 次出现了，标准处置是什么」的时刻 ——
+它能把模型从「盲目重试」推向「先走验证流程」。
+
+> 需要「动手前就提醒」的场景由 §6.5.2 的 `tool_triggers` 覆盖 ——
+> 两者分工：triggers 管「事先该读哪个文件」，坑位记忆管「事后这是什么问题」。
+
+**为什么是 3 次**：单次失败可能只是网络抖动。误报的坑位会污染提示，比漏报代价更高。
+
+**与 Accio 的关键差异**：Accio 用**另一个 LLM 调用**提炼技能，本插件**只记录机器可验证的事实**
+（`failureKind` 来自脚本自报、`count` 来自真实调用次数、`lastSeenAt` 是时间戳，
+**没有任何一项来自模型推断**），且**不写入技能目录** —— 需要沉淀时用
+`dsagent_pitfalls(mode="draft")` 导出带证据的草稿，由人审核后粘贴到 `SKILL.patch.md`。
+
+**不记录哪些失败**：`not_bound` / `need_account_choice` 属流程引导（由配置决定），
+不是需要规避的平台坑，记进去只会污染统计。
+
+两个关键工程细节：
+
+| 细节 | 不处理的后果 |
+|---|---|
+| **签名归一化**（长数字→`<ID>`、引号值→`<VAL>`、路径→`<PATH>`） | `商品 123456 失败` 与 `商品 789012 失败` 会变成两条独立记录，各自计数永远到不了阈值，**坑位永远无法晋升** |
+| **90 天陈旧退出** | 平台会修问题、账号会换；陈旧的坑位继续提示只会造成噪声（记录保留，仅退出提示） |
+
+---
+
+## 6.6 八域知识库（新增）
+
+移植 Accio 的「商家私域知识 Wiki」本体，把分析结论沉淀成可检索的本地知识库。
+
+**八域**：商品 / 店铺 / 客户 / 经营 / 平台 / 资产 / 接待 / **概念**
+
+三条核心原则：
+
+1. **实时数据不入 Wiki** —— 平台能直接导出的价格/库存/当日流量走实时工具；
+   Wiki 只存对这些数据的理解、口径与策略。
+2. **披露三档** —— 可对外 / 仅内部 / 机密。机密字段（价格底线、成本、客户名单、财务数据）
+   不得进入对外回答，字段级声明优先于页级。
+3. **概念域独立成域** —— 是各域字段口径的**唯一出处**，避免同一指标在多页面口径漂移。
+
+### 硬约束：frontmatter 必须经脚本生成
+
+> **模型只填值，不得增加、删除、改名或移动任何 key。**
+
+流程：`dsagent_wiki_template` 生成锁定模板 → 模型只替换 `null` →
+`dsagent_wiki_write` 校验并渲染。渲染时**递归删除空值**（缺席 ≠ 空值）。
+
+校验器会拦下这些真实高频故障：
+
+| 拦截项 | 说明 |
+|---|---|
+| Schema 外字段 | 自创字段名（如把「价格底线」写成「底价」）—— 会让按字段检索永久失效 |
+| 错误枚举 | 「实体子类型」自创取值；单一形态域（商品/店铺/客户）不得出现该字段 |
+| 机密泄露 | 机密字段出现在「可对外」页面 |
+| 接待域 L1 | 证据不足的策略不得标「启用」；接待意图必须取受控 8 值且与意图码对应 |
+| 空壳页 | 缺「实体识别字段」/「领域字段集」块；`title` 与正文 H1 不一致 |
+| 废弃字段 | `页面编号` / `证据次数` / `元字段` 等 Accio 点名要清的脏数据 |
+
+目录结构：`<工作区>/wiki/`，含 `INDEX.md`（自动生成，链接保证可达）、
+`PRINCIPLES.md`（披露边界，人工维护）、`log.md`（达标待办，只追加）、
+`raw/`（原始素材）与八域的 `entities/` + `concepts/`。
+
 ---
 
 ## 7. 配置项与环境变量
@@ -257,6 +419,10 @@ Harness 要求 `name` 必须是**绝对路径**，且本项目**不支持** YAML
 | `skillRoot` | 是 | 技能根目录，插件扫描其下每个子目录的 `SKILL.md` |
 | `storePath` | 否 | 凭证库 JSON 路径，默认 `~/.dsh/dsagent-accounts.json` |
 | `guideOnUnbound` | 否 | 未绑定账号时返回引导文案而非硬报错，默认 `true` |
+| `wikiRoot` | 否 | 八域知识库根目录，默认 `<工作区>/wiki` |
+
+> 技能使用统计落在 `storePath` 同级的 `.skill-stats.json`（不放技能目录内，避免被技能扫描当成资源）；
+> 平台坑位记忆落在同级的 `.pitfall-memory.json`。
 
 ### 运行时环境变量
 
@@ -319,7 +485,7 @@ plugins/dsagent-plugin/
 ├── package.json
 ├── tsconfig.json
 └── src/
-    ├── index.ts                  # host 半区：24 工具 + 系统提示词 + 前置校验 + HTTP 路由 + 定时巡检
+    ├── index.ts                  # host 半区：34 工具 + 系统提示词 + 前置校验 + HTTP 路由 + 定时巡检
     ├── client.ts                 # browser 半区：侧边栏按钮 + 面板（两页签）
     ├── gateway-proxy.ts          # 本地代理网关（Cookie 注入 / 风控检测 / failure_kind / 节流）
     ├── browser-login.ts          # 浏览器登录（Profile 隔离 / SSO 刷新 / 风控验证）
@@ -328,6 +494,14 @@ plugins/dsagent-plugin/
         ├── account-service.ts    # 账号取数 + 健康检查
         ├── credential-store.ts   # 凭证库（原子写 / Cookie 不出模块）
         ├── skill-service.ts      # 技能扫描 + SKILL.md 启停改写
+        ├── skill-quality.ts      # 质量门禁：双语槽位评分 + frontmatter 解析 + tool_triggers 解析
+        ├── tool-triggers.ts      # 工具触发注册表（含内置风控规则 + 会话级去重）
+        ├── skill-stats.ts        # 使用统计 + 淘汰评分（只列候选，不自动删除）
+        ├── skill-patch.ts        # SKILL.patch.md 现场修正层
+        ├── pitfall-memory.ts     # 平台坑位记忆（从真实失败统计，证据≥3 次才提示）
+        ├── wiki-schema.ts        # 八域本体 Schema（商品/店铺/客户/经营/平台/资产/接待/概念）
+        ├── wiki-frontmatter.ts   # 锁定模板生成 + 校验 + 渲染（模型只填值）
+        ├── wiki-store.ts         # 知识库落盘 / 索引 / 日志
         ├── arguments.ts          # 契约加载与工具参数生成
         └── types.ts
 ```
@@ -364,6 +538,18 @@ skills/.dsagent/runtime/
 cd plugins/dsagent-plugin
 npm run build        # tsc + node dev/build-client.mjs
 npm run typecheck    # tsc --noEmit
+```
+
+技能治理与知识库的验证套件（共 211 个用例）：
+
+```bash
+node dev/verify-skill-governance.mjs   # 47 项：双语评分 / 解析 / triggers / 统计 / patch
+node dev/verify-patch-layer.mjs        # 25 项：patch 参与真实执行链路 / 对外 API
+node dev/verify-wiki.mjs               # 68 项：八域 Schema / 锁定模板 / 漂移拦截 / 落盘
+node dev/verify-pitfalls.mjs           # 44 项：签名折叠 / 证据阈值 / 陈旧退出 / 并发安全
+node dev/verify-host-integration.mjs   # 27 项：apply() 注册 34 工具 / 提示词 / 无回归
+node dev/audit-skill-quality.mjs skills # 给全体技能做质量体检（可接 CI）
+node dev/verify-real-triggers.mjs      # 用真实技能文件验证 triggers 匹配
 ```
 
 ## 12. 规范文档

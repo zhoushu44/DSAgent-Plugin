@@ -6,6 +6,18 @@ description: |
   适合「导出614498626290的评价」「抓取这个商品的全部评价」。
   凭证：必须使用平台连接里绑定的 **taobao（淘宝买家）** 账号。
 license: MIT
+# 工具触发声明：模型一调用相关工具，插件即把「先读本 SKILL.md」的提示注入返回。
+# 解决「包了一层工具的技能，其坑位信息在调用前不可见」的问题（详见 tool-triggers.ts）。
+# args 的值支持 /正则/flags 写法；缺 args 表示只要调用该工具就命中。
+tool_triggers:
+  - tool: dsagent_execute_skill
+    args:
+      id: /^product-reviews$/
+  - tool: dsagent_product_reviews
+  # 兜底：模型绕过封装技能、直接用代理打 MTOP 评价接口时也提示
+  - tool: dsagent_proxy
+    args:
+      url: /rate\.taobao\.com|rate\.tmall\.com/
 metadata:
   builtin_skill_version: "1.2"
   dsagent:
