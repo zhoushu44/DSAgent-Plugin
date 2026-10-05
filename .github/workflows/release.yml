@@ -181,6 +181,27 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw 'gh release edit 失败' }
             gh release upload $env:TAG @files --clobber
             if ($LASTEXITCODE -ne 0) { throw 'gh release upload 失败' }
+
+            # ★ gh release edit 只改 Release 元数据，**不会移动 git tag**。
+            #   滚动 Release 的 tag「latest」若不推动，就会永远停在首次创建的
+            #   那个提交上 —— Release 页显示的 tag 与资产里的代码对不上，溯源失真。
+            #   这里把 tag 强制推到本次构建的提交（仅滚动 tag 需要；v* tag 不动）。
+            #
+            #   ★ 必须先建本地 tag：workflow 里 checkout 出来的工作副本通常
+            #     并没有 latest 这个 tag（它只在远端存在），直接 push 会报
+            #     "src refspec refs/tags/latest does not match any"。
+            #
+            #   失败不致命：移动 tag 只是为了让 Release 页显示的提交准确，
+            #   资产已经传完了，取值失败不该让整个发布标红。
+            if ($env:TAG -eq 'latest') {
+              git tag -f latest $env:FULL_SHA 2>&1 | ForEach-Object { Write-Host "  $_" }
+              git push origin refs/tags/latest --force 2>&1 | ForEach-Object { Write-Host "  $_" }
+              if ($LASTEXITCODE -ne 0) {
+                Write-Host '  ! 滚动 tag「latest」推动失败（不影响资产下载）' -ForegroundColor DarkYellow
+              } else {
+                Write-Host '  滚动 tag「latest」已指向本次提交'
+              }
+            }
           } else {
             Write-Host "创建 Release: $env:TAG"
             # ★ --target：滚动 Release 的 tag「latest」需固定指向本次构建的提交，
