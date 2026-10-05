@@ -5,13 +5,37 @@ metadata:
   builtin_skill_version: "2.0"
   dsagent:
 
-    display_name: "competitor-strategy-comparison"
+    display_name: "竞品策略对比分析"
     emoji: "🎯"
 ---
 
 # 竞品策略对比分析
 
 使用 DeepSeek Agent 当前智能体已绑定的 `sycm` 店铺会话，在后台请求 DMP 接口。Cookie 保留在 DeepSeekConnect Gateway，不读取、输出或持久化凭证。
+
+## 前置条件
+
+- 用户提供了本店商品 ID 与同叶子类目竞品 ID，以及分析周期（三项必填，缺一先问）。
+- 竞品与本店商品属**同一叶子类目**；类目不一致时必须先确认，否则指标不可比。
+- 需绑定 sycm（生意参谋/达摩盘）账号；未绑定时引导到账号连接，不猜测数据。
+
+## 工作流
+
+1. **收集输入**：本店商品 ID、竞品 ID（多个）、分析周期；类目不一致先确认。
+2. **取数**：调用达摩盘竞品对比接口，拉取整体/流量/人群画像三维数据。
+3. **口径核对**：核对周期、层级、指标定义一致；不一致先对齐再比较（参照 evidence-rules 第 4 条）。
+4. **三维对比**：经营指标（规模/效率）、流量结构（来源/关键词）、人群画像（职业/消费层级/品牌偏好）。
+5. **输出结论**：差异点 → 归因假设（标 Proxy）→ 可执行的调整建议；每条结论带证据分级标注。
+6. **报告**：生成 HTML 对比报告，生成前须用户确认。
+
+## 错误处理
+
+- 竞品 ID 查不到：明确说明并请用户核对，不得用相似商品替代。
+- 人群画像数据缺失：该维度标 `[unknown]`，只输出经营与流量对比。
+- 周期/口径不一致：以较短周期对齐或标注不可比，不得直接拼表。
+- 单一数据源结论：涉及"竞品为什么比我好"的归因，必须有 ≥2 个信号印证，否则只列差异不下结论。
+
+---
 
 ## 运行环境
 
@@ -183,3 +207,13 @@ competitor_strategy_comparison/
 ```
 
 详细接口与字段见 [references/api_notes.md](references/api_notes.md)。AI 洞察模板见 [references/insights_template.md](references/insights_template.md)。推广和人群分析参考分别见 [references/insights_flow_template.md](references/insights_flow_template.md) 与 [references/insights_audience_template.md](references/insights_audience_template.md)。
+
+---
+
+## 证据分级（输出结论前必读）
+
+本技能输出任何"结论"前，先按**证据四分级**标注级别（Observed 直采 / Calculated 计算 /
+Proxy 代理推断 / Unknown 未知），并遵守五条禁止推断——尤其是：
+**sycm/万相台指数一律标 Proxy，不得当绝对量**；**Unknown 不得当 0 参与平均**。
+
+完整分级表、五条禁止推断与国内场景注释见 [references/evidence-rules.md](references/evidence-rules.md)。

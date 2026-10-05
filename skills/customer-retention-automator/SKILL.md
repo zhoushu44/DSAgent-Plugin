@@ -125,3 +125,13 @@ Monitor these targets to validate your retention engine's effectiveness:
 - **Smart Sending/Frequency Caps**: Ensure at-risk customers aren't receiving your daily marketing blasts *and* your retention sequence simultaneously. Retention should take priority.
 - **Exit Conditions**: All retention flows **MUST** have an immediate exit condition: "Placed Order since starting flow."
 - **Feedback Loops**: For customers who still churn after the full sequence, trigger a 1-question "Why did you leave?" survey to identify systemic product or shipping issues.
+
+---
+
+## 证据分级（输出结论前必读）
+
+本技能输出任何"结论"前，先按**证据四分级**标注级别（Observed 直采 / Calculated 计算 /
+Proxy 代理推断 / Unknown 未知），并遵守五条禁止推断——尤其是：
+**sycm/万相台指数一律标 Proxy，不得当绝对量**；**Unknown 不得当 0 参与平均**。
+
+完整分级表、五条禁止推断与国内场景注释见 [references/evidence-rules.md](references/evidence-rules.md)。

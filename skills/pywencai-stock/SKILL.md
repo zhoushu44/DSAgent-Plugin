@@ -14,7 +14,7 @@ description: >
 license: MIT
 metadata:
   dsagent:
-    display_name: "pywencai-stock"
+    display_name: "A股行情与榜单"
 ---
 
 # A股行情数据查询

@@ -4,7 +4,7 @@ description: 将已完成基本面分析的A股标的转化为情景估值与投
 version: 1.0.0
 metadata:
   dsagent:
-    display_name: "valuation-investment-strategy"
+    display_name: "情景估值与投资计划"
 ---
 
 # 估值投资策略
@@ -144,3 +144,13 @@ metadata:
 - 不得从零重建公司原始事实库（应基于前期分析输出）
 - 不得展示无支撑的虚假精度（如精确目标价而不给区间）
 - 不得忽略风险和资产负债表约束
+
+---
+
+## 证据分级（输出结论前必读）
+
+本技能输出任何"结论"前，先按**证据四分级**标注级别（Observed 直采 / Calculated 计算 /
+Proxy 代理推断 / Unknown 未知），并遵守五条禁止推断——尤其是：
+**sycm/万相台指数一律标 Proxy，不得当绝对量**；**Unknown 不得当 0 参与平均**。
+
+完整分级表、五条禁止推断与国内场景注释见 [references/evidence-rules.md](references/evidence-rules.md)。

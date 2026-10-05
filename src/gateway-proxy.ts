@@ -605,6 +605,37 @@ export async function handleProxy(body: any, store: CredentialStore): Promise<an
       if (payload.length > 5000) payload = smartTruncateJsonAware(payload, 5000)
     }
 
+    // ★ 风控检测增强（吸收 Accio 的风控分类链路）：
+    //
+    //   原来只扫响应体关键词（rgv587_error / fail_sys_user_validate），会漏判两类风控：
+    //   1. bxpunish 响应头 —— 阿里 Baxia WAF 的**权威信号**，比 body 关键词更早、更准
+    //   2. HTML/punish 拦截页 —— 风控返回的不是 JSON 而是 HTML 拦截页，
+    //      JSON.parse 失败后当字符串截断，body 关键词扫不到 → 漏判风控
+    //
+    //   Accio 的分类链路（br 函数 + Crt 函数 + iRe 函数）：
+    //     · bxpunish 头存在 → WAF_BLOCK（IP 级封锁，过滑块也没用，要换 IP）
+    //     · HTML 页含 punish URL → bixi-punish（滑块验证页，过滑块即可解）
+    //     · HTML 页但不含 punish → waf-html（WAF 拦截，可能是 IP 或请求特征）
+    //
+    //   三种风控的引导**完全不同**，混在一起会让用户白费力气。
+
+    /** 是否被 Baxia WAF 封锁（IP 级，bxpunish 头） */
+    const bxpunishHeader = result.responseHeaders?.['bxpunish'] || result.responseHeaders?.['Bxpunish'] || ''
+    const isWafBlocked = !!bxpunishHeader
+
+    /** 响应体是否是 HTML（风控拦截页的典型特征） */
+    const bodyStr0 = typeof result.body === 'string' ? result.body : ''
+    const isHtmlResponse = /^\s*<!doctype|^\s*<html/i.test(bodyStr0)
+      || bodyStr0.includes('bixi-intl.alicdn.com/punish')
+
+    /** 风控子类型：bixi-punish（滑块）/ waf-html（WAF）/ waf-block（IP 封锁）/ 空（非风控） */
+    let riskSubtype: '' | 'bixi-punish' | 'waf-html' | 'waf-block' = ''
+    if (isWafBlocked) {
+      riskSubtype = 'waf-block'
+    } else if (isHtmlResponse) {
+      riskSubtype = bodyStr0.includes('punish') ? 'bixi-punish' : 'waf-html'
+    }
+
     // 提取 Set-Cookie 头（用于闲鱼 _m_h5_tk 等 token 获取）
     const setCookies: string[] = []
     if (result.setCookieHeaders && result.setCookieHeaders.length) {
@@ -614,7 +645,7 @@ export async function handleProxy(body: any, store: CredentialStore): Promise<an
     // 如果有新 Cookie，合并回凭证库（网关侧自动刷新）
     // 但风控/错误响应的 Set-Cookie 不应覆盖有效 Cookie（淘宝风控会返回空 _m_h5_tk）
     // 注意：FAIL_SYS_ILLEGAL_ACCESS 是 MTOP token 初始化的正常响应，需要合并 Set-Cookie
-    const bodyLower0 = typeof result.body === 'string' ? result.body.toLowerCase() : ''
+    const bodyLower0 = bodyStr0.toLowerCase()
     // ★ MTOP 响应只认 `ret` 数组（平台的权威结果位），禁止对整包 body 做关键词子串匹配：
     //   商品/内容类接口会把用户 UGC（商品标题、描述、留言）原样带回，里面可能恰好含
     //   `FAIL_SYS_TOKEN_EMPTY::令牌为空` / `fail_...` 这类字样。实测闲鱼搜 "token" 的结果里
@@ -679,7 +710,26 @@ export async function handleProxy(body: any, store: CredentialStore): Promise<an
 
     // 检测风控/登录失效（判定依据见上方 `scan`：MTOP 只认 ret，避免被 UGC 文本误伤）
     let failureKind = ''
-    if (result.status === 403 || scan.includes('未登录') || scan.includes('请登录')) {
+
+    // ★ 优先判定 bxpunish 头 / HTML 风控页（比 body 关键词更早、更准）。
+    //   Accio 的 br 函数在最前面就查 bxpunish 头，我们同理。
+    if (riskSubtype === 'waf-block') {
+      // IP 级封锁：bxpunish 头存在，过滑块也没用，必须换网络出口
+      failureKind = 'risk_control'
+      // 不标 expired（账号本身没失效，只是 IP 被封）
+      const bxuuid = result.responseHeaders?.['bxuuid'] || result.responseHeaders?.['Bxuuid'] || ''
+      console.warn(`[dsagent-gateway] Baxia WAF 拦截（IP 级）：bxpunish=${bxpunishHeader}, bxuuid=${bxuuid}, shopKey=${account.shop_key}`)
+    } else if (riskSubtype === 'bixi-punish') {
+      // 滑块验证页：过滑块即可解，走 risk_verify 流程
+      failureKind = 'risk_control'
+      console.warn(`[dsagent-gateway] bixi-punish 滑块验证页拦截：shopKey=${account.shop_key}`)
+    } else if (riskSubtype === 'waf-html') {
+      // WAF HTML 拦截（非 punish）：可能是 IP 或请求特征，引导换 IP + 重试
+      failureKind = 'risk_control'
+      console.warn(`[dsagent-gateway] WAF HTML 拦截（非 punish 页）：shopKey=${account.shop_key}`)
+    }
+
+    if (!failureKind && (result.status === 403 || scan.includes('未登录') || scan.includes('请登录'))) {
       failureKind = 'risk_control'
       store.setStatus(account.shop_key, 'expired')
     } else if (hasBizLogin) {
@@ -877,6 +927,50 @@ export async function handleProxy(body: any, store: CredentialStore): Promise<an
       console.log(`[dsagent-gateway] 自动重试等待超时，返回风控错误: ${account.shop_key}`)
     }
 
+    // ★ HTTP 429/503 自动退避重试（吸收 Accio 的 retry policy）：
+    //
+    //   Accio 的退避策略：initialBackoff × backoffMultiplier^(n-1)，带上限 maxBackoff + 抖动。
+    //   这里简化为固定退避序列 [2s, 4s, 8s]（3 次），因为网关层不宜长时间阻塞。
+    //
+    //   仅对**可重试状态码**生效（429=限流、503=服务不可用），其他 4xx/5xx 直接返回。
+    //   重试不二次节流（已经等过退避时间），且不进缓存（重试中间态不缓存）。
+    if (!failureKind && (result.status === 429 || result.status === 503)) {
+      const backoffSeq = [2_000, 4_000, 8_000]
+      for (let attempt = 0; attempt < backoffSeq.length; attempt++) {
+        const waitMs = backoffSeq[attempt]
+        console.log(`[dsagent-gateway] HTTP ${result.status} 退避重试 ${attempt + 1}/${backoffSeq.length}（等待 ${waitMs / 1000}s）: ${account.shop_key}`)
+        await sleep(waitMs)
+        const retryHeaders = { ...headers, 'Cookie': store.get(account.shop_key)?.cookie_str || cookieStr }
+        const retryResult = await httpRequest(method, finalUrl, retryHeaders, postBody, timeout)
+        if (retryResult.status < 400 && retryResult.status !== 429 && retryResult.status !== 503) {
+          // 重试成功
+          let retryPayload: any = retryResult.body
+          try {
+            let retryBody = retryResult.body
+            if (kind === 'mtop_jsonp') {
+              const cbMatch = retryBody.match(/^\s*[a-zA-Z_$][\w$]*\(([\s\S]*)\)\s*;?\s*$/)
+              if (cbMatch) retryBody = cbMatch[1]
+            }
+            retryPayload = JSON.parse(retryBody)
+          } catch { /* 非 JSON，保持原始字符串 */ }
+          console.log(`[dsagent-gateway] HTTP ${result.status} 退避重试成功（第 ${attempt + 1} 次）: ${account.shop_key}`)
+          return {
+            status: 'success',
+            status_code: retryResult.status,
+            payload: retryPayload,
+            set_cookies: retryResult.setCookieHeaders || [],
+            failure_kind: '',
+            risk_pass_received: false,
+            error_message: '',
+            auto_retried: true,
+          }
+        }
+      }
+      // 退避重试全部失败 → 返回 rate_limit
+      console.warn(`[dsagent-gateway] HTTP ${result.status} 退避重试 3 次后仍失败: ${account.shop_key}`)
+      failureKind = 'rate_limit'
+    }
+
     const finalResponse = {
       status: failureKind ? 'error' : 'success',
       status_code: result.status,
@@ -885,11 +979,17 @@ export async function handleProxy(body: any, store: CredentialStore): Promise<an
       failure_kind: failureKind,
       risk_pass_received: riskPassReceived,
       error_message: failureKind
-        ? (verifyUrl
-            ? `触发平台安全风控。请调用 dsagent_risk_verify（platform=${account.platform}）由插件自动打开验证页，`
-              + `完成滑块后验证凭证会自动写回账号并解除风控，随后重试本技能即可。`
-              + `也可手动打开：${verifyUrl}`
-            : `平台返回 HTTP ${result.status}${bodySnippet}`)
+        ? (riskSubtype === 'waf-block'
+            ? `触发平台 WAF 拦截（IP 级封锁，bxpunish 头）。过滑块无法解决 —— 请更换网络出口（切换 WiFi / 热点 / 代理）后重试。`
+            : riskSubtype === 'bixi-punish'
+              ? (verifyUrl
+                  ? `触发平台安全风控（滑块验证页）。请调用 dsagent_risk_verify（platform=${account.platform}）由插件自动打开验证页，完成滑块后验证凭证会自动写回账号并解除风控，随后重试本技能即可。也可手动打开：${verifyUrl}`
+                  : `触发平台安全风控（滑块验证页）。请调用 dsagent_risk_verify（platform=${account.platform}）完成滑块验证后重试。`)
+              : riskSubtype === 'waf-html'
+                ? `触发平台 WAF 拦截（HTML 页，非滑块）。建议：① 更换网络出口；② 等待几分钟后重试；③ 若持续被拦，检查请求频率是否过高。`
+                : verifyUrl
+                  ? `触发平台安全风控。请调用 dsagent_risk_verify（platform=${account.platform}）由插件自动打开验证页，完成滑块后验证凭证会自动写回账号并解除风控，随后重试本技能即可。也可手动打开：${verifyUrl}`
+                  : `平台返回 HTTP ${result.status}${bodySnippet}`)
         : '',
     }
 
@@ -1157,7 +1257,7 @@ function httpRequest(
   headers: Record<string, string>,
   body: string | undefined,
   timeoutSec: number,
-): Promise<{ status: number; body: string; setCookieHeaders: string[]; location?: string }> {
+): Promise<{ status: number; body: string; setCookieHeaders: string[]; location?: string; responseHeaders?: Record<string, string | string[] | undefined> }> {
   return new Promise((resolve, reject) => {
     const parsed = new URL(url)
     const lib = parsed.protocol === 'https:' ? nodeHttps : nodeHttp
@@ -1189,6 +1289,8 @@ function httpRequest(
           body: Buffer.concat(chunks).toString('utf-8'),
           setCookieHeaders,
           location: res.headers['location'] ? String(res.headers['location']) : undefined,
+          // ★ 返回全部响应头（小写键），供风控检测读取 bxpunish / bxuuid 等
+          responseHeaders: res.headers as Record<string, string | string[] | undefined>,
         })
       })
     })

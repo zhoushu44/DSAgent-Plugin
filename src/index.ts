@@ -2765,6 +2765,12 @@ export function apply(ctx: Context, cfg: Config = config) {
   ctx.effect(() => {
     // 启动后 30s 执行首次巡检，之后每 2h 巡检一次
     const doCheck = async () => {
+      // ★ 启动期凭证库健康检查（吸收 Accio 的 StartupStorageHealth）：
+      //   扫一遍凭证库，发现自愈迁移管不到的异常（Cookie 缺失/状态矛盾/绑定孤立），
+      //   记日志让用户知道 —— 不是等用户跑技能时才撞上。
+      try {
+        store.healthCheck()
+      } catch { /* 健康检查本身不应阻断巡检 */ }
       // 阿里系 SSO：淘宝账号存在时自动派生闲鱼账号，避免用户重复扫码
       await ensureXianyuFromTaobao(store)
       // 生意参谋系：补齐 csrfId/loginPointId（万相台、达摩盘技能依赖）

@@ -130,3 +130,13 @@ Before sending an incentive to an "At-Risk" customer, check their historical dis
 - [ ] **Second-Purchase Window**: Identify the average days between order 1 and order 2. Set your first automated retention trigger 5 days *before* this window ends.
 - [ ] **Data Hygiene**: Ensure "Test" orders and "Canceled" orders are excluded from your LTV and frequency calculations.
 - [ ] **Cohort Baseline**: Establish a 12-month retention baseline before launching a new loyalty program to measure its true impact.
+
+---
+
+## 证据分级（输出结论前必读）
+
+本技能输出任何"结论"前，先按**证据四分级**标注级别（Observed 直采 / Calculated 计算 /
+Proxy 代理推断 / Unknown 未知），并遵守五条禁止推断——尤其是：
+**sycm/万相台指数一律标 Proxy，不得当绝对量**；**Unknown 不得当 0 参与平均**。
+
+完整分级表、五条禁止推断与国内场景注释见 [references/evidence-rules.md](references/evidence-rules.md)。

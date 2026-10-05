@@ -22,32 +22,35 @@ import type { Config } from '../index.ts'
 
 const CAPABILITIES: Array<[string, string]> = [
   ['all', '全部'],
-  // 通用技能：取值与规范 §6 的 category 体系一致
+  // 通用技能
   ['office', '文档处理'],
   ['core', '核心基础'],
   ['agent', '协作'],
   ['meta', '元能力'],
   ['connector', '平台连接'],
   ['channel', '消息频道'],
-  // 垂直业务
-  ['vertical', '垂直业务'],
+  // 垂直业务（细分标签，2026-10-05 分类治理）
+  ['selection', '选品与市场'],
+  ['shop-ops', '店铺经营'],
+  ['analytics', '数据分析'],
+  ['crm', '客户运营'],
+  ['copywriting', '内容创作'],
+  ['publish', '内容发布'],
+  ['compliance', '合规'],
+  ['finance', '股票投研'],
+  ['chart', '图表报告'],
   // 平台技能：按功能组归纳
-  ['copywriting', '文案'],
   ['cs-script', '客服'],
-  ['chart', '图表'],
-  ['shop-ops', '店铺'],
-  ['analytics', '分析'],
 ]
 
 const PLATFORMS: Array<[string, string]> = [
   ['all', '全部平台'],
+  ['taobao', '淘宝'],
   ['douyin', '抖音'],
   ['xiaohongshu', '小红书'],
   ['bilibili', 'B站'],
   ['kuaishou', '快手'],
   ['wechat_mp', '公众号'],
-  ['taobao', '淘宝'],
-  ['sycm', '生意参谋'],
   ['pinduoduo', '拼多多'],
   ['xianyu', '闲鱼'],
   ['wechat_store', '微信小店'],
@@ -69,6 +72,11 @@ const PLATFORM_ALIAS: Record<string, string> = {
   pdd: 'pinduoduo',
   mp: 'wechat_mp',
   wechat_mp: 'wechat_mp',
+  // 生意参谋/万相台/达摩盘 复用淘宝登录态（凭证层 sycm→taobao），技能市场并入淘宝组
+  sycm: 'taobao',
+  alimama: 'taobao',
+  dmp: 'taobao',
+  sycm_insight: 'taobao',
 }
 
 /** 归一化平台名，用于筛选比较（前端名与后端名视为同一平台） */
@@ -277,6 +285,12 @@ function normalizeFallback(list: FallbackSkill[]): SkillRow[] {
 
 type Tab = 'vertical' | 'builtin' | 'installed'
 
+/** 垂直业务细分标签集合：这些 + 平台特定技能 → 垂直业务页签；其余 → 内置页签 */
+const BIZ_CAPS = new Set([
+  'selection', 'shop-ops', 'analytics', 'crm', 'copywriting', 'publish',
+  'compliance', 'finance', 'chart', 'cs-script', 'vertical',
+])
+
 export interface SkillMarketPageDeps {
   skill?: SkillService
   config: Config
@@ -309,10 +323,10 @@ export function skillMarketPage(deps: SkillMarketPageDeps) {
     if (tab === 'installed') return s.enabled
     if (tab === 'builtin') {
       // 内置技能：通用核心能力（非垂直业务、非平台特定）
-      return s.platform === 'common' && s.capability !== 'vertical'
+      return s.platform === 'common' && !BIZ_CAPS.has(s.capability)
     }
-    // 垂直业务技能：vertical 类 + 各平台特定技能
-    return s.capability === 'vertical' || s.platform !== 'common'
+    // 垂直业务技能：业务细分标签 + 各平台特定技能
+    return BIZ_CAPS.has(s.capability) || s.platform !== 'common'
   }
 
   function visible(): SkillRow[] {
@@ -375,12 +389,54 @@ export function skillMarketPage(deps: SkillMarketPageDeps) {
       </article>`
   }
 
+  /** 平台分组顺序：有技能的平台在前，common（通用）压轴（sycm 经 normPlatform 已并入 taobao） */
+  const PLATFORM_ORDER = [
+    'taobao', 'douyin', 'xiaohongshu', 'bilibili', 'zhihu', 'pinduoduo', 'xianyu', 'common',
+  ]
+
   function renderGrid(): string {
     const rows = visible()
     if (!rows.length) {
       return `<div class="dsm-empty">没有匹配的技能，换个筛选条件试试。</div>`
     }
-    return `<div class="dsm-grid">${rows.map(card).join('')}</div>`
+    // 按平台分组（平铺卡片 → 分组区块）
+    const groups = new Map<string, SkillRow[]>()
+    for (const s of rows) {
+      const p = normPlatform(s.platform)
+      if (!groups.has(p)) groups.set(p, [])
+      groups.get(p)!.push(s)
+    }
+    const ordered = [...groups.keys()].sort((a, b) => {
+      const ia = PLATFORM_ORDER.indexOf(a), ib = PLATFORM_ORDER.indexOf(b)
+      return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib)
+    })
+    return ordered.map(p => {
+      const items = groups.get(p)!
+      const label = PLATFORM_LABEL[p] || p
+      // 淘宝组内：生意参谋系（数据后台）排前，店铺操作类排后，子标签区分
+      const isSycm = (s: SkillRow) => s.platform === 'sycm'
+      if (p === 'taobao') {
+        const sycm = items.filter(isSycm)
+        const shop = items.filter(s => !isSycm(s))
+        const sec = (rows: SkillRow[], sub: string) => rows.length ? `
+          <h4 class="dsm-sub-hd">${esc(sub)}<em>${rows.length}</em></h4>
+          <div class="dsm-grid">${rows.map(card).join('')}</div>` : ''
+        return `
+        <section class="dsm-group" data-group="taobao">
+          <h3 class="dsm-group-hd"><b>${esc(label)}</b><em>${items.length} 个技能</em></h3>
+          ${sec(sycm, '生意参谋数据后台（复用淘宝登录态）')}
+          ${sec(shop, '店铺操作')}
+        </section>`
+      }
+      return `
+      <section class="dsm-group" data-group="${esc(p)}">
+        <h3 class="dsm-group-hd">
+          <b>${esc(label)}</b>
+          <em>${items.length} 个技能</em>
+        </h3>
+        <div class="dsm-grid">${items.map(card).join('')}</div>
+      </section>`
+    }).join('')
   }
 
   function renderChips(): string {
@@ -393,8 +449,8 @@ export function skillMarketPage(deps: SkillMarketPageDeps) {
   }
 
   function renderTabs(): string {
-    const verticalCount = all.filter(s => s.capability === 'vertical' || s.platform !== 'common').length
-    const builtinCount = all.filter(s => s.platform === 'common' && s.capability !== 'vertical').length
+    const verticalCount = all.filter(s => BIZ_CAPS.has(s.capability) || s.platform !== 'common').length
+    const builtinCount = all.filter(s => s.platform === 'common' && !BIZ_CAPS.has(s.capability)).length
     const installedCount = all.filter(s => s.enabled).length
     const tabs: Array<[Tab, string, number]> = [
       ['vertical', '垂直业务技能', verticalCount],
@@ -460,8 +516,8 @@ export function skillMarketPage(deps: SkillMarketPageDeps) {
           el.classList.toggle('on', k === tab)
           const em = el.querySelector('em')
           if (em) {
-            const vCount = all.filter(s => s.capability === 'vertical' || s.platform !== 'common').length
-            const bCount = all.filter(s => s.platform === 'common' && s.capability !== 'vertical').length
+            const vCount = all.filter(s => BIZ_CAPS.has(s.capability) || s.platform !== 'common').length
+            const bCount = all.filter(s => s.platform === 'common' && !BIZ_CAPS.has(s.capability)).length
             em.textContent = String(k === 'vertical' ? vCount
               : k === 'builtin' ? bCount
               : all.filter(s => s.enabled).length)
@@ -530,7 +586,7 @@ export function skillMarketPage(deps: SkillMarketPageDeps) {
             <div class="dsm-meta">
               <span>技能 id</span><b>${esc(s.id)}</b>
               <span>版本</span><b>${esc(s.version)}</b>
-              <span>平台</span><b>${esc(PLATFORM_LABEL[normPlatform(s.platform)] || s.platform)}</b>
+              <span>平台</span><b>${esc(s.platform === 'sycm' ? '淘宝 · 生意参谋（复用淘宝登录态）' : (PLATFORM_LABEL[normPlatform(s.platform)] || s.platform))}</b>
               <span>能力</span><b>${esc(CAP_LABEL[s.capability] || s.capability)}</b>
               ${s.risk && s.risk !== 'L1' ? `<span>风险等级</span><b>${esc(RISK_META[s.risk]?.label || s.risk)}</b>` : ''}
               <span>当前状态</span><b>${s.enabled ? '已启用' : '已停用'}</b>
@@ -689,6 +745,12 @@ const MARKET_CSS = `
 .dsm-search input{width:260px;border:1px solid #e4e8f0;border-radius:6px;padding:6px 12px;font-size:13px;outline:none}
 .dsm-search input:focus{border-color:#2b6cff}
 .dsm-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px}
+.dsm-group{margin-bottom:6px}
+.dsm-group-hd{display:flex;align-items:baseline;gap:10px;margin:18px 2px 10px;font-size:14px}
+.dsm-group-hd b{color:#1f2437}
+.dsm-group-hd em{color:#98a1b8;font-style:normal;font-size:12px;font-weight:400}
+.dsm-sub-hd{display:flex;align-items:baseline;gap:8px;margin:10px 2px 8px;font-size:12.5px;font-weight:600;color:#5a6478}
+.dsm-sub-hd em{color:#a8b0c4;font-style:normal;font-weight:400;font-size:11.5px}
 .dsm-card{background:#fff;border:1px solid #eceff5;border-radius:9px;padding:14px;display:flex;flex-direction:column;gap:10px}
 .dsm-card:hover{border-color:#c9d4ea;box-shadow:0 4px 14px rgba(43,108,255,.07)}
 .dsm-card-hd{display:flex;align-items:center;gap:9px}

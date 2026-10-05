@@ -93,3 +93,13 @@ HTML 报告路径: /绝对路径/xxx.html
 ## Excel 转换
 
 如需 `.xlsx`，先运行本 Skill 拿到 CSV，再调用 **xlsx Skill** 转换。
+
+---
+
+## 证据分级（输出结论前必读）
+
+本技能输出任何"结论"前，先按**证据四分级**标注级别（Observed 直采 / Calculated 计算 /
+Proxy 代理推断 / Unknown 未知），并遵守五条禁止推断——尤其是：
+**sycm/万相台指数一律标 Proxy，不得当绝对量**；**Unknown 不得当 0 参与平均**。
+
+完整分级表、五条禁止推断与国内场景注释见 [references/evidence-rules.md](references/evidence-rules.md)。

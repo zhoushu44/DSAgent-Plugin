@@ -870,6 +870,116 @@ export class CredentialStore {
   }
 
   /**
+   * 启动期凭证库健康检查（吸收 Accio 的 StartupStorageHealth）。
+   *
+   * 与 `migrateIllegalKeys` / `migrateDriftedKeys` 的分工：
+   *   - 那两个负责**能修**的（key 命名问题），修完不留痕
+   *   - 本方法负责**只能报**的（自愈管不到的异常），记日志让用户知道
+   *
+   * 检查项（都是自愈迁移**管不到**的）：
+   *
+   *   1. **孤儿绑定**：`bound_agent_ids` 引用了不存在的 agent，或全是空的
+   *   2. **Cookie 结构不完整**：关键 Cookie 全缺失（但 status 仍标 valid）
+   *      → 这是 `migrateDriftedKeys` 之后的残留：key 合法、account_id 也对得上，
+   *        但 Cookie 本身可能被 `setCookies` 的空值逻辑冲掉过
+   *   3. **状态与 Cookie 矛盾**：status=valid 但 key_cookies 全无
+   *   4. **credential_platform 与 platform 不一致**：手动导入或外部写入可能漏归一化
+   *   5. **凭证加载失败**：加密层报出 decrypt_failed / safe_unavailable 等
+   *
+   * @returns 发现的问题清单（空数组 = 健康）。也同时打日志，让宿主进程能看到。
+   */
+  healthCheck(): Array<{ shopKey: string; platform: string; issue: string; severity: 'warn' | 'error' }> {
+    const issues: Array<{ shopKey: string; platform: string; issue: string; severity: 'warn' | 'error' }> = []
+    const accounts = this.listAccounts()
+
+    // 0. 凭证加载层异常
+    const loadFailure = this.loadFailureReason()
+    if (loadFailure && loadFailure !== 'not_found') {
+      issues.push({
+        shopKey: '(全局)',
+        platform: '(全局)',
+        issue: `凭证库加载异常: ${loadFailure}`,
+        severity: loadFailure === 'invalidated' || loadFailure === 'decrypt_failed' ? 'error' : 'warn',
+      })
+    }
+
+    for (const a of accounts) {
+      const kc = keyCookies(a.platform)
+
+      // 1. 孤儿绑定：bound_agent_ids 为空或全无效
+      const bounds = a.bound_agent_ids || []
+      if (!bounds.length) {
+        // 'default' 绑定缺失不算严重（新加的账号可能还没绑），只对 valid 账号报
+        if (a.status === 'valid') {
+          issues.push({
+            shopKey: a.shop_key, platform: a.platform,
+            issue: '账号有效但未绑定到任何会话（bound_agent_ids 为空）',
+            severity: 'warn',
+          })
+        }
+      }
+
+      // 2. Cookie 结构不完整：关键 Cookie 全缺失
+      if (kc.length > 0) {
+        const hasAnyKey = kc.some(name => a.cookies?.[name])
+        if (!hasAnyKey && a.status === 'valid') {
+          issues.push({
+            shopKey: a.shop_key, platform: a.platform,
+            issue: `状态标为 valid 但关键 Cookie 全缺失（${kc.join('/')}）`,
+            severity: 'error',
+          })
+        }
+      }
+
+      // 3. status 与 session_hint 矛盾
+      const hintMap: Record<string, string> = {
+        valid: 'ok', pending: 'none', expired: 'expired',
+        reauth_required: 'reauth_required', invalid: 'expired',
+      }
+      const expectedHint = hintMap[a.status] || 'expired'
+      if (a.session_hint && a.session_hint !== expectedHint) {
+        issues.push({
+          shopKey: a.shop_key, platform: a.platform,
+          issue: `状态 ${a.status} 与 session_hint ${a.session_hint} 不一致（应为 ${expectedHint}）`,
+          severity: 'warn',
+        })
+      }
+
+      // 4. credential_platform 与 platform 不一致
+      const expectedCredPlatform = credentialPlatform(a.platform)
+      if (a.credential_platform !== expectedCredPlatform) {
+        issues.push({
+          shopKey: a.shop_key, platform: a.platform,
+          issue: `credential_platform=${a.credential_platform} 应为 ${expectedCredPlatform}（未归一化）`,
+          severity: 'warn',
+        })
+      }
+    }
+
+    // 打日志
+    if (issues.length) {
+      const errors = issues.filter(i => i.severity === 'error')
+      const warns = issues.filter(i => i.severity === 'warn')
+      if (errors.length) {
+        console.error(
+          `[dsagent] 凭证库健康检查发现 ${errors.length} 个严重问题:\n` +
+          errors.map(i => `  ✗ ${i.shopKey} (${i.platform}): ${i.issue}`).join('\n'),
+        )
+      }
+      if (warns.length) {
+        console.warn(
+          `[dsagent] 凭证库健康检查发现 ${warns.length} 个警告:\n` +
+          warns.map(i => `  ⚠ ${i.shopKey} (${i.platform}): ${i.issue}`).join('\n'),
+        )
+      }
+    } else {
+      console.log(`[dsagent] 凭证库健康检查通过（${accounts.length} 个账号）`)
+    }
+
+    return issues
+  }
+
+  /**
    * 上次加载失败的原因（null = 正常）。
    *
    * 对应 Accio `ElectronSafeAuthStorage` 的 reason code：调用方据此区分

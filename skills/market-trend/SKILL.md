@@ -396,3 +396,13 @@ cd "{this_skill_dir}" && python -m market_trend --cate_id 50011999 --trend_mode 
 - **不知道 cate_id** → 使用 `list-categories --keyword 类目名` 查询，或在生意参谋市场排行页面 URL 中找 `cateId=xxx`
 - **数据量太大加载慢** → 使用 `--max_pages 3` 限制每周期只取前 60 条
 - **提示会话无效** → 在平台连接重新登录 sycm
+
+---
+
+## 证据分级（输出结论前必读）
+
+本技能输出任何"结论"前，先按**证据四分级**标注级别（Observed 直采 / Calculated 计算 /
+Proxy 代理推断 / Unknown 未知），并遵守五条禁止推断——尤其是：
+**sycm/万相台指数一律标 Proxy，不得当绝对量**；**Unknown 不得当 0 参与平均**。
+
+完整分级表、五条禁止推断与国内场景注释见 [references/evidence-rules.md](references/evidence-rules.md)。

@@ -166,3 +166,13 @@ stdout 输出 `__DSAGENT_RESULT__` 单行 JSON：
 | 采集被风控 | `risk_control` | 调 `dsagent_risk_verify` 后重试 |
 | 未实现的平台 | `skill_error` | 提示当前仅支持 taobao，其余开发中 |
 | 字段缺失 | — | 进 `data_gaps`，报告提示，不用零值 |
+
+---
+
+## 证据分级（输出结论前必读）
+
+本技能输出任何"结论"前，先按**证据四分级**标注级别（Observed 直采 / Calculated 计算 /
+Proxy 代理推断 / Unknown 未知），并遵守五条禁止推断——尤其是：
+**sycm/万相台指数一律标 Proxy，不得当绝对量**；**Unknown 不得当 0 参与平均**。
+
+完整分级表、五条禁止推断与国内场景注释见 [references/evidence-rules.md](references/evidence-rules.md)。

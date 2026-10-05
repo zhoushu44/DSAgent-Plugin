@@ -192,3 +192,13 @@ python -m product_wdj report --input artifacts/问大家_xxx.json
 - 拉取回答详情时，每个问题会额外请求 1～N 次详情接口，全量获取耗时较长，请合理控制 `--max_pages`
 - 平台连接 binding 的 `shop_key` 形如 `taobao/3360359039`；技能调用问大家 API 时自动取 `/` 后数字作为 `userId`
 - 本地 `--from-json` 调试仅解析列表页首答，不会请求详情接口
+
+---
+
+## 证据分级（输出结论前必读）
+
+本技能输出任何"结论"前，先按**证据四分级**标注级别（Observed 直采 / Calculated 计算 /
+Proxy 代理推断 / Unknown 未知），并遵守五条禁止推断——尤其是：
+**sycm/万相台指数一律标 Proxy，不得当绝对量**；**Unknown 不得当 0 参与平均**。
+
+完整分级表、五条禁止推断与国内场景注释见 [references/evidence-rules.md](references/evidence-rules.md)。

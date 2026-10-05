@@ -33,10 +33,24 @@ import { readSkillPatch, renderBodyWithPatch, PATCH_FILENAME, type PatchResult }
  * 技能脚本实际用到的第三方依赖全集（扫技能目录下所有 .py 的 import 得到）。
  * 用于探测「哪个解释器真的能跑技能」，而不是「哪个命令存在」。
  */
+/**
+ * 技能依赖白名单 —— 用于给候选解释器打分（命中越多越优先）。
+ *
+ * ★ 这里只列**技能真正会 import 的**包。
+ *   曾经误收 pywencai / akshare / matplotlib：它们没有任何技能 import
+ *   （pywencai-stock 的 SKILL.md 自称"无第三方依赖"，走的是东方财富公开 HTTP 接口），
+ *   却会拖入极长依赖链 —— pywencai → py_mini_racer(38MB) + debugpy(31MB) +
+ *   jedi(14MB) + IPython/Jupyter…，matplotlib 又带 fontTools(11MB)，
+ *   合计 200 MB+ 白背进绿色包。
+ *
+ *   清单由 dev/portable/audit-blank-deps.mjs 校验：它用 python 的 ast 解析全仓库
+ *   真实 import，并检查 SKILL.md 声明与反向依赖，三项全不命中才建议裁剪。
+ *   增删依赖后请重跑该脚本确认。
+ */
 const SKILL_DEPS = [
   'httpx', 'requests', 'bs4', 'jieba', 'lxml', 'markdown', 'numpy', 'openpyxl',
-  'pandas', 'PIL', 'docx', 'pptx', 'yaml', 'matplotlib',
-  'pdfplumber', 'pypdf', 'pdf2image', 'defusedxml', 'pywencai', 'akshare',
+  'pandas', 'PIL', 'docx', 'pptx', 'yaml',
+  'pdfplumber', 'pypdf', 'pdf2image', 'defusedxml',
 ]
 
 /**
@@ -64,6 +78,26 @@ function probeInterpreter(exe: string): number {
     return Number.isFinite(n) ? n : -1
   } catch {
     return -1
+  }
+}
+
+/**
+ * 解释器是否真的可用（能启动并执行代码）。
+ *
+ * 与 probeInterpreter 的区别：后者返回 -1 也表示不可用，但 -1 也可能是
+ * 「能跑但一个依赖都没装」。这里只判断「能不能跑」。
+ */
+function isInterpreterUsable(exe: string): boolean {
+  try {
+    const out = execSync(`"${exe}" -`, {
+      input: 'print("ok")\n',
+      stdio: 'pipe',
+      timeout: 6000,
+      encoding: 'utf8',
+    })
+    return String(out).trim() === 'ok'
+  } catch {
+    return false
   }
 }
 
@@ -107,7 +141,31 @@ function pythonCandidates(): string[] {
 let _pyCache: string | null | undefined
 function resolvePython(): string {
   if (_pyCache !== undefined) return _pyCache!
-  const candidates = pythonCandidates()
+
+  // ★ 显式指定优先，且「指定了就信它」。
+  //
+  // 为什么不再参与打分：绿色版靠 DSAGENT_PYTHON 指向包内解释器。包内的依赖是
+  // 按「技能真正需要什么」精简安装的，命中数可能低于用户机器上某个恰好装了更多
+  // 无关包的 Python；若仍按命中数取最大值，就会选中系统解释器，导致技能
+  // ModuleNotFoundError（用户机器上并不存在包内那份依赖）。
+  // 因此：显式指定 = 最终决定；只有它不可用时才回退到打分机制。
+  const explicit = process.env.DSAGENT_PYTHON?.trim()
+  if (explicit) {
+    if (isInterpreterUsable(explicit)) {
+      const score = probeInterpreter(explicit)
+      console.log(
+        `[dsagent] Python 解释器：使用 DSAGENT_PYTHON 指定的 ${explicit}` +
+        `（命中 ${score}/${SKILL_DEPS.length} 个技能依赖）`,
+      )
+      _pyCache = explicit
+      return _pyCache
+    }
+    console.warn(
+      `[dsagent] DSAGENT_PYTHON 指定的解释器不可用，回退到自动探测：${explicit}`,
+    )
+  }
+
+  const candidates = pythonCandidates().filter(c => c !== explicit)
   let best: string | null = null
   let bestScore = -1
   const report: string[] = []
@@ -227,9 +285,11 @@ const SKILL_PLATFORM: Record<string, string> = {
 
 /**
  * 能力归类：决定技能页的「能力」标签与页签归属。
- *   - `vertical` → 垂直业务技能页签；其余（office / core / agent / meta / connector / channel）→ 内置技能页签
+ *   - 细分标签（selection/shop-ops/analytics/crm/copywriting/compliance/finance/chart）
+ *     → 垂直业务技能页签；其余（office / core / agent / meta / connector / channel）→ 内置技能页签
  *   - 平台技能（*-crawl / *-publish / *-comment / *-im）按后缀归纳为功能组
- *   - 通用技能走显式映射，取值与规范 §6 的 category 体系一致
+ *   - 通用技能走显式映射
+ * 「垂直业务」页签判定见 ui/skill-market-page.ts（capability === 'vertical' → 细分标签后改为非内置标签集合）
  */
 const SKILL_CAPABILITY: Record<string, string> = {
   // office：Office 文档处理
@@ -247,6 +307,7 @@ const SKILL_CAPABILITY: Record<string, string> = {
   // meta：技能元能力
   'skill-creator': 'meta',
   'make-skill': 'meta',
+  'self-improvement': 'meta', // 经验沉淀与技能治理同族
   // connector：平台连接
   platform_bindings: 'connector',
   browser_cdp: 'connector',
@@ -255,40 +316,59 @@ const SKILL_CAPABILITY: Record<string, string> = {
   channel_message: 'channel',
   dingtalk_channel: 'channel',
   dws: 'channel',
-  // vertical：垂直业务（无平台后缀的店铺 / 行业 / 金融类）
-  'store-patrol-manager': 'vertical',
-  // 参谋长分析包转换的诊断类技能
-  'category-structure-diagnosis': 'vertical',
-  'product-layering-diagnosis': 'vertical',
-  'shop-promotion-diagnosis': 'vertical',
-  'competitor-strategy-comparison': 'vertical',
-  'competitor-indicator': 'vertical',
-  'market-trend': 'vertical',
-  'sycm-customer': 'vertical',
-  'keyword-traffic': 'vertical',
-  'keyword-assistant': 'vertical',
-  'market-analysis': 'vertical',
-  'product-reviews': 'vertical',
-  'product-wdj': 'vertical',
-  'industry-data-mcp': 'vertical',
-  'pywencai-stock': 'vertical',
-  'valuation-investment-strategy': 'vertical',
-  'financial-statement-analyzer': 'vertical',
-  'industry-competition-moat': 'vertical',
-  'a-stock-diagnosis': 'vertical',
-  'data-report': 'vertical',
-  'smart-compose': 'vertical',
-  'customer-service-reply': 'vertical',
+  // ── 垂直业务细分（2026-10-05 分类治理）──
+  // 选品与市场
+  'demand-niche-analysis': 'selection',
+  'industry-data-mcp': 'selection',
+  // 店铺经营诊断
+  'store-patrol-manager': 'shop-ops',
+  'category-structure-diagnosis': 'shop-ops',
+  'product-layering-diagnosis': 'shop-ops',
+  'shop-promotion-diagnosis': 'shop-ops',
+  // 竞品分析
+  'competitor-strategy-comparison': 'analytics',
+  'competitor-indicator': 'analytics',
+  // 关键词/市场分析
+  'market-trend': 'analytics',
+  'keyword-assistant': 'analytics',
+  'keyword-traffic': 'analytics',
+  'market-analysis': 'analytics',
+  // 客户运营
+  'sycm-customer': 'crm',
+  'customer-voice-analyzer': 'crm',
+  'customer-rfm-analyzer': 'crm',
+  'customer-ltv-calculator': 'crm',
+  'customer-retention-automator': 'crm',
+  'customer-service-reply': 'crm',
+  // 评价分析
+  'product-reviews': 'analytics',
+  'product-wdj': 'analytics',
+  // 内容创作
+  'smart-compose': 'copywriting',
+  'image-prompt-guide': 'copywriting',
+  'marketing-ideas': 'copywriting',
+  'marketing-psychology': 'copywriting',
+  // 合规
+  'tariff-search': 'compliance',
+  // 投研
+  'pywencai-stock': 'finance',
+  'valuation-investment-strategy': 'finance',
+  'financial-statement-analyzer': 'finance',
+  'industry-competition-moat': 'finance',
+  'a-stock-diagnosis': 'finance',
+  // 实验/数据
+  'ab-test-setup': 'analytics',
+  'data-report': 'chart',
 }
 
 /** 兜底：显式映射未覆盖的新技能，按名字后缀与关键词归纳 */
 const CAPABILITY_RULES: Array<[RegExp, string]> = [
+  [/-publish$/, 'publish'],
   [/(?:-crawl|-download|-analytics)$/, 'analytics'],
-  [/-publish$/, 'copywriting'],
   [/(?:-comment|-im)$/, 'cs-script'],
   [/(?:report|chart|wordcloud|viz|cockpit)/, 'chart'],
-  [/(?:competitor|market|industry|keyword|traffic|sycm)/, 'analytics'],
-  [/(?:order|product|patrol|store|stock|店铺|巡店)/, 'shop-ops'],
+  [/(?:patrol|store|店铺|巡店)/, 'shop-ops'],
+  [/(?:stock|finance|valuation|moat)/, 'finance'],
 ]
 
 function inferPlatform(id: string): string {

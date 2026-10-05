@@ -4,7 +4,7 @@ description: 对A股上市公司财务报表进行法证级深度分析，涵盖
 version: 1.0.0
 metadata:
   dsagent:
-    display_name: "financial-statement-analyzer"
+    display_name: "A股财报深度分析"
 ---
 
 # 财务报表深度分析
@@ -494,3 +494,13 @@ A股上市公司执行中国企业会计准则（CAS），与US GAAP/IFRS存在�
 - **补充而非替代估值**：本技能评估财务质量，而非判断股票买卖。估值相关问题请导向相应的估值分析。
 - **GAAP vs 扣非**：关注扣除非经常性损益后的净利润，这是评估A股公司持续经营能力的更可靠指标。
 - **非审计**：这是分析性审阅，不是专业审计。无法检测高级造假或验证数据准确性。
+
+---
+
+## 证据分级（输出结论前必读）
+
+本技能输出任何"结论"前，先按**证据四分级**标注级别（Observed 直采 / Calculated 计算 /
+Proxy 代理推断 / Unknown 未知），并遵守五条禁止推断——尤其是：
+**sycm/万相台指数一律标 Proxy，不得当绝对量**；**Unknown 不得当 0 参与平均**。
+
+完整分级表、五条禁止推断与国内场景注释见 [references/evidence-rules.md](references/evidence-rules.md)。

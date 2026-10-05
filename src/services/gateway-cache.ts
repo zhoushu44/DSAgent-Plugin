@@ -39,6 +39,19 @@
  * 6. **TTL 默认保守**：默认 60s。只覆盖「同一轮任务内的重复请求」这个主要场景，
  *    不试图跨任务复用（那需要真正的快照与失效策略，本模块不做）。
  *
+ * ## 持久化（重启后缓存仍在）
+ *
+ * 原实现用内存 Map，DSH 重启后全部丢失 —— 缓存白做了，又要重新打平台。
+ * 现改用 `node:sqlite`（Node 22+ 内置，零原生依赖）做持久化后端：
+ *
+ *   - 数据库文件落在配置目录下的 `dsagent-cache.db`
+ *   - WAL 模式（读写不互斥，参考 Accio 的 `PRAGMA journal_mode = WAL`）
+ *   - 重启后自动清理已过期条目（`DELETE WHERE expires_at < now`）
+ *   - LRU 用 `last_access_at` 时间戳排序淘汰，而非内存 Map 的插入序
+ *
+ * ★ 接口完全不变：`getCached` / `setCached` / `invalidateCache` / `cacheStats`
+ *   等所有导出函数签名不变，`gateway-proxy.ts` 调用方零改动。
+ *
  * ## 关于 `set_cookies`（已实地核对技能侧用法后的结论）
  *
  * 命中缓存时会把**当次响应**的 `set_cookies` 一并回放。这看着像「重放过期 Cookie」，
@@ -70,6 +83,9 @@
  */
 
 import * as crypto from 'node:crypto'
+import * as path from 'node:path'
+import * as os from 'node:os'
+import { createRequire } from 'node:module'
 
 // ── 配置 ────────────────────────────────────────────────────
 
@@ -143,37 +159,92 @@ function maxEntries(): number {
   return Math.min(raw, 10_000)
 }
 
-/** 仅供测试：清空配置缓存，让环境变量改动生效 */
+/** 仅供测试：清空配置缓存 + 内存回退，让环境变量改动生效 */
 export function resetCacheConfigCache(): void {
   _mode = null
+  _db = null
   stats.hits = 0
   stats.misses = 0
   stats.stores = 0
   stats.evictions = 0
   stats.skips = {}
-  store.clear()
+  memStore.clear()
 }
 
-// ── 缓存条目 ────────────────────────────────────────────────
+// ── SQLite 持久化后端 ──────────────────────────────────────
 
-interface CacheEntry {
-  /** 缓存键 */
-  key: string
-  /** 响应体（已解析的 payload，直接复用，避免重复 JSON.parse） */
-  payload: unknown
-  /** 原始 HTTP 状态码 */
-  statusCode: number
-  /** 完整的响应对象（除 payload 外的字段一并缓存，保证命中时与未命中完全同构） */
-  response: Record<string, unknown>
-  /** 写入时间 */
-  createdAt: number
-  /** 过期时间 */
-  expiresAt: number
-  /** 响应体字节数（用于容量统计） */
-  bytes: number
+/**
+ * SQLite 数据库句柄。
+ *
+ * 用 `node:sqlite`（Node 22+ 内置，实验性 API），零原生依赖。
+ * DSH 宿主的 Node 版本足够新（实测 v24.9.0 可用）。
+ *
+ * 数据库文件路径：`~/.dsh/dsagent-cache.db`，与凭证库同目录。
+ * 可用 `DSAGENT_CACHE_DB` 环境变量覆盖（测试用）。
+ */
+const CACHE_DB_ENV = 'DSAGENT_CACHE_DB'
+let _db: any = null
+
+function dbPath(): string {
+  const override = (process.env[CACHE_DB_ENV] ?? '').trim()
+  if (override) return override
+  try {
+    const dir = path.join(os.homedir(), '.dsh')
+    return path.join(dir, 'dsagent-cache.db')
+  } catch {
+    return path.join(os.tmpdir(), 'dsagent-cache.db')
+  }
 }
 
-const store = new Map<string, CacheEntry>()
+/**
+ * 惰性初始化数据库。
+ *
+ * 延迟到首次读写时才打开 —— 若缓存被 `DSAGENT_GATEWAY_CACHE=off` 关闭，
+ * 根本不会建库文件，不产生副作用。
+ *
+ * ★ 用动态 `require` 而非 `import`：`node:sqlite` 是实验性 API，
+ * 静态 import 会被 tsc 编译成 ESM 的静态绑定，在非 Node 22+ 环境直接报错。
+ * `require` 是 CJS 的运行时查找，不可用时只是返回 null，安全降级。
+ */
+/** ESM 环境下的 require（用 createRequire 构造） */
+const esmRequire = createRequire(import.meta.url)
+
+function db(): any {
+  if (_db !== null) return _db
+  try {
+    const { DatabaseSync } = esmRequire('node:sqlite')
+    _db = new DatabaseSync(dbPath())
+    _db.exec('PRAGMA journal_mode = WAL')
+    _db.exec('PRAGMA synchronous = NORMAL')
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS cache_entries (
+        key           TEXT PRIMARY KEY,
+        payload       TEXT NOT NULL,
+        response_json TEXT NOT NULL,
+        shop_key      TEXT NOT NULL DEFAULT '',
+        platform      TEXT NOT NULL DEFAULT '',
+        status_code   INTEGER NOT NULL DEFAULT 200,
+        bytes         INTEGER NOT NULL DEFAULT 0,
+        created_at    INTEGER NOT NULL,
+        expires_at    INTEGER NOT NULL DEFAULT 0,
+        last_access_at INTEGER NOT NULL DEFAULT 0
+      )
+    `)
+    _db.exec('CREATE INDEX IF NOT EXISTS idx_cache_expires ON cache_entries(expires_at)')
+    _db.exec('CREATE INDEX IF NOT EXISTS idx_cache_shop ON cache_entries(shop_key)')
+    _db.exec('CREATE INDEX IF NOT EXISTS idx_cache_lru ON cache_entries(last_access_at)')
+    const now = Date.now()
+    _db.prepare('DELETE FROM cache_entries WHERE expires_at < ?').run(now)
+    return _db
+  } catch (err) {
+    _db = null
+    console.warn(`[dsagent-cache] SQLite 不可用，退回内存模式: ${err instanceof Error ? err.message : String(err)}`)
+    return null
+  }
+}
+
+/** 内存回退（SQLite 不可用时使用，行为与改造前一致） */
+const memStore = new Map<string, CacheEntry>()
 
 /** 命中/未命中统计（供观测与排障） */
 const stats = {
@@ -187,6 +258,18 @@ const stats = {
 
 function bumpSkip(reason: string): void {
   stats.skips[reason] = (stats.skips[reason] ?? 0) + 1
+}
+
+/** 内存回退条目结构（SQLite 不可用时） */
+interface CacheEntry {
+  key: string
+  payload: unknown
+  statusCode: number
+  response: Record<string, unknown>
+  createdAt: number
+  expiresAt: number
+  bytes: number
+  lastAccessAt: number
 }
 
 // ── 缓存键 ──────────────────────────────────────────────────
@@ -308,21 +391,54 @@ export function isCacheableResponse(response: {
 
 /** 读缓存。未命中或已过期返回 null（过期条目顺手删除）。 */
 export function getCached(key: string): Record<string, unknown> | null {
-  const entry = store.get(key)
+  const now = Date.now()
+  const d = db()
+
+  if (d) {
+    // SQLite 路径
+    const row = d.prepare('SELECT payload, response_json, created_at, expires_at FROM cache_entries WHERE key = ?').get(key)
+    if (!row) {
+      stats.misses++
+      return null
+    }
+    if (now > row.expires_at) {
+      d.prepare('DELETE FROM cache_entries WHERE key = ?').run(key)
+      stats.misses++
+      return null
+    }
+    // 更新最后访问时间（LRU）
+    d.prepare('UPDATE cache_entries SET last_access_at = ? WHERE key = ?').run(now, key)
+    stats.hits++
+
+    // 重建响应对象（从 JSON 反序列化 + 不可枚举归属字段）
+    const response: Record<string, unknown> = JSON.parse(row.response_json)
+    const payload = JSON.parse(row.payload)
+    const shopKey = String(response._cache_shop_key ?? '')
+    const platform = String(response._cache_platform ?? '')
+    const out: Record<string, unknown> = {}
+    for (const [k, v] of Object.entries(response)) out[k] = v
+    if (shopKey) Object.defineProperty(out, '_cache_shop_key', { value: shopKey, enumerable: false, configurable: true })
+    if (platform) Object.defineProperty(out, '_cache_platform', { value: platform, enumerable: false, configurable: true })
+    out.cache_hit = true
+    out.cache_age_ms = now - row.created_at
+    return out
+  }
+
+  // 内存回退路径
+  const entry = memStore.get(key)
   if (!entry) {
     stats.misses++
     return null
   }
-  if (Date.now() > entry.expiresAt) {
-    store.delete(key)
+  if (now > entry.expiresAt) {
+    memStore.delete(key)
     stats.misses++
     return null
   }
-  // LRU：命中后移到队尾（Map 保持插入序，删除再插入即置后）
-  store.delete(key)
-  store.set(key, entry)
+  entry.lastAccessAt = now
+  memStore.delete(key)
+  memStore.set(key, entry)
   stats.hits++
-  // 同 setCached：逐字段复制并保留不可枚举的归属字段
   const out: Record<string, unknown> = {}
   for (const [k, v] of Object.entries(entry.response)) out[k] = v
   for (const meta of ['_cache_shop_key', '_cache_platform', '_cache_ttl_ms'] as const) {
@@ -332,7 +448,7 @@ export function getCached(key: string): Record<string, unknown> | null {
     }
   }
   out.cache_hit = true
-  out.cache_age_ms = Date.now() - entry.createdAt
+  out.cache_age_ms = now - entry.createdAt
   return out
 }
 
@@ -342,12 +458,9 @@ export function setCached(
   response: Record<string, unknown>,
   payload: unknown,
 ): void {
+  const payloadStr = typeof payload === 'string' ? payload : JSON.stringify(payload)
   const bytes = (() => {
-    try {
-      return Buffer.byteLength(typeof payload === 'string' ? payload : JSON.stringify(payload), 'utf-8')
-    } catch {
-      return Number.MAX_SAFE_INTEGER
-    }
+    try { return Buffer.byteLength(payloadStr, 'utf-8') } catch { return Number.MAX_SAFE_INTEGER }
   })()
 
   if (bytes > MAX_CACHED_BODY_BYTES) {
@@ -356,11 +469,39 @@ export function setCached(
   }
 
   const now = Date.now()
-  // ★ 不能用 `{ ...response }` 展开：归属字段（_cache_shop_key 等）被定义成
-  //   **不可枚举**属性（刻意的，见 attachCacheMeta —— 防止随 JSON 泄露给技能），
-  //   而展开运算符只复制可枚举属性，展平后归属信息会全部丢失，
-  //   导致 invalidateCache({shopKey}) 永远清不掉任何条目。
-  //   故这里逐字段复制：可枚举的用 Object.entries，归属字段单独取。
+  const expiresAt = now + ttlMs()
+  const shopKey = String(response._cache_shop_key ?? '')
+  const platform = String(response._cache_platform ?? '')
+  const statusCode = Number(response.status_code ?? 200)
+  // response_json 存可枚举字段 + 归属字段（后者存成可枚举以便 JSON 能序列化，
+  // 读回时用 Object.defineProperty 恢复不可枚举 —— 见 getCached）
+  const responseForDb: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(response)) responseForDb[k] = v
+  responseForDb._cache_shop_key = shopKey
+  responseForDb._cache_platform = platform
+  const responseJson = JSON.stringify(responseForDb)
+
+  const d = db()
+  if (d) {
+    d.prepare(`
+      INSERT OR REPLACE INTO cache_entries
+        (key, payload, response_json, shop_key, platform, status_code, bytes, created_at, expires_at, last_access_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(key, payloadStr, responseJson, shopKey, platform, statusCode, bytes, now, expiresAt, now)
+    stats.stores++
+
+    // LRU 淘汰：按 last_access_at 升序删最旧的
+    const max = maxEntries()
+    const count = d.prepare('SELECT COUNT(*) AS n FROM cache_entries').get().n
+    if (count > max) {
+      const toRemove = count - max
+      d.prepare('DELETE FROM cache_entries WHERE key IN (SELECT key FROM cache_entries ORDER BY last_access_at ASC LIMIT ?)').run(toRemove)
+      stats.evictions += toRemove
+    }
+    return
+  }
+
+  // 内存回退路径
   const stored: Record<string, unknown> = {}
   for (const [k, v] of Object.entries(response)) stored[k] = v
   for (const meta of ['_cache_shop_key', '_cache_platform', '_cache_ttl_ms'] as const) {
@@ -369,24 +510,21 @@ export function setCached(
       Object.defineProperty(stored, meta, { value: v, enumerable: false, configurable: true })
     }
   }
-
-  store.set(key, {
-    key,
-    payload,
-    statusCode: Number(response.status_code ?? 200),
-    response: stored,
-    createdAt: now,
-    expiresAt: now + ttlMs(),
-    bytes,
+  memStore.set(key, {
+    key, payload, statusCode, response: stored,
+    createdAt: now, expiresAt, bytes, lastAccessAt: now,
   })
   stats.stores++
 
-  // LRU 淘汰
   const max = maxEntries()
-  while (store.size > max) {
-    const oldest = store.keys().next().value
-    if (oldest === undefined) break
-    store.delete(oldest)
+  while (memStore.size > max) {
+    let oldest: string | undefined
+    let oldestTime = Infinity
+    for (const [k, v] of memStore) {
+      if (v.lastAccessAt < oldestTime) { oldestTime = v.lastAccessAt; oldest = k }
+    }
+    if (!oldest) break
+    memStore.delete(oldest)
     stats.evictions++
   }
 }
@@ -402,32 +540,46 @@ export function setCached(
  * @returns 被清除的条目数
  */
 export function invalidateCache(filter?: { shopKey?: string; platform?: string }): number {
+  const d = db()
+  if (d) {
+    if (!filter?.shopKey && !filter?.platform) {
+      const r = d.prepare('DELETE FROM cache_entries').run()
+      return r.changes
+    }
+    const conds: string[] = []
+    const args: any[] = []
+    if (filter.shopKey) { conds.push('shop_key = ?'); args.push(filter.shopKey) }
+    if (filter.platform) { conds.push('platform = ?'); args.push(filter.platform) }
+    const r = d.prepare(`DELETE FROM cache_entries WHERE ${conds.join(' OR ')}`).run(...args)
+    return r.changes
+  }
+  // 内存回退
   if (!filter?.shopKey && !filter?.platform) {
-    const n = store.size
-    store.clear()
+    const n = memStore.size
+    memStore.clear()
     return n
   }
   let removed = 0
-  // 键是 sha256，无法从键反查 shopKey —— 故在条目上保存归属信息。
-  // 简化起见这里改用「条目内记录了 key 前缀字段」的做法：
-  for (const [k, entry] of store) {
+  for (const [k, entry] of memStore) {
     const meta = entry.response as Record<string, unknown>
     const sk = String(meta._cache_shop_key ?? '')
     const pf = String(meta._cache_platform ?? '')
     const hit = (filter.shopKey && sk === filter.shopKey)
       || (filter.platform && pf === filter.platform)
-    if (hit) {
-      store.delete(k)
-      removed++
-    }
+    if (hit) { memStore.delete(k); removed++ }
   }
   return removed
 }
 
 /** 清空全部缓存（测试与手动刷新用） */
 export function clearCache(): number {
-  const n = store.size
-  store.clear()
+  const d = db()
+  if (d) {
+    const r = d.prepare('DELETE FROM cache_entries').run()
+    return r.changes
+  }
+  const n = memStore.size
+  memStore.clear()
   return n
 }
 
@@ -443,11 +595,18 @@ export function cacheStats(): {
   evictions: number
   skips: Record<string, number>
   hitRate: string
+  persisted: boolean
 } {
   const total = stats.hits + stats.misses
+  const d = db()
+  let entries = memStore.size
+  if (d) {
+    const r = d.prepare('SELECT COUNT(*) AS n FROM cache_entries').get()
+    entries = r?.n ?? memStore.size
+  }
   return {
     enabled: cacheEnabled(),
-    entries: store.size,
+    entries,
     maxEntries: maxEntries(),
     ttlMs: ttlMs(),
     hits: stats.hits,
@@ -456,6 +615,7 @@ export function cacheStats(): {
     evictions: stats.evictions,
     skips: { ...stats.skips },
     hitRate: total > 0 ? `${((stats.hits / total) * 100).toFixed(1)}%` : 'n/a',
+    persisted: !!d,
   }
 }
 

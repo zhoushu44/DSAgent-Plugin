@@ -18,7 +18,7 @@ description: >
 license: MIT
 metadata:
   dsagent:
-    display_name: "data-report"
+    display_name: "表格数据分析报告"
 ---
 
 # data-report
@@ -142,3 +142,13 @@ python "${SKILL_DIR}/scripts/html_report.py" --validate-html <output.html>
 | `references/chart-reference.md` | ECharts 模板片段 |
 | `references/cookbook_pandas.md` | 深度场景 pandas/scipy 模板 |
 | `references/common_fixes.md` | 常见错误最小修复扩展 |
+
+---
+
+## 证据分级（输出结论前必读）
+
+本技能输出任何"结论"前，先按**证据四分级**标注级别（Observed 直采 / Calculated 计算 /
+Proxy 代理推断 / Unknown 未知），并遵守五条禁止推断——尤其是：
+**sycm/万相台指数一律标 Proxy，不得当绝对量**；**Unknown 不得当 0 参与平均**。
+
+完整分级表、五条禁止推断与国内场景注释见 [references/evidence-rules.md](references/evidence-rules.md)。
