@@ -31,10 +31,15 @@
   ],
   "scripts": {
     "typecheck": "tsc -p tsconfig.typecheck.json",
+    "check:esm": "node dev/check-esm-purity.mjs",
     "build:host": "tsc -p tsconfig.json",
     "smoke": "node dev/smoke-client.mjs",
-    "build": "npm run typecheck && npm run build:host && node dev/build-client.mjs && node dev/smoke-client.mjs",
-    "build:client": "node dev/build-client.mjs && node dev/smoke-client.mjs",
+    "sync": "node dev/portable/sync-to-host.mjs",
+    "build": "npm run check:esm && npm run typecheck && npm run build:host && node dev/build-client.mjs && node dev/smoke-client.mjs && node dev/portable/sync-to-host.mjs",
+    "build:client": "node dev/build-client.mjs && node dev/smoke-client.mjs && node dev/portable/sync-to-host.mjs",
+    "portable": "pwsh -NoProfile -File dev/portable/build-portable.ps1 -Force",
+    "portable:update": "pwsh -NoProfile -File dev/portable/build-update.ps1",
+    "portable:deps": "pwsh -NoProfile -File dev/portable/prepare-pydeps.ps1",
     "prepublishOnly": "npm run build"
   },
   "dsh": {
@@ -53,19 +58,18 @@
       "platform": "web"
     }
   },
+  "dependencies": {
+    "puppeteer-core": "^23.0.0"
+  },
   "peerDependencies": {
     "@deepseek-ai/cordis": ">=4.0.0",
-    "@deepseek-ai/dsh-tools": "^0.1.5-rc.2",
-    "puppeteer-core": "^23.0.0"
+    "@deepseek-ai/dsh-tools": "^0.1.5-rc.2"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {
       "optional": true
     },
     "@deepseek-ai/dsh-tools": {
-      "optional": true
-    },
-    "puppeteer-core": {
       "optional": true
     }
   },

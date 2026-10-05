@@ -1,0 +1,330 @@
+name: Release
+
+# ── 什么时候跑 ──────────────────────────────────────────────────────────────
+#   push 到 main   → 构建增量更新包，更新滚动 Release（tag: latest）
+#   push tag v*    → 构建增量更新包，发布该 tag 的正式 Release
+#   手动触发        → 可选同时组装完整绿色包（约 343 MB）
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      full:
+        description: 同时组装完整绿色包（约 343 MB，需要仓库里已有 base 基座资产）
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+# 连续 push 时只留最新一次，避免并发上传互相覆盖资产
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ── 增量更新包（约 3.3 MB，托管 runner 可完成）────────────────────────────
+  incremental:
+    name: 增量更新包
+    runs-on: windows-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      tag: ${{ steps.ver.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 构建插件（ESM 纯度 + typecheck + host 编译 + esbuild + 冒烟）
+        run: npm run build
+
+      - name: 计算版本与目标 tag
+        id: ver
+        shell: pwsh
+        run: |
+          $sha  = (git rev-parse --short HEAD).Trim()
+          $full = (git rev-parse HEAD).Trim()
+          $date = (Get-Date).ToUniversalTime().ToString('yyyyMMdd')
+          $pkg  = (Get-Content package.json -Raw | ConvertFrom-Json).version
+
+          # 推 tag 就发那个 tag；推 main 就更新滚动 release「latest」
+          if ($env:GITHUB_REF -like 'refs/tags/*') {
+            $tag = $env:GITHUB_REF -replace '^refs/tags/', ''
+          } else {
+            $tag = 'latest'
+          }
+
+          "short_sha=$sha"     >> $env:GITHUB_OUTPUT
+          "full_sha=$full"     >> $env:GITHUB_OUTPUT
+          "pkg_version=$pkg"   >> $env:GITHUB_OUTPUT
+          "tag=$tag"           >> $env:GITHUB_OUTPUT
+          "version=$date-$sha" >> $env:GITHUB_OUTPUT
+          Write-Host "tag=$tag  version=$date-$sha  package=$pkg"
+
+      - name: 生成增量更新包
+        shell: pwsh
+        run: |
+          # 产出 DSAgent-Update-<sha>.zip，结构为 plugin/ 覆盖到绿色包根目录
+          pwsh -NoProfile -File dev/portable/build-update.ps1 -OutRoot dist
+
+      # ★ 固定文件名：让下载链接永远可用，不必随 sha 变化
+      #   https://github.com/<owner>/<repo>/releases/latest/download/DSAgent-Update.zip
+      - name: 归一化文件名 + 校验 + SHA256
+        id: pack
+        shell: pwsh
+        run: |
+          $z = @(Get-ChildItem dist -Filter 'DSAgent-Update-*.zip')
+          if ($z.Count -ne 1) { throw "预期恰好 1 个增量包，实际 $($z.Count): $($z.Name -join ', ')" }
+
+          Copy-Item $z[0].FullName dist/DSAgent-Update.zip -Force
+
+          # 结构自检：必须是 plugin/ 打头，且不含 data/
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path dist/DSAgent-Update.zip))
+          try {
+            $names = @($zip.Entries.FullName)
+            if (-not ($names | Where-Object { $_ -eq 'plugin/lib/index.js' })) {
+              throw '增量包缺少 plugin/lib/index.js'
+            }
+            if ($names | Where-Object { $_ -like 'data/*' }) {
+              throw '增量包含有 data/（凭证不得进分发包）'
+            }
+          } finally { $zip.Dispose() }
+
+          $sums = foreach ($f in (Get-ChildItem dist -Filter '*.zip')) {
+            "$((Get-FileHash $f.FullName -Algorithm SHA256).Hash)  $($f.Name)"
+          }
+          $sums | Set-Content dist/SHA256SUMS.txt -Encoding UTF8
+          Get-Content dist/SHA256SUMS.txt
+
+          $mb = [math]::Round((Get-Item dist/DSAgent-Update.zip).Length / 1MB, 2)
+          "size_mb=$mb" >> $env:GITHUB_OUTPUT
+          Write-Host "增量包 $mb MB"
+
+      - name: 构建摘要
+        shell: pwsh
+        run: |
+          @"
+          ### 增量更新包 ${{ steps.ver.outputs.version }}
+
+          | 项目 | 值 |
+          |---|---|
+          | Release | ``${{ steps.ver.outputs.tag }}`` |
+          | 提交 | ``${{ steps.ver.outputs.full_sha }}`` |
+          | 大小 | ${{ steps.pack.outputs.size_mb }} MB |
+          | 内容 | ``plugin/lib``、``plugin/skills``、``package.json``、``cordis.patch.yml`` |
+
+          对方解压覆盖到绿色包目录 → 全部替换 → 重启。``data/`` 不受影响。
+          "@ >> $env:GITHUB_STEP_SUMMARY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dsagent-update-${{ steps.ver.outputs.short_sha }}
+          path: dist/
+          retention-days: 30
+
+      - name: 发布 / 更新 Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.ver.outputs.tag }}
+          VERSION: ${{ steps.ver.outputs.version }}
+          FULL_SHA: ${{ steps.ver.outputs.full_sha }}
+          PKG_VERSION: ${{ steps.ver.outputs.pkg_version }}
+        run: |
+          # ★ 注意：下面这些是**环境变量**，PowerShell 里必须写 $env:XXX，
+          #   写成 $XXX 会静默取到 $null，Release 说明就变成空白。
+          $notes = @"
+          由 GitHub Actions 自动构建（提交 ``$env:FULL_SHA``）。
+
+          ## 下载
+
+          | 文件 | 说明 |
+          |---|---|
+          | ``DSAgent-Update.zip`` | **增量更新包**（约 3 MB）：解压覆盖到绿色包目录，``data/`` 不受影响 |
+          | ``SHA256SUMS.txt`` | 校验和 |
+
+          ## 固定下载地址
+
+          用 **tag 固定地址**，不要用 ``/releases/latest/download/`` ——
+          后者会解析到「最新的非预发布 Release」，一旦又发了 v1.0.0 之类的
+          版本化 Release，同一个链接就会跳到别的资产上。带 tag 的地址永远稳定：
+
+          ```text
+          https://github.com/${{ github.repository }}/releases/download/$env:TAG/DSAgent-Update.zip
+          ```
+
+          完整绿色包（首次安装用，约 343 MB）见本 Release 的另一资产（若已发布）。
+
+          > 版本 ``$env:VERSION``（package.json $env:PKG_VERSION）
+          "@
+
+          # gh 的退出码不会自动抛异常，因此显式判断
+          gh release view $env:TAG --json tagName *> $null
+          $exists = ($LASTEXITCODE -eq 0)
+
+          $files = @(Get-ChildItem dist -File | ForEach-Object { $_.FullName })
+
+          $notesFile = Join-Path $env:RUNNER_TEMP 'release-notes.md'
+          Set-Content $notesFile $notes -Encoding UTF8
+
+          if ($exists) {
+            Write-Host "更新已有 Release: $env:TAG"
+            gh release edit $env:TAG --title "DSAgent $env:TAG" --notes-file $notesFile
+            if ($LASTEXITCODE -ne 0) { throw 'gh release edit 失败' }
+            gh release upload $env:TAG @files --clobber
+            if ($LASTEXITCODE -ne 0) { throw 'gh release upload 失败' }
+          } else {
+            Write-Host "创建 Release: $env:TAG"
+            # ★ --target：滚动 Release 的 tag「latest」需固定指向本次构建的提交，
+            #   否则 gh 会按默认分支建 tag，产物与 tag 对不上，溯源就断了。
+            # ★ 不加 --prerelease：滚动 Release 也要能被 /releases/download/latest/ 解析。
+            gh release create $env:TAG --title "DSAgent $env:TAG" `
+              --notes-file $notesFile --target $env:FULL_SHA @files
+            if ($LASTEXITCODE -ne 0) { throw 'gh release create 失败' }
+          }
+
+          Write-Host "完成: $env:TAG"
+          gh release view $env:TAG --json url,assets --jq '.url, (.assets[] | "  \(.name)  \(.size)")'
+
+  # ── 完整绿色包（约 343 MB）──────────────────────────────────────────────
+  #
+  # 为什么默认关着：
+  #   完整包的 93% 是 app/（DSH 运行时，638 MB）与 python/（294 MB），极少变动。
+  #   而托管 runner **拿不到 app/** —— 官方在线安装包 0.11.0 里没有 node.exe
+  #   （实测 asar 21221 个条目中 node.exe 数量 = 0），build-portable.ps1 又依赖
+  #   本机已装 DSH Desktop 0.10.0 的目录布局。
+  #
+  # 因此策略：把 app/ + python/ 作为「基座」发布一次（tag: base 的 Release，
+  # 资产名 DSAgent-Base.zip），之后每次只用「基座 + 新 plugin/」快速重组。
+  #
+  # 另一种选择：换 self-hosted runner，直接跑 build-portable.ps1（见 README）。
+  full:
+    name: 完整绿色包
+    if: github.event_name == 'workflow_dispatch' && inputs.full
+    runs-on: windows-latest
+    needs: incremental
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - run: npm ci
+      - run: npm run build
+
+      - name: 取回基座
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          gh release download base --pattern 'DSAgent-Base.zip' --dir dist --clobber
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path dist/DSAgent-Base.zip)) {
+            throw @'
+          仓库里没有基座资产 DSAgent-Base.zip，无法在托管 runner 上组装完整包。
+
+          解决办法（任选其一）：
+            1) 本机跑一次「npm run build && npm run portable && npm run portable:deps」，
+               再用 dev/portable/make-base.ps1 生成 DSAgent-Base.zip，
+               上传到 tag「base」的 Release；
+            2) 或改用 self-hosted runner（本机已装 DSH Desktop），直接跑 build-portable.ps1；
+            3) 或干脆照旧在本机打包，只把增量包交给 CI 自动发。
+          '@
+          }
+          Get-ChildItem dist | Select-Object Name, @{n='MB';e={[math]::Round($_.Length/1MB,1)}}
+
+      - name: 组装完整包
+        shell: pwsh
+        run: |
+          # -AllowRepoOutput：CI runner 上没有 DSH Desktop，dist/ 落在 workspace 无害
+          #（本机跑时该开关必须省略，否则会破坏 DSH Desktop 的插件迁移）
+          pwsh -NoProfile -File dev/portable/assemble-full-from-base.ps1 `
+            -BaseZip dist/DSAgent-Base.zip -OutRoot dist -AllowRepoOutput
+
+      - name: 校验 + SHA256
+        shell: pwsh
+        run: |
+          $z = 'dist/DSAgent-Portable.zip'
+          if (-not (Test-Path $z)) { throw '未生成完整包' }
+
+          # 结构自检：启动器/插件/Python/运行时入口必须在，且不得含 data/
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path $z))
+          try {
+            $names = @($zip.Entries.FullName)
+            $need = @(
+              'DSAgent-Portable/启动 DSAgent.cmd',
+              'DSAgent-Portable/plugin/lib/index.js',
+              'DSAgent-Portable/python/python.exe',
+              'DSAgent-Portable/app/resources/harness-node-entry.mjs'
+            )
+            foreach ($n in $need) {
+              if ($names -notcontains $n) { throw "完整包缺少必要文件: $n" }
+            }
+            $leak = @($names | Where-Object { $_ -like 'DSAgent-Portable/data/*' })
+            if ($leak.Count -gt 0) { throw "完整包含有凭证目录 data/" }
+          } finally { $zip.Dispose() }
+
+          "$((Get-FileHash $z -Algorithm SHA256).Hash)  DSAgent-Portable.zip" |
+            Set-Content dist/SHA256SUMS-full.txt -Encoding UTF8
+          Get-Content dist/SHA256SUMS-full.txt
+          Write-Host ("完整包 {0:N1} MB" -f ((Get-Item $z).Length/1MB))
+
+      - name: 上传到 Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.incremental.outputs.tag }}
+        run: |
+          gh release upload $env:TAG dist/DSAgent-Portable.zip dist/SHA256SUMS-full.txt --clobber
+          if ($LASTEXITCODE -ne 0) { throw '上传完整包失败' }
+
+          # ★ 先取回现有说明，再追加章节后整体写回。
+          #   不要写成 gh release edit --notes "$(gh release view ...)" ——
+          #   嵌套的 $() 里 gh 的退出码会覆盖外层，且内层失败时拿到的可能是空串，
+          #   结果把 Release 说明整段清空。
+          $body = gh release view $env:TAG --json body --jq .body
+          if ($LASTEXITCODE -ne 0) { throw '读取现有 Release 说明失败' }
+
+          $fullSection = @"
+
+          ## 完整绿色包
+
+          | 文件 | 说明 |
+          |---|---|
+          | ``DSAgent-Portable.zip`` | 首次安装用：解压到任意目录 → 双击 ``启动 DSAgent.cmd`` |
+          | ``SHA256SUMS-full.txt`` | 校验和 |
+
+          环境要求：Windows 10/11 64 位，无需另装 Node / Python / DSH。
+          data/ 目录由首次启动自动创建，包里不含任何账号凭证。
+          "@
+
+          # 幂等：重复触发时先剥掉上一轮的「完整绿色包」章节，避免越堆越长
+          $marker = '## 完整绿色包'
+          $idx = $body.IndexOf($marker)
+          if ($idx -ge 0) { $body = $body.Substring(0, $idx).TrimEnd() }
+
+          $notesFile = Join-Path $env:RUNNER_TEMP 'release-notes-full.md'
+          Set-Content $notesFile ($body + $fullSection) -Encoding UTF8
+
+          gh release edit $env:TAG --notes-file $notesFile
+          if ($LASTEXITCODE -ne 0) { throw '更新 Release 说明失败' }
+          Write-Host "完整包已上传到 $env:TAG"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dsagent-full-${{ github.sha }}
+          path: |
+            dist/DSAgent-Portable.zip
+            dist/SHA256SUMS-full.txt
+          retention-days: 7

@@ -1,16 +1,21 @@
 @echo off
-chcp 65001 >nul
-setlocal
-
 rem ===========================================================================
-rem  DSAgent 绿色版 —— 双击入口
+rem  DSAgent Portable - Launcher (double-click entry)
 rem
-rem  实际启动逻辑在 launch.ps1。这里只负责：
-rem    1. 切到本文件所在目录（保证相对路径正确）
-rem    2. 找到可用的 PowerShell
-rem    3. 用 -ExecutionPolicy Bypass 绕过脚本执行策略限制
-rem       （对方电脑通常不允许运行未签名脚本，这是必须的）
+rem  IMPORTANT: keep this file PURE ASCII with CRLF line endings.
+rem  cmd.exe parses .cmd using the system ANSI code page (GBK on Chinese
+rem  Windows). UTF-8 Chinese comments get mis-decoded, and the garbled text is
+rem  then executed as commands, producing errors such as:
+rem      '...' is not recognized as an internal or external command
+rem  All Chinese user-facing text is printed by launch.ps1 instead.
+rem
+rem  The real logic lives in launch.ps1.
 rem ===========================================================================
+
+setlocal
+rem Switch the console to UTF-8 so the Chinese output printed by launch.ps1
+rem renders correctly. This is a pure-ASCII command, so it is safe here.
+chcp 65001 >nul
 
 cd /d "%~dp0"
 
@@ -22,8 +27,7 @@ if not defined PS (
 
 if not defined PS (
   echo.
-  echo  未找到 PowerShell，无法启动。
-  echo  请确保系统为 Windows 10/11。
+  echo  PowerShell not found. Windows 10/11 is required.
   echo.
   pause
   exit /b 1
@@ -33,7 +37,7 @@ if not defined PS (
 
 if errorlevel 1 (
   echo.
-  echo  启动过程出现问题，请查看上方日志。
+  echo  Startup failed. See the log above.
   pause
 )
 

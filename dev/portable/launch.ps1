@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   DSAgent 绿色版启动器。
 

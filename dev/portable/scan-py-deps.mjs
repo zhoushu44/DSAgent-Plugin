@@ -84,21 +84,30 @@ console.log('静态扫描出的第三方依赖（出现次数）:')
 for (const [pkg, n] of sorted) console.log(`  ${String(n).padStart(4)}  ${pkg}`)
 
 /**
- * 权威清单：抽自 src/services/skill-service.ts 的 SKILL_DEPS。
- * 插件用它给每个候选解释器打分并挑选（命中越多越优先），
- * 因此包内 Python 必须尽量把这一组全部装齐，才能被自动选中。
- * 静态扫描可能漏掉「运行时才 import」或「被 try 包裹」的模块，故以此表为准做并集。
+ * 权威清单：**直接从源码读取** src/services/skill-service.ts 的 SKILL_DEPS。
+ *
+ * ★ 不要在这里硬编码副本！
+ *   之前硬编码了一份，结果源码里删掉了 pywencai/akshare/matplotlib，
+ *   这里却仍然保留 —— 两个来源必然漂移。现在改为解析源码，
+ *   保证「插件打分依据」与「打包安装清单」永远一致。
+ *
+ * 静态扫描（上面）负责补齐「运行时才 import」的模块；SKILL_DEPS 负责覆盖
+ * 插件探测用的那一组。两者取并集。
  */
-const SKILL_DEPS = [
-  'httpx', 'requests', 'bs4', 'jieba', 'lxml', 'markdown', 'numpy', 'openpyxl',
-  'pandas', 'PIL', 'docx', 'pptx', 'yaml', 'matplotlib',
-  'pdfplumber', 'pypdf', 'pdf2image', 'defusedxml', 'pywencai', 'akshare',
-]
+function readSkillDepsFromSource() {
+  const srcPath = join(root, 'src', 'services', 'skill-service.ts')
+  const text = readFileSync(srcPath, 'utf8')
+  const m = text.match(/const SKILL_DEPS\s*=\s*\[([\s\S]*?)\]/)
+  if (!m) throw new Error(`无法从 ${srcPath} 解析 SKILL_DEPS，请检查该常量是否改名`)
+  return [...m[1].matchAll(/'([^']+)'/g)].map((x) => x[1])
+}
+const SKILL_DEPS = readSkillDepsFromSource()
+console.log('\n从源码读到的 SKILL_DEPS:', SKILL_DEPS.join(', '))
+
 const DEPS_ALIAS = { PIL: 'Pillow', yaml: 'PyYAML', bs4: 'beautifulsoup4', docx: 'python-docx', pptx: 'python-pptx' }
 
 const all = new Set(sorted.map(([p]) => p))
 for (const d of SKILL_DEPS) all.add(DEPS_ALIAS[d] ?? d)
-// matplotlib 依赖链较重的可选件、pdf2image 需 poppler：仍装上，避免「探测分数低导致不被选中」
 const finalList = [...all].sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()))
 
 console.log('\n最终依赖清单（静态扫描 ∪ SKILL_DEPS）:')

@@ -38,7 +38,15 @@ $ProgressPreference = 'SilentlyContinue'
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoRoot  = (Resolve-Path (Join-Path $ScriptDir '..\..')).Path
 
-if (-not $PkgDir) { $PkgDir = Join-Path $RepoRoot 'dist\DSAgent-Portable' }
+if (-not $PkgDir) { $PkgDir = Join-Path $env:USERPROFILE 'DSAgent-Portable-build\DSAgent-Portable' }
+
+# 与 build-portable.ps1 保持一致：产物绝不能放在仓库内，否则 DSH Desktop 的
+# 插件 profile 迁移会扫到 app.asar 并判定 Invalid package，导致迁移失败、
+# 插件被固定到旧快照（表现为「插件 UI 不显示，重构建也不生效」）。
+$repoCheck = (Resolve-Path (Join-Path $ScriptDir '..\..')).Path
+if ((Resolve-Path $PkgDir -ErrorAction SilentlyContinue).Path -like "$repoCheck*") {
+  throw "包目录不能位于仓库内：$PkgDir`n请改用仓库外路径（默认已改为用户目录）。"
+}
 
 Write-Host ''
 Write-Host '=== 预装 Python 依赖到绿色包 ===' -ForegroundColor Cyan
@@ -72,11 +80,23 @@ Write-Host "  待安装依赖 $($reqLines.Count) 个:" -ForegroundColor DarkGray
 Write-Host "    $($reqLines -join ', ')" -ForegroundColor DarkGray
 Write-Host ''
 
-# ── 3. 升级 pip（老 pip 装不了部分 wheel）───────────────────────────────
-Write-Step '升级包内 pip'
-& $PyExe -m pip install --upgrade pip --index-url $IndexUrl --disable-pip-version-check --quiet
-if ($LASTEXITCODE -ne 0) { Write-Host '    ! pip 升级失败，继续尝试安装依赖（可能仍可用）' -ForegroundColor DarkYellow }
-else { Write-Ok 'pip 已升级' }
+# ── 3. pip 自检（不升级）────────────────────────────────────────────────
+# ★ 不要 `pip install --upgrade pip`：实测它会长时间卡住（自升级要解析自身
+#   依赖并重装，在网络受限/镜像不稳时几乎不返回），且对本包毫无必要 ——
+#   包内 pip 25.3 足以安装下面这些包。
+#   改为只确认 pip 可用，坏了才尝试修复。
+Write-Step '检查包内 pip'
+$pipOk = $false
+try {
+  $v = & $PyExe -m pip --version 2>&1
+  if ($LASTEXITCODE -eq 0) { Write-Ok ($v -join ' '); $pipOk = $true }
+} catch {}
+if (-not $pipOk) {
+  Write-Host '    ! 包内 pip 不可用，尝试用 ensurepip 修复' -ForegroundColor DarkYellow
+  & $PyExe -m ensurepip --default-pip 2>&1 | Select-Object -Last 3 | ForEach-Object { Write-Host "      $_" -ForegroundColor DarkGray }
+  if ($LASTEXITCODE -ne 0) { throw 'pip 不可用且修复失败，无法安装依赖' }
+  Write-Ok 'pip 已修复'
+}
 
 # ── 4. 安装依赖 ─────────────────────────────────────────────────────────
 Write-Step "安装依赖（约 400 MB，视网速需几分钟）"
@@ -84,31 +104,57 @@ Write-Step "安装依赖（约 400 MB，视网速需几分钟）"
 # 用 -t 直接装到包内 site-packages：
 #   - 不依赖 --user / --target 的 sys.path 差异
 #   - 保证启动器设的 PYTHONPATH 一定能 import 到
+#
+# ★ 一次性批量安装（不是逐个装）：
+#   逐个装会让 pip 对每个包各解析一次依赖树，重复下载、重复检查，
+#   实测在 akshare 这种长依赖链上极慢（单个包几分钟）。批量装交给 pip
+#   一次算完整闭包，快得多且不会重复。
 $sitePkgs = Join-Path $PkgDir 'python\Lib\site-packages'
 New-Item -ItemType Directory -Force -Path $sitePkgs | Out-Null
 
 $failed = @()
-foreach ($pkg in $reqLines) {
-  Write-Host "    · $pkg" -ForegroundColor DarkGray -NoNewline
-  $out = & $PyExe -m pip install --upgrade --target $sitePkgs --index-url $IndexUrl `
-                  --disable-pip-version-check --no-warn-script-location $pkg 2>&1
-  if ($LASTEXITCODE -eq 0) {
-    Write-Host "`r    OK $pkg" -ForegroundColor Green
-  } else {
-    Write-Host "`r    !! $pkg 安装失败" -ForegroundColor Red
-    $failed += $pkg
-    $out | Select-Object -Last 3 | ForEach-Object { Write-Host "       $_" -ForegroundColor DarkRed }
+$out = & $PyExe -m pip install --upgrade --target $sitePkgs --index-url $IndexUrl `
+                --disable-pip-version-check --no-warn-script-location `
+                --upgrade-strategy only-if-needed @reqLines 2>&1
+$out | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
+if ($LASTEXITCODE -ne 0) {
+  Write-Host '    ! 批量安装未全部成功，尝试逐个补装失败项' -ForegroundColor DarkYellow
+  # 从输出里挑出失败的包逐个重试，尽量救回
+  foreach ($pkg in $reqLines) {
+    $probeName = ($pkg -replace 'beautifulsoup4', 'bs4' -replace 'Pillow', 'PIL' `
+                      -replace 'PyYAML', 'yaml' -replace 'python-docx', 'docx' `
+                      -replace 'python-pptx', 'pptx' -replace '-', '_')
+    $check = & $PyExe -c "import importlib,sys; sys.path.insert(0,r'$sitePkgs'); importlib.import_module('$probeName')" 2>&1
+    if ($LASTEXITCODE -ne 0) {
+      Write-Host "    · 补装 $pkg" -ForegroundColor DarkGray
+      $r2 = & $PyExe -m pip install --target $sitePkgs --index-url $IndexUrl `
+                     --disable-pip-version-check --no-warn-script-location $pkg 2>&1
+      if ($LASTEXITCODE -ne 0) { $failed += $pkg; $r2 | Select-Object -Last 2 | ForEach-Object { Write-Host "       $_" -ForegroundColor DarkRed } }
+    }
   }
 }
 
 # ── 5. 验证 ─────────────────────────────────────────────────────────────
 Write-Step '验证依赖可导入'
 
-# 与 src/services/skill-service.ts 的 SKILL_DEPS 对应，用于确认包内解释器能拿满分
-$probe = @'
-mods = ['httpx','requests','bs4','jieba','lxml','markdown','numpy','openpyxl',
-        'pandas','PIL','docx','pptx','yaml','matplotlib',
-        'pdfplumber','pypdf','pdf2image','defusedxml','pywencai','akshare']
+# ★ 探测列表由 py-requirements.txt 生成，不硬编码。
+#   曾经硬编码过一份，结果清单里删掉 akshare/matplotlib/pywencai 后，
+#   这里仍按旧列表检查，报出「MISSING=matplotlib,pywencai,akshare」的假警报。
+#   改为从清单推导 import 名，保证「装什么」与「验什么」永远一致。
+$importAlias = @{
+  'beautifulsoup4' = 'bs4'
+  'Pillow'         = 'PIL'
+  'PyYAML'         = 'yaml'
+  'python-docx'    = 'docx'
+  'python-pptx'    = 'pptx'
+  'pdfminer.six'   = 'pdfminer'
+}
+$probeMods = $reqLines | ForEach-Object {
+  if ($importAlias.ContainsKey($_)) { $importAlias[$_] } else { $_ }
+}
+$modList = ($probeMods | ForEach-Object { "'$_'" }) -join ','
+$probe = @"
+mods = [$modList]
 ok, bad = [], []
 for m in mods:
     try:
@@ -117,7 +163,7 @@ for m in mods:
         bad.append(m)
 print('OK=%d/%d' % (len(ok), len(mods)))
 print('MISSING=' + (','.join(bad) if bad else '(none)'))
-'@
+"@
 
 $env:PYTHONPATH = $sitePkgs
 $probeOut = $probe | & $PyExe -

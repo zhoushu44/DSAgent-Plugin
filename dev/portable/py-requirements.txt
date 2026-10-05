@@ -5,14 +5,12 @@
 #       包内 Python 必须命中数最高才会被自动选中，否则技能仍会 ModuleNotFoundError。
 #
 # 安装：dev/portable/prepare-pydeps.ps1 （装进包内 Python，不污染系统）
-akshare
 beautifulsoup4
 defusedxml
 httpx
 jieba
 lxml
 markdown
-matplotlib
 numpy
 openpyxl
 pandas
@@ -22,7 +20,6 @@ Pillow
 pypdf
 python-docx
 python-pptx
-pywencai
 PyYAML
 requests
 validators

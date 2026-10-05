@@ -24,3 +24,10 @@
         storePath: '__PKG__/data/dsagent-accounts.json'
         # 未绑定账号时返回引导文案而不是硬报错
         guideOnUnbound: true
+
+# 溢出文件存储：默认会 mkdtemp 到系统 %TEMP%，在受限环境（沙箱/权限收紧的机器）
+# 会因 EPERM 失败并导致整个 DSH 启动失败。显式指向包内目录，既稳定又符合
+# 「绿色包不污染系统」的目标。
+- id: spill-local
+  config:
+    root: '__PKG__/data/temp/spill'

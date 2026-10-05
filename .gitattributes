@@ -1,0 +1,29 @@
+# 分发包脚本的换行符是**硬性要求**，不是风格偏好，因此必须锁定。
+#
+# 背景（实测踩过）：cmd.exe 解析 .cmd 时按批处理规则处理换行，只有裸 LF 会让
+# `if (...)` 多行块解析错乱；同时 .cmd 必须是纯 ASCII（cmd.exe 按系统 ANSI
+# 代码页读取，与文件自身编码无关，中文注释会被当命令执行）。
+#
+# 为什么需要显式 eol=crlf：仓库里 .cmd 以 LF 存储，靠 core.autocrlf 在签出时
+# 还原成 CRLF。而 GitHub Actions runner 上的 autocrlf 并不保证是 true ——
+# 一旦是 false/input，签出的 .cmd 就是裸 LF，打包脚本的编码校验会直接失败。
+# .gitattributes 的 eol=crlf 优先级高于 core.autocrlf，做到与机器无关。
+#
+# 注：BOM 由 dev/portable/fix-script-encoding.mjs 负责，git 不管 BOM。
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# 二进制资产：禁止任何行尾/编码转换
+*.exe   binary
+*.dll   binary
+*.zip   binary
+*.7z    binary
+*.png   binary
+*.jpg   binary
+*.gif   binary
+*.ico   binary
+*.pyc   binary
+*.node  binary
+
+# lib/ 是编译产物，不做 diff 展示
+lib/**  -diff
