@@ -104,16 +104,18 @@ function readLocalVersion(): { version: string; commit: string; builtAt: string 
 }
 
 /**
- * 查 GitHub latest Release，解析出远端 commit 与 package version。
+ * 查 GitHub latest Release，解析出远端 commit 与版本号。
  *
  * ★ 为什么不直接调 api.github.com：
- *   匿名调 api.github.com 每小时仅 60 次，用户多点几下就 403（实测 IP 103.62.49.178 已被限流）。
+ *   匿名调 api.github.com 每小时仅 60 次，用户多点几下就 403（实测 IP 已被限流）。
  *   改抓 Release 页 HTML（github.com/.../releases/tag/latest）—— 不走 API、无限流。
  *
- * ★ 怎么从页面拿版本：
- *   1) 远端 commit：页面里有指向本次提交的链接，href 含 /commit/<40位sha>，取第一个 7 位短 sha。
- *   2) package version：CI 把它写进了 Release body（"... 版本 yyyyMMdd-<sha>（package.json x.y.z）"），
- *      用正则取 "package.json" 后的版本号。
+ * ★ 怎么从页面拿版本（按优先级）：
+ *   1) Release 标题/tag 本身：页面有 "DSAgent vX.Y" 标题（CI 以 tag 为 Release 标题）。
+ *      版本号纪律是「版本跟着 tag 走」，tag 就是最权威的版本。
+ *   2) Release body 里的 "package.json x.y.z"（旧版说明格式，向后兼容）。
+ *   3) 都没有 → 留空，UI 仍可用 commit 比对。
+ *   4) 远端 commit：页面里指向本次提交的链接，href 含 /commit/<40位sha>，取 7 位短 sha。
  */
 async function fetchRemoteVersion(): Promise<{ version: string; commit: string; ok: boolean; error?: string }> {
   try {
@@ -129,23 +131,37 @@ async function fetchRemoteVersion(): Promise<{ version: string; commit: string; 
     const cm = html.match(/\/commit\/([0-9a-f]{40})/)
     if (cm) commit = cm[1].slice(0, 7)
 
-    // package version：Release body 里 "package.json x.y.z" 或 "（package.json x.y.z）"
+    // 版本号优先级 1：Release 标题「DSAgent X.Y」/「DSAgent vX.Y」（tag 即版本）
     let version = ''
-    const vm = html.match(/package\.json[^\d]{0,4}(\d+\.\d+\.\d+)/)
-    if (vm) version = vm[1]
+    const tm = html.match(/DSAgent\s+v?(\d+(?:\.\d+)+)/)
+    if (tm) version = tm[1]
 
-    // 兜底：若 body 里没写出 package version，用 CI 版本号（yyyyMMdd-sha）里的日期段也无意义，
-    // 此时 version 留空，UI 仍可用 commit 比对。
+    // 版本号优先级 2：Release body 里 "package.json x.y.z"（兼容旧格式）
+    if (!version) {
+      const vm = html.match(/package\.json[^\d]{0,4}(\d+\.\d+\.\d+)/)
+      if (vm) version = vm[1]
+    }
+
     return { version, commit, ok: true }
   } catch (e: any) {
     return { version: '', commit: '', ok: false, error: e?.message || String(e) }
   }
 }
 
-/** 是否有更新：本地 commit 与远端不同（且本地有 commit），或本地 version 与远端不同。 */
+/**
+ * 是否有更新：本地 commit 与远端不同（且本地有 commit），或本地 version 与远端不同。
+ * ★ 版本号按 tag 走（如 6.0.0），而 Release 标题可能是 6.0（无第三位）——
+ *   比较时按「主.次」对齐，避免 6.0 vs 6.0.0 误报有更新。
+ */
 function hasUpdate(local: { version: string; commit: string }, remote: { version: string; commit: string }): boolean {
   if (local.commit && remote.commit) return local.commit !== remote.commit
-  if (local.version && remote.version) return local.version !== remote.version
+  if (local.version && remote.version) {
+    const norm = (v: string) => {
+      const m = v.match(/^(\d+)\.(\d+)/)
+      return m ? `${m[1]}.${m[2]}` : v
+    }
+    return norm(local.version) !== norm(remote.version)
+  }
   return false
 }
 

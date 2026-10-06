@@ -43,6 +43,37 @@ jobs:
       - name: 安装依赖
         run: npm ci
 
+      - name: 版本号跟随 tag（tag 构建时自动写入 package.json）
+        shell: pwsh
+        run: |
+          # ★ 版本号纪律：本地 package.json 只是占位（可能滞后），
+          #   真正的版本号 = git tag。推 tag 7.0 → 构建出的 package.json 就是 7.0.0，
+          #   用户装完检查更新显示 v7.0，与 Release tag 天然一致，无需手动 bump。
+          #   推 main（滚动 latest）时不动版本号——latest 用 commit 比对，版本号无意义。
+          #   ★ 注意顺序：必须在 npm run build 之前执行——build-update.ps1 会把
+          #     package.json 打进增量包，打包前改写才能让用户装到 tag 版本号。
+          if ($env:GITHUB_REF -like 'refs/tags/*') {
+            $tag = $env:GITHUB_REF -replace '^refs/tags/', ''
+            # tag 形如 6.0 / v6.0：剥掉 v 前缀，补 .0 变 semver（6.0 → 6.0.0）
+            $semver = ($tag -replace '^v', '') -replace '^(\d+)\.(\d+)$', '$1.$2.0'
+            if ($semver -notmatch '^\d+\.\d+\.\d+$') {
+              Write-Host "tag '$tag' 不是数字版本，跳过版本写入"
+            } else {
+              $pkgPath = 'package.json'
+              $pkg = Get-Content $pkgPath -Raw -Encoding UTF8 | ConvertFrom-Json
+              if ($pkg.version -ne $semver) {
+                $old = $pkg.version
+                $pkg.version = $semver
+                $pkg | ConvertTo-Json -Depth 32 | Set-Content $pkgPath -Encoding UTF8
+                Write-Host "package.json version: $old → $semver（跟随 tag $tag）"
+              } else {
+                Write-Host "package.json version 已是 $semver，无需修改"
+              }
+            }
+          } else {
+            Write-Host 'main 分支构建，版本号不动（滚动 latest 用 commit 比对）'
+          }
+
       - name: 构建插件（ESM 纯度 + typecheck + host 编译 + esbuild + 冒烟）
         run: npm run build
 
@@ -68,6 +99,8 @@ jobs:
           "tag=$tag"           >> $env:GITHUB_OUTPUT
           "version=$date-$sha" >> $env:GITHUB_OUTPUT
           Write-Host "tag=$tag  version=$date-$sha  package=$pkg"
+          # ★ pkg_version 此时读的是已被「版本号跟随 tag」步骤改写后的 package.json：
+          #   tag 6.0 → pkg_version=6.0.0，Release 说明与用户安装后显示的版本一致。
 
       - name: 生成增量更新包
         shell: pwsh
