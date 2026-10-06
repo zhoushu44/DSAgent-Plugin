@@ -673,7 +673,18 @@ disable-model-invocation: ${s.enabled ? 'false' : 'true'}</pre>
             })
             const data = resp.ok ? await resp.json() : null
             if (!data || !data.ok) {
-              sayLong('检查更新失败：服务未就绪')
+              // 区分「运行中的 host 还是旧版（缺 check_update 分支）」与「其他故障」：
+              // host 半区代码在 DSH 启动时加载，运行中不会热更新 ——
+              // 磁盘已是新版但进程还是旧版时，会收到 400 + "Unknown action: check_update"。
+              // 400 的 body 也是 JSON，读出来精确判断；读不出时按状态码推断。
+              let errBody: { error?: string } | null = null
+              if (!resp.ok) { try { errBody = await resp.json() } catch { /* body 非 JSON */ } }
+              const errText = String(errBody?.error || data?.error || '')
+              if (errText.includes('Unknown action') || (!data && resp.status === 400)) {
+                sayLong('插件已更新，但运行中的 DSH 还是旧版。\n请完全退出 DSH Desktop（托盘右键退出）后重新打开，即可生效。')
+              } else {
+                sayLong(`检查更新失败：${errText || `HTTP ${resp.status}`}`)
+              }
               return
             }
             if (!data.remoteOk) {
