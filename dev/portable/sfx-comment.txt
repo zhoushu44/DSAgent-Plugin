@@ -1,0 +1,18 @@
+Path=%USERPROFILE%\DSAgent
+Title=DSAgent 安装程序
+Text
+{
+DSAgent 智能助手 — 一键安装
+
+将安装到:  %USERPROFILE%\DSAgent
+如需更换位置, 点「浏览」修改。
+
+点「安装」后自动解压, 完成后会自动启动。
+首次启动需 10-30 秒初始化, 浏览器将自动打开。
+
+数据(账号/会话)保存在安装目录的 data\ 下,
+卸载 = 删除整个 DSAgent 文件夹, 不写注册表。
+}
+Setup=DSAgent-Portable\启动 DSAgent.cmd
+Overwrite=1
+Silent=0

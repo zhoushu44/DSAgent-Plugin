@@ -1,9 +1,0 @@
-[project]
-slug = " industry-competition-moat"
-name = " 行业竞争护城河分析"
-category = "股票"
-version = "1.0.0"
-author = "YiqiWork"
-description = "分析A股公司的行业结构、竞争格局、供需平衡与护城河，评估公司增长可持续性及差异化真实性，所有输出均附带可访问的来源链接"
-icon_url = "https://s1.aigei.com/src/img/png/b5/b5c7cfb49c044ae7b185dbc1f987033b.png?imageMogr2/auto-orient/thumbnail/!282x282r/gravity/Center/crop/282x282/quality/85/%7CimageView2/2/w/282&e=2051020800&token=P7S2Xpzfz11vAkASLTkfHN7Fw-oOZBecqeJaxypL:I_jH2P3WY0Z9HLp6BnqMNyNz3SI="
-requires-python = ">=3.10"
