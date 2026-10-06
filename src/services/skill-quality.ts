@@ -448,7 +448,7 @@ export function validateSkill(raw: string): SkillValidation {
  * 同时警告：降级后 **nested 字段（renderers / tools / tool_triggers）会被完全忽略**。
  *
  * 对本项目尤其重要：技能 description 里大量出现 `[src: ...]` 这类方括号
- * （实测 data-report 554 字符属风险区），
+ * （实测 data-report 554 字符、pywencai-stock 440 字符都在风险区），
  * 一旦解析器换成真正的 YAML 实现，这些 description 会解析失败并连带丢掉 tool_triggers。
  *
  * 因此这里主动把「未加引号但以特殊字符开头的值」标出来，让作者提前修掉。

@@ -1,6 +1,6 @@
 {
   "name": "@dsagent/dsagent-plugin",
-  "version": "4.0.0",
+  "version": "1.0.0",
   "description": "DSH 插件：账号连接器 + 技能市场，为模型注册 5 个只读工具（账号查询、健康检查、技能列表、技能详情、平台列表），浏览器侧提供账号连接页与技能市场页。 · DSH plugin: account connector + skill market — registers 5 read-only tools and a dual-tab browser UI.",
   "keywords": [
     "deepseek-harness",

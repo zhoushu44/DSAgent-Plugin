@@ -25,7 +25,6 @@ import { createPitfallMemory, renderPitfallHint, exportPitfallDraft, isRecordabl
 import { loadContract, contractToolName, contractToolParameters, buildContractArgv, type SkillContract } from './services/arguments.js'
 import { readdirSync, readFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { CredentialStore, parseCookieStr, keyCookies, credentialPlatform, resolveDisplayNick, loginOwnerPlatform, planCascadeDisconnect } from './services/credential-store.js'
 import { doBrowserLogin, closeBrowser, ensureXianyuFromTaobao, riskVerify, removeAccountProfile } from './browser-login.js'
 import * as authOp from './services/auth-operation.js'
@@ -48,105 +47,6 @@ import * as nodeOs from 'node:os'
 function maskSecret(s: string): string {
   if (!s) return ''
   return s.length <= 4 ? '••••' : s.slice(0, 4) + '••••'
-}
-
-/* ─────────────── 自检更新：读本地版本，查 GitHub latest Release 比对 ─────────────── */
-/**
- * 插件根目录（lib/ 的父目录）。
- * host 半区编译产物是 lib/index.js，import.meta.url 指向它，上跳一层即插件根。
- * 绿色包里 build-info.json 在包根（= 插件根的父目录），下面读本地版本时两处都兜底。
- */
-const PLUGIN_ROOT = (() => {
-  try {
-    const here = fileURLToPath(import.meta.url)
-    // 兼容：编译产物可能在 lib/index.js（生产）或 src/index.ts（dev 直载，rare），
-    // 上跳一层都能拿到插件根。
-    return nodePath.resolve(nodePath.dirname(here), '..')
-  } catch {
-    // 兜底：cwd。极少走到，import.meta.url 在 ESM 下几乎总有值。
-    return process.cwd()
-  }
-})()
-
-/** 仓库地址（Release tag = latest 的滚动版本）。与 release.yml 的滚动 tag 一致。 */
-const UPDATE_REPO = 'zhoushu44/DSAgent-Plugin'
-
-/**
- * 读本地版本信息。
- * - package.json 的 version：所有安装方式都有（市场装的就是它）。
- * - build-info.json 的 gitCommit：仅绿色包有；市场/dev 安装没有，回退为空。
- *   绿色包的 build-info.json 在包根（插件根的父目录），两处都找。
- */
-function readLocalVersion(): { version: string; commit: string; builtAt: string } {
-  let version = '0.0.0'
-  let commit = ''
-  let builtAt = ''
-  try {
-    const pj = JSON.parse(readFileSync(join(PLUGIN_ROOT, 'package.json'), 'utf8'))
-    version = String(pj.version || '0.0.0')
-  } catch { /* 极少走到：package.json 必然存在 */ }
-
-  // build-info.json 候选位置：插件根本身 + 父目录（绿色包包根）
-  for (const cand of [
-    join(PLUGIN_ROOT, 'build-info.json'),
-    join(PLUGIN_ROOT, '..', 'build-info.json'),
-  ]) {
-    if (existsSync(cand)) {
-      try {
-        const info = JSON.parse(readFileSync(cand, 'utf8'))
-        if (!commit && info.gitCommit) commit = String(info.gitCommit).slice(0, 7)
-        if (!builtAt && (info.commitTime || info.builtAt)) builtAt = String(info.commitTime || info.builtAt)
-        break
-      } catch { /* 格式异常忽略 */ }
-    }
-  }
-  return { version, commit, builtAt }
-}
-
-/**
- * 查 GitHub latest Release，解析出远端 commit 与 package version。
- *
- * ★ 为什么不直接调 api.github.com：
- *   匿名调 api.github.com 每小时仅 60 次，用户多点几下就 403（实测 IP 103.62.49.178 已被限流）。
- *   改抓 Release 页 HTML（github.com/.../releases/tag/latest）—— 不走 API、无限流。
- *
- * ★ 怎么从页面拿版本：
- *   1) 远端 commit：页面里有指向本次提交的链接，href 含 /commit/<40位sha>，取第一个 7 位短 sha。
- *   2) package version：CI 把它写进了 Release body（"... 版本 yyyyMMdd-<sha>（package.json x.y.z）"），
- *      用正则取 "package.json" 后的版本号。
- */
-async function fetchRemoteVersion(): Promise<{ version: string; commit: string; ok: boolean; error?: string }> {
-  try {
-    const r = await fetch(`https://github.com/${UPDATE_REPO}/releases/tag/latest`, {
-      headers: { 'User-Agent': 'dsagent-update-checker' },
-      redirect: 'follow',
-    })
-    if (!r.ok) return { version: '', commit: '', ok: false, error: `GitHub 返回 HTTP ${r.status}` }
-    const html = await r.text()
-
-    // 远端 commit：页面里第一处 /commit/<40sha>
-    let commit = ''
-    const cm = html.match(/\/commit\/([0-9a-f]{40})/)
-    if (cm) commit = cm[1].slice(0, 7)
-
-    // package version：Release body 里 "package.json x.y.z" 或 "（package.json x.y.z）"
-    let version = ''
-    const vm = html.match(/package\.json[^\d]{0,4}(\d+\.\d+\.\d+)/)
-    if (vm) version = vm[1]
-
-    // 兜底：若 body 里没写出 package version，用 CI 版本号（yyyyMMdd-sha）里的日期段也无意义，
-    // 此时 version 留空，UI 仍可用 commit 比对。
-    return { version, commit, ok: true }
-  } catch (e: any) {
-    return { version: '', commit: '', ok: false, error: e?.message || String(e) }
-  }
-}
-
-/** 是否有更新：本地 commit 与远端不同（且本地有 commit），或本地 version 与远端不同。 */
-function hasUpdate(local: { version: string; commit: string }, remote: { version: string; commit: string }): boolean {
-  if (local.commit && remote.commit) return local.commit !== remote.commit
-  if (local.version && remote.version) return local.version !== remote.version
-  return false
 }
 
 /**
@@ -919,23 +819,6 @@ export function apply(ctx: Context, cfg: Config = config) {
                 res.writeHead(500, { 'Content-Type': 'application/json' })
                 res.end(JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) }))
               }
-            } else if (action === 'check_update') {
-              // 检查更新：比对本地版本（package.json version + build-info commit）
-              // 与 GitHub latest Release。UI 技能页「检查更新」按钮的数据源。
-              const local = readLocalVersion()
-              const remote = await fetchRemoteVersion()
-              const updateAvailable = remote.ok ? hasUpdate(local, remote) : false
-              res.writeHead(200, { 'Content-Type': 'application/json' })
-              res.end(JSON.stringify({
-                ok: true,
-                local: { version: local.version, commit: local.commit, builtAt: local.builtAt },
-                remote: { version: remote.version, commit: remote.commit },
-                remoteOk: remote.ok,
-                remoteError: remote.error,
-                updateAvailable,
-                repo: UPDATE_REPO,
-                downloadUrl: `https://github.com/${UPDATE_REPO}/releases/latest/download/DSAgent-Update.zip`,
-              }))
             } else {
               res.writeHead(400, { 'Content-Type': 'application/json' })
               res.end(JSON.stringify({ ok: false, error: `Unknown action: ${action}` }))

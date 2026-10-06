@@ -37,6 +37,7 @@ const CAPABILITIES: Array<[string, string]> = [
   ['copywriting', '内容创作'],
   ['publish', '内容发布'],
   ['compliance', '合规'],
+  ['finance', '股票投研'],
   ['chart', '图表报告'],
   // 平台技能：按功能组归纳
   ['cs-script', '客服'],
@@ -254,6 +255,11 @@ const FALLBACK_SKILLS_RAW: FallbackSkill[] = [
   { id: 'market-analysis', name: '淘宝搜索结果页分析', description: '分析淘宝搜索结果页大盘，统计竞品卡位、价格带与卖点分布。', version: '1.0.0', platform: 'common', capability: 'vertical', risk: 'L1', enabled: true, dir: '', body: '' },
   { id: 'product-reviews', name: '淘宝商品评价分析', description: '采集并分析商品评价，做情感归类、痛点提取与卖点提炼。', version: '1.0.0', platform: 'common', capability: 'vertical', risk: 'L1', enabled: true, dir: '', body: '' },
   { id: 'industry-data-mcp', name: '淘宝行业类目分析', description: '基于行业库（参谋长）做类目全维度分析：类目归属、汇总指标、按天趋势、热搜词、商品榜单，生成交互式 HTML 报告。', version: '1.0.0', platform: 'common', capability: 'vertical', risk: 'L1', enabled: true, dir: '', body: '' },
+  { id: 'pywencai-stock', name: 'A股行情数据查询', description: '基于东方财富公开接口获取A股涨幅榜/跌幅榜、涨停跌停股池、概念与行业板块、个股行情财务、主力资金流、龙虎榜、市盈率/ROE/净利润排行。无需登录、无需 API Key。', version: '2.0.0', platform: 'common', capability: 'vertical', risk: 'L0', enabled: true, dir: '', body: '' },
+  { id: 'valuation-investment-strategy', name: '估值与投资策略分析', description: '个股估值建模与投资策略分析，输出估值区间与策略建议。', version: '1.0.0', platform: 'common', capability: 'vertical', risk: 'L0', enabled: true, dir: '', body: '' },
+  { id: 'financial-statement-analyzer', name: '财务报表深度分析', description: '三张表深度解析，识别财务质量、盈利结构与风险信号。', version: '1.0.0', platform: 'common', capability: 'vertical', risk: 'L0', enabled: true, dir: '', body: '' },
+  { id: 'industry-competition-moat', name: '行业竞争护城河分析', description: '分析行业竞争格局与护城河，评估长期竞争优势与壁垒。', version: '1.0.0', platform: 'common', capability: 'vertical', risk: 'L0', enabled: true, dir: '', body: '' },
+  { id: 'a-stock-diagnosis', name: 'A股个股技术诊断', description: '基于 60 日 K 线计算 MA5/10/20/60、量价关系、支撑压力位与风险信号，输出结构化诊断报告。', version: '1.0.0', platform: 'common', capability: 'vertical', risk: 'L0', enabled: true, dir: '', body: '' },
   { id: 'data-report', name: '数据可视化报告', description: '将结构化数据生成可视化图表与交互式 HTML 报告。', version: '1.0.0', platform: 'common', capability: 'vertical', risk: 'L0', enabled: true, dir: '', body: '' },
   { id: 'smart-compose', name: '智能排版', description: '对文案内容做智能排版与版式优化，输出可直接发布的成品。', version: '1.0.0', platform: 'common', capability: 'vertical', risk: 'L0', enabled: true, dir: '', body: '' },
   { id: 'customer-service-reply', name: '电商客服话术生成', description: '根据场景与商品信息生成客服话术，支持售前咨询、售后安抚与催单场景。', version: '1.0.0', platform: 'common', capability: 'vertical', risk: 'L0', enabled: true, dir: '', body: '' },
@@ -282,7 +288,7 @@ type Tab = 'vertical' | 'builtin' | 'installed'
 /** 垂直业务细分标签集合：这些 + 平台特定技能 → 垂直业务页签；其余 → 内置页签 */
 const BIZ_CAPS = new Set([
   'selection', 'shop-ops', 'analytics', 'crm', 'copywriting', 'publish',
-  'compliance', 'chart', 'cs-script', 'vertical',
+  'compliance', 'finance', 'chart', 'cs-script', 'vertical',
 ])
 
 export interface SkillMarketPageDeps {
@@ -407,14 +413,11 @@ export function skillMarketPage(deps: SkillMarketPageDeps) {
     return ordered.map(p => {
       const items = groups.get(p)!
       const label = PLATFORM_LABEL[p] || p
-      // 淘宝组内按职能分区（20 个，平铺会淹没）
+      // 淘宝组内：生意参谋系（数据后台）排前，店铺操作类排后，子标签区分
+      const isSycm = (s: SkillRow) => s.platform === 'sycm'
       if (p === 'taobao') {
-        const isCap = (cap: string) => (s: SkillRow) => s.capability === cap
-        const sycm = items.filter(s => s.platform === 'sycm')                          // 生意参谋数据后台（含诊断系）
-        const diag = items.filter(s => s.platform !== 'sycm' && isCap('shop-ops')(s))  // 店内诊断（淘宝直连）
-        const crm = items.filter(s => s.platform !== 'sycm' && isCap('crm')(s))        // 客户运营（取数走 sycm-customer/reviews）
-        const sel = items.filter(s => s.platform !== 'sycm' && (isCap('selection')(s) || isCap('analytics')(s))) // 选品/评价/关键词
-        const rest = items.filter(s => !sycm.includes(s) && !diag.includes(s) && !crm.includes(s) && !sel.includes(s))
+        const sycm = items.filter(isSycm)
+        const shop = items.filter(s => !isSycm(s))
         const sec = (rows: SkillRow[], sub: string) => rows.length ? `
           <h4 class="dsm-sub-hd">${esc(sub)}<em>${rows.length}</em></h4>
           <div class="dsm-grid">${rows.map(card).join('')}</div>` : ''
@@ -422,10 +425,7 @@ export function skillMarketPage(deps: SkillMarketPageDeps) {
         <section class="dsm-group" data-group="taobao">
           <h3 class="dsm-group-hd"><b>${esc(label)}</b><em>${items.length} 个技能</em></h3>
           ${sec(sycm, '生意参谋数据后台（复用淘宝登录态）')}
-          ${sec(diag, '店内诊断')}
-          ${sec(sel, '选品 · 评价 · 关键词')}
-          ${sec(crm, '客户运营')}
-          ${sec(rest, '店铺操作')}
+          ${sec(shop, '店铺操作')}
         </section>`
       }
       return `
@@ -470,10 +470,7 @@ export function skillMarketPage(deps: SkillMarketPageDeps) {
             <div>
               <h2>DSAgent 技能</h2>
             </div>
-            <div class="dsm-hd-btns">
-              <button class="dsm-btn" data-act="check_update">检查更新</button>
-              <button class="dsm-btn" data-act="import">导入本地技能</button>
-            </div>
+            <button class="dsm-btn" data-act="import">导入本地技能</button>
           </header>
           ${renderTabs()}
           ${renderChips()}
@@ -507,25 +504,6 @@ export function skillMarketPage(deps: SkillMarketPageDeps) {
         toast.textContent = msg
         toast.hidden = false
         window.setTimeout(() => { toast.hidden = true }, 2000)
-      }
-
-      /** 长文本提示：更新结果含多行信息，短 toast 看不清。
-       *  改成「点击关闭 + 10 秒兜底」，并把 toast 撑成多行 + 可选文本换行。 */
-      let longTimer = 0
-      function sayLong(msg: string) {
-        toast.textContent = msg
-        toast.hidden = false
-        toast.classList.add('dsm-toast-long')
-        // 之前若有长提示定时器，清掉避免提前消失
-        if (longTimer) window.clearTimeout(longTimer)
-        const dismiss = () => {
-          toast.hidden = true
-          toast.classList.remove('dsm-toast-long')
-          toast.removeEventListener('click', dismiss)
-          if (longTimer) { window.clearTimeout(longTimer); longTimer = 0 }
-        }
-        toast.addEventListener('click', dismiss)
-        longTimer = window.setTimeout(dismiss, 12_000)
       }
 
       function repaint() {
@@ -660,42 +638,6 @@ disable-model-invocation: ${s.enabled ? 'false' : 'true'}</pre>
 
         const actEl = t.closest('[data-act]') as HTMLElement | null
         if (actEl?.dataset.act === 'close') { drawer.hidden = true; return }
-        if (actEl?.dataset.act === 'check_update') {
-          // 检查更新：调 host 半区 check_update action，比对本地版本与 GitHub latest Release
-          const btn = actEl as HTMLButtonElement
-          btn.disabled = true
-          btn.textContent = '检查中…'
-          try {
-            const resp = await fetch('/dsagent/api', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ action: 'check_update' }),
-            })
-            const data = resp.ok ? await resp.json() : null
-            if (!data || !data.ok) {
-              sayLong('检查更新失败：服务未就绪')
-              return
-            }
-            if (!data.remoteOk) {
-              sayLong(`无法连接 GitHub（${data.remoteError || '网络错误'}）。可稍后重试，或直接访问：\nhttps://github.com/${data.repo}/releases/latest`)
-              return
-            }
-            const l = data.local, r = data.remote
-            const localStr = l.commit ? `v${l.version}（${l.commit}）` : `v${l.version}`
-            const remoteStr = r.commit ? `v${r.version}（${r.commit}）` : `v${r.version || '?'}`
-            if (data.updateAvailable) {
-              sayLong(`发现新版本！\n本地 ${localStr} → 远端 ${remoteStr}\n\n下载增量包（解压覆盖到安装目录，重启生效）：\n${data.downloadUrl}\n\n完整绿色包见 Release 页。`)
-            } else {
-              sayLong(`已是最新版本 ${localStr}\n（远端 ${remoteStr}）`)
-            }
-          } catch (err) {
-            sayLong(`检查更新出错：${(err as Error).message}`)
-          } finally {
-            btn.disabled = false
-            btn.textContent = '检查更新'
-          }
-          return
-        }
         if (actEl?.dataset.act === 'import') {
           // 导入本地技能：选择 SKILL.md 后校验入库
           const input = document.createElement('input')
@@ -856,8 +798,4 @@ const MARKET_CSS = `
 .dsm-pre{background:#f7f9fc;border:1px solid #eceff5;border-radius:6px;padding:10px;font-size:12px;color:#4a5266;overflow:auto;margin:0;white-space:pre-wrap}
 .dsm-toast{position:fixed;left:50%;bottom:40px;transform:translateX(-50%);background:rgba(24,28,40,.9);color:#fff;padding:8px 18px;border-radius:20px;font-size:13px;z-index:120}
 .dsm-toast[hidden]{display:none}
-/* 长文本更新提示：撑成多行卡片，白名单换行，可点击关闭 */
-.dsm-toast-long{left:auto;right:24px;bottom:24px;transform:none;max-width:520px;border-radius:10px;padding:14px 18px;font-size:12.5px;line-height:1.7;white-space:pre-wrap;cursor:pointer;text-align:left;box-shadow:0 8px 30px rgba(16,20,32,.22)}
-/* 头部两个按钮的容器 */
-.dsm-hd-btns{display:flex;gap:8px}
 `

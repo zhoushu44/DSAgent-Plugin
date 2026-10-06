@@ -20,7 +20,7 @@ const pr = rows.find(r => r.id === 'product-reviews')
 const pw = rows.find(r => r.id === 'product-wdj')
 ok('product-reviews 被识别为有 patch', pr?.hasPatch === true)
 ok('product-wdj 被识别为有 patch', pw?.hasPatch === true)
-ok('无 patch 的技能 hasPatch=false', rows.find(r => r.id === 'market-analysis')?.hasPatch === false)
+ok('无 patch 的技能 hasPatch=false', rows.find(r => r.id === 'a-stock-diagnosis')?.hasPatch === false)
 
 console.log('\n[2] patchOf() 可读出内容')
 const p = await svc.patchOf('product-reviews')
@@ -74,7 +74,7 @@ ok('product-reviews 主文档 0.90（缺错误处理槽位，仅 warn）', Math.
 ok('product-reviews 只有 warn，无 error', pr.issues.every(i => i.severity === 'warn'))
 ok('product-wdj 质量分为 1.00（三槽位齐全）', pw.quality === 1, `实际 ${pw.quality}`)
 // 说明：分数不因 patch 存在而改变，验证「评分与 patch 解耦」
-const noPatchTwin = rows.find(r => r.id === 'market-analysis')
+const noPatchTwin = rows.find(r => r.id === 'a-stock-diagnosis')
 ok('无 patch 技能照常评分', typeof noPatchTwin.quality === 'number' && noPatchTwin.quality > 0)
 
 svc.dispose()

@@ -35,7 +35,7 @@ console.log('\n=== 匹配行为验证（真实注册表） ===')
 const cases = [
   ['dsagent_execute_skill', { id: 'product-reviews' }, '应命中 product-reviews 声明 + 内置风控'],
   ['dsagent_execute_skill', { id: 'product-wdj' }, '应命中 product-wdj 声明 + 内置风控'],
-  ['dsagent_execute_skill', { id: 'smart-compose' }, '应无命中（非淘宝系、无声明）'],
+  ['dsagent_execute_skill', { id: 'a-stock-diagnosis' }, '应无命中（非淘宝系、无声明）'],
   ['dsagent_proxy', { url: 'https://rate.taobao.com/detailList.htm' }, '应命中 product-reviews 的代理兜底规则'],
   ['dsagent_proxy', { url: 'https://example.com/other' }, '应无命中'],
 ]
@@ -54,8 +54,8 @@ assert.ok(wdjHits.some(h => h.skillId.startsWith('builtin:')), '内置风控规�
 const proxyHits = reg.match('dsagent_proxy', { url: 'https://rate.taobao.com/x' })
 assert.ok(proxyHits.some(h => h.skillId === 'product-reviews'), 'product-reviews 代理兜底规则应命中')
 
-const noneHits = reg.match('dsagent_execute_skill', { id: 'smart-compose' })
-assert.equal(noneHits.length, 0, 'smart-compose 不应命中任何规则')
+const noneHits = reg.match('dsagent_execute_skill', { id: 'a-stock-diagnosis' })
+assert.equal(noneHits.length, 0, 'a-stock-diagnosis 不应命中任何规则')
 
 console.log('\n=== 渲染给模型的提示 ===')
 console.log(reg.formatHint(reg.match('dsagent_execute_skill', { id: 'product-wdj' }, 'demo-session')))

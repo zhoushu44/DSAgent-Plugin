@@ -38,7 +38,7 @@ import { readSkillPatch, renderBodyWithPatch, PATCH_FILENAME, type PatchResult }
  *
  * ★ 这里只列**技能真正会 import 的**包。
  *   曾经误收 pywencai / akshare / matplotlib：它们没有任何技能 import
- *   （当时的 A 股技能走的是东方财富公开 HTTP 接口，自称"无第三方依赖"），
+ *   （pywencai-stock 的 SKILL.md 自称"无第三方依赖"，走的是东方财富公开 HTTP 接口），
  *   却会拖入极长依赖链 —— pywencai → py_mini_racer(38MB) + debugpy(31MB) +
  *   jedi(14MB) + IPython/Jupyter…，matplotlib 又带 fontTools(11MB)，
  *   合计 200 MB+ 白背进绿色包。
@@ -253,13 +253,6 @@ const SKILL_PLATFORM: Record<string, string> = {
   'product-reviews': 'taobao',
   'product-wdj': 'taobao',
   'market-analysis': 'taobao',
-  // taobao 平台（取数依赖淘宝域：参谋长行业 MCP / taobao 买家账号 / 淘宝系兄弟技能）
-  'industry-data-mcp': 'taobao',        // 参谋长行业库（qiwrok_* 淘宝行业数据）
-  'demand-niche-analysis': 'taobao',    // 需绑定 taobao 买家账号采集（SKILL.md frontmatter 明示）
-  'customer-voice-analyzer': 'taobao',  // 取数依赖 product-reviews / product-wdj（淘宝评价）
-  'customer-rfm-analyzer': 'taobao',    // 数据来自 sycm-customer（生意参谋）或用户订单文件
-  'customer-ltv-calculator': 'taobao',  // 同上
-  'customer-retention-automator': 'taobao', // 同上
   // xianyu 平台
   'xianyu-crawl': 'xianyu',
   'xianyu-publish': 'xianyu',
@@ -357,6 +350,12 @@ const SKILL_CAPABILITY: Record<string, string> = {
   'marketing-psychology': 'copywriting',
   // 合规
   'tariff-search': 'compliance',
+  // 投研
+  'pywencai-stock': 'finance',
+  'valuation-investment-strategy': 'finance',
+  'financial-statement-analyzer': 'finance',
+  'industry-competition-moat': 'finance',
+  'a-stock-diagnosis': 'finance',
   // 实验/数据
   'ab-test-setup': 'analytics',
   'data-report': 'chart',
@@ -369,6 +368,7 @@ const CAPABILITY_RULES: Array<[RegExp, string]> = [
   [/(?:-comment|-im)$/, 'cs-script'],
   [/(?:report|chart|wordcloud|viz|cockpit)/, 'chart'],
   [/(?:patrol|store|店铺|巡店)/, 'shop-ops'],
+  [/(?:stock|finance|valuation|moat)/, 'finance'],
 ]
 
 function inferPlatform(id: string): string {
@@ -1150,7 +1150,7 @@ function buildCommand(skill: SkillRow, request: string, explicitArgs?: string[],
  * 脚本调用点：同一行内先出现显式占位符，再出现 scripts/xxx.py。
  *
  * 覆盖两种真实写法：
- *   - `python3 {baseDir}/scripts/fetch_data.py --keyword x`（xianyu-crawl 等）
+ *   - `python3 {baseDir}/scripts/fetch_data.py --keyword x`（xianyu-crawl / a-stock-diagnosis）
  *   - `cd "{this_skill_dir}" && python scripts/search_notes.py "关键词"`（xiaohongshu-crawl）
  *
  * 刻意不匹配裸 `python scripts/xxx.py`（docx/pptx/xlsx/skill-creator 用的是这种），

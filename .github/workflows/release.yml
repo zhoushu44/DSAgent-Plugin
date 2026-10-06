@@ -1,14 +1,13 @@
 name: Release
 
 # ── 什么时候跑 ──────────────────────────────────────────────────────────────
-#   push 到 main           → 构建增量更新包，更新滚动 Release（tag: latest）
-#   push tag v* / 数字开头   → 构建增量更新包，发布该 tag 的正式 Release
-#                            （v4.0、4.0、3.0 都会触发；滚动 tag latest / base 不匹配）
-#   手动触发                → 可选同时组装完整绿色包（约 343 MB）
+#   push 到 main   → 构建增量更新包，更新滚动 Release（tag: latest）
+#   push tag v*    → 构建增量更新包，发布该 tag 的正式 Release
+#   手动触发        → 可选同时组装完整绿色包（约 343 MB）
 on:
   push:
     branches: [main]
-    tags: ['v*', '[0-9]*']
+    tags: ['v*']
   workflow_dispatch:
     inputs:
       full:
