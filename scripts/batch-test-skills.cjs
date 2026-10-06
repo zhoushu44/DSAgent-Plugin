@@ -103,8 +103,6 @@ const CASES = [
   { id: 'xianyu-crawl', request: '帮我在闲鱼搜索 手机壳' },
   { id: 'xiaohongshu-crawl', request: '帮我搜索小红书上的 手机壳 笔记' },
   { id: 'zhihu-crawl', request: '帮我采集知乎上的 手机壳 相关问题' },
-  { id: 'a-stock-diagnosis', request: '查一下贵州茅台的股票诊断' },
-  { id: 'pywencai-stock', request: '帮我查一下今日涨幅前10的股票' },
 ]
 
 function runOne(c) {

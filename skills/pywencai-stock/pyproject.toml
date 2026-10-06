@@ -1,9 +1,0 @@
-[project]
-slug = "pywencai-stock"
-name = "A股行情数据查询"
-category = "股票"
-version = "2.0.0"
-author = "YiqiWork"
-description = "A股行情与榜单数据查询工具 - 基于东方财富公开接口获取涨幅榜/跌幅榜、涨停跌停股池、概念与行业板块、个股行情财务、主力资金流、龙虎榜、市盈率/ROE/净利润排行。无需登录、无需 API Key。"
-icon_url = "https://ts1.tc.mm.bing.net/th/id/OIP-C.R9T-sdFIld2341Qvzqv3JgAAAA?w=193&h=180&c=8&rs=1&qlt=90&o=6&pid=ImgAns&rm=2"
-requires-python = ">=3.10"

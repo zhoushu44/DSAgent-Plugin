@@ -1,9 +1,0 @@
-[project]
-slug = "financial-statement-analyzer"
-name = " 财务报表深度分析"
-category = "股票"
-version = "1.0.0"
-author = "YiqiWork"
-description = "对A股上市公司财务报表进行法证级深度分析，涵盖杜邦分解、盈利质量评估、财务健康评分（Z值/F值/M值）、营运资本分析、资产负债表风险排查及同行基准比较，输出结构化十节分析报告"
-icon_url = "https://s1.aigei.com/src/img/png/b5/b5c7cfb49c044ae7b185dbc1f987033b.png?imageMogr2/auto-orient/thumbnail/!282x282r/gravity/Center/crop/282x282/quality/85/%7CimageView2/2/w/282&e=2051020800&token=P7S2Xpzfz11vAkASLTkfHN7Fw-oOZBecqeJaxypL:I_jH2P3WY0Z9HLp6BnqMNyNz3SI="
-requires-python = ">=3.10"

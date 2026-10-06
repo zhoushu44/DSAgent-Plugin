@@ -1,9 +1,0 @@
-[project]
-slug = "a-stock-diagnosis"
-name = " A股个股技术诊断"
-category = "股票"
-version = "1.0.0"
-author = "YiqiWork"
-description = "A股个股深度技术诊断工具，基于60日K线分析均线、量价、支撑压力及风险信号"
-icon_url = "https://s1.aigei.com/src/img/png/b5/b5c7cfb49c044ae7b185dbc1f987033b.png?imageMogr2/auto-orient/thumbnail/!282x282r/gravity/Center/crop/282x282/quality/85/%7CimageView2/2/w/282&e=2051020800&token=P7S2Xpzfz11vAkASLTkfHN7Fw-oOZBecqeJaxypL:I_jH2P3WY0Z9HLp6BnqMNyNz3SI="
-requires-python = ">=3.10"

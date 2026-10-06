@@ -217,8 +217,8 @@ ok('内置风控规则对淘宝系技能生效', () => {
   const hits = reg.match('dsagent_execute_skill', { id: 'product-wdj' })
   assert.ok(hits.some(h => h.skillId.startsWith('builtin:')), JSON.stringify(hits))
 })
-ok('内置规则对无关技能不生效（如 a-stock-diagnosis）', () => {
-  const hits = reg.match('dsagent_execute_skill', { id: 'a-stock-diagnosis' })
+ok('内置规则对无关技能不生效（如 smart-compose）', () => {
+  const hits = reg.match('dsagent_execute_skill', { id: 'smart-compose' })
   assert.equal(hits.length, 0, JSON.stringify(hits))
 })
 ok('会话级去重：同会话第二次不重复提示', () => {
