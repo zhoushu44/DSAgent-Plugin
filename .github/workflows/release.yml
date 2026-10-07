@@ -2,9 +2,11 @@ name: Release
 
 # ── 什么时候跑 ──────────────────────────────────────────────────────────────
 #   push 到 main           → 构建增量更新包，更新滚动 Release（tag: latest）
-#   push tag v* / 数字开头   → 构建增量更新包，发布该 tag 的正式 Release
-#                            （v4.0、4.0、3.0 都会触发；滚动 tag latest / base 不匹配）
+#   push tag v* / 数字开头   → 构建增量更新包，发布该 tag 的正式 Release，
+#                            并同步刷新滚动 Release latest（含 tag 号标题 + 同资产），
+#                            保证检查更新（抓 latest 页）能立刻发现新 tag 版本
 #   手动触发                → 可选同时组装完整绿色包（约 343 MB）
+#                            （v4.0、4.0、3.0 都会触发；滚动 tag latest / base 不匹配）
 on:
   push:
     branches: [main]
@@ -248,6 +250,33 @@ jobs:
 
           Write-Host "完成: $env:TAG"
           gh release view $env:TAG --json url,assets --jq '.url, (.assets[] | "  \(.name)  \(.size)")'
+
+          # ★ tag Release 发布后，同步更新滚动 Release「latest」。
+          #   检查更新功能抓的是 /releases/tag/latest 页面：
+          #   - main push 触发的 latest 构建，body 里 package.json 可能滞后（版本只在 tag 构建写入）
+          #   - 若用户推了 tag 7.0 但 latest 还停在旧 body，检查更新会误判「已是最新」
+          #   同步策略：tag Release 发布成功后，把同样的资产+说明（含 tag 号标题）覆盖到 latest，
+          #   这样 latest 页永远展示最新 tag 版本，检查更新立刻能发现新 tag。
+          #   失败不致命：latest 滞后只影响版本显示，不影响 tag Release 本身。
+          if ($env:TAG -ne 'latest' -and $env:TAG -ne 'base') {
+            Write-Host "同步滚动 Release latest（跟随 tag $env:TAG）"
+            gh release view latest --json tagName *> $null
+            $latestExists = ($LASTEXITCODE -eq 0)
+            if ($latestExists) {
+              gh release edit latest --title "DSAgent $env:TAG" --notes-file $notesFile
+              if ($LASTEXITCODE -ne 0) { Write-Host '  ! latest 说明更新失败（不影响下载）' -ForegroundColor DarkYellow }
+              gh release upload latest @files --clobber
+              if ($LASTEXITCODE -ne 0) { Write-Host '  ! latest 资产上传失败（不影响下载）' -ForegroundColor DarkYellow }
+            } else {
+              gh release create latest --title "DSAgent $env:TAG" `
+                --notes-file $notesFile --target $env:FULL_SHA @files
+              if ($LASTEXITCODE -ne 0) { Write-Host '  ! latest Release 创建失败（不影响下载）' -ForegroundColor DarkYellow }
+            }
+            # latest 的 git tag 也要指到本次提交（同滚动逻辑）
+            git tag -f latest $env:FULL_SHA 2>&1 | ForEach-Object { Write-Host "  $_" }
+            git push origin refs/tags/latest --force 2>&1 | ForEach-Object { Write-Host "  $_" }
+            if ($LASTEXITCODE -ne 0) { Write-Host '  ! latest tag 推动失败（不影响资产）' -ForegroundColor DarkYellow }
+          }
 
   # ── 完整绿色包（约 343 MB）──────────────────────────────────────────────
   #
