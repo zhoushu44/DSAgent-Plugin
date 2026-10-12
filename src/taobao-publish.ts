@@ -27,7 +27,7 @@
  *             窗口内补全，若提交被校验拦住，工具会继续等待并识别用户手动提交的结果。
  */
 import { CredentialStore, resolveAccountForRequest, type StoredAccount } from './services/credential-store.js'
-import { clearProfileLocks, findChromePath, profileDir, profileOwner, releaseProfile, tryAcquireProfile, registerProfilePort, registeredPortFor, verifyPortOwnership } from './browser-login.js'
+import { clearProfileLocks, findChromePath, profileDir, profileOwner, releaseProfile, tryAcquireProfile, registerProfilePort, registeredPortFor, verifyPortOwnership, sleep, UI_STEP_DELAY_MS } from './browser-login.js'
 import { createAttrCache, type AttrCache } from './services/attr-cache.js'
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
@@ -193,10 +193,6 @@ export interface TaobaoPublishResult {
   finalUrl?: string
   /** 命中风控时透出的验证页地址（供 dsagent_risk_verify 使用） */
   verifyUrl?: string
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise(r => setTimeout(r, ms))
 }
 
 /**
@@ -457,7 +453,7 @@ async function selectCategory(
       await page.mouse.move(br.x, br.y).catch(() => { /* 忽略 */ })
       await sleep(300)
       await page.mouse.click(br.x, br.y).catch(() => { /* 忽略 */ })
-      await sleep(2500)
+      await sleep(UI_STEP_DELAY_MS)
     }
 
     if (brandOpts.length) {
@@ -526,7 +522,7 @@ async function selectCategory(
     let cand = await nextCategoryCandidate()
     if (!cand) {
       // 结果可能还在渲染，稍等后重试一次；仍无则收工
-      await sleep(2500)
+      await sleep(UI_STEP_DELAY_MS)
       cand = await nextCategoryCandidate()
       if (!cand) break
     }
@@ -715,7 +711,7 @@ async function uploadImages(page: any, images: string[]): Promise<{ ok: boolean;
   await sleep(3000)
 
   // 5. 若弹层仍开着，点「完成」收起
-  if (pickFrame()) { await realClick(await rectInFrame(FN_DONE)); await sleep(2500) }
+  if (pickFrame()) { await realClick(await rectInFrame(FN_DONE)); await sleep(UI_STEP_DELAY_MS) }
 
   // 6. 校验主图区是否已出现图片
   const count = await page.evaluate(() =>
@@ -1374,7 +1370,7 @@ async function fillDetailImages(
         .find(x => (x.textContent || '').trim() === '完成' && /UploadPanel/.test(String((x as HTMLElement).className || ''))) as HTMLElement | undefined
       b?.click()
     }).catch(() => { /* 忽略 */ })
-    await sleep(2500)
+    await sleep(UI_STEP_DELAY_MS)
 
     // ── ⑤ 选中本次上传的瓦片（按文件名匹配，回退第一个）──
     const base = want[n].split(/[\\/]/).pop() || ''

@@ -17,7 +17,11 @@ Cookie 由网关从 CredentialStore 取并注入。技能侧不接触原始 Cook
 from __future__ import annotations
 
 from typing import Any
-from . import runtime_http
+
+try:
+    from . import runtime_http
+except ImportError:
+    import runtime_http
 
 
 # ─── 错误类型常量 ───
@@ -35,6 +39,7 @@ class BindingContextError(Exception):
     def __init__(self, message: str, *, platform: str = "", failure_kind: str = FAILURE_TOKEN,
                  accounts: list | None = None):
         super().__init__(message)
+        self.message = message
         self.platform = platform
         self.failure_kind = failure_kind
         # need_account_choice 时携带候选账号列表，交由模型向用户提问
@@ -46,6 +51,7 @@ class PlatformRequestError(Exception):
     def __init__(self, message: str, *, failure_kind: str = FAILURE_API, status_code: int = 0,
                  accounts: list | None = None):
         super().__init__(message)
+        self.message = message
         self.failure_kind = failure_kind
         self.status_code = status_code
         self.accounts = accounts or []

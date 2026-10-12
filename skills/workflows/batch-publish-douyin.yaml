@@ -1,0 +1,28 @@
+name: 批量发布抖音视频
+category: 内容发布
+mode: batch
+count_input: count
+description: |
+  批量发布抖音视频：输入视频描述和数量，逐个调用 douyin-publish 技能完成发布。
+  适用于内容批量上架场景。
+inputs:
+  - key: description
+    label: 视频描述
+    type: textarea
+    required: true
+    default: ""
+  - key: count
+    label: 发布数量
+    type: number
+    required: true
+    default: "3"
+    min: 1
+    max: 50
+steps:
+  - name: 发布视频
+    skill: douyin-publish
+    args:
+      description: "{{description}}"
+      index: "{{loop.index}}"
+    output: step1
+    on_failure: abort

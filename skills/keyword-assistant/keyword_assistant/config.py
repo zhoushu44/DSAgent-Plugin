@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+# ★ 改 URL 前先看 SKILL.md「API 接口」章节，URL 错误会被 health_check() 拦截
 SYCM_BASE_URL = "https://sycm.taobao.com"
 KEYWORD_EXPAND_ENDPOINT = "/mc/mq/mkt/keyword/relate/analysis.json"
 SEARCH_RANK_ENDPOINT = "/mc/mq/mkt/keyword/rank/pro.json"

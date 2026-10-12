@@ -1,0 +1,1 @@
+import{n}from"./rolldown-runtime-BSJ3dJRS.js";function s(a){let t=2166136261;for(let e=0;e<a.length;e++)t^=a.charCodeAt(e),t=Math.imul(t,16777619);return(t>>>0).toString(36)}function o(a){const t=a.replace(/[\\/]+$/,""),e=Math.max(t.lastIndexOf("/"),t.lastIndexOf("\\"));return s(e>=0?t.slice(e+1):t)}var i=n((()=>{}));export{s as n,o as r,i as t};

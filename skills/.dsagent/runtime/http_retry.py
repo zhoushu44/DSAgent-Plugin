@@ -58,7 +58,10 @@ def call_json_with_retries(
             retry_on=("rate_limit", "api_error"),
         )
     """
-    from .platform_client import PlatformRequestError, FAILURE_TOKEN, FAILURE_RISK
+    try:
+        from .platform_client import PlatformRequestError, FAILURE_TOKEN, FAILURE_RISK
+    except ImportError:
+        from platform_client import PlatformRequestError, FAILURE_TOKEN, FAILURE_RISK
 
     last_error: Exception | None = None
     for attempt in range(max_retries + 1):

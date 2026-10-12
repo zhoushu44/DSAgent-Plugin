@@ -1,0 +1,28 @@
+name: 闲鱼批量上架商品
+category: 店铺经营
+mode: batch
+count_input: count
+description: |
+  闲鱼批量上架商品：输入商品标题和上架数量，逐个调用 xianyu-publish 技能完成上架。
+  适用于闲鱼店铺批量铺货场景。
+inputs:
+  - key: title
+    label: 商品标题
+    type: text
+    required: true
+    default: ""
+  - key: count
+    label: 上架数量
+    type: number
+    required: true
+    default: "10"
+    min: 1
+    max: 200
+steps:
+  - name: 上架商品
+    skill: xianyu-publish
+    args:
+      title: "{{title}}"
+      index: "{{loop.index}}"
+    output: step1
+    on_failure: continue

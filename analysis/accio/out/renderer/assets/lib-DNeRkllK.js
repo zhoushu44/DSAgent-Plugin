@@ -1,0 +1,1 @@
+import{t as i}from"./rolldown-runtime-BSJ3dJRS.js";var f=i((t=>{Object.defineProperty(t,"__esModule",{value:!0}),t.transferDomain=void 0;function r(n,a){const o=a||location&&location.hostname;if(o){const e=o.match(/alibaba\.(.*)/);if(e&&e.length>0)return n.replace("com",e[1])}return n}t.transferDomain=r}));export{f as t};

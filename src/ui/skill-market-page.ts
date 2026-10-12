@@ -298,8 +298,8 @@ export function skillMarketPage(deps: SkillMarketPageDeps) {
   let cap = 'all'
   let plat = 'all'
   let kw = ''
-  /** 排序模式：default（技能目录顺序）/ quality（最需修的在前）/ usage（真在用的在前） */
-  let sortBy: 'default' | 'quality' | 'usage' = 'default'
+  /** 排序模式：default（技能目录顺序）/ usage（真在用的在前） */
+  let sortBy: 'default' | 'usage' = 'default'
 
   async function load() {
     const host = (globalThis as { __PLUGIN__?: { skills?: SkillRow[] } }).__PLUGIN__
@@ -328,10 +328,7 @@ export function skillMarketPage(deps: SkillMarketPageDeps) {
       inTab(s) &&
       (plat === 'all' || normPlatform(s.platform) === normPlatform(plat)) &&
       (!kw || s.name.includes(kw) || s.id.includes(kw) || s.description.includes(kw)))
-    // 排序模式：默认按 id；质量升序把「最需要修的」排最前；使用率降序把「真在用」排最前
-    if (sortBy === 'quality') {
-      return [...rows].sort((a, b) => a.quality - b.quality || a.id.localeCompare(b.id))
-    }
+    // 排序模式：默认按 id；使用率降序把「真在用」排最前
     if (sortBy === 'usage') {
       return [...rows].sort((a, b) => b.useCount - a.useCount || b.lastUsedAt - a.lastUsedAt || a.id.localeCompare(b.id))
     }
@@ -340,23 +337,6 @@ export function skillMarketPage(deps: SkillMarketPageDeps) {
 
   function esc(s: string): string {
     return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;')
-  }
-
-  /**
-   * 质量徽标 —— 把 Accio 同量表的文档质量分可视化。
-   *
-   * 阈值口径：
-   *   ≥1.00 完整（绿）｜ ≥0.85 良好（蓝）｜ ≥0.70 可改进（黄）｜ <0.70 有结构缺陷（红）
-   * 后两档同时给出 error 计数，因为「0.60 且没有任何 error」与
-   * 「0.60 且缺 Workflow」是两种完全不同的状态，只看分数分不出来。
-   */
-  function qualityBadge(s: SkillRow): string {
-    // 回退数据（无真实扫描）不显示质量徽标 —— 那 0.00 分不是真实结论，显示出来会误导
-    if (!s.frontmatter) return ''
-    const errs = s.issues.filter(i => i.severity === 'error').length
-    const level = s.quality >= 1 ? 'good' : s.quality >= 0.85 ? 'ok' : s.quality >= 0.70 ? 'warn' : 'bad'
-    const label = errs ? `质量 ${s.quality.toFixed(2)} · ${errs} 项缺陷` : `质量 ${s.quality.toFixed(2)}`
-    return `<span class="dsm-q dsm-q-${level}" title="文档质量分（Accio 同量表，槽位中英双语匹配）">${esc(label)}</span>`
   }
 
   function card(s: SkillRow): string {
@@ -371,7 +351,7 @@ export function skillMarketPage(deps: SkillMarketPageDeps) {
           </div>
         </div>
         <p class="dsm-desc">${esc(s.description || '暂无描述')}</p>
-        <div class="dsm-q-row">${qualityBadge(s)}${patch}${used}</div>
+        <div class="dsm-q-row">${patch}${used}</div>
         <div class="dsm-card-ft">
           <label class="dsm-switch" title="改写 SKILL.md 的 disable-model-invocation">
             <input type="checkbox" data-toggle="${esc(s.id)}" ${s.enabled ? 'checked' : ''}>
@@ -481,7 +461,6 @@ export function skillMarketPage(deps: SkillMarketPageDeps) {
             <input type="search" placeholder="搜索技能名称或功能…" data-kw>
             <div class="dsm-sort">
               <button class="dsm-chip ${sortBy === 'default' ? 'on' : ''}" data-sort="default">默认</button>
-              <button class="dsm-chip ${sortBy === 'quality' ? 'on' : ''}" data-sort="quality" title="文档质量分升序，最需要修的排前面">待修优先</button>
               <button class="dsm-chip ${sortBy === 'usage' ? 'on' : ''}" data-sort="usage" title="按成功执行次数降序">常用优先</button>
             </div>
           </div>
@@ -568,32 +547,19 @@ export function skillMarketPage(deps: SkillMarketPageDeps) {
                 <div class="dsm-tags">${triggers.map(t => `<span class="dsm-tag">${esc(t)}</span>`).join('')}</div>
               </div>`
             : ''}`
-        // 质量与统计段：仅对真实扫描到的技能显示（回退数据没有真实分数）
-        let qualitySec = ''
+        // 使用统计段：仅对真实扫描到的技能显示（回退数据没有真实统计）
+        let statsSec = ''
         if (s.frontmatter) {
-          const errs = s.issues.filter(i => i.severity === 'error')
-          const warns = s.issues.filter(i => i.severity === 'warn')
           const usedTxt = s.useCount > 0
             ? `成功 ${s.useCount} 次${s.lastUsedAt ? `，最近 ${new Date(s.lastUsedAt).toLocaleDateString()}` : ''}`
             : '尚未成功使用过'
-          qualitySec = `
+          statsSec = `
           <div class="dsm-d-sec">
-            <h4>文档质量 ${s.quality.toFixed(2)} / 1.00</h4>
+            <h4>使用统计</h4>
             <div class="dsm-meta">
               <span>成功使用</span><b>${esc(usedTxt)}</b>
               <span>现场修正</span><b>${s.hasPatch ? '有 SKILL.patch.md' : '无'}</b>
             </div>
-            ${errs.length
-              ? `<p class="dsm-hint"><b>结构性问题（${errs.length}）</b></p>
-                 <ul class="dsm-asks">${errs.map(i => `<li><span>${esc(i.message)}</span></li>`).join('')}</ul>`
-              : ''}
-            ${warns.length
-              ? `<p class="dsm-hint"><b>可改进（${warns.length}）</b></p>
-                 <ul class="dsm-asks">${warns.map(i => `<li><span>${esc(i.message)}</span></li>`).join('')}</ul>`
-              : ''}
-            ${!errs.length && !warns.length ? '<p class="dsm-hint">文档结构完整，无校验问题。</p>' : ''}
-            <p class="dsm-hint">评分口径与 Accio 一致：Workflow 权重最高（0.20），
-              槽位中英双语匹配（「## 工作流」与「## Workflow」等价）。</p>
           </div>`
         }
 
@@ -602,7 +568,7 @@ export function skillMarketPage(deps: SkillMarketPageDeps) {
             <h4>功能说明</h4><p>${esc(s.description || '暂无描述')}</p>
           </div>
           ${askSec}
-          ${qualitySec}
+          ${statsSec}
           <div class="dsm-d-sec">
             <h4>元信息</h4>
             <div class="dsm-meta">
@@ -802,13 +768,9 @@ const MARKET_CSS = `
 .dsm-search input[type=search]{flex:1;min-width:180px}
 .dsm-sort{display:flex;gap:6px;flex:none}
 
-/* 质量徽标：阈值同 qualityBadge()，四档 + 补丁 + 使用次数 */
+/* 徽标：补丁 + 使用次数 */
 .dsm-q-row{display:flex;gap:6px;flex-wrap:wrap;margin:0 0 10px}
 .dsm-q{display:inline-block;border-radius:4px;padding:1px 7px;font-size:11px;line-height:18px;border:1px solid transparent}
-.dsm-q-good{background:#e8f7ee;color:#1a7f47;border-color:#b9e6cb}
-.dsm-q-ok{background:#eaf1ff;color:#2b5fd9;border-color:#c4d6fb}
-.dsm-q-warn{background:#fff6e5;color:#a26a00;border-color:#f5dca6}
-.dsm-q-bad{background:#fdeceb;color:#c0362c;border-color:#f6c8c4}
 .dsm-q-patch{background:#f0ecff;color:#5b3fbe;border-color:#d8cffa}
 .dsm-q-use{background:#f2f4f9;color:#5a6377;border-color:#e2e7f0}
 .dsm-search input{width:260px;border:1px solid #e4e8f0;border-radius:6px;padding:6px 12px;font-size:13px;outline:none}

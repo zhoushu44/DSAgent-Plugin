@@ -1,0 +1,1 @@
+require("../index.js");const e=require("./renderer-index-Bt_oKWP-.js");exports.skillRendererIndex=e.skillRendererIndex;

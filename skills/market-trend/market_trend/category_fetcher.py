@@ -12,7 +12,7 @@ import logging
 
 from ._api_client import SycmClient
 
-from .config import SYCM_BASE_URL
+from .config import CATEGORY_MARKET_PATH, SYCM_BASE_URL
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +46,7 @@ def fetch_all_categories(client: SycmClient, cate_type: str = "all") -> list[dic
     Args:
         cate_type: 保留参数，暂不区分类型（市场排行 API 不区分标准/导购）
     """
-    url = f"{SYCM_BASE_URL}/mc/common/free/getCateInfo.json"
+    url = f"{SYCM_BASE_URL}{CATEGORY_MARKET_PATH}"
     params = {"marketVersion": "free"}
 
     logger.info("获取市场排行类目列表...")

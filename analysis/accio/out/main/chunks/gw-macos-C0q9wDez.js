@@ -1,0 +1,1 @@
+const e=require(`../gateway-worker.js`),t=require(`./gw-chunked-exec-D0LMRC3h.js`);let n=require(`node:os`);n=e.Ny(n);const r=Number(n.default.release().split(`.`)[0])<12,i=new URL(`macos-trash`,require(`url`).pathToFileURL(__filename).href);async function a(e){if(r)throw Error(`macOS 10.12 or later required`);await t.t(i,e,1e3)}exports.default=a;

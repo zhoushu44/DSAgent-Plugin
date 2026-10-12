@@ -27,7 +27,7 @@
  *     ★ submit-add 实测在视口外（y≈1099.5 > 视口 900），必须先 scrollIntoView 再点
  */
 import { CredentialStore, resolveAccountForRequest, type StoredAccount } from './services/credential-store.js'
-import { clearProfileLocks, findChromePath, profileDir, profileOwner, releaseProfile, tryAcquireProfile } from './browser-login.js'
+import { clearProfileLocks, findChromePath, profileDir, profileOwner, releaseProfile, tryAcquireProfile, sleep, UI_STEP_DELAY_MS } from './browser-login.js'
 import { existsSync, statSync } from 'node:fs'
 
 const UPLOAD_URL = 'https://member.bilibili.com/platform/upload/video/frame'
@@ -522,7 +522,7 @@ export async function bilibiliPublish(
 
     // 可能弹出二次确认弹窗（★ 只认 .bcc-dialog 内的明确文案，避免误点其它弹层的「确定」）
     try {
-      await new Promise(r => setTimeout(r, 2500))
+      await sleep(UI_STEP_DELAY_MS)
       const confirmed = await page.evaluate(() => {
         const btns = Array.from(document.querySelectorAll('.bcc-dialog button, .bcc-dialog .bcc-button')) as HTMLElement[]
         const hit = btns.find(b => b.offsetParent !== null && /确认投稿|继续投稿|确认提交/.test((b.innerText || '').trim()))

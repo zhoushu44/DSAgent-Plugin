@@ -3,8 +3,8 @@
  *
  * 动态导入 puppeteer-core，连接本机 Chrome，导航到登录页，轮询关键 Cookie。
  */
-import { CredentialStore, keyCookies, credentialPlatform, isRiskPassCookie } from './services/credential-store.js'
-import { clearRiskCooldown, probePlatformPermission, invalidateGatewayCache } from './gateway-proxy.js'
+import { CredentialStore, keyCookies, credentialPlatform, isRiskPassCookie, type AccountEnv } from './services/credential-store.js'
+import { clearRiskCooldown, probePlatformPermission, invalidateGatewayCache, desktopUserAgent } from './gateway-proxy.js'
 import * as authOp from './services/auth-operation.js'
 import { existsSync, mkdirSync, readdirSync, renameSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
@@ -267,6 +267,21 @@ async function verifyXhsLoggedIn(page: any): Promise<boolean> {
   }
 }
 
+/**
+ * UI 操作后的标准等待时间（ms）。
+ *
+ * 统一各 publish 脚本中 UI 操作后的延迟基准：原来散落为 2500ms（淘宝/拼多多/知乎/B站）
+ * 与 1500~6000ms 等不一致的魔法数字，现提取为共享常量，保证各平台节拍一致。
+ * - 用途：点击按钮 / 选择下拉项 / 上传文件后等待页面渲染落定
+ * - 对于需要更长等待的场景（如文件上传完成轮询），仍可传更大的值
+ */
+export const UI_STEP_DELAY_MS = 2500
+
+/** sleep 的便捷封装（各 publish 脚本无须各自再定义 sleep 函数） */
+export function sleep(ms: number): Promise<void> {
+  return new Promise(r => setTimeout(r, ms))
+}
+
 /** 查找本机 Chrome 可执行文件 */
 export function findChromePath(): string | undefined {
   const candidates = [
@@ -277,6 +292,102 @@ export function findChromePath(): string | undefined {
     'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
   ]
   return candidates.find(p => p && existsSync(p))
+}
+
+// ── 环境指纹（P1-3，比特浏览器 + QIWork 模式）──────────────────
+//
+// 环境漂移（IP + UA + 时区三者突变）是电商风控掉登录的头号诱因。
+// 每个账号首次登录时生成一套环境指纹并持久化，之后该账号的网关请求
+// 与所有浏览器操作都复用它 —— 平台看到的是「同一台设备在定期回来」。
+
+/** 读取账号绑定的环境指纹（未绑定时返回 null） */
+export function envOf(account: { account_meta?: Record<string, any> } | null | undefined): AccountEnv | null {
+  const env = account?.account_meta?.env
+  if (!env || typeof env !== 'object' || !env.ua) return null
+  return env as AccountEnv
+}
+
+/** 默认视口（与改造前 3 处硬编码一致：无 env 的账号回退到这套，行为不变） */
+const DEFAULT_VIEWPORT = { width: 1440, height: 900 }
+
+/** 生成一套新环境指纹（登录成功时调用一次；不落库，由 store.bindAccountEnv 持久化） */
+export function buildAccountEnv(): AccountEnv {
+  return {
+    ua: desktopUserAgent(),
+    viewport: { ...DEFAULT_VIEWPORT },
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai',
+    language: process.env.LANG?.split('.')[0] || 'zh-CN',
+    platform: process.platform === 'win32' ? 'Win32' : process.platform,
+    env_bound_at: new Date().toISOString(),
+  }
+}
+
+/**
+ * 把账号绑定的环境应用到 puppeteer page（viewport / 时区 / 语言 / UA）。
+ *
+ * 调用方拿到 page 后立即调用。UA 只在 env 与本机默认不同的时候才覆盖：
+ * 不覆盖时用本机真实 Chrome 的 UA，才能与内核自动发出的 sec-ch-ua /
+ * navigator.userAgentData 保持一致；env 里记的本来就是本机 UA，正常情况
+ * 不会走到覆盖分支，仅在换机器后（旧 env UA ≠ 本机 UA）才显式钉住旧值。
+ */
+export async function applyAccountEnv(page: any, env: AccountEnv | null): Promise<void> {
+  const vp = env?.viewport?.width ? env.viewport : DEFAULT_VIEWPORT
+  await page.setViewport({ width: vp.width, height: vp.height })
+  if (env?.timezone || env?.language) {
+    try {
+      await page.emulateTimezone(env?.timezone || undefined)
+    } catch { /* 旧版 puppeteer 无此 API */ }
+    try {
+      await page.setExtraHTTPHeaders(
+        env?.language ? { 'Accept-Language': `${env.language},zh;q=0.9` } : {},
+      )
+    } catch { /* 忽略 */ }
+  }
+  if (env?.ua && env.ua !== desktopUserAgent()) {
+    try { await page.setUserAgent(env.ua) } catch { /* 忽略 */ }
+  }
+}
+
+/** 出口 IP 观测节流：同一进程内每 10 分钟至多查一次公网 IP（无代理时的低成本基线） */
+let lastEgressProbeAt = 0
+let lastEgressIp: string | undefined
+const EGRESS_PROBE_INTERVAL_MS = 10 * 60 * 1000
+
+/**
+ * 观测并记录账号的公网出口 IP（P1-3，比特浏览器 stopWhileIpChange 思路）。
+ *
+ * - 进程级节流（10 分钟一次）：探测 IP 要打外网服务，不能每个请求都查；
+ * - IP 变化时 console.warn 告警 —— 无代理场景下家庭宽带重拨 / 切换网络
+ *   都会造成出口 IP 漂移，这是用户唯一能感知的「环境变了」信号；
+ * - 观测失败静默跳过（公网 IP 服务不可用不能影响登录/请求主流程）。
+ */
+export async function observeEgressIp(store: CredentialStore, shopKey?: string): Promise<void> {
+  const nowMs = Date.now()
+  if (lastEgressIp && nowMs - lastEgressProbeAt < EGRESS_PROBE_INTERVAL_MS) {
+    if (shopKey) {
+      try { await store.recordEgressIp(shopKey, lastEgressIp) } catch { /* 忽略 */ }
+    }
+    return
+  }
+  lastEgressProbeAt = nowMs
+  try {
+    const res = await fetch('https://api.ipify.org?format=json', {
+      signal: AbortSignal.timeout(8000),
+    })
+    if (!res.ok) return
+    const data = await res.json() as { ip?: string }
+    const ip = String(data.ip || '').trim()
+    if (!ip) return
+    if (lastEgressIp && lastEgressIp !== ip) {
+      console.warn(
+        `[dsagent-env] 出口 IP 已变化: ${lastEgressIp} → ${ip}（无代理场景下请留意账号风控；若使用代理请确认代理稳定）`,
+      )
+    }
+    lastEgressIp = ip
+    if (shopKey) {
+      try { await store.recordEgressIp(shopKey, ip) } catch { /* 忽略 */ }
+    }
+  } catch { /* 网络异常或超时：跳过本轮观测 */ }
 }
 
 /** 浏览器 Profile 根目录 —— 所有 userDataDir 都在此之下 */
@@ -514,9 +625,11 @@ export async function doBrowserLogin(
     })
 
     const page = await browser.newPage()
-    // 不覆盖 UA：用本机真实 Chrome 的 UA，才能与内核自动发出的 sec-ch-ua / navigator.userAgentData 保持一致。
-    // 硬改 UA 会造成「UA 声称 Chrome/120、Client Hints 暴露真实版本」的自相矛盾，反而是最容易被识别的特征。
-    await page.setViewport({ width: 1440, height: 900 })
+    // ★ P1-3：按账号绑定的环境指纹设置 viewport / 时区 / 语言。
+    //   replaceShopKey 对应已有账号 → envOf 取到已绑定的 env；首次登录 → env 还没写入，用默认。
+    //   不覆盖 UA 的策略保持不变（applyAccountEnv 内部只在 env UA ≠ 本机 UA 时才钉住旧值）。
+    const loginEnv = replaceShopKey ? envOf(store.get(replaceShopKey)) : null
+    await applyAccountEnv(page, loginEnv)
 
     // 反自动化检测：隐藏 webdriver 标志
     // 同时埋一个「用户操作计数器」：页面内的点击/按键/滚动/拖动鼠标都会累加，
@@ -764,6 +877,14 @@ export async function doBrowserLogin(
       console.log(`[dsagent-login] 登录成功，准备保存凭证...${replaceShopKey ? `（替换旧账号 ${replaceShopKey}，绑定关系继承）` : ''}`)
       const saved = await store.save(platform, jar, { replaceShopKey })
       console.log(`[dsagent-login] 凭证已保存: shopKey=${saved.shop_key}, accountId=${saved.account_id}`)
+
+      // ★ P1-3：首次登录时绑定环境指纹（UA / viewport / 时区 / 语言）。
+      //   已有 env 的账号不覆盖（env 是账号身份的一部分）。
+      //   绑定后该账号的网关请求 UA 与所有浏览器操作 viewport 都复用这套环境，
+      //   避免环境漂移触发异地/换设备风控。
+      await store.bindAccountEnv(saved.shop_key, buildAccountEnv())
+      // 记录当前出口 IP 作为基线（后续变化时告警）
+      await observeEgressIp(store, saved.shop_key)
       // ★ 重新登录后凭证已变 → 立即失效该账号的网关缓存。
       //   凭证指纹虽已参与缓存键（键会自然改变），但显式清理能同时回收
       //   「同一账号在旧身份下留下的条目」占用的内存，避免长期运行堆积。
@@ -846,11 +967,49 @@ export async function closeBrowser(): Promise<{ ok: boolean; text?: string }> {
  *   4. 等待页面加载完成，提取 goofish.com 域的所有 Cookie
  *   5. 合并到凭证库中对应闲鱼账号的 Cookie 里
  */
+/**
+ * P1-2 刷新单飞 + 冷却（Accio AccountRefresher 模式）：
+ *   - inflight Map：同一账号的并发刷新共享同一个 Promise —— 登录流程与 2h 巡检
+ *     同时发现闲鱼 Cookie 缺失时，只拉起一次浏览器，其余调用等结果，防止 Profile 互踩；
+ *   - cooldownUntil Map：浏览器阶段失败（启动失败/未装 Chrome）后 60s 内直接短路，
+ *     防止失败风暴反复拉起 headless Chrome。
+ *   守卫类拒绝（身份不一致、缺 unb）是确定性错误，不进入冷却（标记 retryable 的才冷却）。
+ */
+const xianyuRefreshInflight = new Map<string, Promise<{ ok: boolean; error?: string; retryable?: boolean }>>()
+const xianyuRefreshCooldownUntil = new Map<string, number>()
+const XIANYU_REFRESH_COOLDOWN_MS = 60_000
+
 export async function refreshXianyuCookies(
   store: CredentialStore,
   shopKey: string,
   sourceCookies?: Record<string, string>,
 ): Promise<{ ok: boolean; error?: string }> {
+  // 前置守卫去重（P1-2）：账号缺失是确定性错误，直接短路，不占单飞槽位
+  if (!store.get(shopKey)) return { ok: false, error: `账号 ${shopKey} 不存在` }
+
+  const cooldown = xianyuRefreshCooldownUntil.get(shopKey) ?? 0
+  if (Date.now() < cooldown) {
+    const remain = Math.ceil((cooldown - Date.now()) / 1000)
+    return { ok: false, error: `上次刷新失败，冷却中（约 ${remain}s），稍后自动重试` }
+  }
+  const existing = xianyuRefreshInflight.get(shopKey)
+  if (existing) return existing
+  const task = doRefreshXianyuCookies(store, shopKey, sourceCookies)
+    .then(r => {
+      if (!r.ok && r.retryable) xianyuRefreshCooldownUntil.set(shopKey, Date.now() + XIANYU_REFRESH_COOLDOWN_MS)
+      else if (r.ok) xianyuRefreshCooldownUntil.delete(shopKey)
+      return r
+    })
+    .finally(() => { xianyuRefreshInflight.delete(shopKey) })
+  xianyuRefreshInflight.set(shopKey, task)
+  return task
+}
+
+async function doRefreshXianyuCookies(
+  store: CredentialStore,
+  shopKey: string,
+  sourceCookies?: Record<string, string>,
+): Promise<{ ok: boolean; error?: string; retryable?: boolean }> {
   const account = store.get(shopKey)
   if (!account) {
     return { ok: false, error: `账号 ${shopKey} 不存在` }
@@ -882,7 +1041,9 @@ export async function refreshXianyuCookies(
 
     const chromePath = findChromePath()
     if (!chromePath) {
-      return { ok: false, error: '未找到 Chrome 或 Edge 浏览器' }
+      // 未装浏览器是环境级确定性错误：进冷却意义不大，但 60s 冷却可挡住登录流程
+      // 与巡检在同一分钟内的重复尝试（用户装好浏览器前每次都会失败）。
+      return { ok: false, error: '未找到 Chrome 或 Edge 浏览器', retryable: true }
     }
     console.log(`[dsagent-xianyu-refresh] 使用浏览器: ${chromePath}`)
 
@@ -914,7 +1075,9 @@ export async function refreshXianyuCookies(
 
     try {
       const page = await browser.newPage()
-      await page.setViewport({ width: 1440, height: 900 })
+      // P1-3：闲鱼刷新也按淘宝账号绑定的 env 设置 viewport（无 env 时回退默认 1440x900）
+      const refreshEnv = envOf(store.get(shopKey))
+      await applyAccountEnv(page, refreshEnv)
 
       // 反自动化检测
       await page.evaluateOnNewDocument(() => {
@@ -954,6 +1117,13 @@ export async function refreshXianyuCookies(
 
       console.log(`[dsagent-xianyu-refresh] 提取到 ${Object.keys(goofishJar).length} 个 Cookie`)
 
+      // ★ P1-2：SSO 静默失败判定 —— goofish 域一个 Cookie 都没拿到说明 SSO 没发生
+      //   （被重定向到登录页/风控页），此时若仍返回 ok，xianyuSsoSynced 会被占位，
+      //   该身份在本进程内永远不会重试（FIX-LOG #70 同类问题）。
+      if (Object.keys(goofishJar).length === 0) {
+        return { ok: false, error: 'SSO 未发生（goofish.com 未下发任何 Cookie，可能登录态已被风控拦截）', retryable: true }
+      }
+
       // 合并：goofish Cookie 优先，但空值不得覆盖已有非空值
       // （goofish 会下发 unb= 空串，直接覆盖会让闲鱼登录态丢失、后续 SSO 无法复用）
       const goofishNonEmpty = Object.fromEntries(
@@ -975,7 +1145,8 @@ export async function refreshXianyuCookies(
       await closeActiveBrowser()
     }
   } catch (err) {
-    return { ok: false, error: `浏览器启动失败：${err instanceof Error ? err.message : String(err)}` }
+    // 浏览器阶段失败（启动/超时/导航）是暂时性错误 → retryable，进入 60s 冷却
+    return { ok: false, error: `浏览器启动失败：${err instanceof Error ? err.message : String(err)}`, retryable: true }
   }
 }
 
@@ -1237,7 +1408,9 @@ export async function riskVerify(
 
     try {
       const page = await browser.newPage()
-      await page.setViewport({ width: 1440, height: 900 })
+      // P1-3：风控验证按账号绑定的 env 设置 viewport（无 env 时回退默认 1440x900）
+      const verifyEnv = envOf(store.get(shopKey))
+      await applyAccountEnv(page, verifyEnv)
       await page.evaluateOnNewDocument(() => {
         Object.defineProperty(navigator, 'webdriver', { get: () => undefined })
       })

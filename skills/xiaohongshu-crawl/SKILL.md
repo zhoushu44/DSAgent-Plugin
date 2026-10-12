@@ -107,3 +107,19 @@ metadata:
   "keyword": "手机壳"
 }
 ```
+
+## 工作流
+
+1. 确认用户已在账号连接页面绑定小红书账号（xhs 平台）
+2. 从用户请求中提取搜索关键词
+3. 执行 `python scripts/search_notes.py "关键词"` 搜索笔记
+4. 按需执行 `note_detail.py` 获取详情或 `note_comments.py` 采集评论
+5. 读取 stdout 中的 `__DSAGENT_RESULT__` JSON 行，解析结果数据
+6. 向用户展示采集结果摘要
+
+## 错误处理
+
+- 小红书风控等级最高（L3），请求间隔必须 >= 3 秒
+- Cookie 中 `web_session` 失效时需重新登录（有效期约 1-3 天）
+- 频繁请求会触发风控导致 Cookie 失效，建议使用小号
+- 采集内容仅供数据分析，不得用于商业用途

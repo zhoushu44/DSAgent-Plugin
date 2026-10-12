@@ -1,0 +1,1 @@
+import{ar as a,rr as o}from"./index-B3kRscgu.js";import{a as c,s as n}from"./domain-config-D6DA_TLj.js";a();n();var t="/account/pricing",_="accio_work_pc",s="accio_work_web";function P(i){const r=new URL(t,c());return r.searchParams.set("region",o.isWeb?s:_),i&&r.searchParams.set("teamId",i),r.toString()}export{P as t};

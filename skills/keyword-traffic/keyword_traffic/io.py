@@ -8,5 +8,5 @@ from typing import Any
 
 
 def emit_json(data: dict[str, Any]) -> None:
-    sys.stdout.write(json.dumps(data, ensure_ascii=False, indent=2))
+    sys.stdout.write("__DSAGENT_RESULT__" + json.dumps(data, ensure_ascii=False))
     sys.stdout.write("\n")

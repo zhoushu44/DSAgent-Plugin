@@ -56,7 +56,7 @@
  *             （见 readSubmitErrors），并继续等待、识别用户手动提交的结果。
  */
 import { CredentialStore, resolveAccountForRequest, type StoredAccount } from './services/credential-store.js'
-import { clearProfileLocks, findChromePath, profileDir, profileOwner, releaseProfile, tryAcquireProfile } from './browser-login.js'
+import { clearProfileLocks, findChromePath, profileDir, profileOwner, releaseProfile, tryAcquireProfile, sleep, UI_STEP_DELAY_MS } from './browser-login.js'
 import { createAttrCache, type AttrCache } from './services/attr-cache.js'
 import { existsSync, statSync, writeFileSync } from 'node:fs'
 import { basename, join } from 'node:path'
@@ -209,10 +209,6 @@ export interface PddPublishResult {
   shopKey?: string
   /** 发布成功后的落地页 URL */
   finalUrl?: string
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise(r => setTimeout(r, ms))
 }
 
 /**
@@ -910,7 +906,7 @@ async function fillSkuSpec(
   const optIdx = hit >= 0 ? hit : (opts.length > 1 ? 1 : 0)
   await realClickMarked(page, `[data-pdd-specopt="${optIdx}"]`)
   console.log(`[dsagent-pdd-publish] SKU 规格类型已选：${opts[optIdx]}（候选 ${opts.length} 项）`)
-  await sleep(2500)
+  await sleep(UI_STEP_DELAY_MS)
 
   const wantImg = skus.some(s => String(s.image || '').trim())
 
@@ -1050,7 +1046,7 @@ async function fillSkuSpec(
         const h = await page.$('[data-pdd-skuimg="1"]').catch(() => null)
         if (!h) break
         await h.uploadFile(file).catch(() => { /* 忽略 */ })
-        await sleep(2500)
+        await sleep(UI_STEP_DELAY_MS)
         // ★ 缩略图是 CSS background-image（不是 <img>），回读必须同时抓 backgroundImage，
         //   只查 <img> 会把已上传的图误判为失败（第 10 轮实测误报）。
         ok = await page.evaluate((ri: number) => {

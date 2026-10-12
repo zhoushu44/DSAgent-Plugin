@@ -1,0 +1,1 @@
+const e=require(`../gateway-worker.js`);exports.detectInstalledBrowsers=e.xl,exports.detectSystemEnvironment=e.Sl;

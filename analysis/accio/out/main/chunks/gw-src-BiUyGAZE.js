@@ -1,0 +1,1 @@
+const e=require(`../gateway-worker.js`);e.Zd(),exports.MessageFactory=e.wf;

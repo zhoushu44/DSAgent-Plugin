@@ -11,5 +11,5 @@ def load_json(path: str | Path) -> dict[str, Any]:
 
 
 def emit_json(value: dict[str, Any]) -> None:
-    print(json.dumps(value, ensure_ascii=False, indent=2))
+    print("__DSAGENT_RESULT__" + json.dumps(value, ensure_ascii=False))
 

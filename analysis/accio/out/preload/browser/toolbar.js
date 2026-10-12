@@ -1,0 +1,1 @@
+let e=require("electron");e.contextBridge.exposeInMainWorld("toolbarBridge",{sendAction:r=>{e.ipcRenderer.send("browser-preview:toolbar-action",r)},onStateChange:r=>{const n=(e,n)=>r(n);return e.ipcRenderer.on("browser-preview:url-changed",n),()=>e.ipcRenderer.removeListener("browser-preview:url-changed",n)},notifyReady:()=>{e.ipcRenderer.send("browser-preview:toolbar-ready")}});

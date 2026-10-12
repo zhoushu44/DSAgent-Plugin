@@ -2,6 +2,6 @@
     - id: dsagent-plugin
       name: '@dsagent/dsagent-plugin'
       config:
-        skillRoot: 'e:/360MoveData/Users/Administrator/Desktop/deepseek-agent/skills'
+        skillRoot: 'e:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills'
         storePath: 'C:/Users/Administrator/.dsh/dsagent-accounts.json'
         guideOnUnbound: true

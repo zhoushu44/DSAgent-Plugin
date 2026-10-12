@@ -18,6 +18,8 @@ import logging
 import sys
 import time
 
+logger = logging.getLogger(__name__)
+
 from .config import (
     BATCH_TIME_BUDGET_SEC,
     DEFAULT_MAX_PAGES,
@@ -232,7 +234,6 @@ def _output_table(trend_items: list, periods: list, rank_type: str, summary: dic
 def main() -> int:
     args = parse_args()
     setup_logging(args.output_format)
-    logger = logging.getLogger(__name__)
 
     try:
         client, shop_key = get_sycm_client()

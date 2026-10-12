@@ -332,3 +332,20 @@ with open("encrypted.pdf", "wb") as output:
 - 有关 JavaScript 库（pdf-lib），请参阅 REFERENCE.md
 - 如果需要填写 PDF 表单，请按照 FORMS.md 中的说明操作
 - 有关故障排除指南，请参阅 REFERENCE.md
+
+## 工作流
+
+1. 判断任务类型：提取文本/表格、合并/拆分、创建新 PDF、OCR、加密/解密
+2. 提取文本：优先用 `pdfplumber` 的 `extract_text()`，保留布局用 `pdftotext -layout`
+3. 提取表格：用 `pdfplumber` 的 `extract_tables()`，可配合 pandas 转 DataFrame
+4. 合并/拆分/旋转：用 `pypdf` 的 `PdfWriter`/`PdfReader`，或命令行 `qpdf`
+5. 创建新 PDF：用 `reportlab` 的 Canvas 或 Platypus，注意不用 Unicode 下标/上标
+6. 扫描版 PDF：用 `pdf2image` 转图片 + `pytesseract` OCR
+7. 交付物写入 `artifacts/pdf/` 目录
+
+## 错误处理
+
+- `pypdf` 读取加密 PDF 需先调用 `decrypt(password)`
+- `reportlab` 内置字体不含 Unicode 下标/上标，须用 `<sub>`/`<super>` 标签
+- 提取结果为空时检查 PDF 是否为扫描版（图片型），需走 OCR 路径
+- 依赖缺失时报告依赖问题并停止，不要反复重试

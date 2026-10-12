@@ -472,10 +472,12 @@ export function createAccountService(storePath: string) {
     /**
      * 真实健康检查 —— 本地 Cookie 结构检查 + 远程轻量探测（#55）。
      *
-     * 每个账号先做本地关键 Cookie 结构检查，缺失即标记 expired；
-     * 通过后再经 host 路由 probe_session 发起一次远程轻量探测
-     * （当前仅小红书支持，其他平台返回 unknown 不做误判）。
-     * 远端判定为游客态时标记 expired 并回写凭证库。
+     * 每个账号先做本地关键 Cookie 结构检查（P1-1：缺失只计数，达阈值才置位，
+     * 与远端探测同一套连续失败语义）；通过后再经 host 路由 probe_session
+     * 发起一次远程轻量探测。
+     * 探测结果四态（P1-1 语义化状态机）：
+     *   valid → 恢复/保持 valid；expired → 连续失败计数，达阈值落 reauth_required；
+     *   risk_control → 风控/限流 ≠ 凭证失效，状态保持仅提示；unknown → 状态保持。
      */
     async checkHealthReal(platform?: string): Promise<HealthRow[]> {
       const rows = await this.list(platform)
@@ -500,9 +502,22 @@ export function createAccountService(storePath: string) {
         const hasKeyCookies = kc.length > 0 && kc.every(name => cookieJar[name])
 
         if (!hasKeyCookies) {
-          // 关键 Cookie 缺失，标记过期
-          await store.setStatus(stored.shop_key, 'expired')
-          results.push({ platformId: row.platformId, nickname: row.nickname, status: 'expired', reason: '关键 Cookie 缺失' })
+          // ★ P1-1：单次关键 Cookie 缺失不再立即落 expired。
+          //   setCookies 的「空值不覆盖」策略意味着 Cookie 只会在整库重写时被清掉，
+          //   偶发缺失更可能是「探测点域不覆盖该 Cookie」而非真失效；
+          //   且与远端探测的连续失败阈值语义对齐（§5.0：不得由单次失败触发）。
+          //   交给远端探测确认：缺 Cookie 的账号在 host 侧 probeRemoteSession
+          //   开头就会因 cookie_str 为空/关键项缺失返回 expired/unknown，
+          //   走 recordSessionProbe 的计数路径，达阈值才落 reauth_required。
+          await store.recordSessionProbe(stored.shop_key, 'expired')
+          const rec2 = store.get(stored.shop_key)
+          const curStatus: AccountStatus = (rec2?.status as AccountStatus) || 'pending'
+          results.push({
+            platformId: row.platformId,
+            nickname: row.nickname,
+            status: curStatus,
+            reason: `关键 Cookie 缺失${rec2?.session_fail_count ? `（${rec2.session_fail_count}/3）` : ''}`,
+          })
           continue
         }
 
@@ -518,6 +533,17 @@ export function createAccountService(storePath: string) {
           status?: string
           failCount?: number
         }>('probe_session', { shopKey: stored.shop_key })
+        // ★ P1-1：风控/限流 ≠ 凭证失效 —— 状态保持原样（host 侧未落库），
+        //   仅在 reason 里透出风控提示，避免账号页把限流误读为掉登录。
+        if (probe?.ok && probe.result === 'risk_control') {
+          results.push({
+            platformId: row.platformId,
+            nickname: row.nickname,
+            status: row.status,
+            reason: probe.reason || '命中平台风控/限流（登录态未受影响，稍后自动重试）',
+          })
+          continue
+        }
         if (probe?.ok && probe.result === 'expired') {
           // 未达阈值时 host 侧不落库，页面保持原状态，只在 reason 里提示进度
           //

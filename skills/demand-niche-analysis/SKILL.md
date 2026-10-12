@@ -169,6 +169,126 @@ stdout 输出 `__DSAGENT_RESULT__` 单行 JSON：
 
 ---
 
+## API 接口
+
+> 通过 Chrome DevTools 网络抓包获取，2026-04-10。本技能使用两个平台的 API：淘宝 MTOP（商品搜索）+ 生意参谋（关联词拓展）。
+
+### API 1: 淘宝 MTOP 商品搜索
+
+**POST /h5/{api}/{version}/**
+
+获取淘宝搜索商品列表（价格/标题/销量等），用于价格分布和竞争分析。
+
+- Base URL: `https://h5api.m.taobao.com`
+- API: `mtop.relationrecommend.wirelessrecommend.recommend`
+- Version: `2.0`
+- App Key: `12574478`
+
+请求结构（MTOP JSONP 协议）:
+```json
+{
+  "appId": "34385",
+  "params": "{\"device\":\"HMA-AL00\",\"q\":\"充电宝\",\"page\":1,\"n\":48,...}"
+}
+```
+
+`params` 内的关键字段:
+- `q`: URL 编码的搜索关键词
+- `page`/`n`: 页码/每页数量（48）
+- `sort`: 排序方式（default/price-asc/price-desc/sale-desc）
+- `start_price`/`end_price`: 价格区间
+- `myCNA`: 来自绑定上下文的 cna（缺失会 FAIL_BIZ_PARAM_ERR）
+- `userAgent`: UA 字符串
+
+extra_params:
+```json
+{ "timeout": "10000", "appKey": "12574478" }
+```
+
+返回结构:
+```json
+{
+  "data": {
+    "resultList": [
+      {
+        "item": {
+          "item_id": "123",
+          "title": "充电宝...",
+          "price": "59.9",
+          "pic_path": "...",
+          "sold": "1000"
+        }
+      }
+    ]
+  }
+}
+```
+
+重试策略: `call_json_with_retries(max_retries=3, retry_on=("rate_limit",))`
+- MTOP 首次调用会返回 `FAIL_SYS_TOKEN_EMPTY`（token 引导响应），网关合并新 `_m_h5_tk` 后报 `rate_limit` — 重试一次即成功。
+
+### API 2: 生意参谋关联词拓展
+
+**GET /mc/rest/productSearchWord/relatedSearchWord.json**
+
+获取指定关键词的关联搜索词列表（搜索人气/点击率/支付转化率/供需比）。
+
+- Base URL: `https://sycm.taobao.com`
+- Endpoint: `/mc/rest/productSearchWord/relatedSearchWord.json`
+
+params:
+```json
+{
+  "dateRange": "2026-04-03|2026-04-09",
+  "dateType": "recent7",
+  "pageSize": 50,
+  "page": 1,
+  "order": "desc",
+  "orderBy": "seIpvUvHits",
+  "keyWord": "充电宝",
+  "cycleFlag": "cycle",
+  "rankType": "related",
+  "device": "0",
+  "marketVersion": "free"
+}
+```
+
+返回结构:
+```json
+{
+  "data": {
+    "data": [
+      {
+        "relatedSekeyword": { "value": "充电宝快充" },
+        "seIpvUvHits": { "value": "12345", "cycleCrc": "↑" },
+        "clickThroughRate": { "value": "3.5%" },
+        "payConvRate": { "value": "2.1%" },
+        "simWeight": { "value": "0.85" }
+      }
+    ]
+  }
+}
+```
+
+**注意**: sycm 与 taobao 是两套域会话，sycm 未登录很常见。此时降级为「只基于商品数据」分析，并在 `data_gaps` 里提示用户重新登录，绝不因可选层失败而让整个技能失败。
+
+### 请求头
+
+网关自动注入 Cookie/UA/Referer/Accept。adapter 手动指定：
+```
+Referer: https://sycm.taobao.com/
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
+```
+
+### 限流
+
+- 网关层: 账号间隔 4s（`ACCOUNT_INTERVAL_SECONDS`）
+- MTOP 层: `MTOP_THROTTLE = CallThrottle(min_interval=4.5, jitter=1.5)`
+- sycm 层: `SYCM_THROTTLE = CallThrottle(min_interval=1.8, jitter=0.7)`
+- 分页间隔: `time.sleep(random.uniform(0.5, 1.0))`
+
+---
+
 ## 证据分级（输出结论前必读）
 
 本技能输出任何"结论"前，先按**证据四分级**标注级别（Observed 直采 / Calculated 计算 /

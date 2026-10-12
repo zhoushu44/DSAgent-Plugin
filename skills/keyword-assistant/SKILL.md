@@ -322,6 +322,117 @@ cd "{keyword_traffic_dir}" && python -m keyword_traffic trend "{关键词}"
 
 ---
 
+## API 接口
+
+> 通过 Chrome DevTools 网络抓包获取，2026-04-10
+
+### Base URL
+
+```
+https://sycm.taobao.com
+```
+
+所有端点 = `SYCM_BASE_URL` + path，定义在 `config.py`。
+
+### 端点 1: 关联词拓展
+
+#### GET /mc/mq/mkt/keyword/relate/analysis.json
+
+获取指定种子关键词的关联词列表，含搜索人气/点击率/支付转化等指标。
+
+- 常量: `config.KEYWORD_EXPAND_ENDPOINT`
+
+params:
+```json
+{
+  "dateRange": "2026-04-01,2026-04-07",
+  "dateType": "week",
+  "page": 1,
+  "pageSize": 10,
+  "keyWord": "充电宝",
+  "cycleFlag": "cycle",
+  "rankType": "related",
+  "device": "0",
+  "marketVersion": "free",
+  "cateId": "201272600"
+}
+```
+
+返回:
+```json
+{
+  "data": {
+    "data": [
+      {
+        "relatedSekeyword": { "value": "充电宝快充" },
+        "seIpvUvHits": { "value": "12345", "cycleCrc": "↑" },
+        "clickThroughRate": { "value": "3.5%", "cycleCrc": "→" },
+        "payByrCnt": { "value": "678" },
+        "payConvRate": { "value": "2.1%" },
+        "simWeight": { "value": "0.85" },
+        "tmaoClickRatio": { "value": "60%" },
+        "freeClkRate": { "value": "40%" }
+      }
+    ]
+  }
+}
+```
+
+### 端点 2: 搜索词排行榜
+
+#### GET /mc/mq/mkt/keyword/rank/pro.json
+
+获取搜索词排行榜，支持按类目/支付转化/搜索人气排序。
+
+- 常量: `config.SEARCH_RANK_ENDPOINT`
+
+params:
+```json
+{
+  "dateRange": "2026-04-01,2026-04-07",
+  "dateType": "week",
+  "page": 1,
+  "pageSize": 50,
+  "order": "desc",
+  "orderBy": "seIpvUvHits",
+  "kwType": "word",
+  "rankType": "all",
+  "keyWord": "",
+  "device": "0",
+  "marketVersion": "free",
+  "cateId": "201272600"
+}
+```
+
+返回:
+```json
+{
+  "data": {
+    "data": [
+      {
+        "rn": { "value": 1 },
+        "searchWord": { "value": "充电宝" },
+        "seIpvUvHits": { "value": "50000" },
+        "payRate": { "value": "5%" },
+        "clickThroughRate": { "value": "3%" },
+        "freeClkRate": { "value": "40%" }
+      }
+    ]
+  }
+}
+```
+
+### 请求头
+
+网关自动注入 Cookie/UA/Referer/Accept。如需手动指定：
+```
+Accept: application/json, text/javascript, */*; q=0.01
+X-Requested-With: XMLHttpRequest
+Referer: https://sycm.taobao.com/
+```
+
+---
+
 ## 证据分级（输出结论前必读）
 
 本技能输出任何"结论"前，先按**证据四分级**标注级别（Observed 直采 / Calculated 计算 /
@@ -329,3 +440,19 @@ Proxy 代理推断 / Unknown 未知），并遵守五条禁止推断——尤其
 **sycm/万相台指数一律标 Proxy，不得当绝对量**；**Unknown 不得当 0 参与平均**。
 
 完整分级表、五条禁止推断与国内场景注释见 [references/evidence-rules.md](references/evidence-rules.md)。
+
+## 工作流
+
+1. 确认用户意图：只需数据、需要深度分析、还是需要完整 HTML 报告
+2. 执行数据获取：`python -m keyword_assistant "关键词"`（expand 模式）或 `--mode rank`（排行榜模式）
+3. 读取 stdout JSON，检查 `status:"success"` 和数据是否为空
+4. 若用户需要深度分析：读取 JSON 数据，撰写 insights.md 洞察文件（至少 3 个 ## 模块，500+ 字）
+5. 若用户需要 HTML 报告：执行 `inject-report --insights_md <路径>`，从输出取 `report_path` 并打开
+6. 交付结果：JSON 数据 + CSV 文件 + HTML 报告（按需）
+
+## 错误处理
+
+- 退出码=2 时引导用户在平台连接重新登录 sycm
+- 退出码=4 时加 `--cate_id` 重试解决 API 权限问题
+- insights.md 不足 3 个模块或标题带 emoji 时 inject-report 会报错，修正后重试
+- 任何一步失败立即停止，不要跳过失败的步骤继续往下走

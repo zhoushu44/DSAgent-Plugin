@@ -1,0 +1,1 @@
+function s(c,u,i,r,o,a,t){try{var e=c[a](t),n=e.value}catch(f){i(f);return}e.done?u(n):Promise.resolve(n).then(r,o)}function v(c){return function(){var u=this,i=arguments;return new Promise(function(r,o){var a=c.apply(u,i);function t(n){s(a,r,o,t,e,"next",n)}function e(n){s(a,r,o,t,e,"throw",n)}t(void 0)})}}export{v as t};

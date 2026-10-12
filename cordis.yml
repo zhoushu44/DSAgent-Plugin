@@ -22,12 +22,12 @@
 - insert:
     # ── 本项目插件本体：账号连接器页 + 技能市场页 + 工具注册 ──
     - id: dsagent-plugin
-      name: 'e:/360MoveData/Users/Administrator/Desktop/deepseek-agent/plugins/dsagent-plugin/src/index.ts'
+      name: 'e:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/src/index.ts'
       disabled: false
       config:
         # 技能根目录：指向本项目现成的 skills/（36 个技能）
         # 用 customSkillDirs 挂载，不搬目录、不改结构
-        skillRoot: 'e:/360MoveData/Users/Administrator/Desktop/deepseek-agent/skills'
+        skillRoot: 'e:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills'
         # 凭证存储路径：本地 JSON 文件，存账号 Cookie
         storePath: 'C:/Users/Administrator/.dsh/dsagent-accounts.json'
         # 未绑定账号时，工具返回引导文案而非硬报错
@@ -41,6 +41,6 @@
         # ★ 关键：只认下面这个目录，本项目技能与 Harness 自带技能互不可见
         includeDefaultRoots: false
         customSkillDirs:
-          - 'e:/360MoveData/Users/Administrator/Desktop/deepseek-agent/skills'
+          - 'e:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills'
         # 技能文件改动免重启生效
         watch: true

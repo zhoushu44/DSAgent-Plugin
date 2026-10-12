@@ -99,3 +99,25 @@ metadata:
 - `private_mode`、`browser_args`、`executable_path` 都是每次 `start` 的显式参数，不会持久保存
 - 若当前已有浏览器在运行，需要先 `stop` 再重新 `start`，才能切换启动方式、窗口可见性或启动参数。
 - 可见模式会占用桌面并需要图形环境，服务器或无图形环境可能无法使用。
+
+## 工作流
+
+1. 确认用户对窗口可见性的需求：是否需要显示浏览器窗口
+2. 判断是否需要 private_mode（禁用 CDP、改走 Playwright）
+3. 按需组合参数：`headed`、`private_mode`、`browser_args`、`executable_path`
+4. 若当前已有浏览器运行，先执行 `stop` 再重新 `start`
+5. 执行 `start` 并传入组合参数
+6. 任务完成后执行 `stop` 释放浏览器实例
+
+## 错误处理
+
+- 若当前已有浏览器在运行，必须先 `stop` 再 `start`，否则无法切换启动方式
+- managed CDP 依赖本机存在 Chrome/Chromium/Edge，缺失时改用 `private_mode=true`
+- 可见模式需要图形环境，服务器或无图形环境可能无法使用
+- `executable_path` 只接受包含已知浏览器关键词的可执行文件
+
+## 前置条件
+
+- managed CDP 模式需要本机已安装 Chrome / Chromium / Edge
+- 可见模式（`headed=true`）需要图形桌面环境
+- `executable_path` 指向的浏览器可执行文件必须真实存在

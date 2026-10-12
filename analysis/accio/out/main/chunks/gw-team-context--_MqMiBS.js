@@ -1,0 +1,1 @@
+const e=require(`../gateway-worker.js`);exports.buildCollaborationMemberDmPrompt=e.an,exports.buildCollaborationMemberStaticGuidance=e.on,exports.buildCollaborationTeamConfigFromDmContext=e.sn;

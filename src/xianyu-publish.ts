@@ -26,7 +26,7 @@
  *   扫码登录**得到的（只有这条路能拿到 havana_lgc2_77 会话票据）。
  */
 import { CredentialStore, resolveAccountForRequest, type StoredAccount } from './services/credential-store.js'
-import { clearProfileLocks, findChromePath, profileDir, profileOwner, releaseProfile, tryAcquireProfile } from './browser-login.js'
+import { clearProfileLocks, findChromePath, profileDir, profileOwner, releaseProfile, tryAcquireProfile, sleep, UI_STEP_DELAY_MS } from './browser-login.js'
 import { existsSync, statSync } from 'node:fs'
 
 const PUBLISH_URL = 'https://www.goofish.com/publish'
@@ -273,7 +273,7 @@ export async function xianyuPublish(
     await page.goto(PUBLISH_URL, { waitUntil: 'domcontentloaded', timeout: 45_000 })
 
     // 等页面渲染（React 首屏 + prepublish.check / preget 两个前置接口）
-    await new Promise(r => setTimeout(r, 4000))
+    await sleep(UI_STEP_DELAY_MS)
 
     // ── 2. 登录态判定 ─────────────────────────────────────
     // 闲鱼未登录时**不跳转**登录页，而是原地渲染「立即登录」，因此必须看页面文案与登录按钮。
@@ -308,7 +308,7 @@ export async function xianyuPublish(
     const uploadDeadline = Date.now() + UPLOAD_WAIT_MS
     let uploaded = 0
     while (Date.now() < uploadDeadline) {
-      await new Promise(r => setTimeout(r, 2000))
+      await sleep(2000)
       try {
         uploaded = await page.evaluate((expect: number) => {
           const txt = document.body?.innerText || ''
@@ -374,7 +374,7 @@ export async function xianyuPublish(
       }
     }
     console.log(`[dsagent-xianyu-publish] 已填描述（输入 ${description.length} 字，页面接收 ${descLen} 字）`)
-    await new Promise(r => setTimeout(r, 1500))
+    await sleep(UI_STEP_DELAY_MS)
 
     // ── 5. 填价格 / 原价 ───────────────────────────────────
     // ★ 实测（dev/probe-xianyu-price-dom.mjs）：发布页价格类输入框 name 全为空、placeholder 均为 "0.00"，
@@ -442,7 +442,7 @@ export async function xianyuPublish(
     }
 
     // ── 7. 点「发布」──────────────────────────────────────
-    await new Promise(r => setTimeout(r, 2000))
+    await sleep(UI_STEP_DELAY_MS)
     const clicked = await page.evaluate(() => {
       const btns = Array.from(document.querySelectorAll('button')) as HTMLElement[]
       const hit = btns.find(b => ['发布', '确认发布', '立即发布', '发布闲置'].includes((b.innerText || '').trim())
@@ -470,7 +470,7 @@ export async function xianyuPublish(
     let errText = ''
     const deadline = Date.now() + PUBLISH_TIMEOUT_MS
     while (Date.now() < deadline) {
-      await new Promise(r => setTimeout(r, 2000))
+      await sleep(2000)
       finalUrl = page.url()
       try {
         bodyText = await page.evaluate(() => (document.body?.innerText || '').replace(/\s+/g, ' ').slice(0, 3000))

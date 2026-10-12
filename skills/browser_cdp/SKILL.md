@@ -203,3 +203,24 @@ CDP 相关 stop 需要区分两类：
 - external CDP 的 auto-stop 是“自动断开”，不是“自动关闭用户浏览器”
 - 当前 activity 主要由 tool 操作刷新；用户手动在浏览器窗口中的本地交互，通常不会刷新 idle 计时
 - `private_mode` 是每次 `start` 的显式参数，不作为 workspace 持久状态保存
+
+## 工作流
+
+1. 判断用户意图：是扫描端口、连接已有浏览器、还是指定端口启动
+2. 若扫描端口：执行 `list_cdp_targets`，指定范围或用默认 9000–10000
+3. 若连接已有浏览器：用 `connect_cdp` + `cdp_url` 附着到外部 Chrome
+4. 若指定端口启动：用 `start` + `cdp_port`，按需加 `headed=true`
+5. 连接成功后，使用 `open`、`snapshot`、`click`、`type` 等常规操作
+6. 任务完成后执行 `stop`：managed CDP 会关闭浏览器进程，external CDP 仅断开连接
+
+## 错误处理
+
+- 端口已被占用时不会自动重试，提示用户换端口或先 `stop` 旧进程
+- external CDP 连接失败时检查目标浏览器是否已启动远程调试
+- 使用显式 CDP 前提醒用户存在敏感数据暴露风险
+
+## 前置条件
+
+- 本机已安装 Chrome / Chromium / Edge（managed CDP 依赖）
+- 同一 workspace 同时只能运行一个浏览器实例，需先 `stop` 再切换
+- 连接 external CDP 前，目标浏览器必须已以 `--remote-debugging-port` 启动

@@ -81,7 +81,10 @@ def main():
     text = json.dumps(result, ensure_ascii=False, indent=2)
     if args.output:
         out = Path(args.output); out.parent.mkdir(parents=True, exist_ok=True); out.write_text(text, encoding="utf-8")
-    print(text)
+    if args.output:
+        print(f"validation -> {args.output}")
+    else:
+        print(f"__DSAGENT_RESULT__{json.dumps(result, ensure_ascii=False)}")
     raise SystemExit(1 if errors else 0)
 
 

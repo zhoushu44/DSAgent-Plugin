@@ -17,7 +17,7 @@ import * as crypto from 'node:crypto'
 import { URL } from 'node:url'
 import { readdirSync } from 'node:fs'
 import { dirname } from 'node:path'
-import { findChromePath } from './browser-login.js'
+import { findChromePath, observeEgressIp } from './browser-login.js'
 import { CredentialStore, credentialPlatform, isRiskPassCookie, normalizePlatform, resolveAccountForRequest, accountsForPlatform } from './services/credential-store.js'
 import {
   cacheEnabled,
@@ -73,6 +73,39 @@ const nextAllowedAt = new Map<string, number>()
 /** shop_key → 风控冷却截止时间戳（毫秒） */
 const riskCooldownUntil = new Map<string, number>()
 
+// ── P2-2 per-account 串行队列（sub2api sticky 路由）─────────────────
+//
+// 同一账号的自动化任务进串行队列（并发 = 1），跨账号并行。
+// 防止同一账号两个并发任务一个在登录窗、一个在用旧 cookie 请求，
+// 互相踩踏导致会话作废。
+//
+// 实现：每个 shopKey 维护一条 Promise 链（FIFO），新请求接到链尾，
+// 前一个请求 settle（无论成功/失败）后下一个才开始执行。
+
+/** shop_key → 链尾 Promise（串行排队用） */
+const accountQueues = new Map<string, Promise<unknown>>()
+
+/**
+ * 把一个异步操作排进指定账号的串行队列。
+ *
+ * - 同一 shopKey 的多个调用按 FIFO 顺序依次执行（前一个 settle 后下一个才开始）；
+ * - 跨 shopKey 自然并行（各自的链互不相关）；
+ * - 不会无限堆积：每个 Promise settle 后即被后继节点替换，GC 可回收。
+ */
+function withAccountQueue<T>(shopKey: string, fn: () => Promise<T>): Promise<T> {
+  const prev = accountQueues.get(shopKey) ?? Promise.resolve()
+  // catch 前驱的异常 → 前驱失败不应阻断后续排队
+  const chained = prev.catch(() => {}).then(fn)
+  // finally 清理：链尾回到 resolved 状态后移除自身，避免 Map 无限增长
+  const cleanup = chained.finally(() => {
+    if (accountQueues.get(shopKey) === chained) {
+      accountQueues.delete(shopKey)
+    }
+  })
+  accountQueues.set(shopKey, cleanup)
+  return cleanup
+}
+
 /**
  * 风控「验证通过」凭证的 Cookie 名由 `.services/credential-store.ts` 定义（单一真源），
  * 这里只做引用，避免两处漂移。
@@ -99,7 +132,7 @@ const VERIFY_URL_TTL_MS = 30 * 60 * 1000
 const CHROME_MAJOR_FALLBACK = 120
 let cachedDesktopUA: string | undefined
 
-function desktopUserAgent(): string {
+export function desktopUserAgent(): string {
   if (!cachedDesktopUA) {
     cachedDesktopUA = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${detectChromeMajor()}.0.0.0 Safari/537.36`
   }
@@ -416,6 +449,11 @@ export async function handleProxy(body: any, store: CredentialStore): Promise<an
   }
   const account = resolved.account
   console.log(`[dsagent-gateway] 选中账号: ${account.shop_key} (platform=${account.platform}, status=${account.status}, level=${resolved.level}, agentId=${agentId || '(空)'}, tb_token=${account.tb_token ? 'YES' : 'NO'})`)
+  // P1-3：出口 IP 观测（进程级节流，每 10 分钟至多一次，不阻塞请求）
+  observeEgressIp(store, account.shop_key).catch(() => { /* 观测失败不影响请求 */ })
+  // ★ P2-2（sub2api sticky 路由）：同一账号的请求串行排队，跨账号并行。
+  //   防止同账号两个并发任务一个在登录窗、一个在用旧 cookie 请求，互相踩踏导致会话作废。
+  return withAccountQueue(account.shop_key, async () => {
   const cookieStr = account.cookie_str
   if (!cookieStr) {
     return {
@@ -440,9 +478,11 @@ export async function handleProxy(body: any, store: CredentialStore): Promise<an
   }
 
   // 构建请求头
+  // ★ P1-3：UA 优先取账号绑定的 env（环境指纹一致性），无 env 时回退本机默认。
+  const accountEnv = (account.account_meta?.env as { ua?: string } | undefined)?.ua
   const headers: Record<string, string> = {
     'Cookie': cookieStr,
-    'User-Agent': desktopUserAgent(),
+    'User-Agent': accountEnv || desktopUserAgent(),
     'Referer': targetUrl,
     'Accept': 'application/json, text/plain, */*',
   }
@@ -625,8 +665,14 @@ export async function handleProxy(body: any, store: CredentialStore): Promise<an
 
     /** 响应体是否是 HTML（风控拦截页的典型特征） */
     const bodyStr0 = typeof result.body === 'string' ? result.body : ''
-    const isHtmlResponse = /^\s*<!doctype|^\s*<html/i.test(bodyStr0)
+    // ★ 404/500 等 HTTP 错误页也是 HTML，但不是风控。先排除非风控 HTTP 错误，
+    //   否则 404 会被判为 waf-html → risk_control，掩盖真正的 URL 错误（FIX-LOG #53）。
+    const isHttpErrorPage = result.status >= 400 && result.status < 500
+      && !bodyStr0.includes('punish') && !bodyStr0.includes('rgv587_error')
+    const isHtmlResponse = !isHttpErrorPage && (
+      /^\s*<!doctype|^\s*<html/i.test(bodyStr0)
       || bodyStr0.includes('bixi-intl.alicdn.com/punish')
+    )
 
     /** 风控子类型：bixi-punish（滑块）/ waf-html（WAF）/ waf-block（IP 封锁）/ 空（非风控） */
     let riskSubtype: '' | 'bixi-punish' | 'waf-html' | 'waf-block' = ''
@@ -1016,6 +1062,7 @@ export async function handleProxy(body: any, store: CredentialStore): Promise<an
       failure_kind: 'api_error',
     }
   }
+  }) // end withAccountQueue
 }
 
 // ─────────────── 阿里妈妈 csrfId / loginPointId 探测 ───────────────
@@ -1038,10 +1085,10 @@ interface AlimamaAccess {
  * 用给定 Cookie 调一次阿里妈妈 checkAccess，取 csrfId / loginPointId / 错误语义。
  * 不抛错：网络异常返回 `status: 0`，由调用方决定文案。
  */
-async function fetchAlimamaAccess(cookieStr: string): Promise<AlimamaAccess> {
+async function fetchAlimamaAccess(cookieStr: string, uaOverride?: string): Promise<AlimamaAccess> {
   const headers: Record<string, string> = {
     'Cookie': cookieStr,
-    'User-Agent': desktopUserAgent(),
+    'User-Agent': uaOverride || desktopUserAgent(),
     'Content-Type': 'application/json; charset=utf-8',
     'Accept': 'application/json, text/plain, */*',
     'Origin': 'https://one.alimama.com',
@@ -1093,7 +1140,7 @@ export async function ensureAlimamaTokens(store: CredentialStore): Promise<boole
   if (!account) return false
   if (!account.cookie_str) return false
 
-  const { status, csrfId, loginPointId } = await fetchAlimamaAccess(account.cookie_str)
+  const { status, csrfId, loginPointId } = await fetchAlimamaAccess(account.cookie_str, account.account_meta?.env?.ua)
   if (!csrfId) {
     console.warn(`[dsagent-gateway] checkAccess 未返回 csrfId (HTTP ${status})`)
     return false
@@ -1133,7 +1180,7 @@ export async function probePlatformPermission(
   // 与技能请求共用账号级节流，避免预检打乱同一账号的出口频率
   await throttleAccount(shopKey)
 
-  const { status, csrfId, loginPointId } = await fetchAlimamaAccess(account.cookie_str)
+  const { status, csrfId, loginPointId } = await fetchAlimamaAccess(account.cookie_str, account.account_meta?.env?.ua)
   if (!csrfId) {
     const reason = status === 0
       ? '请求失败（网络异常或超时）'
@@ -1151,8 +1198,15 @@ export async function probePlatformPermission(
 
 // ─────────────── 远程登录态探测（健康巡检用） ───────────────
 
-/** 探测结果：valid=远端确认已登录 / expired=远端确认为游客 / unknown=无法判定（网络异常或平台未支持） */
-export type SessionProbeResult = 'valid' | 'expired' | 'unknown'
+/**
+ * 探测结果四态（P1-1 语义化状态机，sub2api 模式 ——「风控/限流 ≠ 凭证失效」）：
+ *   valid        = 远端确认已登录
+ *   expired      = 远端确认为游客（重定向到登录页）→ 连续失败计数，达阈值才 reauth_required
+ *   risk_control = 被风控/限流拦截（HTTP 429/403、baxia punish、bxpunish 头）
+ *                  → 冷却、不计数！账号本体仍是登录态，误标会引导用户白白重登
+ *   unknown      = 无法判定（网络异常或平台未支持）→ 状态保持
+ */
+export type SessionProbeResult = 'valid' | 'expired' | 'risk_control' | 'unknown'
 
 const XHS_HOME_URL = 'https://www.xiaohongshu.com/explore'
 const XHS_MAX_REDIRECTS = 3
@@ -1178,6 +1232,7 @@ export async function probeRemoteSession(account: {
   platform: string
   shop_key: string
   cookie_str: string
+  account_meta?: Record<string, any>
 }): Promise<{ result: SessionProbeResult; reason?: string }> {
   const cred = credentialPlatform(account.platform)
   if (!account.cookie_str) return { result: 'unknown', reason: '缺少 Cookie' }
@@ -1187,13 +1242,13 @@ export async function probeRemoteSession(account: {
   if (cred === 'taobao' && normalizePlatform(account.platform) !== 'xianyu') {
     // ★ 闲鱼必须排除：xianyu 凭证层虽归一到 taobao，但其 Cookie 是 goofish 域，
     //   用 alimama 探测必然未登录 → 会误标 expanded。
-    return probeTaobaoSession(account.cookie_str)
+    return probeTaobaoSession(account)
   }
   if (cred !== 'xhs') return { result: 'unknown' }
 
   const headers: Record<string, string> = {
     'Cookie': account.cookie_str,
-    'User-Agent': desktopUserAgent(),
+    'User-Agent': account.account_meta?.env?.ua || desktopUserAgent(),
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
     'Accept-Language': 'zh-CN,zh;q=0.9',
   }
@@ -1207,6 +1262,10 @@ export async function probeRemoteSession(account: {
       url = new URL(res.location, url).toString()
       res = await httpRequest('GET', url, headers, undefined, 20)
     }
+    // ★ 风控优先于一切判定（P1-1）：429/403 与 punish 头说明账号被限流，
+    //   不代表登录态失效 —— 归为 risk_control 而非 expired/unknown，避免误标。
+    const risk = riskSignalFrom(res.status, res.responseHeaders)
+    if (risk) return { result: 'risk_control', reason: risk }
     if (res.status >= 400) return { result: 'unknown', reason: `HTTP ${res.status}` }
 
     // 首页 HTML 里的 SSR 数据是「JSON 字符串再转义」形式：`\"user\":{\"loggedIn\":false...`。
@@ -1231,6 +1290,32 @@ export async function probeRemoteSession(account: {
 }
 
 /**
+ * 从 HTTP 状态码与响应头识别风控/限流信号（P1-1）。
+ * 覆盖三类信号（与 handleProxy 的风控识别口径对齐，但只取「确定是风控」的子集，宁缺勿滥）：
+ *   - HTTP 429（限流）/ 403（WAF 拒绝）
+ *   - 小红书风控头 `bxpunish` / `bxuuid`（httpRequest 已透传全量响应头）
+ *   - 阿里 baxia punish（RGV587_ERROR / 滑块页）
+ */
+function riskSignalFrom(
+  status: number,
+  responseHeaders?: Record<string, string | string[] | undefined>,
+  body?: string,
+): string | undefined {
+  if (status === 429) return 'HTTP 429：请求被限流'
+  if (status === 403) return 'HTTP 403：请求被 WAF/风控拒绝'
+  const headers = responseHeaders || {}
+  const headerVal = (k: string) => {
+    const v = headers[k]
+    return Array.isArray(v) ? v.join(',') : (v ? String(v) : '')
+  }
+  const bxpunish = headerVal('bxpunish')
+  if (bxpunish) return `风控拦截头 bxpunish=${bxpunish}`
+  if (headerVal('bx-mid') && headerVal('bx-uuid')) return '风控拦截头 bx-mid/bx-uuid'
+  if (body && /RGV587_ERROR|punish[^a-z]/i.test(body)) return 'baxia 风控拦截（RGV587/punish）'
+  return undefined
+}
+
+/**
  * 淘宝系（taobao 凭证层，含生意参谋/万相台/达摩盘）远程登录态探测。
  *
  * 为什么用阿里妈妈 checkAccess 而不是淘宝域名：生意参谋系账号的凭证层已归并到 taobao，
@@ -1241,13 +1326,23 @@ export async function probeRemoteSession(account: {
  *   - HTTP 200 且 info.ok=false 且 errorCode=5008004 → 明确未登录 → expired
  *   - 其余（网络异常 status=0 / 非 200 / 权限类错误码如 5008005）→ unknown，不误判
  */
-async function probeTaobaoSession(cookieStr: string): Promise<{ result: SessionProbeResult; reason?: string }> {
-  const { status, csrfId, ok, errorCode } = await fetchAlimamaAccess(cookieStr)
+async function probeTaobaoSession(account: {
+  platform: string
+  shop_key: string
+  cookie_str: string
+  account_meta?: Record<string, any>
+}): Promise<{ result: SessionProbeResult; reason?: string }> {
+  const { status, csrfId, ok, errorCode } = await fetchAlimamaAccess(account.cookie_str, account.account_meta?.env?.ua)
   if (status === 200 && csrfId) return { result: 'valid' }
   if (status === 200 && !ok && errorCode === 5008004) {
     return { result: 'expired', reason: '阿里 SSO 登录态已失效（未登录）' }
   }
   if (status === 0) return { result: 'unknown', reason: '探测请求失败（网络异常或超时）' }
+  // ★ 风控信号优先（P1-1）：429/403/punish 是被限流，不是掉登录 ——
+  //   checkAccess 走 httpRequest，但 fetchAlimamaAccess 只回传了 status，
+  //   故这里用状态码判风控（阿里妈妈网关层限流返回 429/403）。
+  const risk = riskSignalFrom(status)
+  if (risk) return { result: 'risk_control', reason: risk }
   return { result: 'unknown', reason: `HTTP ${status} 且无明确登录态（errorCode=${errorCode ?? '无'}）` }
 }
 

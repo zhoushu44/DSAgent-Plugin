@@ -1,0 +1,1 @@
+var s={PRO:"subscription.pro",ELITE:"subscription.elite",BASIC:"subscription.basic",ENTERPRISE:"subscription.enterprise",BUSINESS:"subscription.business",ULTRA:"subscription.ultra",FREE:"subscription.free",TEAM:"subscription.team"};function r(i){return s[i??"FREE"]??s.FREE}export{r as t};

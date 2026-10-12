@@ -370,6 +370,25 @@ tool_triggers:
 | **签名归一化**（长数字→`<ID>`、引号值→`<VAL>`、路径→`<PATH>`） | `商品 123456 失败` 与 `商品 789012 失败` 会变成两条独立记录，各自计数永远到不了阈值，**坑位永远无法晋升** |
 | **90 天陈旧退出** | 平台会修问题、账号会换；陈旧的坑位继续提示只会造成噪声（记录保留，仅退出提示） |
 
+### 6.5.6 发布脚本 UI 步骤延迟规范（新增）
+
+所有 publish 脚本中 **UI 操作后等待页面渲染落定**的延迟，统一使用共享常量 `UI_STEP_DELAY_MS`，
+**不得散落为 `sleep(2500)` / `setTimeout(r, 2500)` 等魔法数字**。
+
+| 规则 | 说明 |
+|------|------|
+| **常量定义** | `src/browser-login.ts` → `export const UI_STEP_DELAY_MS = 2500` |
+| **sleep 函数** | `src/browser-login.ts` → `export function sleep(ms): Promise<void>` — 各 publish 脚本 import 使用，不再各自定义 |
+| **适用场景** | 点击按钮 / 选择下拉项 / 上传文件后等待页面渲染 |
+| **不适用场景** | while 循环中的轮询间隔（保留 2000ms）、文件上传完成轮询超时（保留原值） |
+| **变更基准** | 调整延迟值只需改 `UI_STEP_DELAY_MS` 一处，所有 publish 脚本自动生效 |
+
+**涉及文件**：`taobao-publish.ts` / `pdd-publish.ts` / `bilibili-publish.ts` / `zhihu-publish.ts` / `xiaohongshu-publish.ts` / `xianyu-publish.ts` / `douyin-publish.ts`
+
+> **三层节流体系**：本规范只管 publish 脚本中的 UI 步骤延迟。爬虫/分析技能的 API 请求节流由
+> `CallThrottle`（[http_retry.py](skills/.dsagent/runtime/http_retry.py) 默认 `min_interval=2.0`）管，
+> 账号级节流由网关 `ACCOUNT_INTERVAL_SECONDS = 4.0`（[gateway-proxy.ts](src/gateway-proxy.ts)）管。
+
 ---
 
 ## 6.6 八域知识库（新增）
@@ -485,8 +504,15 @@ plugins/dsagent-plugin/
 ├── package.json
 ├── tsconfig.json
 └── src/
-    ├── index.ts                  # host 半区：34 工具 + 系统提示词 + 前置校验 + HTTP 路由 + 定时巡检
+    ├── index.ts                  # host 半区：apply() 入口 + 服务创建 + 工具接线 + 前置校验 + 定时巡检
     ├── client.ts                 # browser 半区：侧边栏按钮 + 面板（两页签）
+    ├── http-routes.ts            # HTTP 路由（凭证管理 / 账号操作 / 技能启停 / 网关代理）
+    ├── prompt.ts                 # 系统提示词（技能调用方式 / 错误处理表 / 风控引导）
+    ├── tool-runtime.ts           # 工具运行时公共层（defineTool 包装 / lossless JSON 清洗 / payload 落盘）
+    ├── tools-platform.ts         # 13 个平台工具（账号 / 登录 / 风控 / 代理 / Cookie 导入 / 平台清单）
+    ├── tools-publish.ts          # 10 个发布工具（各平台内容发布 / 采集 / 下载）
+    ├── tools-skill.ts            # 6 个技能工具（清单 / 详情 / 执行 / 报告 / 坑位记忆 / 对话）
+    ├── tools-wiki.ts             # 5 个知识库工具（schema / 模板 / 写入 / 搜索 / 统计）
     ├── gateway-proxy.ts          # 本地代理网关（Cookie 注入 / 风控检测 / failure_kind / 节流）
     ├── browser-login.ts          # 浏览器登录（Profile 隔离 / SSO 刷新 / 风控验证）
     ├── *-publish.ts / *-crawl.ts # 各平台发布与采集实现
@@ -548,16 +574,18 @@ node dev/verify-patch-layer.mjs        # 25 项：patch 参与真实执行链路
 node dev/verify-wiki.mjs               # 68 项：八域 Schema / 锁定模板 / 漂移拦截 / 落盘
 node dev/verify-wiki-textpath.mjs      # 25 项：文本路径与模板路径校验一致性（机密字段泄漏回归）
 node dev/verify-pitfalls.mjs           # 54 项：签名折叠 / 证据阈值 / 陈旧退出 / 并发安全 / 记录策略
-node dev/verify-host-integration.mjs   # 27 项：apply() 注册 34 工具 / 提示词 / 无回归
+node dev/verify-host-integration.mjs   # 27 项：apply() 注册 35 工具 / 提示词 / 无回归
 node dev/audit-skill-quality.mjs skills # 给全体技能做质量体检（可接 CI）
 node dev/verify-real-triggers.mjs      # 用真实技能文件验证 triggers 匹配
 ```
 
 ## 12. 规范文档
 
-| 文档 | 说明 |
+以下规范文档已内联到 README 对应章节，不再单独维护：
+
+| 规范 | 位置 |
 |---|---|
-| [.trae/rules/dsagent-account-spec.md](.trae/rules/dsagent-account-spec.md) | 账号连接规范（凭证库 / 登录 / 健康检查 / 工具输出） |
-| [.trae/rules/dsagent-skill-spec.md](.trae/rules/dsagent-skill-spec.md) | 技能编写规范（SKILL.md / 输出规范 / runtime 模块） |
-| [.trae/rules/dsagent-plugin-ui.md](.trae/rules/dsagent-plugin-ui.md) | UI 规则（页面职责 / 卡片显示 / 筛选器） |
-| [.trae/rules/dsagent-runtime-spec.md](.trae/rules/dsagent-runtime-spec.md) | Runtime 模块 API 文档（函数签名 / 错误类型 / 使用示例） |
+| 账号连接规范（凭证库 / 登录 / 健康检查 / 工具输出） | 第 4-5 节 + 第 8 节 |
+| 技能编写规范（SKILL.md / 输出规范 / runtime 模块） | 第 6.5 节 + 第 10 节「技能 Runtime 模块」 |
+| UI 规则（页面职责 / 卡片显示 / 筛选器） | 第 4 节 |
+| Runtime 模块 API 文档（函数签名 / 错误类型 / 使用示例） | 第 10 节「技能 Runtime 模块」+ `skills/.dsagent/runtime/` 源码 |

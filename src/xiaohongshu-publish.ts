@@ -17,7 +17,7 @@
  *   - tab 切换：div.creator-tab（内含 span.title「上传视频」/「上传图文」）
  */
 import { CredentialStore, resolveAccountForRequest, type StoredAccount } from './services/credential-store.js'
-import { clearProfileLocks, findChromePath, profileDir, profileOwner, releaseProfile, tryAcquireProfile } from './browser-login.js'
+import { clearProfileLocks, findChromePath, profileDir, profileOwner, releaseProfile, tryAcquireProfile, sleep, UI_STEP_DELAY_MS } from './browser-login.js'
 import { existsSync, statSync } from 'node:fs'
 
 const PUBLISH_URL = 'https://creator.xiaohongshu.com/publish/publish'
@@ -284,7 +284,7 @@ export async function xiaohongshuPublish(
     let editorReady = false
     const uploadDeadline = Date.now() + UPLOAD_WAIT_MS
     while (Date.now() < uploadDeadline) {
-      await new Promise(r => setTimeout(r, 2000))
+      await sleep(2000)
       try {
         const ready = await page.evaluate(() =>
           !!(document.querySelector('input.d-text') && document.querySelector('.tiptap.ProseMirror')))
@@ -302,7 +302,7 @@ export async function xiaohongshuPublish(
       }
     }
     // 图片上传后会有缩略图渲染与校验，稍等稳定
-    await new Promise(r => setTimeout(r, 3000))
+    await sleep(UI_STEP_DELAY_MS)
 
     // ── 4. 填标题（React 受控组件，必须走原生 setter + 事件） ──
     const titleOk = await page.evaluate((val: string) => {
@@ -348,7 +348,7 @@ export async function xiaohongshuPublish(
     // ── 6. 点「发布笔记」 ──────────────────────────────────
     // 实测：发布按钮不是 <button>，是叶子节点文本「发布笔记」（span.btn-text），
     // 点击叶子节点会冒泡到 React 的 onClick 容器上。
-    await new Promise(r => setTimeout(r, 1500))
+    await sleep(UI_STEP_DELAY_MS)
     const clicked = await page.evaluate(() => {
       const isLeaf = (el: Element) => el.children.length === 0
       const nodes = Array.from(document.querySelectorAll('span, div, button')) as HTMLElement[]
@@ -369,7 +369,7 @@ export async function xiaohongshuPublish(
     console.log('[dsagent-xhs-publish] 已点击发布笔记，等待结果...')
 
     // 部分场景会再弹一层二次确认弹窗，尝试自动点「确定/确认发布」
-    await new Promise(r => setTimeout(r, 2000))
+    await sleep(UI_STEP_DELAY_MS)
     try {
       await page.evaluate(() => {
         const isLeaf = (el: Element) => el.children.length === 0
@@ -387,7 +387,7 @@ export async function xiaohongshuPublish(
     let errText = ''
     const deadline = Date.now() + PUBLISH_TIMEOUT_MS
     while (Date.now() < deadline) {
-      await new Promise(r => setTimeout(r, 2000))
+      await sleep(2000)
       finalUrl = page.url()
       try {
         bodyText = await page.evaluate(() => (document.body?.innerText || '').replace(/\s+/g, ' ').slice(0, 2000))

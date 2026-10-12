@@ -1,0 +1,27 @@
+name: 测试-抖音热点采集
+category: 数据采集
+mode: batch
+count_input: count
+description: 工作流引擎链路测试：批量调用 douyin-crawl 采集抖音热点视频，验证变量渲染、轮次执行与进度回填。
+inputs:
+  - key: keyword
+    label: 搜索关键词
+    type: text
+    required: true
+    default: 测试
+  - key: count
+    label: 采集轮数
+    type: number
+    required: true
+    default: 2
+    min: 1
+    max: 5
+steps:
+  - name: 采集视频
+    skill: douyin-crawl
+    args:
+      mode: search
+      keyword: "{{keyword}}"
+      count: "3"
+    output: crawl
+    on_failure: continue

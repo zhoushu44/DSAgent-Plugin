@@ -6,6 +6,7 @@ metadata:
     display_name: "A/B 测试与实验设计"
     emoji: "🧪"
     requires: {}
+disable-model-invocation: false
 ---
 
 # A/B 测试与实验设计

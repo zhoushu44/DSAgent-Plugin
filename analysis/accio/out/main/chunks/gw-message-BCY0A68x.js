@@ -1,0 +1,1 @@
+const e=require(`../gateway-worker.js`);exports.copyMessagePathForFork=e.Jf,exports.deleteMessageFile=e.Xf,exports.prepareForkLeafAndAnchorsForAppend=e.$f,exports.readMessages=e.ep,exports.resolveForkRuntimeAnchors=e.np;

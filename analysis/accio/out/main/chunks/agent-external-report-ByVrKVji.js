@@ -1,0 +1,1 @@
+require("../index.js");const e=require("./agent-external-report-Dftak2qy.js");exports.reportAgentCreated=e.reportAgentCreated,exports.reportAgentCreatedDetailed=e.reportAgentCreatedDetailed;

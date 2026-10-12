@@ -1,0 +1,1 @@
+const s="hide_agent_island";function e(n){if(!n)return!1;const t=n.trim().toLowerCase();return t==="true"||t==="1"||t==="yes"||t==="on"}function r(n){return!e(n)}const i={items:[],updatedAt:0};export{s as n,r,i as t};

@@ -59,7 +59,8 @@
     }
   },
   "dependencies": {
-    "puppeteer-core": "^23.0.0"
+    "puppeteer-core": "^23.0.0",
+    "yaml": "^2.9.1"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": ">=4.0.0",

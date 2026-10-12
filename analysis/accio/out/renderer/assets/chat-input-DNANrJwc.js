@@ -1,0 +1,1 @@
+import{ar as t,rr as p}from"./index-B3kRscgu.js";import{t as a}from"./web-home-chat-input-lncrzaKD.js";import{t as o}from"./desktop-home-chat-input-1twCGEhD.js";t();const n=p.isDesktop?o:a;export{n as t};

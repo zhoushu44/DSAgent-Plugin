@@ -20,40 +20,85 @@ DSAgent runtime 导出注册表 — 技能侧统一入口。
     from runtime.dsagent_runtime import *
 """
 
-from .output import (
-    log,
-    output_result,
-    output_files,
-    output_summary,
-    extract_keyword_from_request,
-)
-from .platform_client import (
-    fetch_binding_context,
-    http_get,
-    http_post,
-    mtop_jsonp,
-    BindingContextError,
-    PlatformRequestError,
-    FAILURE_RISK,
-    FAILURE_TOKEN,
-    FAILURE_RATE,
-    FAILURE_PARSE,
-    FAILURE_API,
-    FAILURE_NOT_BOUND,
-    FAILURE_ACCOUNT_CHOICE,
-)
-from .http_retry import (
-    CallThrottle,
-    call_json_with_retries,
-)
-from .runtime_http import (
-    api_base,
-    require_token,
-    require_agent_id,
-    auth_headers,
-    get_json,
-    post_json,
-)
+try:
+    from .output import (
+        log,
+        output_result,
+        output_files,
+        output_summary,
+        extract_keyword_from_request,
+    )
+except ImportError:
+    from output import (
+        log,
+        output_result,
+        output_files,
+        output_summary,
+        extract_keyword_from_request,
+    )
+
+try:
+    from .platform_client import (
+        fetch_binding_context,
+        http_get,
+        http_post,
+        mtop_jsonp,
+        BindingContextError,
+        PlatformRequestError,
+        FAILURE_RISK,
+        FAILURE_TOKEN,
+        FAILURE_RATE,
+        FAILURE_PARSE,
+        FAILURE_API,
+        FAILURE_NOT_BOUND,
+        FAILURE_ACCOUNT_CHOICE,
+    )
+except ImportError:
+    from platform_client import (
+        fetch_binding_context,
+        http_get,
+        http_post,
+        mtop_jsonp,
+        BindingContextError,
+        PlatformRequestError,
+        FAILURE_RISK,
+        FAILURE_TOKEN,
+        FAILURE_RATE,
+        FAILURE_PARSE,
+        FAILURE_API,
+        FAILURE_NOT_BOUND,
+        FAILURE_ACCOUNT_CHOICE,
+    )
+
+try:
+    from .http_retry import (
+        CallThrottle,
+        call_json_with_retries,
+    )
+except ImportError:
+    from http_retry import (
+        CallThrottle,
+        call_json_with_retries,
+    )
+
+try:
+    from .runtime_http import (
+        api_base,
+        require_token,
+        require_agent_id,
+        auth_headers,
+        get_json,
+        post_json,
+    )
+except ImportError:
+    from runtime_http import (
+        api_base,
+        require_token,
+        require_agent_id,
+        auth_headers,
+        get_json,
+        post_json,
+    )
 
 __all__ = [
     # 输出

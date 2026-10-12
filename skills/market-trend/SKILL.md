@@ -399,6 +399,113 @@ cd "{this_skill_dir}" && python -m market_trend --cate_id 50011999 --trend_mode 
 
 ---
 
+## API 接口
+
+### Base URL
+
+```
+https://sycm.taobao.com
+```
+
+所有端点 = `SYCM_BASE_URL` + path，定义在 `config.py`。
+
+### 端点列表
+
+#### 市场排行类目列表
+
+`GET /mc/common/free/getCateInfo.json`
+
+- 常量: `config.CATEGORY_MARKET_PATH`
+- params: `{ "marketVersion": "free" }`
+- 返回: `data` 数组，每项含 `cateId`/`cateName`/`children`
+
+#### 标准类目树
+
+`GET /cc/common/category/getStdCate.json`
+
+- 常量: `config.CATEGORY_STD_PATH`
+
+#### 导购类目树
+
+`GET /cc/common/category/getDefCate.json`
+
+- 常量: `config.CATEGORY_DEF_PATH`
+
+#### 商品排行榜（5 种 rankType）
+
+所有排行通过同一组端点获取，通过 `rankType` 参数区分：
+
+| rankType | label | api_path | indexCode |
+|----------|-------|----------|-----------|
+| gmv | 交易总量 | `/mc/mq/mkt/item/offline/rank.json` | payByrCnt,uv |
+| growth | 交易增速 | `/mc/mq/mkt/item/offline/rank.json` | payByrCnt,uv |
+| flow | 流量总量 | `/mc/mq/mkt/item/offline/rank/search.json` | uv,searchUv |
+| add | 加购收藏 | `/mc/mq/mkt/item/offline/rank/purpose.json` | cartByrCnt,cltByrCnt,uv |
+| newitm_ipv | 新品流量 | `/mc/mq/mkt/item/offline/rank.json` | cartByrCnt,uv |
+
+配置集中在 `config.RANK_TYPE_CONFIGS` 字典中。
+
+### 通用 params
+
+```json
+{
+  "dateRange": "2026-04-01,2026-04-07",
+  "dateType": "week",
+  "page": 1,
+  "pageSize": 20,
+  "cateId": "201272600",
+  "cateFlag": "leaf",
+  "rankType": "gmv",
+  "priceSeg": "",
+  "sellerType": "all",
+  "keyWord": "",
+  "indexCode": "payByrCnt,uv",
+  "marketVersion": "free"
+}
+```
+
+### 返回结构
+
+```json
+{
+  "data": {
+    "recordCount": 100,
+    "data": [
+      {
+        "cateRankId": { "value": 1 },
+        "item": { "itemId": "123", "title": "...", "pictUrl": "..." },
+        "shop": { "title": "...", "b2CShop": true },
+        "payByrCnt": { "value": "500", "cycleCrc": "↑" },
+        "uv": { "value": "3000", "cycleCrc": "→" }
+      }
+    ]
+  }
+}
+```
+
+- `cateRankId.value`: 排名
+- `item.itemId`/`item.title`: 商品 ID 和标题
+- `shop.title`/`shop.b2CShop`: 店铺名和是否天猫
+- `payByrCnt.value`/`uv.value`/`searchUv.value` 等: 指标值
+- `*.cycleCrc`: 环比变化方向
+
+### 请求头
+
+网关自动注入 Cookie/UA/Referer/Accept。如需手动指定：
+```
+Accept: application/json, text/javascript, */*; q=0.01
+X-Requested-With: XMLHttpRequest
+Referer: https://sycm.taobao.com/
+```
+
+### 限流
+
+- 网关层: 账号间隔 4s（`ACCOUNT_INTERVAL_SECONDS`）
+- Python 层: `CallThrottle(min_interval=2.0)`
+- 本技能: `config.API_REQUEST_DELAY = 1.5`
+
+---
+
 ## 证据分级（输出结论前必读）
 
 本技能输出任何"结论"前，先按**证据四分级**标注级别（Observed 直采 / Calculated 计算 /

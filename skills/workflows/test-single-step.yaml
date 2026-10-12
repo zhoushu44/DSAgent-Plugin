@@ -1,0 +1,19 @@
+name: 测试-单步对话
+category: 自定义
+mode: single
+description: |
+  最简单的测试工作流：单次执行，调用 chat_with_agent 技能。
+  用于验证工作流引擎是否正常运行。
+inputs:
+  - key: message
+    label: 消息内容
+    type: text
+    required: true
+    default: 你好
+steps:
+  - name: 发送消息
+    skill: chat_with_agent
+    args:
+      message: "{{message}}"
+    output: step1
+    on_failure: continue

@@ -15,7 +15,7 @@
  *   - 发布按钮文本「发布」，另有「我知道了」弹窗需先关闭
  */
 import { CredentialStore, resolveAccountForRequest, type StoredAccount } from './services/credential-store.js'
-import { clearProfileLocks, findChromePath, profileDir, profileOwner, releaseProfile, tryAcquireProfile } from './browser-login.js'
+import { clearProfileLocks, findChromePath, profileDir, profileOwner, releaseProfile, tryAcquireProfile, sleep, UI_STEP_DELAY_MS } from './browser-login.js'
 import { existsSync, statSync } from 'node:fs'
 
 const UPLOAD_URL = 'https://creator.douyin.com/creator-micro/content/upload'
@@ -246,7 +246,7 @@ export async function douyinPublish(
     let editorReady = false
     const uploadDeadline = Date.now() + UPLOAD_WAIT_MS
     while (Date.now() < uploadDeadline) {
-      await new Promise(r => setTimeout(r, 2000))
+      await sleep(2000)
       if (page.url().includes(EDITOR_URL_PART)) { editorReady = true; break }
     }
     if (!editorReady) {
@@ -259,7 +259,7 @@ export async function douyinPublish(
       }
     }
     // 编辑页 React 渲染 + 视频转码状态回填需要一点时间
-    await new Promise(r => setTimeout(r, 5000))
+    await sleep(UI_STEP_DELAY_MS)
 
     // ── 3. 关闭「我知道了」等引导弹窗 ──────────────────────
     try {
@@ -271,7 +271,7 @@ export async function douyinPublish(
       })
       if (closed) {
         console.log('[dsagent-douyin-publish] 已关闭引导弹窗')
-        await new Promise(r => setTimeout(r, 1000))
+        await sleep(UI_STEP_DELAY_MS)
       }
     } catch { /* 无弹窗，忽略 */ }
 
@@ -319,7 +319,7 @@ export async function douyinPublish(
     }
 
     // ── 6. 点「发布」 ──────────────────────────────────────
-    await new Promise(r => setTimeout(r, 1500))
+    await sleep(UI_STEP_DELAY_MS)
     const clicked = await page.evaluate(() => {
       const btns = Array.from(document.querySelectorAll('button')) as HTMLElement[]
       const hit = btns.find(b => (b.innerText || '').trim() === '发布' && !(b as HTMLButtonElement).disabled)
@@ -340,7 +340,7 @@ export async function douyinPublish(
     let errText = ''
     const deadline = Date.now() + PUBLISH_TIMEOUT_MS
     while (Date.now() < deadline) {
-      await new Promise(r => setTimeout(r, 2000))
+      await sleep(2000)
       finalUrl = page.url()
       try {
         bodyText = await page.evaluate(() => (document.body?.innerText || '').replace(/\s+/g, ' ').slice(0, 2000))

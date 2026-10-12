@@ -1,0 +1,1 @@
+import"./vendor-state-routing-DFChRAiR.js";import"./vendor-doc-tools-DkREqKq3.js";import"./vendor-sanitize-ZqtdjMRs.js";import"./workspace-office-preview-Cob0Fz72.js";import{t as a}from"./load-workspace-office-file-preview-DspEasL_.js";export{a as loadWorkspaceOfficeFilePreview};

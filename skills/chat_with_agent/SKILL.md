@@ -1,6 +1,6 @@
 ---
 name: chat_with_agent
-description: 当你需要咨询其他 agent、寻求帮助，或用户明确要求某个 agent 参与时，使用本 skill。
+description: "当你需要向其他 agent 咨询问题、寻求帮助、请求方案或复核，或用户明确要求某个 agent 参与对话时使用本技能。支持前台对话（chat_with_agent）和后台任务（submit_to_agent + check_agent_task）两种模式，可通过 session_id 保持多轮上下文连续性。默认优先使用 list_agents() 查找目标 Agent，不要猜测 ID。"
 metadata:
   builtin_skill_version: "1.2"
   dsagent:

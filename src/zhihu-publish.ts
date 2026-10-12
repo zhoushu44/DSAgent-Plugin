@@ -22,7 +22,7 @@
  *   - 发布设置（封面 / 话题 / 投稿至问题）是页面侧栏，非阻塞弹窗
  */
 import { CredentialStore, resolveAccountForRequest, type StoredAccount } from './services/credential-store.js'
-import { clearProfileLocks, findChromePath, profileDir, profileOwner, releaseProfile, tryAcquireProfile } from './browser-login.js'
+import { clearProfileLocks, findChromePath, profileDir, profileOwner, releaseProfile, tryAcquireProfile, sleep, UI_STEP_DELAY_MS } from './browser-login.js'
 
 const WRITE_URL = 'https://zhuanlan.zhihu.com/write'
 const PUBLISH_TIMEOUT_MS = 120_000
@@ -281,7 +281,7 @@ export async function zhihuPublish(
     // ── 4. 校验内容已就位 ──────────────────────────────────
     // 知乎编辑器会把正文字数实时回填到页面（「字数：N」）。
     // 用它做一次落地校验，避免「填了但编辑器没收到」导致后续点不动发布按钮。
-    await new Promise(r => setTimeout(r, 2500))
+    await sleep(UI_STEP_DELAY_MS)
     const landed = await page.evaluate(() => {
       const el = document.querySelector('div.public-DraftEditor-content')
       const blocks = el ? el.querySelectorAll('[data-block="true"]').length : 0

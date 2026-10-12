@@ -16,7 +16,7 @@ metadata:
 
 # DOCX 创建、编辑与分析
 
-## 前置依赖
+## 前置条件
 
 - **docx** (`npm install -g docx`): 新文档创建
 - **LibreOffice** (`soffice`): `.doc` -> `.docx` 转换、修订接受和 PDF 导出
@@ -489,3 +489,20 @@ python scripts/office/pack.py unpacked/ output.docx --original document.docx
   </wp:inline>
 </w:drawing>
 ```
+
+## 工作流
+
+1. 判断任务类型：创建新文档、读取/分析内容、还是编辑现有文档
+2. 若为 .doc 旧格式：先用 `soffice --headless --convert-to docx` 转换
+3. 创建新文档：使用 docx-js（`npm install -g docx`）生成，显式设置页面尺寸、字体样式
+4. 读取内容：用 `pandoc` 提取文本，或用 `unpack.py` 解压获取原始 XML
+5. 编辑现有文档：`unpack.py` 解压 → 编辑 XML → `pack.py` 重新打包
+6. 创建后用 `validate.py` 验证文件有效性
+7. 交付物写入 `artifacts/docx/` 目录
+
+## 错误处理
+
+- docx-js 默认 A4 页面，美国文档须显式设 US Letter（12240×15840 DXA）
+- 绝不使用 Unicode 项目符号，必须用 `LevelFormat.BULLET` 编号配置
+- 表格须双重宽度设置（`columnWidths` + 单元格 `width`），用 `WidthType.DXA` 不用 `PERCENTAGE`
+- `ImageRun` 必须指定 `type` 参数；`PageBreak` 必须在 `Paragraph` 内部

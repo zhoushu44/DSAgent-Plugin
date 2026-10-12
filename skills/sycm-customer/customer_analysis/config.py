@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+# ★ 改 URL 前先看 SKILL.md「API 接口」章节，URL 错误会被 health_check() 拦截
 SYCM_BASE_URL = "https://sycm.taobao.com/domain/oneQuery.json"
 SYCM_MULTI_URL = "https://sycm.taobao.com/domain/multiQuery.json"
 SYCM_PAGE_INFO_URL = "https://sycm.taobao.com/oneauth/constructed/getPageInfo.json"

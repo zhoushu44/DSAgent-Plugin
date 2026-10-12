@@ -1,0 +1,1 @@
+import{g as r,p as t}from"./domain-config-D6DA_TLj.js";import{a}from"./help-center-domain-context-CANO2msM.js";t();function p({ipCountryCode:n,fallbackRegion:i}){const e=r(n);if(e==="CN"||e==="GLOBAL")return e;const o=a(i);return o==="CN"||o==="GLOBAL"?o:"GLOBAL"}export{p as t};

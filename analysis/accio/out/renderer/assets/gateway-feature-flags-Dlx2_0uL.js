@@ -1,0 +1,1 @@
+import{n}from"./rolldown-runtime-BSJ3dJRS.js";async function m(i,r,t,s){const e=s?.trim(),a={keys:r};return t&&(a.accountId=t),e&&(a.teamId=e),(await i("/feature-flags/evaluate",{method:"POST",body:JSON.stringify(a)}))?.values??{}}var o=n((()=>{}));export{o as n,m as t};

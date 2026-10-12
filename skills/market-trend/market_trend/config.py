@@ -5,9 +5,11 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+# ★ 改 URL 前先看 SKILL.md「API 接口」章节，URL 错误会被 health_check() 拦截
 SYCM_BASE_URL = "https://sycm.taobao.com"
 CATEGORY_STD_PATH = "/cc/common/category/getStdCate.json"
 CATEGORY_DEF_PATH = "/cc/common/category/getDefCate.json"
+CATEGORY_MARKET_PATH = "/mc/common/free/getCateInfo.json"
 
 PAGE_SIZE = 20
 DEFAULT_MAX_PAGES = 5

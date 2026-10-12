@@ -11,6 +11,7 @@
 
 import { accountPage } from '../src/ui/account-page.ts'
 import { skillMarketPage } from '../src/ui/skill-market-page.ts'
+import { workflowPage } from '../src/workflow/page.ts'
 
 /** 由 esbuild 的 define 注入：服务端预取数据的 base64 编码 */
 interface Payload {
@@ -21,7 +22,11 @@ interface Payload {
 }
 declare const __DSAGENT_B64__: string
 
-const payload: Payload = JSON.parse(atob(__DSAGENT_B64__))
+// atob() 返回 Latin-1 二进制串，须用 TextDecoder 按 UTF-8 解码，否则中文乱码
+const _b64 = atob(__DSAGENT_B64__)
+const _bytes = new Uint8Array(_b64.length)
+for (let i = 0; i < _b64.length; i++) _bytes[i] = _b64.charCodeAt(i)
+const payload: Payload = JSON.parse(new TextDecoder('utf-8').decode(_bytes))
 
 const cfg = {
   skillRoot: payload.skillRoot,
@@ -156,6 +161,8 @@ async function boot() {
     account: previewAccountService as never,
     config: cfg,
   }))
+  // 工作流页：浏览器半区页面直接 fetch('/dsagent/api')，无需注入服务替身
+  await mounter('m-workflow', workflowPage({ config: cfg }))
 }
 
 void boot()

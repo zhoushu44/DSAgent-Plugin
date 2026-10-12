@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Browser Preview Toolbar</title>
+    <style>
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+
+      :root {
+        color-scheme: light dark;
+        font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      html, body { height: 100%; }
+
+      body {
+        height: 48px;
+        background: rgba(255, 255, 255, 0.9);
+        color: #18181b;
+        border-bottom: 0.5px solid rgba(24, 24, 27, 0.1);
+        -webkit-app-region: drag;
+        overflow: hidden;
+        display: flex;
+        align-items: center;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        body {
+          background: rgba(30, 30, 32, 0.95);
+          color: #f4f4f5;
+          border-bottom-color: rgba(244, 244, 245, 0.08);
+        }
+      }
+
+      /* 左侧交通灯占位 */
+      .traffic-spacer {
+        flex-shrink: 0;
+        width: 80px;
+      }
+
+      /* 导航按钮区 */
+      .nav-btns {
+        -webkit-app-region: no-drag;
+        flex-shrink: 0;
+        display: flex;
+        align-items: center;
+        gap: 2px;
+        padding: 0 6px;
+      }
+
+      .icon-btn {
+        -webkit-app-region: no-drag;
+        width: 28px;
+        height: 28px;
+        border: none;
+        background: transparent;
+        border-radius: 6px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        color: #52525b;
+        transition: background 0.12s, color 0.12s;
+        flex-shrink: 0;
+      }
+
+      .icon-btn:hover:not(:disabled) {
+        background: rgba(24, 24, 27, 0.07);
+        color: #18181b;
+      }
+
+      .icon-btn:disabled {
+        opacity: 0.3;
+        cursor: not-allowed;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        .icon-btn { color: #a1a1aa; }
+        .icon-btn:hover:not(:disabled) { background: rgba(244,244,245,0.08); color: #f4f4f5; }
+      }
+
+      .icon-btn svg { width: 16px; height: 16px; fill: currentColor; display: block; }
+
+      /* URL 展示区 */
+      .url-wrap {
+        -webkit-app-region: no-drag;
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        align-items: center;
+      }
+
+      .url-display {
+        -webkit-app-region: no-drag;
+        width: 100%;
+        height: 28px;
+        border-radius: 7px;
+        border: 1px solid rgba(24, 24, 27, 0.12);
+        background: rgba(255,255,255,0.7);
+        color: inherit;
+        font-size: 12px;
+        font-family: inherit;
+        padding: 0 10px;
+        text-align: center;
+        cursor: pointer;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        line-height: 28px;
+        user-select: none;
+        transition: background 0.12s;
+      }
+
+      .url-display:hover {
+        background: rgba(24, 24, 27, 0.05);
+      }
+
+      .url-display:active {
+        background: rgba(24, 24, 27, 0.1);
+      }
+
+      @media (prefers-color-scheme: dark) {
+        .url-display {
+          background: rgba(255,255,255,0.05);
+          border-color: rgba(244,244,245,0.1);
+        }
+        .url-display:hover { background: rgba(255,255,255,0.1); }
+        .url-display:active { background: rgba(255,255,255,0.15); }
+      }
+
+      /* 复制 toast */
+      .copy-toast {
+        position: fixed;
+        bottom: 10px;
+        left: 50%;
+        transform: translateX(-50%) translateY(8px);
+        background: rgba(24, 24, 27, 0.85);
+        color: #fff;
+        font-size: 12px;
+        padding: 5px 12px;
+        border-radius: 6px;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 0.15s, transform 0.15s;
+        white-space: nowrap;
+      }
+
+      .copy-toast.show {
+        opacity: 1;
+        transform: translateX(-50%) translateY(0);
+      }
+
+      @media (prefers-color-scheme: dark) {
+        .copy-toast { background: rgba(244, 244, 245, 0.9); color: #18181b; }
+      }
+
+      /* 右侧按钮区 */
+      .right-btns {
+        -webkit-app-region: no-drag;
+        flex-shrink: 0;
+        display: flex;
+        align-items: center;
+        gap: 2px;
+        padding: 0 10px;
+      }
+
+      /* 业务方关闭 URL 地址栏：只藏 URL 区，前进/后退/刷新仍保留 */
+      body.no-url-bar .url-wrap { display: none; }
+    </style>
+    <script type="module" crossorigin src="../assets/browser/toolbar-Cmpp9RWx.js"></script>
+  </head>
+  <body>
+    <!-- 交通灯占位 -->
+    <div class="traffic-spacer"></div>
+
+    <!-- 后退 / 前进 / 刷新 -->
+    <div class="nav-btns">
+      <button id="back" type="button" class="icon-btn" title="后退" disabled>
+        <svg viewBox="0 0 20 20"><path d="M12.707 5.293a1 1 0 0 1 0 1.414L9.414 10l3.293 3.293a1 1 0 0 1-1.414 1.414l-4-4a1 1 0 0 1 0-1.414l4-4a1 1 0 0 1 1.414 0Z"/></svg>
+      </button>
+      <button id="forward" type="button" class="icon-btn" title="前进" disabled>
+        <svg viewBox="0 0 20 20"><path d="M7.293 14.707a1 1 0 0 1 0-1.414L10.586 10 7.293 6.707a1 1 0 0 1 1.414-1.414l4 4a1 1 0 0 1 0 1.414l-4 4a1 1 0 0 1-1.414 0Z"/></svg>
+      </button>
+      <button id="reload" type="button" class="icon-btn" title="刷新">
+        <svg viewBox="0 0 20 20"><path d="M4 2a1 1 0 0 1 1 1v2.172A8 8 0 1 1 2.274 11a1 1 0 1 1 1.94.486A6 6 0 1 0 6.172 7H8a1 1 0 0 1 0 2H4a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1Z"/></svg>
+      </button>
+    </div>
+
+    <!-- URL 展示区（点击复制） -->
+    <div class="url-wrap">
+      <div id="url-display" class="url-display" title="点击复制链接"></div>
+    </div>
+
+    <!-- 右侧占位（与左侧对称） -->
+    <div class="right-btns"></div>
+
+    <!-- 复制成功 toast -->
+    <div id="copy-toast" class="copy-toast">复制成功</div>
+
+  </body>
+</html>

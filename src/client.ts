@@ -13,6 +13,7 @@ import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type { Config } from './index.js'
 import { accountPage } from './ui/account-page.js'
 import { skillMarketPage } from './ui/skill-market-page.js'
+import { workflowPage } from './workflow/page.js'
 import { createAccountService } from './services/account-service.js'
 import { createSkillService } from './services/skill-service.js'
 
@@ -77,12 +78,14 @@ export function apply(ctx: ClientContext, cfg?: Config) {
           'entry.tooltip': '账号连接与业务技能',
           'tab.account': '账号连接',
           'tab.market': 'DSAgent 技能',
+          'tab.workflow': '工作流',
         },
         en: {
           'entry.label': 'DSAgent',
           'entry.tooltip': 'Account & Business Skills',
           'tab.account': 'Accounts',
           'tab.market': 'DSAgent Skills',
+          'tab.workflow': 'Workflow',
         },
       }
       try {
@@ -168,7 +171,7 @@ export function apply(ctx: ClientContext, cfg?: Config) {
 
   // ── 中心面板组件（含 tab 切换）──
   function DSAgentPanel() {
-    const [tab, setTab] = React.useState('account') as ['account' | 'market', (t: 'account' | 'market') => void]
+    const [tab, setTab] = React.useState('account') as ['account' | 'market' | 'workflow', (t: 'account' | 'market' | 'workflow') => void]
     const containerRef = React.useRef(null) as { current: HTMLDivElement | null }
 
     React.useEffect(() => {
@@ -187,7 +190,9 @@ export function apply(ctx: ClientContext, cfg?: Config) {
         const page =
           tab === 'account'
             ? accountPage({ account: createAccountService(config.storePath) as never, config })
-            : skillMarketPage({ skill: createSkillService(config.skillRoot) as never, config })
+            : tab === 'market'
+            ? skillMarketPage({ skill: createSkillService(config.skillRoot) as never, config })
+            : workflowPage({ config })
 
         const raw = await page.html()
         // 提取 <style> 块
@@ -261,6 +266,25 @@ export function apply(ctx: ClientContext, cfg?: Config) {
             },
           },
           tt('tab.market'),
+        ),
+        React.createElement(
+          'button',
+          {
+            type: 'button',
+            onClick: () => setTab('workflow'),
+            style: {
+              border: 'none',
+              background: 'none',
+              padding: '12px 16px',
+              cursor: 'pointer',
+              color: tab === 'workflow' ? '#2b6cff' : '#67708a',
+              borderBottom: `2px solid ${tab === 'workflow' ? '#2b6cff' : 'transparent'}`,
+              fontWeight: tab === 'workflow' ? 600 : 400,
+              fontSize: '13px',
+              fontFamily: 'inherit',
+            },
+          },
+          tt('tab.workflow'),
         ),
       ),
       // 内容区

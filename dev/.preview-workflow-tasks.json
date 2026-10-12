@@ -1,0 +1,53 @@
+[
+  {
+    "id": "wf_task_1791737250932_2788",
+    "workflowName": "测试-抖音热点采集",
+    "shop": "douyin_cdcf4d6d40bee1499106ea6466ad78d8",
+    "inputs": {
+      "keyword": "美食探店",
+      "count": 1
+    },
+    "inputSummary": "搜索关键词：美食探店；采集轮数：1",
+    "status": "completed",
+    "success": 1,
+    "failed": 0,
+    "target": 1,
+    "current": 1,
+    "startedAt": "2026-10-11T16:47:30.932Z",
+    "finishedAt": "2026-10-11T16:47:33.353Z",
+    "error": null,
+    "rounds": [
+      {
+        "index": 1,
+        "status": "ok",
+        "durationMs": 2408,
+        "error": null
+      }
+    ]
+  },
+  {
+    "id": "wf_task_1791736633840_1944",
+    "workflowName": "测试-单步对话",
+    "shop": null,
+    "inputs": {
+      "message": "预览验收测试消息"
+    },
+    "inputSummary": "消息内容：预览验收测试消息",
+    "status": "completed",
+    "success": 0,
+    "failed": 1,
+    "target": 1,
+    "current": 1,
+    "startedAt": "2026-10-11T16:37:13.840Z",
+    "finishedAt": "2026-10-11T16:37:13.849Z",
+    "error": null,
+    "rounds": [
+      {
+        "index": 1,
+        "status": "failed",
+        "durationMs": 1,
+        "error": "[skill_error] 未知错误"
+      }
+    ]
+  }
+]

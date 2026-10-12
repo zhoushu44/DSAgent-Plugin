@@ -15,6 +15,7 @@ metadata:
   qiwork:
     emoji: "🗂"
     requires: {}
+disable-model-invocation: false
 ---
 
 # 类目结构诊断

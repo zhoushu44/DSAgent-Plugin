@@ -104,6 +104,13 @@ export interface StoredAccount {
 
 interface VaultData {
   accounts: Record<string, StoredAccount>
+  /**
+   * 库版本号（P0-1，Accio revision 模式）：每次 write 自增。
+   * 防的是「read → 长流程（如 2 分钟浏览器登录）→ write」期间，另一个入口
+   * （host 半区 / 派生同步 / UI）写了新版本，登录完成回写时把新版本整体覆盖回退。
+   * 旧数据无此字段时视为 0。
+   */
+  revision?: number
 }
 
 // ── 常量表（抄 gateway.md 的实测表）────────────────────────
@@ -117,8 +124,56 @@ const SHOP_KEY_RE = /^[a-z_]+_[A-Za-z0-9_-]+$/
  */
 const SESSION_FAIL_THRESHOLD = 3
 
-/** 远端探测结果：与 gateway-proxy 的 SessionProbeResult 同构（此处独立声明避免循环依赖） */
-type SessionProbeResult = 'valid' | 'expired' | 'unknown'
+/**
+ * 远端探测结果：与 gateway-proxy 的 SessionProbeResult 同构（此处独立声明避免循环依赖）。
+ * P1-1 四态：风控/限流 ≠ 凭证失效 —— risk_control 只冷却不计数，防止被限流的健康账号被误标。
+ */
+type SessionProbeResult = 'valid' | 'expired' | 'risk_control' | 'unknown'
+
+/**
+ * 账号环境指纹（P1-3，比特浏览器 + QIWork 模式）。
+ *
+ * 环境漂移（IP + UA + 时区三者突变）是电商风控掉登录的头号诱因：
+ * 账号昨天在「Chrome 134 / 1440x900 / Asia/Shanghai」登录，今天换个 UA 或换台机器
+ * 直接发请求，平台看到的就像换了台设备，极易触发异地/换设备风控强制下线。
+ *
+ * 首次登录成功时生成并写入 `account_meta.env`，此后该账号的所有请求
+ * （网关发请求时的 UA）与浏览器操作（viewport / 时区 / 语言）复用同一套环境。
+ * 已绑定的 env 不覆盖 —— 用户重登（换机器、换 Chrome 版本）时保持旧环境
+ * 可能与真实环境矛盾，但 env 是「账号身份的一部分」，宁可让用户删除账号
+ * 重录，也不自动漂移。
+ */
+export interface AccountEnv {
+  /** 登录时使用的 User-Agent（与本机真实 Chrome 内核一致，含主版本号） */
+  ua: string
+  /** 视口尺寸：登录窗口 / 保活 / 风控验证 / 数据分析统一复用 */
+  viewport: { width: number; height: number }
+  /** 时区（ICANN 名，如 Asia/Shanghai） */
+  timezone: string
+  /** 语言（如 zh-CN） */
+  language: string
+  /** 操作系统平台（如 Win32） */
+  platform: string
+  /** 最近一次观测到的公网出口 IP（变化时打告警日志） */
+  last_egress_ip?: string
+  /** env 绑定时间（ISO 格式） */
+  env_bound_at: string
+}
+
+/**
+ * 写前备份保留份数（P0-1，比特浏览器多份兜底模式）。
+ * 损坏时 `.corrupt.json` 只有一份「最后时刻」，轮转备份则提供「任意近 N 次写入」的回滚点。
+ * 备份为加密信封原样拷贝（不重复加密），失败静默（备份不应阻断主流程）。
+ */
+const BACKUP_KEEP = 5
+
+/**
+ * 两份备份的最小间隔（P0-1）。探测计数等高频小写每次都备份会：
+ * 1. 把几分钟前的有价值回滚点挤掉（BACKUP_KEEP 很小）；
+ * 2. 同目录堆积大量几乎相同的 .bak。
+ * 间隔内跳过，保证回滚点分布在时间轴上而非按写入次数分布。
+ */
+const BACKUP_MIN_INTERVAL_MS = 10 * 60 * 1000
 
 /** 平台 -> 判定登录成功的关键 Cookie */
 const KEY_COOKIES: Record<string, string[]> = {
@@ -800,6 +855,11 @@ export class CredentialStore {
   private lastLoadFailure: LoadFailureReason | null = null
   /** 磁盘上仍是明文、等待下一次写入时自动加密迁移 */
   private pendingMigration = false
+  /**
+   * 本进程写盘的最新 revision（P0-1）。外部入口（另一实例）写的版本不在此列——
+   * 由「写前 mtime 比对 + 重读」路径兜住。
+   */
+  private lastWrittenRevision = 0
 
   constructor(filePath: string) {
     this.filePath = filePath
@@ -1149,9 +1209,68 @@ export class CredentialStore {
     }
   }
 
+  /**
+   * 写前备份轮转（P0-1）：把当前磁盘版本拷贝为 `<file>.<timestamp>.bak`，
+   * 只保留最近 BACKUP_KEEP 份（按文件名时间戳排序，删最旧）。
+   *
+   * - 备份的是**加密信封原样字节**（凭证文件本身），不重复加密；
+   * - 频率控制：距上一份备份不足 BACKUP_MIN_INTERVAL_MS 时不做（防止探测计数
+   *   这类高频小写把有价值的回滚点挤掉）；
+   * - 全程 try/catch 静默：备份失败不能阻断保存主流程。
+   */
+  private rotateBackup(): void {
+    try {
+      if (!fs.existsSync(this.filePath)) return
+      const dir = path.dirname(this.filePath)
+      const base = path.basename(this.filePath)
+      const nowMs = Date.now()
+      // 频率控制：太近的备份直接跳过
+      const entries = fs.readdirSync(dir).filter(n => n.startsWith(`${base}.`) && n.endsWith('.bak'))
+      const stamps = entries
+        .map(n => Number(n.slice(base.length + 1, -4)))
+        .filter(t => Number.isFinite(t))
+        .sort((a, b) => a - b)
+      if (stamps.length && nowMs - stamps[stamps.length - 1] < BACKUP_MIN_INTERVAL_MS) return
+      const bakPath = path.join(dir, `${base}.${nowMs}.bak`)
+      fs.copyFileSync(this.filePath, bakPath)
+      // 溢出删旧：rename/copy 失败的残留文件（非纯数字时间戳）不会被列入 stamps，自然不删
+      while (stamps.length >= BACKUP_KEEP) {
+        const oldest = stamps.shift()
+        if (oldest == null) break
+        try { fs.unlinkSync(path.join(dir, `${base}.${oldest}.bak`)) } catch { /* 忽略 */ }
+      }
+    } catch { /* 备份失败不阻断写 */ }
+  }
+
   private write(data: VaultData): void {
     const dir = path.dirname(this.filePath)
     fs.mkdirSync(dir, { recursive: true })
+
+    // ★ 防旧覆盖新（P0-1，Accio revision 模式）：
+    //   write 的 data 几乎都来自「早先的 read() + 局部修改」，若这期间磁盘已被
+    //   别的入口写过新版本（revision 更大），本次整体落盘会把对方的改动回退。
+    //   处理：写前比对磁盘 mtime，发现外部写入则重读一次，把**其他账号行**合并进来。
+    try {
+      const diskMtimeMs = fs.existsSync(this.filePath) ? fs.statSync(this.filePath).mtimeMs : 0
+      if (diskMtimeMs !== this.cacheMtimeMs && diskMtimeMs > 0) {
+        // 磁盘版本比缓存新（外部入口写入）→ 缓存失效，read() 会走磁盘拿最新 revision
+        this.cache = null
+        this.cacheMtimeMs = 0
+        const current = this.read()
+        if ((current.revision ?? 0) > (data.revision ?? 0)) {
+          // 只合并 data 快照里没有的账号行（新增的账号），不覆盖调用方改过的行
+          for (const [key, row] of Object.entries(current.accounts)) {
+            if (!(key in data.accounts)) data.accounts[key] = row
+          }
+        }
+      }
+    } catch { /* 比对失败按无外部写入处理 */ }
+
+    data.revision = Math.max(data.revision ?? 0, this.lastWrittenRevision) + 1
+    this.lastWrittenRevision = data.revision
+
+    // 写前备份轮转（先备份旧版本，再写新版本）
+    this.rotateBackup()
 
     // ★ 走加密层编码：默认产出密文信封；`auto` 模式下密钥不可得会退回明文
     //   （宁可明文可用，也不要因环境缺机器标识导致整个插件无法保存账号）。
@@ -1465,6 +1584,13 @@ export class CredentialStore {
           flipped = true
         }
         item.last_checked_at = now()
+      } else if (result === 'risk_control') {
+        // ★ P1-1（sub2api 模式）：风控/限流 ≠ 凭证失效。
+        //   被限流的账号登录态通常完好（429/403/punish 只是服务端拒绝本次请求），
+        //   此时累计失败会顺着 expired 的路径把健康账号误标成 reauth_required，
+        //   用户被误导去白白重登。故：计数与状态均不动，只刷新检查时间。
+        //   冷却由 host 侧的 riskCooldownUntil / probe_session 路由日志承担。
+        item.last_checked_at = now()
       }
       // unknown：计数与状态均保持不变，避免「无法判定」被当成失败累积
 
@@ -1508,6 +1634,66 @@ export class CredentialStore {
       }
       if (patch['alimama_login_point_id']) {
         item.login_point_id = patch['alimama_login_point_id']
+      }
+      this.write(data)
+    })
+  }
+
+  /**
+   * 记录一次会话保活（P0-3）：把时间戳写进 `account_meta.last_keepalive_at`。
+   *
+   * keepalive 扫描据此跳过「近期间已保活」的账号，避免每轮巡检都拉起浏览器。
+   * 单独一个方法而不是让 keepalive 模块直接改 cookies ——
+   * 元数据写入也必须走 withLock + read-modify-write，绕过会撞 revision 防旧覆盖新。
+   */
+  async markKeepaliveAt(shopKey: string): Promise<void> {
+    await this.withLock(() => {
+      const data = this.read()
+      const item = data.accounts[shopKey]
+      if (!item) return
+      item.account_meta = { ...(item.account_meta || {}), last_keepalive_at: now() }
+      this.write(data)
+    })
+  }
+
+  /**
+   * 绑定环境指纹（P1-3）：首次登录成功时把账号的 UA / viewport / 时区 / 语言
+   * 写进 `account_meta.env`，此后该账号的所有请求与浏览器操作复用同一套环境。
+   *
+   * 幂等：已有 env 的账号不覆盖（env 是账号身份的一部分，见 AccountEnv 注释）。
+   * 元数据写入也必须走 withLock + read-modify-write，绕过会撞 revision 防旧覆盖新。
+   */
+  async bindAccountEnv(shopKey: string, env: AccountEnv): Promise<void> {
+    await this.withLock(() => {
+      const data = this.read()
+      const item = data.accounts[shopKey]
+      if (!item) return
+      if (item.account_meta?.env) return
+      item.account_meta = { ...(item.account_meta || {}), env }
+      this.write(data)
+    })
+  }
+
+  /**
+   * 记录最近一次公网出口 IP（P1-3，比特浏览器 stopWhileIpChange 思路）。
+   *
+   * 只更新 `env.last_egress_ip`；IP 变化的告警由调用方打日志
+   * （store 保持纯存储语义，不掺网络观测）。
+   * 账号未绑定 env 时同样记录 —— 无 env 的存量账号先有 IP 基线，
+   * 绑定 env 时把已有基线带上，不丢历史。
+   */
+  async recordEgressIp(shopKey: string, ip: string): Promise<void> {
+    if (!ip) return
+    await this.withLock(() => {
+      const data = this.read()
+      const item = data.accounts[shopKey]
+      if (!item) return
+      const meta = item.account_meta || {}
+      const env = (meta.env || {}) as Partial<AccountEnv>
+      if (env.last_egress_ip === ip) return
+      item.account_meta = {
+        ...meta,
+        env: { ...env, last_egress_ip: ip },
       }
       this.write(data)
     })

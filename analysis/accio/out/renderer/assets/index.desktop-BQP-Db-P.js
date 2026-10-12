@@ -1,0 +1,1 @@
+import"./vendor-react-BflrOYNF.js";import"./vendor-i18n-udtrfyWc.js";import"./vendor-state-routing-DFChRAiR.js";import{a as s,i as t,n as d,r as n,t as p}from"./index.desktop-CIjlN4kD.js";t();export{p as DESKTOP_FIRST_PAINT_NAMESPACES,d as default,n as initLiteI18n,s as loadFullI18n};

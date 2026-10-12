@@ -1,0 +1,1 @@
+import{o as d}from"./workspace-office-file-kind-DjbhT0V9.js";function i(t,o,a,s){const r=d(a);if(r==="csv"||r==="tsv"){let e=new TextDecoder().decode(o);return e.startsWith("\uFEFF")&&(e=e.slice(1)),t.read(e,{type:"string",FS:r==="tsv"?"	":",",...s})}return t.read(o,{type:"array",...s})}export{i as t};

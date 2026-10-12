@@ -11,8 +11,15 @@
  * 运行：node dev/gateway-cache.test.mjs
  */
 import assert from 'node:assert/strict'
+import * as fs from 'node:fs'
+import * as os from 'node:os'
 import * as path from 'node:path'
 import { pathToFileURL } from 'node:url'
+
+// ★ 隔离：把 SQLite 缓存库指到临时文件，避免污染用户真实的 ~/.dsh/dsagent-cache.db
+//   （resetCacheConfigCache 只清内存态与统计，不清 DB 文件；不隔离会导致跨用例残留）
+const _tmpDbDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsagent-gc-test-'))
+process.env.DSAGENT_CACHE_DB = path.join(_tmpDbDir, 'test-cache.db')
 
 const LIB = path.resolve(import.meta.dirname, '..', 'lib')
 const gc = await import(pathToFileURL(path.join(LIB, 'services', 'gateway-cache.js')).href)
@@ -27,9 +34,14 @@ function test(name, fn) { CASES.push({ suite: currentSuite, name, fn }) }
 async function runAll() {
   let pass = 0
   const failures = []
-  for (const c of CASES) {
+  for (let i = 0; i < CASES.length; i++) {
+    const c = CASES[i]
     try {
       gc.resetCacheConfigCache()
+      // ★ 每用例独立 DB 文件：resetCacheConfigCache 只设 _db=null 不调 .close()，
+      //   旧 DatabaseSync 句柄在 GC 前仍锁文件（Windows 不允许删除打开的文件），
+      //   rmSync 会静默失败导致残留。换用递增文件名最简洁。
+      process.env.DSAGENT_CACHE_DB = path.join(_tmpDbDir, `test-${i}.db`)
       delete process.env.DSAGENT_GATEWAY_CACHE
       delete process.env.DSAGENT_GATEWAY_CACHE_TTL
       delete process.env.DSAGENT_GATEWAY_CACHE_MAX

@@ -1,0 +1,1 @@
+import{U as r,V as o}from"./gateway-client-BZvNv_1t.js";import{Jo as g,Zo as s,ts as c}from"./app-store-Ckqd27Cr.js";o();c();var a=new Set;function l(n,i){const e=s(n);return e?i.filter(t=>g(t,"agent-package").includes(e)).map(t=>t.id):[]}function f(n){if(!r(n))return a;const i=g(n,"agent-package");return i.length===0?a:new Set(i)}export{f as n,l as t};

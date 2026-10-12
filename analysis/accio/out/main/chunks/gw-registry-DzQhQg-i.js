@@ -1,0 +1,1 @@
+const e=require(`../gateway-worker.js`);e.Dg(),exports.getCookie=e.Tg,exports.getToken=e.Eg,exports.refreshToken=e.Og,exports.setCookieGetter=e.kg,exports.setTokenGetter=e.Ag,exports.setTokenRefresher=e.jg;

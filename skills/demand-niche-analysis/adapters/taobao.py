@@ -37,6 +37,7 @@ from runtime.dsagent_runtime import (  # noqa: E402
 from runtime.dsagent_runtime import PlatformRequestError  # noqa: E402
 
 # ─── 淘宝 MTOP 搜索接口常量（与 market-analysis 技能一致）───
+# ★ 改 URL 前先看 SKILL.md「API 接口」章节
 PLATFORM = "taobao"
 MTOP_APP_KEY = "12574478"
 MTOP_API = "mtop.relationrecommend.wirelessrecommend.recommend"

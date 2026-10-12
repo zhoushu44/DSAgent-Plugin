@@ -1,0 +1,1 @@
+const e=require(`../gateway-worker.js`);exports.MOBILE_BROWSER_UNAVAILABLE_SECTION=e.vr,exports.isBrowserToolName=e.Cr,exports.loadToolRegistry=e.Tr;

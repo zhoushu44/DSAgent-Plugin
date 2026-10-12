@@ -50,7 +50,7 @@ def output_summary(items: list[dict], **extra: Any) -> None:
     lines.append(f"[完成] 共 {len(items)} 条结果")
     for k, v in extra.items():
         lines.append(f"[{k}] {v}")
-    print("\n".join(lines), file=sys.stderr, flush=True)
+    print("\n".join(lines), flush=True)  # stdout — 与文档一致
 
 
 # 平台限定词：出现在关键词前后都应剥离（"闲鱼商品" → "商品"）

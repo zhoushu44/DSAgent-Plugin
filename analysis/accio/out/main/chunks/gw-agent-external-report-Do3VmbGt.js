@@ -1,0 +1,1 @@
+const e=require(`../gateway-worker.js`);exports.reportAgentCreated=e.mr,exports.reportAgentCreatedDetailed=e.hr;

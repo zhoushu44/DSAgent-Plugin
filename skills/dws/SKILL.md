@@ -1,6 +1,6 @@
 ---
 name: dws
-description: "管理钉钉产品能力（AI表格/日历/通讯录/群聊/待办/审批/考勤/日志/文档/钉盘/听记/邮箱等）。当用户需要操作钉钉工作台数据时使用。"
+description: "管理钉钉全产品能力：AI表格、日历、通讯录、群聊、待办、审批、考勤、日志、文档、钉盘、听记、邮箱等。当用户需要操作钉钉工作台数据、查询或创建企业资源时使用本技能。通过 dws_command 工具执行，支持 --format json 输出、--dry-run 预览和事件监听，写操作需用户确认后加 --yes。"
 metadata:
   builtin_skill_version: "1.0.51"
   dsagent:

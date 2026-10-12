@@ -1,0 +1,509 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="data-spm" data-spm-protocol="i">
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#ffffff" />
+    <meta name="theme-color" content="#18181b" media="(prefers-color-scheme: dark)" />
+    <!-- 字体优先加载：Noto Sans 字体预热 -->
+    <link rel="preload" href="./fonts/Noto-Sans-regular.woff2" as="font" type="font/woff2" />
+    <!-- icon-fonts.css 延迟加载：避免阻塞 Splash 首帧绘制（Splash 不需要图标字体）。
+         media="print" 使浏览器不阻塞渲染地加载 CSS，onload 后切回 all 使其生效。 -->
+    <link rel="stylesheet" href="./icon-fonts.css" media="print" onload="this.media='all'" />
+    <noscript><link rel="stylesheet" href="./icon-fonts.css" /></noscript>
+    <title>Accio</title>
+    <style id="__splash_styles__">
+      @keyframes _spAura {
+        0%,
+        100% {
+          opacity: var(--sp-aura-rest-opacity);
+          transform: scale(var(--sp-aura-rest-scale));
+        }
+        50% {
+          opacity: var(--sp-aura-peak-opacity);
+          transform: scale(var(--sp-aura-peak-scale));
+        }
+      }
+      @keyframes _spFloat {
+        0%,
+        100% {
+          transform: translateY(0) scale(1);
+        }
+        50% {
+          transform: translateY(-4px) scale(1.02);
+        }
+      }
+      @keyframes _spBloom {
+        0%,
+        100% {
+          opacity: 0.78;
+          transform: scaleY(0.9);
+        }
+        50% {
+          opacity: 1;
+          transform: scaleY(1.1);
+        }
+      }
+      ._spAuraEl {
+        --sp-aura-rest-opacity: 0.32;
+        --sp-aura-rest-scale: 0.94;
+        --sp-aura-peak-opacity: 0.92;
+        --sp-aura-peak-scale: 1.1;
+        background: radial-gradient(
+          circle at 50% 72%,
+          rgba(0, 178, 255, 0.22),
+          rgba(17, 255, 107, 0.12) 42%,
+          transparent 72%
+        );
+        animation: _spAura 3.2s ease-in-out infinite;
+      }
+      #__splash__ {
+        background: #fff;
+      }
+      html[data-startup-splash-disabled='true'] #__splash__ {
+        display: none !important;
+      }
+      /* 手动选定的主题优先于系统偏好：dark class 由 head 内联脚本按
+         localStorage['phoenix-theme'] 决议后写入，早于 splash 首帧绘制。
+         脚本成功决议时会打上 data-theme-resolved，此后下方 prefers-color-scheme
+         兜底不再参与（否则「手动选 light + 系统 dark」会被错误染黑）。 */
+      html.dark #__splash__ {
+        background: #1c1c1e;
+      }
+      @media (prefers-color-scheme: dark) {
+        html:not([data-theme-resolved]) #__splash__ {
+          background: #1c1c1e;
+        }
+      }
+      html.dark ._spAuraEl {
+        --sp-aura-rest-opacity: 0.22;
+        --sp-aura-rest-scale: 0.96;
+        --sp-aura-peak-opacity: 0.72;
+        --sp-aura-peak-scale: 1.08;
+        background: radial-gradient(
+          circle at 50% 72%,
+          rgba(0, 178, 255, 0.14),
+          rgba(17, 255, 107, 0.07) 42%,
+          transparent 72%
+        );
+      }
+      @media (prefers-reduced-motion: reduce) {
+        ._spAuraEl {
+          animation: none !important;
+          opacity: 0.6;
+          transform: scale(1);
+        }
+        ._spLogoSvg {
+          animation: none !important;
+          transform: none;
+        }
+        ._spTri {
+          animation: none !important;
+          opacity: 1;
+          transform: none;
+        }
+      }
+    </style>
+    <script>
+      ;(function (d, w) {
+        var startupCopy = {
+          en: { loading: 'Loading app...', deviceIdCopied: 'Device ID copied' },
+          zh: { loading: '正在启动应用...', deviceIdCopied: '设备ID已复制' },
+          'zh-TW': { loading: '正在啟動應用程式...', deviceIdCopied: '裝置 ID 已複製' },
+          id: { loading: 'Memuat aplikasi...', deviceIdCopied: 'ID perangkat disalin' },
+          ms: { loading: 'Memuatkan aplikasi...', deviceIdCopied: 'ID peranti disalin' },
+          de: { loading: 'App wird gestartet...', deviceIdCopied: 'Geräte-ID kopiert' },
+          es: {
+            loading: 'Iniciando la aplicación...',
+            deviceIdCopied: 'ID del dispositivo copiado',
+          },
+          fr: {
+            loading: "Démarrage de l'application...",
+            deviceIdCopied: "Identifiant de l'appareil copié",
+          },
+          it: { loading: "Avvio dell'app...", deviceIdCopied: 'ID dispositivo copiato' },
+          ja: { loading: 'アプリを起動中...', deviceIdCopied: 'デバイス ID をコピーしました' },
+          ko: { loading: '앱 시작 중...', deviceIdCopied: '기기 ID가 복사되었습니다' },
+          pt: {
+            loading: 'Iniciando o aplicativo...',
+            deviceIdCopied: 'ID do dispositivo copiado',
+          },
+        }
+
+        function normalizeLanguage(value) {
+          var normalized = String(value || '')
+            .trim()
+            .replace('_', '-')
+            .toLowerCase()
+          if (!normalized) return null
+          if (
+            normalized === 'zh-tw' ||
+            normalized === 'zh-hk' ||
+            normalized === 'zh-mo' ||
+            normalized.indexOf('zh-hant') === 0
+          ) {
+            return 'zh-TW'
+          }
+          var primary = normalized.split('-')[0]
+          return startupCopy[primary] ? primary : null
+        }
+
+        function isManualLanguageCache() {
+          try {
+            var raw = w.localStorage && w.localStorage.getItem('phoenix-language-meta')
+            if (!raw) return false
+            var meta = JSON.parse(raw)
+            return !!(meta && meta.version === 2 && meta.mode === 'manual')
+          } catch (e) {
+            return false
+          }
+        }
+
+        function readManualStoredLanguage() {
+          try {
+            if (!isManualLanguageCache()) return null
+            var stored = normalizeLanguage(
+              w.localStorage && w.localStorage.getItem('phoenix-language'),
+            )
+            if (stored) return stored
+          } catch (e) {}
+          return null
+        }
+
+        function detectLanguage() {
+          var stored = readManualStoredLanguage()
+          if (stored) return stored
+
+          var languages =
+            w.navigator && w.navigator.languages && w.navigator.languages.length
+              ? w.navigator.languages
+              : w.navigator && w.navigator.language
+                ? [w.navigator.language]
+                : []
+          for (var i = 0; i < languages.length; i += 1) {
+            var lang = normalizeLanguage(languages[i])
+            if (lang) return lang
+          }
+
+          return 'en'
+        }
+
+        var startupLang = detectLanguage()
+        d.documentElement.lang = startupLang === 'zh' ? 'zh-CN' : startupLang
+        w.__PHOENIX_STARTUP_COPY__ = startupCopy[startupLang] || startupCopy.en
+
+        var hash = w.location.hash || ''
+        var disableSplash =
+          hash.indexOf('#/about') === 0 ||
+          hash.indexOf('#/help-center') === 0 ||
+          hash.indexOf('#/support-chat') === 0 ||
+          hash.indexOf('#/file-preview') === 0 ||
+          hash.indexOf('#/html-preview') === 0
+        if (disableSplash) d.documentElement.setAttribute('data-startup-splash-disabled', 'true')
+
+        // 窗口表面标记：macOS vibrancy 与 Windows Mica 都需要透明 html/body；其余窗口
+        // 标为 opaque，保住 body 的兜底底色。preload 先于本脚本执行，首帧可同步读取
+        // Windows 材质状态；之后只需处理 GPU 复核触发的 Mica → opaque 单向降级。
+        try {
+          var platform = String((w.phoenixAPI && w.phoenixAPI.platform) || '').toLowerCase()
+          var material = w.phoenixAPI && w.phoenixAPI.windowsMaterial
+          function syncWindowSurface(materialVisible) {
+            if (!platform || platform === 'darwin') return
+            if (platform === 'win32' && materialVisible === true) {
+              d.documentElement.removeAttribute('data-window-surface')
+              return
+            }
+            d.documentElement.setAttribute('data-window-surface', 'opaque')
+          }
+          var materialVisible = !!(
+            platform === 'win32' &&
+            material &&
+            typeof material.getVisible === 'function' &&
+            material.getVisible() === true
+          )
+          function handleMaterialVisibilityChanged(visible) {
+            materialVisible = visible === true
+            syncWindowSurface(materialVisible)
+          }
+          syncWindowSurface(materialVisible)
+          if (
+            platform === 'win32' &&
+            material &&
+            typeof material.onChange === 'function'
+          ) {
+            var unsubscribeMaterial = material.onChange(handleMaterialVisibilityChanged)
+            if (typeof unsubscribeMaterial === 'function') {
+              w.addEventListener('unload', unsubscribeMaterial, { once: true })
+            }
+          }
+        } catch (e) {}
+
+        // 主题预设：与 packages/app/src/hooks/use-theme.ts 的 'phoenix-theme' 同源同决议。
+        // React 挂载前就把 dark class 写好，否则 splash 与首帧只认 prefers-color-scheme，
+        // 用户手动选 dark 而系统为 light 时会先白后黑地闪一下。
+        var storedTheme = null
+        try {
+          storedTheme = w.localStorage && w.localStorage.getItem('phoenix-theme')
+        } catch (e) {}
+        // 白名单校验，与 use-theme.ts 的 readCachedTheme() 同写法；
+        // 非法值与读不到（localStorage 被策略禁用等）一律回落 'light'，
+        // 与 use-theme.ts 的 defaultTheme 一致
+        var isValidTheme =
+          storedTheme === 'light' || storedTheme === 'dark' || storedTheme === 'system'
+        if (!isValidTheme) {
+          storedTheme = 'light'
+        }
+        var prefersDark = false
+        try {
+          prefersDark =
+            storedTheme === 'system'
+              ? !!(w.matchMedia && w.matchMedia('(prefers-color-scheme: dark)').matches)
+              : storedTheme === 'dark'
+        } catch (e) {}
+        d.documentElement.classList[prefersDark ? 'add' : 'remove']('dark')
+        // 无条件标记：决议已完成（哪怕回落到默认值），splash 不应再受 prefers-color-scheme 影响，
+        // 否则「系统 dark + localStorage 不可用」会先黑后白
+        d.documentElement.setAttribute('data-theme-resolved', '1')
+      })(document, window)
+    </script>
+    <script type="module" crossorigin src="./assets/index-B3kRscgu.js"></script>
+    <link rel="modulepreload" crossorigin href="./assets/rolldown-runtime-BSJ3dJRS.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-react-BflrOYNF.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-state-routing-DFChRAiR.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-ui-BcaUJBsv.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor-i18n-udtrfyWc.js">
+    <link rel="stylesheet" crossorigin href="./assets/index-NRTwEbDq.css">
+  </head>
+  <body class="antialiased overscroll-none text-sm overflow-hidden">
+    <noscript>You need to enable JavaScript to run this app.</noscript>
+    <!-- Inline Splash: sits OUTSIDE #root so React's createRoot().render() won't destroy it.
+         The renderer entry removes it after the first actual screen is mounted. -->
+    <div
+      id="__splash__"
+      style="position: fixed; inset: 0; z-index: 100020; display: flex; flex-direction: column"
+    >
+      <div style="height: 45px; min-height: 45px; flex-shrink: 0; -webkit-app-region: drag"></div>
+      <div
+        style="
+          flex: 1;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          transform: translateY(-13px);
+        "
+      >
+        <div style="position: relative; width: 132px; height: 132px; margin-bottom: 24px">
+          <div
+            class="_spAuraEl"
+            style="
+              position: absolute;
+              inset: 16px 10px 12px;
+              border-radius: 9999px;
+              filter: blur(12px);
+            "
+          ></div>
+          <div style="position: absolute; inset: 0; display: grid; place-items: center">
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              class="_spLogoSvg"
+              style="
+                width: 92px;
+                height: 92px;
+                position: relative;
+                z-index: 2;
+                animation: _spFloat 3.2s ease-in-out infinite;
+              "
+            >
+              <path
+                d="M17.9195 22.2564L11.9915 9.31647L6.06348 22.2564C5.85639 22.7139 5.39043 23.0074 4.88996 23.0074H0.515137L10.6454 0.874026C11.1804 -0.291342 12.8285 -0.291342 13.3548 0.874026L23.4851 23.0074H19.1103C18.6012 23.0074 18.1439 22.7139 17.9368 22.2564H17.9195Z"
+                fill="#121317"
+              />
+              <path
+                d="M17.2984 24L11.983 12.4067L6.67627 24H17.2984Z"
+                fill="url(#_spG)"
+                class="_spTri"
+                style="transform-origin: 50% 74%; animation: _spBloom 3.2s ease-in-out infinite"
+              />
+              <defs>
+                <linearGradient
+                  id="_spG"
+                  x1="11.983"
+                  y1="24"
+                  x2="11.983"
+                  y2="8.867"
+                  gradientUnits="userSpaceOnUse"
+                >
+                  <stop offset="0.19" stop-color="#91FFF1" stop-opacity="0" />
+                  <stop offset="0.38" stop-color="#11FF6B" stop-opacity="0.48" />
+                  <stop offset="0.55" stop-color="#00CAC9" stop-opacity="0.85" />
+                  <stop offset="0.72" stop-color="#00B2FF" />
+                </linearGradient>
+              </defs>
+            </svg>
+          </div>
+        </div>
+        <p
+          id="__splash_message__"
+          style="
+            color: #a1a1aa;
+            font-size: 14px;
+            text-align: center;
+            margin: 0;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+          "
+        >
+          Loading app...
+        </p>
+        <script>
+          ;(function (w, d) {
+            var message = d.getElementById('__splash_message__')
+            var copy = w.__PHOENIX_STARTUP_COPY__
+            if (message && copy && copy.loading) message.textContent = copy.loading
+          })(window, document)
+        </script>
+        <p
+          id="__splash_detail__"
+          hidden
+          style="
+            color: #b4b4bb;
+            font-size: 12px;
+            text-align: center;
+            margin: 8px 0 0;
+            line-height: 1.6;
+            max-width: 360px;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+          "
+        ></p>
+      </div>
+      <div
+        id="__splash_version_footer__"
+        hidden
+        style="
+          position: absolute;
+          right: 20px;
+          bottom: 20px;
+          display: flex;
+          flex-direction: column;
+          align-items: flex-end;
+          gap: 2px;
+          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+          -webkit-app-region: no-drag;
+        "
+      >
+        <div
+          id="__splash_version_hint__"
+          hidden
+          style="
+            pointer-events: none;
+            user-select: none;
+            padding: 0 4px;
+            color: #a1a1aa;
+            font-size: 11px;
+            line-height: 1;
+            font-weight: 500;
+          "
+        ></div>
+        <button
+          id="__splash_version__"
+          type="button"
+          aria-label="Application version"
+          style="
+            border: none;
+            background: transparent;
+            padding: 2px 4px;
+            border-radius: 4px;
+            cursor: default;
+            user-select: none;
+            color: #a1a1aa;
+            font-size: 11px;
+            font-weight: 500;
+            outline: none;
+            font-family: inherit;
+          "
+        ></button>
+      </div>
+      <script>
+        ;(function (w, d) {
+          var footer = d.getElementById('__splash_version_footer__')
+          var button = d.getElementById('__splash_version__')
+          var hint = d.getElementById('__splash_version_hint__')
+          if (!footer || !button || !hint) return
+
+          function copyText(text) {
+            if (w.navigator && w.navigator.clipboard && w.navigator.clipboard.writeText) {
+              return w.navigator.clipboard.writeText(text).then(
+                function () {
+                  return true
+                },
+                function () {
+                  return copyTextWithTextarea(text)
+                },
+              )
+            }
+            return Promise.resolve(copyTextWithTextarea(text))
+          }
+
+          function copyTextWithTextarea(text) {
+            try {
+              var textarea = d.createElement('textarea')
+              textarea.value = text
+              textarea.setAttribute('readonly', '')
+              textarea.style.position = 'fixed'
+              textarea.style.opacity = '0'
+              textarea.style.pointerEvents = 'none'
+              d.body.appendChild(textarea)
+              textarea.select()
+              textarea.setSelectionRange(0, textarea.value.length)
+              var copied = d.execCommand('copy')
+              textarea.remove()
+              return copied
+            } catch (e) {
+              return false
+            }
+          }
+
+          function showHint() {
+            var copy = w.__PHOENIX_STARTUP_COPY__ || {}
+            hint.textContent = copy.deviceIdCopied || 'Device ID copied'
+            hint.hidden = false
+            w.clearTimeout(showHint.timer)
+            showHint.timer = w.setTimeout(function () {
+              hint.hidden = true
+            }, 2400)
+          }
+
+          function setupVersion(version) {
+            var normalized = String(version || '').trim()
+            if (!normalized) return
+            button.textContent = 'v' + normalized
+            footer.hidden = false
+          }
+
+          button.addEventListener('dblclick', function () {
+            var api = w.phoenixAPI
+            if (!api || typeof api.getDeviceId !== 'function') return
+            api
+              .getDeviceId()
+              .then(function (deviceId) {
+                if (!deviceId) return false
+                return copyText(deviceId)
+              })
+              .then(function (copied) {
+                if (copied) showHint()
+              })
+              .catch(function () {})
+          })
+
+          var api = w.phoenixAPI
+          if (api && typeof api.getVersion === 'function') {
+            api.getVersion().then(setupVersion).catch(function () {})
+          }
+        })(window, document)
+      </script>
+    </div>
+    <div id="root" class="flex flex-col h-dvh"></div>
+  </body>
+</html>

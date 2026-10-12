@@ -468,6 +468,7 @@ async function fetchHostSkills(): Promise<SkillRow[] | null> {
 
 export function createSkillService(skillRoot: string, opts?: { statsPath?: string }) {
   const root = resolve(skillRoot || '.')
+  const isBrowserHalf = typeof window !== 'undefined'
   let cache: SkillRow[] | null = null
   /** 缓存写入时间：超过 CACHE_TTL 视为过期，下次 list() 重扫 */
   let cacheAt = 0
@@ -580,8 +581,8 @@ export function createSkillService(skillRoot: string, opts?: { statsPath?: strin
       const row = await this.get(id)
       if (!row) throw new Error(`技能不存在：${id}`)
 
-      // 技能行来自 host 半区（browser 半区无 dir）→ 必须回 host 落盘
-      if (!row.dir) {
+      // browser 半区无文件系统（skillRoot 为空）→ 必须回 host 落盘
+      if (isBrowserHalf) {
         const resp = await fetch('/dsagent/api', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },

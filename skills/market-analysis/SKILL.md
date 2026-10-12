@@ -265,3 +265,19 @@ Proxy 代理推断 / Unknown 未知），并遵守五条禁止推断——尤其
 **sycm/万相台指数一律标 Proxy，不得当绝对量**；**Unknown 不得当 0 参与平均**。
 
 完整分级表、五条禁止推断与国内场景注释见 [references/evidence-rules.md](references/evidence-rules.md)。
+
+## 工作流
+
+1. 确认用户已绑定 taobao 账号并绑定到当前智能体
+2. 从用户自然语言中提取关键词、排序方式、发货地、价格区间等参数
+3. 执行 `python -m market_analysis "用户原话"` 或带 `--sort`/`--location`/`--price_min`/`--price_max`/`--item_limit` 参数
+4. 读取 stdout JSON，检查数据和文件路径
+5. 向用户报告 3 条真实绝对路径（JSON/CSV/HTML）
+6. 追问是否需要关键词深度分析，引导到关键词助手技能
+
+## 错误处理
+
+- 登录态失效时提示在平台连接登录淘宝并绑定智能体
+- 请求间隔约 4-6 秒以避免风控
+- 用户问"怎么用"时优先用自然语言解释，不要主动讲接口、Cookie 等技术术语
+- 需 Excel 格式时先拿 CSV 再调用 xlsx 技能转换，不在本技能内生成 xlsx

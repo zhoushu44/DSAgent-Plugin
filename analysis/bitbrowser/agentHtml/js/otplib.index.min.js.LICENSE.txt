@@ -1,0 +1,7 @@
+/**
+ * @otplib/preset-browser
+ *
+ * @author Gerald Yeo <contact@fusedthought.com>
+ * @version: 12.0.1
+ * @license: MIT
+ **/
