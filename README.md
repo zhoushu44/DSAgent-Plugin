@@ -4,7 +4,8 @@
 
 - **账号连接页** —— 手动扫码 / 导入 Cookie 连账号，查看登录态，绑定会话
 - **技能市场页** —— 浏览、筛选、启用 / 停用技能，带**文档质量分**与缺陷清单
-- **34 个工具** —— 注册给模型，覆盖账号查询、技能执行、平台代理、发布、采集、知识库
+- **工作流页** —— 可视化编排多步骤技能链，批量循环执行，轮次追踪与持久化
+- **35 个工具** —— 注册给模型，覆盖账号查询、技能执行、平台代理、发布、采集、知识库、工作流
 - **技能质量治理** —— 双语质量门禁、工具触发路由、使用统计、`SKILL.patch.md` 现场修正
 - **八域知识库** —— 商家私域知识沉淀（商品/店铺/客户/经营/平台/资产/接待/概念）
 
@@ -58,7 +59,7 @@ pnpm dsh web --patch ./plugins/dsagent-plugin/cordis.yml
 
 | id | 作用 |
 |---|---|
-| `dsagent-plugin` | 插件本体：2 个页面 + 34 个工具 + 前置校验 + 定时巡检 |
+| `dsagent-plugin` | 插件本体：3 个页面 + 35 个工具 + 前置校验 + 定时巡检 |
 | `dsagent-skills` | 技能发现：`includeDefaultRoots: false` + `customSkillDirs` 指向本项目 `skills/`，与 DSH 自带技能**双向隔离** |
 
 把 `dsagent-plugin` 的 `disabled: true` 即可整套卸载（页面 + 工具），配置项保留，改回 `false` 恢复。
@@ -97,7 +98,7 @@ Harness 要求 `name` 必须是**绝对路径**，且本项目**不支持** YAML
 
 ## 4. 界面使用
 
-点侧边栏 **🔌** 打开 DSAgent 面板，面板有两个页签。
+点侧边栏 **🔌** 打开 DSAgent 面板，面板有三个页签。
 
 ### 3.1 账号连接
 
@@ -153,6 +154,18 @@ Harness 要求 `name` 必须是**绝对路径**，且本项目**不支持** YAML
 
 点「启用 / 停用」会**真实改写该技能 `SKILL.md` 的 `disable-model-invocation`**，Harness 热更新、免重启生效。停用的技能不会出现在模型可见的技能清单里。
 
+### 3.3 工作流
+
+工作流页签展示已保存的工作流模板和运行中的任务：
+
+- **模板列表**：每个模板卡片显示名称、分类、模式（batch/single）、步骤数、输入项数、描述
+- **创建任务**：选模板 → 填写输入参数 → 提交，引擎立即开始异步执行
+- **任务列表**：按创建时间倒序，显示状态（queued/running/completed/failed/stopped）、进度（成功/失败/总轮数）、输入摘要、最近错误
+- **任务详情**：点开查看每轮每步的标准化日志（`[时间] 第N轮 步骤「名」(skill) ✓成功 Xms`）
+- **操作**：停止运行中任务、删除已结束任务
+
+模板放在 `skills/workflows/` 目录下（YAML 格式），详见 §6.7。
+
 ---
 
 ## 5. 在对话里使用
@@ -190,7 +203,7 @@ Harness 要求 `name` 必须是**绝对路径**，且本项目**不支持** YAML
 
 ---
 
-## 6. 工具清单（34 个）
+## 6. 工具清单（35 个）
 
 ### 账号类
 
@@ -251,6 +264,12 @@ Harness 要求 `name` 必须是**绝对路径**，且本项目**不支持** YAML
 | `dsagent_xianyu_analytics` | 统计闲鱼商品表现（曝光 / 想要 / 收藏） |
 
 > `dsagent_proxy` 是兜底手段：只有当已注册技能都满足不了需求时才用，不要拿它手拼 API（技能已封装签名、分页、数据清洗）。
+
+### 工作流类
+
+| 工具 | 用途 |
+|---|---|
+| `dsagent_workflow` | 创建 / 查询 / 停止 / 删除工作流任务，浏览模板（`actions` / `tasks` / `templates`） |
 
 ### 知识库类（八域本体，移植自 Accio）
 
@@ -429,6 +448,86 @@ tool_triggers:
 
 ---
 
+## 6.7 工作流引擎（新增）
+
+批量执行多步骤技能链：定义模板 → 输入参数 → 异步引擎串行/循环执行 → 轮次追踪 → 持久化。
+
+### 模板定义（YAML）
+
+模板放在 `skills/workflows/` 目录下，扫描时自动发现：
+
+```yaml
+name: 批量关税查询
+category: 关税查询
+mode: batch              # batch（循环）或 single（单次）
+count_input: count       # batch 模式下指定轮数来源的 input key
+description: 批量查询不同产品的出口关税税率
+inputs:
+  - key: product
+    label: 产品名称
+    type: text            # text / number / select
+    required: true
+    default: 无线耳机
+  - key: count
+    label: 轮数
+    type: number
+    required: true
+    default: 3
+    min: 1
+    max: 10
+steps:
+  - name: 查询关税
+    skill: tariff-search
+    args:
+      product: "{{product}}"
+      index: "{{loop.index}}"
+      total: "{{loop.total}}"
+    output: tariff
+    on_failure: continue  # continue（跳到下一轮）或 abort（终止整个任务）
+```
+
+### 模板六项校验
+
+保存时自动校验，不通过拒绝写入：
+
+| 校验项 | 说明 |
+|---|---|
+| 名称合法 | 非空、不含非法文件名字符 |
+| 技能可用 | 每个 step 引用的 skillId 存在且 enabled |
+| 非 instructions 入口 | 技能必须有 `{baseDir}` 脚本入口（`instructions` 类技能不能作为步骤） |
+| batch 完整性 | batch 模式必须有 `count_input` 且对应 input 的 type=number |
+| 输出变量唯一 | 各 step 的 `output` 不能重名 |
+| args 引用有效 | `{{var}}` 引用的 input key 或 step output 必须存在 |
+
+### 变量渲染
+
+| 语法 | 来源 |
+|---|---|
+| `{{input_key}}` | 用户输入的参数值 |
+| `{{loop.index}}` | 当前轮次序号（从 1 开始） |
+| `{{loop.total}}` | 总轮数 |
+| `{{step_output.raw}}` | 上一步 executeSkill 返回的 text |
+| `{{step_output.count}}` | 上一步 payload 中的字段（支持点号链式取值） |
+
+### 失败策略
+
+| 级别 | 触发条件 | 行为 |
+|---|---|---|
+| 步骤级 | `on_failure: continue` | 跳到下一轮，该轮标记 failed |
+| 步骤级 | `on_failure: abort` | 终止整个任务 |
+| 环境级 | `token_expired` / `risk_control` | **无视 on_failure，直接 abort** 整个任务 |
+
+### 运行时特性
+
+- **异步引擎**：任务创建后异步执行，`MAX_CONCURRENT_TASKS=3` 并发上限
+- **浏览器互斥锁**：同一平台同时只允许一个技能操作浏览器
+- **标准化日志**：`[HH:mm:ss] 第N轮 步骤「名」(skill) ✓成功 Xms` / `✗失败 Xms | 错误摘要`
+- **即时持久化**：每轮完成即写盘，插件重启后可恢复任务列表
+- **重启对账**：插件重启时扫描 `running` / `queued` 状态的任务，标记为 `failed`（错误："插件重启，任务中断"），`completed` / `stopped` 不受影响
+- **停止机制**：`stopTask()` 将 `queued` → `stopped`；正在执行的轮次执行完后停止
+
+---
+
 ## 7. 配置项与环境变量
 
 ### 插件配置（`cordis.yml`）
@@ -516,6 +615,11 @@ plugins/dsagent-plugin/
     ├── gateway-proxy.ts          # 本地代理网关（Cookie 注入 / 风控检测 / failure_kind / 节流）
     ├── browser-login.ts          # 浏览器登录（Profile 隔离 / SSO 刷新 / 风控验证）
     ├── *-publish.ts / *-crawl.ts # 各平台发布与采集实现
+    ├── workflow/                 # 工作流引擎（模板编排 / 批量执行 / 轮次追踪）
+    │   ├── service.ts            #   模板扫描校验 + 任务 CRUD + 异步执行引擎
+    │   ├── api.ts                #   HTTP action 分发 + dsagent_workflow 工具定义
+    │   ├── types.ts              #   共享类型
+    │   └── page.ts               #   浏览器侧 UI（任务列表 + 编排编辑器）
     └── services/
         ├── account-service.ts    # 账号取数 + 健康检查
         ├── credential-store.ts   # 凭证库（原子写 / Cookie 不出模块）
@@ -577,6 +681,8 @@ node dev/verify-pitfalls.mjs           # 54 项：签名折叠 / 证据阈值 / 
 node dev/verify-host-integration.mjs   # 27 项：apply() 注册 35 工具 / 提示词 / 无回归
 node dev/audit-skill-quality.mjs skills # 给全体技能做质量体检（可接 CI）
 node dev/verify-real-triggers.mjs      # 用真实技能文件验证 triggers 匹配
+node dev/workflow-test.mjs             # 73 项：模板校验 / 任务 CRUD / 变量渲染 / 失败策略 / 重启对账
+node dev/workflow-real-create-run.mjs  # 真实技能创建+运行工作流（tariff-search / zhihu-crawl / douyin-crawl）
 ```
 
 ## 12. 规范文档
@@ -588,4 +694,5 @@ node dev/verify-real-triggers.mjs      # 用真实技能文件验证 triggers �
 | 账号连接规范（凭证库 / 登录 / 健康检查 / 工具输出） | 第 4-5 节 + 第 8 节 |
 | 技能编写规范（SKILL.md / 输出规范 / runtime 模块） | 第 6.5 节 + 第 10 节「技能 Runtime 模块」 |
 | UI 规则（页面职责 / 卡片显示 / 筛选器） | 第 4 节 |
+| 工作流规范（模板定义 / 变量渲染 / 失败策略 / 持久化） | 第 6.7 节 + `docs/workflow-requirements.md` |
 | Runtime 模块 API 文档（函数签名 / 错误类型 / 使用示例） | 第 10 节「技能 Runtime 模块」+ `skills/.dsagent/runtime/` 源码 |
