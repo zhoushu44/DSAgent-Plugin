@@ -52,6 +52,9 @@ export const BINDING_RULES: Array<[string, string]> = [
   ['pdd-publish', 'pdd_mms'],
   // taobao 平台（淘宝 / 天猫，共用同一套登录态）
   ['taobao-publish', 'taobao'],
+  // alibaba 平台（1688 B2B —— 独立登录态，Cookie 在 .1688.com 域）
+  ['alibaba-product-find', 'alibaba'],
+  ['alibaba-source-suppliers', 'alibaba'],
 ]
 
 /** 技能 id → 需绑定的平台（无绑定返回 null） */

@@ -1,1 +1,0 @@
-const e=require(`../gateway-worker.js`);exports.resolveBrowserRelayPort=e.bl;

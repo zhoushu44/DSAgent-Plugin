@@ -32,6 +32,22 @@ except ImportError:
     import runtime_http
 
 
+def _browser_headers(referer: str, origin: str) -> dict:
+    """浏览器指纹头集合 — 所有平台请求必须携带，防风控。"""
+    return {
+        "Referer": referer,
+        "Origin": origin,
+        "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="120", "Not(A:Brand";v="24"',
+        "Sec-Ch-Ua-Mobile": "?0",
+        "Sec-Ch-Ua-Platform": '"Windows"',
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Dest": "empty",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
+    }
+
+
 # ═══════════════════════════════════════════════════════════════
 # 生意参谋 (SYCM) 客户端
 # ═══════════════════════════════════════════════════════════════
@@ -94,7 +110,12 @@ class SycmClient:
     def get(self, url: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         try:
             resp = platform_client.http_get(
-                url, platform="sycm", params=params, timeout=30.0
+                url, platform="sycm", params=params,
+                headers=_browser_headers(
+                    referer="https://sycm.taobao.com/",
+                    origin="https://sycm.taobao.com",
+                ),
+                timeout=30.0,
             )
         except platform_client.PlatformRequestError as e:
             if e.failure_kind == platform_client.FAILURE_TOKEN:
@@ -211,10 +232,12 @@ class AlimamaInsightClient:
                 json_body=body,
                 params=query_params,
                 headers={
+                    **_browser_headers(
+                        referer="https://one.alimama.com/index.html",
+                        origin="https://one.alimama.com",
+                    ),
                     "Content-Type": "application/json;charset=UTF-8",
                     "X-Requested-With": "XMLHttpRequest",
-                    "Origin": "https://one.alimama.com",
-                    "Referer": "https://one.alimama.com/index.html",
                     "Accept": "application/json, text/javascript, */*; q=0.01",
                 },
                 timeout=30.0,
@@ -384,6 +407,13 @@ class MtopCaller:
         app_key: str,
     ) -> dict[str, Any]:
         self._throttle()
+        # 平台对应的来源页面，用于 Referer / Origin + 浏览器指纹头
+        mtop_headers = _browser_headers(
+            referer="https://s.taobao.com/",
+            origin="https://s.taobao.com",
+        )
+        if headers:
+            mtop_headers.update(headers)
         try:
             resp = platform_client.mtop_jsonp(
                 url,
@@ -392,6 +422,7 @@ class MtopCaller:
                 version=version,
                 data=data,
                 extra_params=extra_params,
+                headers=mtop_headers,
                 timeout=timeout,
             )
         except platform_client.PlatformRequestError as e:
@@ -508,14 +539,25 @@ class DmpCompetitionClient:
         try:
             if method.upper() == "GET":
                 resp = platform_client.http_get(
-                    url, platform="dmp", params=params, timeout=30.0
+                    url, platform="dmp", params=params,
+                    headers=_browser_headers(
+                        referer="https://dmp.advgateway.taobao.com/",
+                        origin="https://dmp.advgateway.taobao.com",
+                    ),
+                    timeout=30.0,
                 )
             else:
                 resp = platform_client.http_post(
                     url, platform="dmp", json_body=body, params=params,
-                    headers={"Content-Type": "application/json;charset=UTF-8",
-                             "X-Requested-With": "XMLHttpRequest",
-                             "Accept": "application/json, text/javascript, */*; q=0.01"},
+                    headers={
+                        **_browser_headers(
+                            referer="https://dmp.advgateway.taobao.com/",
+                            origin="https://dmp.advgateway.taobao.com",
+                        ),
+                        "Content-Type": "application/json;charset=UTF-8",
+                        "X-Requested-With": "XMLHttpRequest",
+                        "Accept": "application/json, text/javascript, */*; q=0.01",
+                    },
                     timeout=30.0,
                 )
         except platform_client.PlatformRequestError as e:

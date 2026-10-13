@@ -1,1 +1,0 @@
-const e=require(`../gateway-worker.js`);let t=require(`@phoenix-common/security-guard`);exports.SECURITY_GUARD_GRAY_DEFAULT=e.Ni,exports.SECURITY_GUARD_GRAY_KEY=e.Pi,exports.signWithSecurityGuard=e.Fi;

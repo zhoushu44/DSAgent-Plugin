@@ -1,1 +1,0 @@
-require("../index.js"),require("./lib-D4Ix_yW9.js");const e=require("./windows-command-AUuSEecV.js");e.init_windows_command(),exports.decodeChildOutput=e.decodeChildOutput;

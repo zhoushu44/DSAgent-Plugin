@@ -1,1 +1,0 @@
-require("../index.js");const e=require("./downloader-Da15uO9j.js");exports.SkillDownloader=e.SkillDownloader;

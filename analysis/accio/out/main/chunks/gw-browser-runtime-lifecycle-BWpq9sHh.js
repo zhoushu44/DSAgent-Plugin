@@ -1,1 +1,0 @@
-const e=require(`../gateway-worker.js`);exports.closeBrowserV2AgentTabs=e.Ic;

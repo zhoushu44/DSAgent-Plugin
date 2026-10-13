@@ -1,1 +1,0 @@
-const e=require(`../gateway-worker.js`),t=require(`./gw-chunked-exec-D0LMRC3h.js`),n=new URL(`windows-trash.exe`,require(`url`).pathToFileURL(__filename).href);async function r(e){await t.t(n,e,200)}exports.default=r;

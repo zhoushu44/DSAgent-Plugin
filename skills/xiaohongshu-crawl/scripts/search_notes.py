@@ -82,6 +82,14 @@ def search_via_gateway(keyword: str, page: int = 1, limit: int = 20) -> dict:
         "Content-Type": "application/json;charset=UTF-8",
         "Origin": "https://www.xiaohongshu.com",
         "Referer": "https://www.xiaohongshu.com/",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="120", "Not(A:Brand";v="24"',
+        "Sec-Ch-Ua-Mobile": "?0",
+        "Sec-Ch-Ua-Platform": '"Windows"',
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Dest": "empty",
     }
     headers.update(sign_hdrs)
 

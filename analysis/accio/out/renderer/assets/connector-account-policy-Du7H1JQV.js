@@ -1,1 +1,0 @@
-function r(e){if(typeof e!="string")return"unavailable";switch(e.trim().toLowerCase()){case"connected":return"ready";case"reconnect_required":return"reauth_required";default:return"unavailable"}}export{r as t};

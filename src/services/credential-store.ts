@@ -218,6 +218,9 @@ const KEY_COOKIES: Record<string, string[]> = {
   xianyu: ['unb'],
   wechat_store: [],
   zhihu: ['z_c0'],
+  // 1688（阿里巴巴 B2B）：与淘宝同属阿里 SSO 体系，关键 Cookie 仍是 `unb`，
+  // 但 MTOP 网关需要 .1688.com 域的 _m_h5_tk 等域 Cookie，须独立登录 1688 后获取。
+  alibaba: ['unb'],
 }
 
 /**
@@ -256,6 +259,8 @@ const ACCOUNT_ID_FROM: Record<string, string> = {
   wechat_mp: 'slave_sid',
   wechat_store: 'uuid',
   zhihu: 'z_c0',
+  // 1688：account_id 取 `unb`（阿里 SSO 用户 ID，稳定且与淘宝同源）
+  alibaba: 'unb',
 }
 
 /**
@@ -610,6 +615,7 @@ export const PLATFORM_PREFIX: Record<string, string> = {
   wechat_mp: 'wx',
   wechat_store: 'wx',
   zhihu: 'zh',
+  alibaba: '1688',
 }
 
 /**

@@ -1,1 +1,0 @@
-const e=require(`../gateway-worker.js`);e.hv(),exports.openWin32StableFile=e.gv;

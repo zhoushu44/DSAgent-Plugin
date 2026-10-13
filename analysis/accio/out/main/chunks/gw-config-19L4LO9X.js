@@ -1,1 +1,0 @@
-const e=require(`../gateway-worker.js`);e._g(),exports.getPackageRegion=e.mg;

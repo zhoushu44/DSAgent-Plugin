@@ -238,6 +238,10 @@ class TaobaoAdapter:
                     version=MTOP_API_VERSION,
                     data=json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
                     extra_params={"timeout": "10000", "appKey": MTOP_APP_KEY},
+                    headers={
+                        "Referer": "https://s.taobao.com/",
+                        "Origin": "https://s.taobao.com",
+                    },
                     timeout=30,
                 ),
                 max_retries=3,

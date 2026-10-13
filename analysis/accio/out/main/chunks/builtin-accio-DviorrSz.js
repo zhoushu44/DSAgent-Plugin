@@ -1,1 +1,0 @@
-require("../index.js");const e=require("./builtin-accio-ByGSjOgv.js");exports.BUILTIN_ACCIO_AGENT_TYPE=e.BUILTIN_ACCIO_AGENT_TYPE,exports.BUILTIN_ACCIO_PACKAGE_CODE=e.BUILTIN_ACCIO_PACKAGE_CODE,exports.ensureBuiltinAccio=e.ensureBuiltinAccio;

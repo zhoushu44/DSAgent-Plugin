@@ -1,1 +1,0 @@
-let e=require("electron");e.contextBridge.exposeInMainWorld("simulatorBridge",{send:r=>e.ipcRenderer.invoke("simulator:send-message",r)});

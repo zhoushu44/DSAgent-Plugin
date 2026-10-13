@@ -9,14 +9,24 @@
  *   - 不需要 RS256/JWKS 令牌验签，DSCONNECT_TOKEN 只做占位
  *   - Cookie 从本地 CredentialStore 取，不从网关侧注入
  *   - 请求由 Node.js http/https 直接发出
+ *
+ * 反风控措施（对齐 QIWork + Accio）：
+ *   - 浏览器指纹头注入（Sec-Ch-Ua / Sec-Fetch-* / 高熵头）— 对齐 QIWork
+ *   - NO_PROXY 环境变量隔离 — 对齐 QIWork，防止代理劫持导致 IP 跳变
+ *   - 响应头清洗（移除 CSP / X-Frame-Options 等）— 对齐 QIWork
+ *   - 路由冷却器（连续失败自动冷却 60s）— 对齐 Accio
+ *   - 结构化错误分类（auth / network / rate_limit / timeout）— 对齐 Accio
+ *   - DNS Fake-IP 绕过（198.18/19 段检测 + 公共 DNS）— 对齐 Accio
  */
 
 import * as nodeHttp from 'node:http'
 import * as nodeHttps from 'node:https'
+import * as nodeDns from 'node:dns'
 import * as crypto from 'node:crypto'
 import { URL } from 'node:url'
 import { readdirSync } from 'node:fs'
 import { dirname } from 'node:path'
+import { gunzipSync, inflateSync, brotliDecompressSync } from 'node:zlib'
 import { findChromePath, observeEgressIp } from './browser-login.js'
 import { CredentialStore, credentialPlatform, isRiskPassCookie, normalizePlatform, resolveAccountForRequest, accountsForPlatform } from './services/credential-store.js'
 import {
@@ -67,6 +77,164 @@ const ACCOUNT_RISK_COOLDOWN_MS = 60_000
  */
 const RISK_AUTO_RETRY_MAX_WAIT_MS = 120_000
 const RISK_AUTO_RETRY_POLL_INTERVAL_MS = 2_000
+
+// ─────────────── NO_PROXY 网络隔离（对齐 QIWork）───────────────────
+//
+// QIWork 在启动 Python 后端子进程时显式设置 NO_PROXY 环境变量，
+// 确保请求不走系统代理（VPN/翻墙工具），防止出口 IP 跳变触发异地登录风控。
+// DSAgent 的网关 httpRequest 也需要确保不被系统代理劫持。
+// 进程启动时一次性注入，影响所有后续 http.request 调用。
+
+const NO_PROXY_HOSTS = '127.0.0.1,localhost,::1,<local>'
+{
+  const existing = process.env.NO_PROXY || process.env.no_proxy || ''
+  if (!existing.includes('127.0.0.1')) {
+    process.env.NO_PROXY = NO_PROXY_HOSTS
+    process.env.no_proxy = NO_PROXY_HOSTS
+  }
+}
+
+// ─────────────── 路由冷却器（对齐 Accio RouteController）───────────────
+//
+// 当某个平台域名连续失败时，自动进入冷却期（60s），期间不再对该域名发请求。
+// 防止对已被风控标记的 IP 持续轰炸。对齐 Accio 的 RouteController：
+//   - consecutiveFailuresBeforeCooldown = 2
+//   - cooldownMs = 60_000
+
+const ROUTE_COOLDOWN_MS = 60_000
+const ROUTE_FAILURE_THRESHOLD = 2
+
+/** 域名 → 连续失败次数 */
+const routeFailures = new Map<string, number>()
+/** 域名 → 冷却截止时间戳 */
+const routeCooldownUntil = new Map<string, number>()
+
+function isRouteCoolingDown(host: string): boolean {
+  const until = routeCooldownUntil.get(host)
+  if (!until) return false
+  if (Date.now() >= until) {
+    routeCooldownUntil.delete(host)
+    routeFailures.delete(host)
+    return false
+  }
+  return true
+}
+
+function reportRouteSuccess(host: string): void {
+  routeFailures.delete(host)
+}
+
+function reportRouteFailure(host: string): void {
+  const count = (routeFailures.get(host) ?? 0) + 1
+  routeFailures.set(host, count)
+  if (count >= ROUTE_FAILURE_THRESHOLD) {
+    routeCooldownUntil.set(host, Date.now() + ROUTE_COOLDOWN_MS)
+    console.warn(`[dsagent-gateway] 路由冷却：${host} 连续失败 ${count} 次，冷却 ${ROUTE_COOLDOWN_MS / 1000}s`)
+  }
+}
+
+// ─────────────── 结构化错误分类（对齐 Accio ChannelError）───────────────
+//
+// 不同错误类型需要不同的处理策略：
+//   - auth: 不重试（继续请求只会加重风控）
+//   - network: 可重试，但不清除偏好路由
+//   - rate_limit: 退避等待后重试
+//   - timeout: 可重试，清除偏好路由（可能是该路由的 IP 被封锁）
+
+type ErrorKind = 'auth' | 'network' | 'rate_limit' | 'timeout' | 'risk_control' | 'unknown'
+
+function classifyError(status: number, scan: string): ErrorKind {
+  if (scan.includes('rgv587_error') || scan.includes('fail_sys_user_validate')
+      || scan.includes('bxpunish') || scan.includes('未登录') || scan.includes('请登录')
+      || scan.includes('fail_biz_login') || scan.includes('login_expired')) {
+    return 'risk_control'
+  }
+  if (status === 401 || status === 419 || scan.includes('fail_biz_login')) return 'auth'
+  if (status === 429 || scan.includes('rate limit') || scan.includes('too many requests')) return 'rate_limit'
+  if (status === 408 || scan.includes('timeout') || scan.includes('timed out')) return 'timeout'
+  if (status >= 500 || scan.includes('econnrefused') || scan.includes('enotfound')
+      || scan.includes('econnreset') || scan.includes('socket hang up')) {
+    return 'network'
+  }
+  return 'unknown'
+}
+
+// ─────────────── DNS Fake-IP 绕过（对齐 Accio dns-bypass）───────────────
+//
+// 部分中国 DNS 服务器会对特定域名返回 fake-IP（198.18.x.x / 198.19.x.x），
+// 导致请求被劫持。通过公共 DNS 服务器解析并过滤 fake-IP，直接用真实 IP 连接。
+// 对齐 Accio 的 dns-bypass 模块。
+
+const PUBLIC_DNS_SERVERS = ['223.5.5.5', '114.114.114.114', '8.8.8.8']
+const fakeIpCache = new Map<string, { ip: string; expires: number }>()
+const FAKE_IP_CACHE_TTL = 300_000 // 5 分钟
+
+function isFakeIp(ip: string): boolean {
+  const parts = ip.split('.').map(Number)
+  if (parts.length !== 4) return false
+  // 198.18.x.x / 198.19.x.x — fake-IP 测试网段
+  if (parts[0] === 198 && (parts[1] === 18 || parts[1] === 19)) return true
+  // 其他私有/保留段
+  if (parts[0] === 0 || parts[0] === 127) return true
+  if (parts[0] === 10) return true
+  if (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) return true
+  if (parts[0] === 192 && parts[1] === 168) return true
+  if (parts[0] === 169 && parts[1] === 254) return true
+  return false
+}
+
+/**
+ * 用公共 DNS 解析域名，过滤 fake-IP，返回真实 IP。
+ * 解析结果缓存 5 分钟，避免每次请求都做 DNS 查询。
+ */
+async function resolveWithPublicDns(hostname: string): Promise<string | undefined> {
+  const cached = fakeIpCache.get(hostname)
+  if (cached && Date.now() < cached.expires) return cached.ip
+
+  for (const server of PUBLIC_DNS_SERVERS) {
+    try {
+      const resolver = new nodeDns.promises.Resolver()
+      resolver.setServers([server])
+      const addresses = await resolver.resolve4(hostname)
+      const realIp = addresses.find(ip => !isFakeIp(ip))
+      if (realIp) {
+        fakeIpCache.set(hostname, { ip: realIp, expires: Date.now() + FAKE_IP_CACHE_TTL })
+        return realIp
+      }
+    } catch {
+      continue
+    }
+  }
+  return undefined
+}
+
+// ─────────────── 响应头清洗（对齐 QIWork relaxResponseHeaders）───────────────
+//
+// QIWork 在 onHeadersReceived 中移除 CSP / X-Frame-Options 等安全限制头，
+// 防止这些头影响自动化页面加载。DSAgent 网关虽然不做页面渲染，
+// 但这些头可能影响下游 puppeteer 登录窗口的页面行为。
+
+const RESTRICTIVE_HEADER_NAMES = new Set([
+  'content-security-policy',
+  'content-security-policy-report-only',
+  'x-content-security-policy',
+  'x-webkit-csp',
+  'x-frame-options',
+  'cross-origin-opener-policy',
+  'cross-origin-embedder-policy',
+  'cross-origin-resource-policy',
+  'permissions-policy',
+  'feature-policy',
+])
+
+function relaxResponseHeaders(headers: Record<string, string | string[] | undefined>): Record<string, string | string[] | undefined> {
+  const next: Record<string, string | string[] | undefined> = {}
+  for (const [key, values] of Object.entries(headers)) {
+    if (RESTRICTIVE_HEADER_NAMES.has(key.toLowerCase())) continue
+    if (values) next[key] = values
+  }
+  return next
+}
 
 /** shop_key → 下一个允许发请求的时间戳（毫秒） */
 const nextAllowedAt = new Map<string, number>()
@@ -130,26 +298,227 @@ const VERIFY_URL_TTL_MS = 30 * 60 * 1000
  * 探测失败时回退 CHROME_MAJOR_FALLBACK（等于改造前的取值），不会比原来更差。
  */
 const CHROME_MAJOR_FALLBACK = 120
+const CHROME_FULL_FALLBACK = '120.0.0.0'
 let cachedDesktopUA: string | undefined
+let cachedChromeMajor: number | undefined
+let cachedChromeFull: string | undefined
+
+/** OS 适配（对齐 QIWork `uaPlatform()` / `hintPlatform()`） */
+function uaPlatform(): string {
+  if (process.platform === 'darwin') return 'Macintosh; Intel Mac OS X 10_15_7'
+  if (process.platform === 'linux') return 'X11; Linux x86_64'
+  return 'Windows NT 10.0; Win64; x64'
+}
+
+function hintPlatform(): string {
+  if (process.platform === 'darwin') return '"macOS"'
+  if (process.platform === 'linux') return '"Linux"'
+  return '"Windows"'
+}
 
 export function desktopUserAgent(): string {
   if (!cachedDesktopUA) {
-    cachedDesktopUA = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${detectChromeMajor()}.0.0.0 Safari/537.36`
+    cachedDesktopUA = `Mozilla/5.0 (${uaPlatform()}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${detectChromeMajor()}.0.0.0 Safari/537.36`
   }
   return cachedDesktopUA
 }
 
+/** 从安装目录的子目录名读 Chrome 完整版本号（形如 `…/Application/134.0.6998.89/`） */
+function detectChromeFull(): string {
+  if (cachedChromeFull !== undefined) return cachedChromeFull
+  const exe = findChromePath()
+  if (!exe) { cachedChromeFull = CHROME_FULL_FALLBACK; return cachedChromeFull }
+  try {
+    const versions = readdirSync(dirname(exe))
+      .filter(d => /^\d+\.\d+\.\d+\.\d+$/.test(d))
+    if (versions.length) {
+      // 取最大版本号
+      versions.sort((a, b) => {
+        const ai = Number(a.split('.')[0])
+        const bi = Number(b.split('.')[0])
+        return bi - ai
+      })
+      cachedChromeFull = versions[0]
+    } else {
+      cachedChromeFull = CHROME_FULL_FALLBACK
+    }
+    return cachedChromeFull
+  } catch {
+    cachedChromeFull = CHROME_FULL_FALLBACK
+    return cachedChromeFull
+  }
+}
+
 /** 从安装目录的子目录名读 Chrome 主版本（形如 `…/Application/134.0.6998.89/`） */
 function detectChromeMajor(): number {
+  if (cachedChromeMajor !== undefined) return cachedChromeMajor
   const exe = findChromePath()
-  if (!exe) return CHROME_MAJOR_FALLBACK
+  if (!exe) { cachedChromeMajor = CHROME_MAJOR_FALLBACK; return cachedChromeMajor }
   try {
     const majors = readdirSync(dirname(exe))
       .filter(d => /^\d+\.\d+\.\d+\.\d+$/.test(d))
       .map(d => Number(d.split('.')[0]))
-    return majors.length ? Math.max(...majors) : CHROME_MAJOR_FALLBACK
+    cachedChromeMajor = majors.length ? Math.max(...majors) : CHROME_MAJOR_FALLBACK
+    return cachedChromeMajor
   } catch {
-    return CHROME_MAJOR_FALLBACK
+    cachedChromeMajor = CHROME_MAJOR_FALLBACK
+    return cachedChromeMajor
+  }
+}
+
+// ─────────────── 浏览器指纹头 ───────────────
+//
+// Node.js HTTP 模块不会自动发送 sec-ch-ua / sec-fetch-* / Accept-Language / Accept-Encoding
+// 等浏览器指纹头。阿里系 Baxia WAF 和其他平台风控会把"缺少这些头"视为非浏览器客户端，
+// 直接触发 IP 级封锁（bxpunish=1）。QIWork 用 Electron Chromium 内核发请求，内核自动补齐
+// 这些头；本网关用 Node.js 直连，必须手动注入。
+
+/** Chrome GREASE brand 值映射（按主版本号），用于 sec-ch-ua 的 grease 段 */
+const GREASE_BY_MAJOR: Record<number, { brand: string; version: string }> = {
+  120: { brand: 'Not(A:Brand', version: '8' },
+  121: { brand: 'Not(A:Brand', version: '8' },
+  122: { brand: 'Not(A:Brand', version: '8' },
+  123: { brand: 'Google Chrome', version: '123' },
+  124: { brand: 'Chromium', version: '124' },
+  125: { brand: 'Google Chrome', version: '125' },
+  126: { brand: 'Not/A)Brand', version: '8' },
+  127: { brand: 'Not/A)Brand', version: '8' },
+  128: { brand: 'Chromium', version: '128' },
+  129: { brand: 'Not?A_Brand', version: '99' },
+  130: { brand: 'Not?A_Brand', version: '99' },
+  131: { brand: 'Google Chrome', version: '131' },
+  132: { brand: 'Not/A)Brand', version: '8' },
+  133: { brand: 'Not:A_Brand', version: '8' },
+  134: { brand: 'Not:A-Brand', version: '8' },
+  135: { brand: 'Google Chrome', version: '135' },
+  136: { brand: 'Not)A;Brand', version: '8' },
+  137: { brand: 'Not)A;Brand', version: '8' },
+  138: { brand: 'Not;A=Brand', version: '8' },
+  139: { brand: 'Not?A_Brand', version: '99' },
+  140: { brand: 'Not=A?Brand', version: '24' },
+}
+
+/** 根据 Chrome 主版本号获取 GREASE brand 信息 */
+function greaseFor(major: number): { brand: string; version: string } {
+  // 精确匹配优先，否则取最接近的小版本
+  if (GREASE_BY_MAJOR[major]) return GREASE_BY_MAJOR[major]
+  const keys = Object.keys(GREASE_BY_MAJOR).map(Number).sort((a, b) => a - b)
+  // 找 ≤ major 的最大 key；没有则取第一个
+  const fit = keys.filter(k => k <= major).pop() ?? keys[0]
+  return GREASE_BY_MAJOR[fit]
+}
+
+/** 从 UA 字符串解析 Chrome 主版本号（如 "Chrome/120.0.0.0" → 120） */
+function parseChromeMajorFromUA(ua: string): number | undefined {
+  const m = ua.match(/Chrome\/(\d+)\./)
+  return m ? Number(m[1]) : undefined
+}
+
+/** 从 UA 字符串解析 Chrome 完整版本号（如 "Chrome/120.0.6998.89" → "120.0.6998.89"） */
+function parseChromeFullFromUA(ua: string): string | undefined {
+  const m = ua.match(/Chrome\/(\d+\.\d+\.\d+\.\d+)/)
+  return m ? m[1] : undefined
+}
+
+/** 判断 URL 是否为抖音域名（对齐 QIWork `isDouyinUrl()`） */
+function isDouyinUrl(url: string): boolean {
+  try {
+    const host = new URL(url).hostname.toLowerCase()
+    return host === 'douyin.com' || host.endsWith('.douyin.com')
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 按平台生成来源页面 URL（用于 Referer / Origin）。
+ *
+ * 真实浏览器发 MTOP/API 请求时，Referer 是来源页面（如 https://s.1688.com/），
+ * 不是 API 地址本身。QIWork 靠 Chromium 内核自动填 Referer；Node.js 网关
+ * 需要根据目标 URL 的域名推断来源页面。
+ */
+function pageOriginFor(url: string, platform: string): string {
+  try {
+    const parsed = new URL(url)
+    const host = parsed.hostname
+    // 阿里系 MTOP H5 API：来源是对应的 H5 页面
+    if (host === 'h5api.m.1688.com') return 'https://s.1688.com/'
+    if (host === 'h5api.m.taobao.com') return 'https://s.taobao.com/'
+    if (host === 'h5api.m.goofish.com') return 'https://www.goofish.com/'
+    // 生意参谋
+    if (host === 'sycm.taobao.com') return 'https://sycm.taobao.com/'
+    // 阿里妈妈
+    if (host === 'one.alimama.com') return 'https://one.alimama.com/index.html'
+    // DMP
+    if (host === 'dmp.advgateway.taobao.com') return 'https://dmp.advgateway.taobao.com/'
+    // 其他：返回同源根路径
+    return `${parsed.protocol}//${parsed.host}/`
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * 构建浏览器指纹头（sec-ch-ua / sec-fetch-* / Accept-Language / Accept-Encoding）。
+ *
+ * 这些头在浏览器路径（Puppeteer + Chromium 内核）里是自动生成的，但 Node.js HTTP
+ * 模块不会发送它们。缺失会被阿里 Baxia WAF 等风控系统识别为"非浏览器客户端"。
+ *
+ * 调用方可通过 body.headers 覆盖任何自动生成的头。
+ */
+function buildBrowserFingerprintHeaders(
+  targetUrl: string,
+  platform: string,
+  userAgent: string,
+  isPost: boolean,
+): Record<string, string> {
+  const uaMajor = parseChromeMajorFromUA(userAgent)
+  const uaFull = parseChromeFullFromUA(userAgent)
+  const major = uaMajor ?? detectChromeMajor()
+  const full = uaFull ?? detectChromeFull()
+  const grease = greaseFor(major)
+  const pageOrigin = pageOriginFor(targetUrl, platform)
+
+  // 抖音域名用 "Google Chrome" brand，其他域名用 "Chromium" brand（对齐 QIWork）
+  // 同时检查 platform 标识，覆盖 URL 被 mock 的场景
+  const useChromeBrand = isDouyinUrl(targetUrl) || platform === 'douyin'
+
+  const brands = useChromeBrand
+    ? `"${grease.brand}";v="${grease.version}", "Google Chrome";v="${major}", "Chromium";v="${major}"`
+    : `"${grease.brand}";v="${grease.version}", "Chromium";v="${major}"`
+
+  // 高熵头：完整版本列表（对齐 QIWork `chromeClientHintHeaders()` 的 fullList）
+  const fullVersionList = useChromeBrand
+    ? `"${grease.brand}";v="${grease.version}.0.0.0", "Google Chrome";v="${full}", "Chromium";v="${full}"`
+    : `"${grease.brand}";v="${grease.version}.0.0.0", "Chromium";v="${full}"`
+
+  let targetHost = ''
+  let pageHost = ''
+  try {
+    const t = new URL(targetUrl)
+    targetHost = t.hostname
+    if (pageOrigin) pageHost = new URL(pageOrigin).hostname
+  } catch { /* ignore */ }
+
+  // Sec-Fetch-Site: same-origin / cross-site
+  let secFetchSite = 'cross-site'
+  if (pageHost && targetHost === pageHost) {
+    secFetchSite = 'same-origin'
+  } else if (pageHost && targetHost.endsWith(pageHost)) {
+    secFetchSite = 'same-site'
+  }
+
+  return {
+    'Sec-Ch-Ua': brands,
+    'Sec-Ch-Ua-Full-Version-List': fullVersionList,
+    'Sec-Ch-Ua-Mobile': '?0',
+    'Sec-Ch-Ua-Platform': hintPlatform(),
+    'Sec-Fetch-Site': secFetchSite,
+    'Sec-Fetch-Mode': 'cors',
+    'Sec-Fetch-Dest': 'empty',
+    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+    'Accept-Encoding': 'gzip, deflate, br',
+    ...(pageOrigin ? { 'Referer': pageOrigin } : {}),
   }
 }
 
@@ -479,15 +848,31 @@ export async function handleProxy(body: any, store: CredentialStore): Promise<an
 
   // 构建请求头
   // ★ P1-3：UA 优先取账号绑定的 env（环境指纹一致性），无 env 时回退本机默认。
-  const accountEnv = (account.account_meta?.env as { ua?: string } | undefined)?.ua
+  const accountEnv = (account.account_meta?.env as { ua?: string; language?: string } | undefined)
+  const ua = accountEnv?.ua || desktopUserAgent()
+  const isPost = kind === 'http_post'
+
+  // 基础头
   const headers: Record<string, string> = {
     'Cookie': cookieStr,
-    'User-Agent': accountEnv || desktopUserAgent(),
-    'Referer': targetUrl,
+    'User-Agent': ua,
     'Accept': 'application/json, text/plain, */*',
   }
 
-  // 合并额外 headers
+  // 注入浏览器指纹头（sec-ch-ua / sec-fetch-* / Accept-Language / Accept-Encoding / Referer）
+  // 这些头在浏览器路径由 Chromium 内核自动生成，Node.js 必须手动补齐，
+  // 否则阿里 Baxia WAF 等风控系统会把请求识别为"非浏览器客户端"并触发 IP 级封锁。
+  const fingerprint = buildBrowserFingerprintHeaders(targetUrl, platform, ua, isPost)
+  for (const [k, v] of Object.entries(fingerprint)) {
+    headers[k] = v
+  }
+
+  // Accept-Language 优先用账号绑定的语言
+  if (accountEnv?.language) {
+    headers['Accept-Language'] = `${accountEnv.language},zh;q=0.9,en;q=0.8`
+  }
+
+  // 合并额外 headers（调用方传入的 headers 可覆盖任何自动生成的头）
   if (body.headers && typeof body.headers === 'object') {
     for (const [k, v] of Object.entries(body.headers)) {
       headers[k] = String(v)
@@ -621,7 +1006,34 @@ export async function handleProxy(body: any, store: CredentialStore): Promise<an
   }
 
   try {
+    // ★ 路由冷却检查（对齐 Accio RouteController）：域名连续失败 ≥ 2 次后冷却 60s
+    const targetHost = new URL(finalUrl).hostname
+    if (isRouteCoolingDown(targetHost)) {
+      console.warn(`[dsagent-gateway] 路由冷却中，跳过请求: ${targetHost}`)
+      return {
+        status: 'error',
+        status_code: 503,
+        payload: null,
+        set_cookies: [],
+        failure_kind: 'route_cooldown',
+        risk_pass_received: false,
+        error_message: `路由 ${targetHost} 连续失败已进入冷却期，请稍后重试或更换网络出口`,
+      }
+    }
+
     const result = await httpRequest(method, finalUrl, headers, postBody, timeout)
+
+    // ★ 响应头清洗（对齐 QIWork relaxResponseHeaders）：移除 CSP / X-Frame-Options 等限制头
+    if (result.responseHeaders) {
+      result.responseHeaders = relaxResponseHeaders(result.responseHeaders)
+    }
+
+    // 路由状态上报：成功重置失败计数，失败累计
+    if (result.status >= 200 && result.status < 400) {
+      reportRouteSuccess(targetHost)
+    } else if (result.status >= 500 || result.status === 429) {
+      reportRouteFailure(targetHost)
+    }
 
     // 调试日志：查看淘宝返回的原始内容
     console.log(`[dsagent-gateway] ${method} ${finalUrl.substring(0, 200)}... → HTTP ${result.status}, body[0:300]=${result.body.substring(0, 300)}`)
@@ -978,13 +1390,31 @@ export async function handleProxy(body: any, store: CredentialStore): Promise<an
     //   Accio 的退避策略：initialBackoff × backoffMultiplier^(n-1)，带上限 maxBackoff + 抖动。
     //   这里简化为固定退避序列 [2s, 4s, 8s]（3 次），因为网关层不宜长时间阻塞。
     //
+    //   增强：429 响应可能携带 Retry-After 头（秒数或 HTTP 日期），
+    //   优先使用 Retry-After 值作为退避时间（对齐 Accio 的 rate limit 处理）。
+    //
     //   仅对**可重试状态码**生效（429=限流、503=服务不可用），其他 4xx/5xx 直接返回。
     //   重试不二次节流（已经等过退避时间），且不进缓存（重试中间态不缓存）。
     if (!failureKind && (result.status === 429 || result.status === 503)) {
-      const backoffSeq = [2_000, 4_000, 8_000]
+      // 读取 Retry-After 头（秒数或 HTTP 日期）
+      const retryAfterRaw = result.responseHeaders?.['retry-after'] as string | undefined
+      let retryAfterMs = 0
+      if (retryAfterRaw) {
+        const asSeconds = Number(retryAfterRaw)
+        if (!isNaN(asSeconds) && asSeconds > 0) {
+          retryAfterMs = Math.min(asSeconds * 1000, 60_000) // 上限 60s
+        } else {
+          // 尝试解析 HTTP 日期
+          const asDate = Date.parse(retryAfterRaw)
+          if (!isNaN(asDate)) {
+            retryAfterMs = Math.min(Math.max(asDate - Date.now(), 0), 60_000)
+          }
+        }
+      }
+      const backoffSeq = retryAfterMs > 0 ? [retryAfterMs] : [2_000, 4_000, 8_000]
       for (let attempt = 0; attempt < backoffSeq.length; attempt++) {
         const waitMs = backoffSeq[attempt]
-        console.log(`[dsagent-gateway] HTTP ${result.status} 退避重试 ${attempt + 1}/${backoffSeq.length}（等待 ${waitMs / 1000}s）: ${account.shop_key}`)
+        console.log(`[dsagent-gateway] HTTP ${result.status} 退避重试 ${attempt + 1}/${backoffSeq.length}（等待 ${Math.round(waitMs / 1000)}s${retryAfterMs > 0 ? '，Retry-After' : ''}）: ${account.shop_key}`)
         await sleep(waitMs)
         const retryHeaders = { ...headers, 'Cookie': store.get(account.shop_key)?.cookie_str || cookieStr }
         const retryResult = await httpRequest(method, finalUrl, retryHeaders, postBody, timeout)
@@ -1056,10 +1486,14 @@ export async function handleProxy(body: any, store: CredentialStore): Promise<an
 
     return finalResponse
   } catch (err: any) {
+    // ★ 结构化错误分类（对齐 Accio ChannelError）：网络异常不一定是 api_error，
+    //   超时/连接重置/限流各有不同的重试策略，笼统报 api_error 会让模型误判。
+    const errMsg = String(err?.message || err)
+    const kind = classifyError(0, errMsg.toLowerCase())
     return {
       status: 'error',
-      error_message: `代理请求失败: ${err?.message || String(err)}`,
-      failure_kind: 'api_error',
+      error_message: `代理请求失败: ${errMsg}`,
+      failure_kind: kind === 'unknown' ? 'api_error' : kind,
     }
   }
   }) // end withAccountQueue
@@ -1365,6 +1799,34 @@ function httpRequest(
       headers,
     }
 
+    // ★ DNS Fake-IP 绕过（对齐 Accio dns-bypass）：
+    //   某些网络环境下（VPN/代理/ hosts 污染），域名会解析到 198.18.x / 19.x 等
+    //   fake-IP 测试网段，导致请求发到错误地址。检测到 fake-IP 时，用公共 DNS
+    //   交叉解析获取真实 IP，替换 hostname 并设置 Host 头保持 SNI 正确。
+    const hostname = parsed.hostname
+    const lookup = (cb: (err: NodeJS.ErrnoException | null, address: string, family: number) => void) => {
+      // 先用系统默认解析拿到 IP
+      nodeDns.lookup(hostname, { family: 4 }, async (sysErr, sysIp) => {
+        if (!sysErr && sysIp && !isFakeIp(sysIp)) {
+          // 系统 DNS 正常，直接用
+          cb(null, sysIp, 4)
+          return
+        }
+        // 系统 DNS 返回 fake-IP 或失败 → 用公共 DNS 交叉解析
+        const realIp = await resolveWithPublicDns(hostname)
+        if (realIp) {
+          console.log(`[dsagent-gateway] DNS 绕过: ${hostname} 系统 DNS=${sysIp || '(失败)'} → 公共 DNS=${realIp}`)
+          cb(null, realIp, 4)
+        } else if (sysIp) {
+          // 公共 DNS 也失败了，回退系统 DNS（总比没有强）
+          cb(null, sysIp, 4)
+        } else {
+          cb(sysErr || new Error(`DNS 解析失败: ${hostname}`), '', 4)
+        }
+      })
+    }
+    options.lookup = lookup as any
+
     const req = lib.request(options, (res: any) => {
       const chunks: Buffer[] = []
       res.on('data', (chunk: Buffer) => chunks.push(chunk))
@@ -1379,9 +1841,20 @@ function httpRequest(
           if (Array.isArray(raw)) setCookieHeaders.push(...raw)
           else setCookieHeaders.push(String(raw))
         }
+        // 解压响应体（我们发送 Accept-Encoding: gzip, deflate, br，
+        // 但 Node.js http 模块不会自动解压，需手动处理）
+        let rawBody = Buffer.concat(chunks)
+        const encoding = res.headers['content-encoding']
+        if (encoding) {
+          try {
+            if (encoding.includes('gzip')) rawBody = gunzipSync(rawBody)
+            else if (encoding.includes('deflate')) rawBody = inflateSync(rawBody)
+            else if (encoding.includes('br')) rawBody = brotliDecompressSync(rawBody)
+          } catch { /* 解压失败，保留原始数据 */ }
+        }
         resolve({
           status: res.statusCode || 0,
-          body: Buffer.concat(chunks).toString('utf-8'),
+          body: rawBody.toString('utf-8'),
           setCookieHeaders,
           location: res.headers['location'] ? String(res.headers['location']) : undefined,
           // ★ 返回全部响应头（小写键），供风控检测读取 bxpunish / bxuuid 等

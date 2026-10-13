@@ -1,1 +1,0 @@
-var n=null;function a(i,t){const e={sessionId:i,path:t};return n=e,()=>{n===e&&(n=null)}}function o(i){return n!==null&&n.path!=="/design"&&n.sessionId===(i.activeTeamConversationId??i.activeConversationId)}export{o as n,a as t};

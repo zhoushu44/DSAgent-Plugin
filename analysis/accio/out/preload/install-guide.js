@@ -1,1 +1,0 @@
-let e=require("electron");e.contextBridge.exposeInMainWorld("installGuide",{openChromeUrl:r=>{"string"==typeof r&&r.startsWith("chrome://")&&e.ipcRenderer.send("install:open-chrome-url",r)}});

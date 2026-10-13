@@ -1,1 +1,0 @@
-const e=require(`../gateway-worker.js`),t=require(`./gw-ws-D0eBup1x.js`);var n=e.Oy(((e,n)=>{n.exports=t.t()}));Object.defineProperty(exports,`default`,{enumerable:!0,get:function(){return n()}});

@@ -96,9 +96,16 @@ def _headers(referer=None):
     return {
         "User-Agent": UA,
         "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "zh-CN,zh;q=0.9",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
         "Referer": referer or "https://www.zhihu.com/",
         "x-requested-with": "fetch",
+        "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="120", "Not(A:Brand";v="24"',
+        "Sec-Ch-Ua-Mobile": "?0",
+        "Sec-Ch-Ua-Platform": '"Windows"',
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Dest": "empty",
     }
 
 

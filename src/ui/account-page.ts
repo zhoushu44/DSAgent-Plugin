@@ -26,6 +26,7 @@ const PLATFORM_META: Record<string, { label: string; color: string; glyph: strin
   pdd_mms: { label: '拼多多商家后台', color: '#e02e24', glyph: '拼', via: 'Cookie 托管' },
   wechat_store: { label: '微信小店', color: '#fa9d3b', glyph: '店', via: '官方开放 API' },
   zhihu: { label: '知乎', color: '#0084ff', glyph: '知', via: 'Cookie 托管' },
+  alibaba: { label: '1688', color: '#ff7300', glyph: '阿', via: 'Cookie 托管' },
 }
 
 const STATUS_META: Record<AccountStatus, { label: string; cls: string }> = {
@@ -89,6 +90,10 @@ const LOGIN_METHODS: Record<string, Array<{ key: string; label: string; hint: st
     { key: 'qrcode', label: '扫码登录', hint: '打开知乎 App 扫码' },
     { key: 'manual_cookie', label: '导入 Cookie', hint: '从浏览器复制粘贴' },
   ],
+  alibaba: [
+    { key: 'qrcode', label: '扫码登录', hint: '打开 1688 App 扫码' },
+    { key: 'manual_cookie', label: '导入 Cookie', hint: '从浏览器复制粘贴' },
+  ],
 }
 
 /** 平台专属风控/前置提示 */
@@ -103,6 +108,7 @@ const PLATFORM_NOTES: Record<string, string> = {
   pinduoduo: '拼多多开放平台需先申请应用并审核通过。',
   pdd_mms: '需用**商家账号**登录 mms.pinduoduo.com（商品发布/上架用）。它与「拼多多」买家账号是两套独立登录态，互不通用。拼多多滑块风控为页内内联，发布时需在弹出的可见窗口内手动拖动完成。',
   zhihu: '知乎登录态有效期约 30 天，过期后需在此重新登录。频繁请求可能触发风控，建议使用小号。',
+  alibaba: '1688（阿里巴巴 B2B）独立登录态，Cookie 在 .1688.com 域。与淘宝同属阿里 SSO 体系但须独立登录 1688。',
 }
 
 const PAGE_SIZE = 20

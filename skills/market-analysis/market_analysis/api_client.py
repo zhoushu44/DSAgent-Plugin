@@ -30,6 +30,23 @@ from .config import (
 from .types import SearchProduct, SkillError
 
 
+def _browser_headers(referer: str, origin: str, ua: str) -> dict:
+    """浏览器指纹头 — 所有 MTOP 调用必须携带。"""
+    return {
+        "Referer": referer,
+        "Origin": origin,
+        "User-Agent": ua,
+        "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="120", "Not(A:Brand";v="24"',
+        "Sec-Ch-Ua-Mobile": "?0",
+        "Sec-Ch-Ua-Platform": '"Windows"',
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Dest": "empty",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
+    }
+
+
 def strip_html_tags(value: str) -> str:
     return re.sub(r"<[^>]*>", "", value or "")
 
@@ -212,11 +229,11 @@ class TaobaoMarketAnalysisClient:
             price_max=price_max,
         )
         data_str = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-        headers = {
-            "Referer": "https://s.taobao.com/",
-            "Origin": "https://s.taobao.com",
-            "User-Agent": DEFAULT_USER_AGENT,
-        }
+        headers = _browser_headers(
+            referer="https://s.taobao.com/",
+            origin="https://s.taobao.com",
+            ua=DEFAULT_USER_AGENT,
+        )
         try:
             return self._mtop.call(
                 label="市场分析",

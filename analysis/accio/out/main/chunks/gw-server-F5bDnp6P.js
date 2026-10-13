@@ -1,1 +1,0 @@
-const e=require(`../gateway-worker.js`);exports.getDirectCdpPortFromRelay=e.ol,exports.getDirectCdpWsUrlFromRelay=e.sl,exports.getRelayOrNull=e.ll;

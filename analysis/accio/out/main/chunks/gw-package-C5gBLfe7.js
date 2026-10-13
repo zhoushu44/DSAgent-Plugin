@@ -1,1 +1,0 @@
-const e=require(`../gateway-worker.js`);exports.installHubPackage=e.Cm,exports.syncPackageType=e.Em;

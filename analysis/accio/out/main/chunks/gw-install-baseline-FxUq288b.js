@@ -1,1 +1,0 @@
-const e=require(`../gateway-worker.js`);exports.sha256Hex=e.or;

@@ -33,17 +33,20 @@ dist/DSAgent-Portable.zip
 .DS_Store
 Thumbs.db
 
-# ── Accio 逆向分析的临时解包目录 ──
+# ── 逆向分析的临时解包目录 ──
 # 这些是 Electron 应用（app.asar）的解包产物，属第三方厂商代码：
-#   · 体积巨大（合计 ~320MB），不该进仓库
+#   · 体积巨大，不该进仓库
 #   · 版权不属于本项目，入库有合规风险
-#   · 需要重读时用 dev/accio-analysis/unpack-asar.mjs 重新解包即可
+#   · 需要重读时用 dev/unpack-asar.mjs 重新解包即可
 .tmp-accio/
 _accio_probe/
 accio-app/
 accio_extracted/
 dev/accio-analysis/
 accio_files.txt
+analysis/
+.bitbrowser-extracted/
+.qiwork-extracted/
 
 # 分析与验证的落盘产物（每次运行都会重建）
 artifacts/
@@ -61,3 +64,9 @@ accio-staging/
 
 # npm 本地缓存（某些环境会把 cache 落在仓库内）
 .npm-cache/
+
+# Chrome 测试 profile（登录调试残留）
+.chrome-profiles/
+
+# 临时优化文档（开发过程产物，已沉淀到代码注释和项目规则）
+anti-bot-optimization.md

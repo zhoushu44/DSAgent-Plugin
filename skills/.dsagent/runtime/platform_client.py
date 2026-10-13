@@ -69,6 +69,7 @@ _PLATFORM_HINTS: dict[str, str] = {
     "pinduoduo": "请在「账号连接」页面绑定拼多多账号。",
     "bilibili": "请在「账号连接」页面绑定 B 站账号。",
     "kuaishou": "请在「账号连接」页面绑定快手账号。",
+    "alibaba": "请在「账号连接」页面绑定 1688 账号。",
 }
 
 
@@ -202,6 +203,7 @@ def http_post(url: str, *, platform: str, json_body: dict | str | None = None,
 
 def mtop_jsonp(url: str, *, platform: str, api: str, version: str = "1.0",
                data: str = "{}", extra_params: dict | None = None,
+               headers: dict | None = None,
                timeout: float = 30.0,
                inject_token: bool = True) -> dict:
     """通过网关代理发起 mtop JSONP 请求（网关自动处理签名和 Cookie）"""
@@ -216,4 +218,6 @@ def mtop_jsonp(url: str, *, platform: str, api: str, version: str = "1.0",
     }
     if extra_params:
         body["extra_params"] = extra_params
+    if headers:
+        body["headers"] = headers
     return _platform_request(body, platform=platform, timeout=timeout)

@@ -1,1 +1,0 @@
-const e=require(`../gateway-worker.js`);var t=e.Oy(((t,n)=>{let r=e.gm(),i=e.vm(),a=e.xm(),o=e.bm(),s=e.ym(),c=e.hm(),l=e._m(),u=e.mm();l.createWebSocketStream=r,l.extension=i,l.PerMessageDeflate=a,l.Receiver=o,l.Sender=s,l.Server=u,l.subprotocol=c,l.WebSocket=l,l.WebSocketServer=u,n.exports=l}));Object.defineProperty(exports,`t`,{enumerable:!0,get:function(){return t}});

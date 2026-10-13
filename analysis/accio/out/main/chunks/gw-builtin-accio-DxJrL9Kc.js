@@ -1,1 +1,0 @@
-const e=require(`../gateway-worker.js`);exports.BUILTIN_ACCIO_AGENT_TYPE=e.lr,exports.BUILTIN_ACCIO_PACKAGE_CODE=e.dr,exports.ensureBuiltinAccio=e.pr;

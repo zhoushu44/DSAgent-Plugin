@@ -1,1 +1,0 @@
-const e=require(`../gateway-worker.js`);exports.rememberRegisteredPackageRegion=e.T,exports.resetRegisteredPackageRegion=e.D,exports.resolvePackageRegion=e.O;

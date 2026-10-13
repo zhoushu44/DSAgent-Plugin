@@ -1,1 +1,0 @@
-const e=require(`../gateway-worker.js`);exports.configureAskUserEventBus=e.km,exports.configurePluginToolEventBus=e.ya;

@@ -1,1 +1,0 @@
-import{D as s,E as e}from"./vendor-state-routing-DFChRAiR.js";import{a as t,dd as a,i as r,rd as o}from"./app-store-Ckqd27Cr.js";e();r();o();function i(){return{recentWorkspaces:t(s(a))}}export{i as t};

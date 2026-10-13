@@ -1,1 +1,0 @@
-import{i as n,n as t}from"./index.desktop-CIjlN4kD.js";n();function a(e){return String(e??"").trim().replace("_","-")||"en"}function i(){return a(t.language||(typeof navigator<"u"?navigator.language:"")||"en")}export{a as n,i as t};

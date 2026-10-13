@@ -1,1 +1,0 @@
-import{O as a,k as s}from"./vendor-state-routing-DFChRAiR.js";a();function o(n){return n==="team"}function r(n){return o(n.currentSpaceKind)&&n.manualOpenNonce>0}const u=s(n=>({manualOpenNonce:0,requestManualOpen:()=>{n(e=>({manualOpenNonce:e.manualOpenNonce+1}))}}));export{o as n,u as r,r as t};

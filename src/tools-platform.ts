@@ -446,6 +446,7 @@ export function buildPlatformTools(deps: PlatformToolsDeps): import('@deepseek-a
           ['pinduoduo', '拼多多'], ['pdd_mms', '拼多多商家后台'],
           ['xianyu', '闲鱼'], ['wechat_store', '微信小店'],
           ['zhihu', '知乎'],
+          ['alibaba', '1688'],
         ]
         return {
           text: platforms.map(([pid, label]) => {

@@ -1,1 +1,0 @@
-import{s as i}from"./rolldown-runtime-BSJ3dJRS.js";import{a as n}from"./vendor-react-BflrOYNF.js";import{Hg as o,Ug as t}from"./app-store-Ckqd27Cr.js";var a=i(n(),1);o();var _=500;function m(){const[r,s]=(0,a.useState)(()=>t());return(0,a.useEffect)(()=>{if(r)return;const e=setInterval(()=>{t()&&(s(!0),clearInterval(e))},_);return()=>clearInterval(e)},[r]),r}export{m as t};

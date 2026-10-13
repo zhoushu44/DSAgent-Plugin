@@ -1,1 +1,0 @@
-const e=require("../index.js");e.init_config(),exports.getPackageRegion=e.getPackageRegion;

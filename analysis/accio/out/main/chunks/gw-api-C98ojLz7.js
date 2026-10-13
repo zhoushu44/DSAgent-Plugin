@@ -1,1 +1,0 @@
-const e=require(`../gateway-worker.js`);e.eg(),exports.getFullGatewayUrl=e.Yh,exports.getRaw=e.$h,exports.post=e.tg;

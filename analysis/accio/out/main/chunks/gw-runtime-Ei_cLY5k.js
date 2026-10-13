@@ -1,1 +1,0 @@
-const e=require(`../gateway-worker.js`);e.by(),exports.getRuntime=e.vy,exports.isVpsDeployment=e.xy;

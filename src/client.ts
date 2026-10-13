@@ -139,6 +139,218 @@ export function apply(ctx: ClientContext, cfg?: Config) {
     }, 'dsagent: main panel')
   })
 
+  // ── 对话页输入框上方：动态推荐指令条（点击填充输入框，等用户确认发送）──
+  // 机制（官方通道，与 ui-goal/todo 同款）：
+  //   'conversation.input.dock' 是 session-scope list slot，渲染在 composer 上方；
+  //   标准注入两组 props：
+  //   - ui-conversation: props.inputActions（setDraft/submit/...）、props.session（含 blank）
+  //   - ui-chat:        props.useChat（hooks ['chat'] → useChat），可读聊天记录
+  //   推荐逻辑：读 useChat().navigation.items() 的 prompt/response 文本预览，
+  //   跑平台/动作关键词匹配 → 推断「平台 × 链路阶段」→ 换 chips。
+  step('示例指令条', () => {
+    ctx.effect(() => {
+      const disposeSuggest = ctx.slots.inject('conversation.input.dock', () =>
+        ctx.slots.register(
+          {
+            name: 'conversation.input.dock',
+            id: 'dsagent-suggest',
+            order: 15,
+            locale: NS,
+          },
+          SuggestDock,
+        ),
+      )
+      return () => disposeSuggest()
+    }, 'dsagent: suggest dock')
+  })
+
+  // ── 动态推荐：数据 ──
+  // 链路：collect（采集）→ analyze（分析）→ publish（发布）→ manage（账号/工具）
+  type Stage = 'collect' | 'analyze' | 'publish' | 'manage'
+  interface Suggestion {
+    readonly label: string
+    readonly text: string
+    readonly platform?: string
+    readonly stage: Stage
+  }
+
+  // 平台词表：聊天文本命中即判定当前平台（含别名）
+  const PLATFORM_WORDS: ReadonlyArray<{ readonly platform: string; readonly words: readonly string[] }> = [
+    { platform: 'douyin', words: ['抖音', 'douyin', 'tiktok'] },
+    { platform: 'taobao', words: ['淘宝', 'taobao', '天猫'] },
+    { platform: '1688', words: ['1688', '阿里巴巴批发', '批发市场'] },
+    { platform: 'xiaohongshu', words: ['小红书', 'xiaohongshu', '红书'] },
+    { platform: 'zhihu', words: ['知乎', 'zhihu'] },
+    { platform: 'bilibili', words: ['b站', '哔哩哔哩', 'bilibili', '哔站'] },
+    { platform: 'xianyu', words: ['闲鱼', 'xianyu'] },
+    { platform: 'pdd', words: ['拼多多', 'pdd'] },
+    { platform: 'dingtalk', words: ['钉钉', 'dingtalk'] },
+  ]
+
+  // 动作词表：判定最近完成的链路阶段
+  const STAGE_WORDS: ReadonlyArray<{ readonly stage: Stage; readonly words: readonly string[] }> = [
+    { stage: 'collect', words: ['采集', '爬取', '抓取', '爬虫', '抓取数据'] },
+    { stage: 'analyze', words: ['分析', '统计', '对比', '选品', '分层', '评价分析'] },
+    { stage: 'publish', words: ['发布', '上传视频', '发笔记', '上架'] },
+    { stage: 'manage', words: ['账号', '绑定', '连接状态', '登录'] },
+  ]
+
+  // 推荐清单：按「平台 × 链路阶段」索引；platform 缺省 = 任意平台可用
+  const SUGGESTIONS: readonly Suggestion[] = [
+    // 初始态：平台入口（各平台代表动作）
+    { label: '采集抖音热门视频', text: '采集抖音热门视频数据', platform: 'douyin', stage: 'collect' },
+    { label: '采集小红书笔记', text: '采集小红书笔记数据', platform: 'xiaohongshu', stage: 'collect' },
+    { label: '1688智能选品', text: '帮我做1688选品分析', platform: '1688', stage: 'analyze' },
+    { label: '分析商品评价', text: '分析这个商品的评价，链接：', stage: 'analyze' },
+    { label: '查看账号连接状态', text: '查看我的账号连接状态', stage: 'manage' },
+    // 抖音链路
+    { label: '分析刚采集的视频', text: '分析刚才采集的抖音视频数据', platform: 'douyin', stage: 'analyze' },
+    { label: '采集抖音商品榜', text: '采集抖音商品榜数据', platform: 'douyin', stage: 'collect' },
+    { label: '发布抖音视频', text: '帮我发布一条抖音视频', platform: 'douyin', stage: 'publish' },
+    // 淘宝链路
+    { label: '分析淘宝商品评价', text: '分析这个淘宝商品的评价，链接：', platform: 'taobao', stage: 'analyze' },
+    { label: '发布淘宝商品', text: '帮我上架一个淘宝商品', platform: 'taobao', stage: 'publish' },
+    // 小红书链路
+    { label: '分析小红书笔记', text: '分析采集到的小红书笔记数据', platform: 'xiaohongshu', stage: 'analyze' },
+    { label: '发布小红书笔记', text: '帮我发布一篇小红书笔记', platform: 'xiaohongshu', stage: 'publish' },
+    // 通用下一步
+    { label: '发布到其他平台', text: '把结果整理后发布到', stage: 'publish' },
+  ]
+
+  // ── 动态推荐：规则引擎 ──
+  /** 从最近几轮 prompt/response 文本推断「平台 × 已完成阶段」。 */
+  function inferContext(items: readonly { readonly prompt: string; readonly response: string }[]): { platform?: string; stage?: Stage } {
+    // 取最近 3 轮，从最新往回扫：最新一轮命中的才算数（话题会切换，
+    // 旧轮次的动作词不该覆盖新话题；如「查看账号连接状态」的「账号」
+    // 不该把之后的「分析商品评价」阶段抢成 manage）。
+    const recent = items.slice(-3)
+    if (recent.length === 0) return {}
+
+    // 平台：逐轮（新→旧）在 prompt+response 里找；助手回复也常提平台名
+    // （如「已采集抖音视频 50 条」），可作辅助。轮内 prompt 优先于
+    // response——用户说的是主话题，回复里顺带提到其他平台（如「也可
+    // 试试闲鱼」）不该抢走平台；同段内词表序先命中先得。
+    let platform: string | undefined
+    for (let i = recent.length - 1; i >= 0 && !platform; i--) {
+      const { prompt, response } = recent[i]
+      for (const segment of [prompt, response]) {
+        for (const entry of PLATFORM_WORDS) {
+          if (entry.words.some((w) => segment.includes(w))) {
+            platform = entry.platform
+            break
+          }
+        }
+        if (platform) break
+      }
+    }
+
+    // 阶段：逐轮（新→旧）只看用户 prompt——助手回复常含「账号 xxx」
+    // 「分析完成」等系统噪声，会把刚完成的动作误判成 manage/analyze（实测踩坑）。
+    // 轮内取词表序最后一个命中（collect→analyze→publish→manage，越靠后越是刚完成的动作）。
+    let stage: Stage | undefined
+    for (let i = recent.length - 1; i >= 0 && !stage; i--) {
+      const prompt = recent[i].prompt
+      for (const entry of STAGE_WORDS) {
+        if (entry.words.some((w) => prompt.includes(w))) stage = entry.stage
+      }
+    }
+    return { platform, stage }
+  }
+
+  /** 依「平台 × 链路阶段」生成推荐 chips（最多 5 条）。 */
+  function pickSuggestions(context: { platform?: string; stage?: Stage }): readonly Suggestion[] {
+    const { platform, stage } = context
+    if (!platform && !stage) {
+      // 初始态：清单前 5 条即平台入口组（见 SUGGESTIONS 排列，避免误捞后段链路 chips）
+      return SUGGESTIONS.slice(0, 5)
+    }
+    // 链路推进：当前 stage 的下一阶段，同平台优先
+    const order: Record<Stage, Stage> = { collect: 'analyze', analyze: 'publish', publish: 'manage', manage: 'collect' }
+    const nextStage = stage ? order[stage] : 'collect'
+    const next = SUGGESTIONS.filter((s) => s.stage === nextStage)
+    const samePlatform = next.filter((s) => s.platform === platform)
+    const anyPlatform = next.filter((s) => s.platform === undefined)
+    // 同阶段相邻动作作补位（如采集完视频 → 再采集商品榜），排在下阶段项之后
+    const sameStage = SUGGESTIONS.filter((s) => s.platform === platform && s.stage === stage)
+    // 无平台场景（如「查看账号连接状态」后的 manage→collect）同平台下阶段项可能全空，
+    // 回落到其他平台的下阶段项——否则只剩用户刚用过的那条，推荐原地踏步
+    const nextPool = samePlatform.length + anyPlatform.length > 0 ? [...samePlatform, ...anyPlatform] : next
+    const pool = [...nextPool, ...sameStage]
+    // 去重保序，最多 5 条
+    const seen = new Set<string>()
+    return pool.filter((s) => (seen.has(s.label) ? false : (seen.add(s.label), true))).slice(0, 5)
+  }
+
+  // ── 动态推荐指令条组件 ──
+  // useChat 签名（SnapshotSelectorHook）：<S>(sel: (s: ChatSnapshot) => S) => S
+  interface ChatNavItem { readonly prompt: string; readonly response: string }
+  // 稳定空数组：selector 里「?? []」若每次新建数组，getSnapshot 身份不稳定
+  // 会让 useSyncExternalStore 判定持续变化（可能无限重渲），必须用常量。
+  const NO_CHAT_ITEMS: readonly ChatNavItem[] = []
+  // 无 ui-chat 时的占位 hook（保持调用数恒定，满足 Rules of Hooks）
+  const NO_CHAT_HOOK = (sel: (s: { navigation?: { items(): readonly ChatNavItem[] } }) => readonly ChatNavItem[]) =>
+    sel({ navigation: undefined })
+  interface SuggestDockProps {
+    inputActions?: { setDraft: (text: string) => void } | undefined
+    session?: { blank?: boolean } | undefined
+    useChat?: (<S>(sel: (s: { navigation?: { items(): readonly ChatNavItem[] } }) => S) => S) | undefined
+    [key: string]: unknown
+  }
+
+  function SuggestDock(props: SuggestDockProps) {
+    // useChat 是 React hook，必须无条件、每次渲染以相同顺序调用
+    //（早退 return 之前），否则违反 Rules of Hooks。
+    const useChat = props.useChat ?? NO_CHAT_HOOK
+    const items = useChat((s) => s.navigation?.items() ?? NO_CHAT_ITEMS)
+    const setDraft = props.inputActions?.setDraft
+    if (!setDraft) return null
+
+    // 读聊天记录推断上下文；hook 不存在或无消息时回落初始态
+    const blankSession = props.session?.blank === true || items.length === 0
+    const context = blankSession ? {} : inferContext(items)
+    const suggestions = pickSuggestions(context)
+
+    return React.createElement(
+      'div',
+      {
+        style: {
+          // 与宿主 composer 卡片左对齐 + 随宽度自适应：直接用宿主的
+          // --dsh-composer-card-max-width（卡片实际宽度变量），margin: 0 auto。
+          maxWidth: 'var(--dsh-composer-card-max-width, 720px)',
+          margin: '0 auto',
+          width: '100%',
+          boxSizing: 'border-box',
+          display: 'flex',
+          flexWrap: 'wrap',
+          gap: '8px',
+          padding: '4px 0',
+        },
+      },
+      ...suggestions.map((s) =>
+        React.createElement(
+          'button',
+          {
+            type: 'button',
+            key: s.label,
+            onClick: () => setDraft(s.text),
+            style: {
+              // 暗色主题适配：跟随宿主前景/描边语义变量，缺省回退到中性灰
+              border: '1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.12))',
+              borderRadius: '999px',
+              background: 'transparent',
+              color: 'inherit',
+              padding: '5px 12px',
+              fontSize: '12px',
+              cursor: 'pointer',
+              whiteSpace: 'nowrap',
+            },
+          },
+          s.label,
+        ),
+      ),
+    )
+  }
+
   // ── 侧边栏图标组件 ──
   // ★ 必须渲染 span 而非 button：宿主 PanelRow 外层已是 <button onClick=selectPanel>，
   //   button 嵌套 button 是非法 HTML，浏览器解析时会把内层 button 拆出 DOM 层级，

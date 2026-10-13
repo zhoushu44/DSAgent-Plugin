@@ -1,1 +1,0 @@
-function r(t){const e=t.split(/[/\\]+/).filter(Boolean);return e[e.length-1]??t}function s(t){const e=t.replace(/[/\\]+$/,""),n=Math.max(e.lastIndexOf("/"),e.lastIndexOf("\\"));return n<0?"":n===0?e.slice(0,1):n===2&&/^[A-Za-z]:/.test(e)?e.slice(0,3):e.slice(0,n)}export{s as n,r as t};

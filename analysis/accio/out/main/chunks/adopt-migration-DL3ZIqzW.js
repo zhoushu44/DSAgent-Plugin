@@ -1,1 +1,0 @@
-require("../index.js"),require("./builtin-accio-ByGSjOgv.js");const e=require("./adopt-migration-DdcDetLq.js");exports.reconcileLegacyAdoptedVersions=e.reconcileLegacyAdoptedVersions;

@@ -1,1 +1,0 @@
-require("../index.js");const e=require("./cdp-discovery-Cd_ml8B2.js");exports.discoverChromeInstancesLight=e.discoverChromeInstancesLight,exports.listDirectCdpTabs=e.listDirectCdpTabs;

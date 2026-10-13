@@ -1,1 +1,0 @@
-require("../index.js").init_src();

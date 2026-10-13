@@ -1,1 +1,0 @@
-const e=require("../index.js"),r=require("./cri-cdp-connection-P9gGrN4_.js");var n=e.__commonJSMin((e,n)=>{n.exports=r.require_ws()});Object.defineProperty(exports,"default",{enumerable:!0,get:function(){return n()}});

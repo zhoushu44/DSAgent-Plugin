@@ -217,6 +217,8 @@ async function getAllDomainCookies(page: any, platform: string): Promise<{ name:
     // 拼多多商家后台：登录票据 PASS_ID 写在 mms.pinduoduo.com / .pinduoduo.com 域，
     // 与买家 H5（mobile.yangkeduo.com）不共享，必须显式列全。
     pdd_mms: ['https://mms.pinduoduo.com', 'https://.pinduoduo.com'],
+    // 1688（阿里巴巴 B2B）：独立登录，Cookie 写在 .1688.com 域
+    alibaba: ['https://.1688.com'],
   }
   const domains = domainMap[credPlatform] || domainMap[platform] || []
   if (domains.length > 0) {

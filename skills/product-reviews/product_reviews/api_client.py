@@ -32,6 +32,23 @@ from .config import (
 from .types import SkillError
 
 
+def _browser_headers(referer: str, origin: str, ua: str) -> dict:
+    """浏览器指纹头 — 所有 MTOP 调用必须携带。"""
+    return {
+        "Referer": referer,
+        "Origin": origin,
+        "User-Agent": ua,
+        "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="120", "Not(A:Brand";v="24"',
+        "Sec-Ch-Ua-Mobile": "?0",
+        "Sec-Ch-Ua-Platform": '"Windows"',
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Dest": "empty",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
+    }
+
+
 def _to_skill_error(exc: Exception, *, fallback: str) -> SkillError:
     if isinstance(exc, TaobaoRiskControlError):
         return SkillError(EXIT_API_ERROR, exc.message)
@@ -80,11 +97,11 @@ class TaobaoRateListClient:
             "foldFlag": "0",
         }
         data_str = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
-        headers = {
-            "Referer": f"https://detail.tmall.com/item.htm?id={item_id}",
-            "Origin": "https://detail.tmall.com",
-            "User-Agent": DEFAULT_USER_AGENT,
-        }
+        headers = _browser_headers(
+            referer=f"https://detail.tmall.com/item.htm?id={item_id}",
+            origin="https://detail.tmall.com",
+            ua=DEFAULT_USER_AGENT,
+        )
         try:
             return self._mtop.call(
                 label="评价",
@@ -120,11 +137,11 @@ class TaobaoDetailClient:
         data_str = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
         # Referer/Origin 必须与 DETAIL_BASE_URL 同域（tmall），跨域会被 MTOP 判风控
         referer = DETAIL_REFERER.format(item_id=item_id)
-        headers = {
-            "Referer": referer,
-            "Origin": "https://detail.tmall.com",
-            "User-Agent": DEFAULT_USER_AGENT,
-        }
+        headers = _browser_headers(
+            referer=referer,
+            origin="https://detail.tmall.com",
+            ua=DEFAULT_USER_AGENT,
+        )
         try:
             return self._mtop.call_once(
                 label="商品详情",

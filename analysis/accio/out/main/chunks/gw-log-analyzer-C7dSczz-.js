@@ -1,1 +1,0 @@
-const e=require(`../gateway-worker.js`);e.R(),exports.analyzeLogs=e.L;

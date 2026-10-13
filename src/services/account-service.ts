@@ -42,6 +42,8 @@ const LOGIN_URLS: Record<string, string> = {
   pinduoduo: 'https://mobile.yangkeduo.com/login.html',
   wechat_store: 'https://channels.weixin.qq.com/shop',
   zhihu: 'https://www.zhihu.com/signin',
+  // ★ 1688（阿里巴巴 B2B）独立登录页
+  alibaba: 'https://login.1688.com/member/signin.htm',
 }
 
 /** 内置回退数据：仅用于无数据时的可视预览 */

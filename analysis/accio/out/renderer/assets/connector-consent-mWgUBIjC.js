@@ -1,1 +1,0 @@
-import{Dt as e,Ot as r}from"./connector-store-WIJvko5l.js";import{c as a}from"./use-connectors-6rWI3IL8.js";r();const s=new Set(["alibaba","shopify"]);function u(o,i){const n=e(i);if(!n||!s.has(n.id))return null;if(n.id==="alibaba"){const t=a(o,n);return t?{...n,customDescription:t}:null}return n.id==="shopify"?n:null}export{u as n,s as t};

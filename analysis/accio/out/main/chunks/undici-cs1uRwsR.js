@@ -1,1 +1,0 @@
-const e=require("./registry-B3_Pzf6d.js");Object.defineProperty(exports,"default",{enumerable:!0,get:function(){return e.require_undici()}});

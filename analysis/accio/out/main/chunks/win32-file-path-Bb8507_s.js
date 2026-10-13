@@ -1,1 +1,0 @@
-const e=require("../index.js");e.init_win32_stable_file(),exports.openWin32StableFile=e.openWin32StableFile;

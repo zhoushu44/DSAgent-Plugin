@@ -1,1 +1,0 @@
-const e=require(`../gateway-worker.js`);Object.defineProperty(exports,`default`,{enumerable:!0,get:function(){return e.Mg()}});
