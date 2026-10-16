@@ -114,7 +114,7 @@ python3 {baseDir}/scripts/fetch_data.py --keyword "搜索关键词" [--page 1] [
 
 | 错误场景 | failure_kind | 处理方式 |
 |---------|-------------|---------|
-| DSCONNECT_URL 未设置 | `not_bound` | 引导用户到「账号连接」页面绑定闲鱼账号 |
+| 网关不可达（env 未注入且自动发现失败） | `not_bound` | 先确认 DSAgent 宿主在运行；在运行仍报错才引导用户到「账号连接」页面绑定闲鱼账号 |
 | _m_h5_tk 获取失败 | `token_expired` | 提示账号登录态可能失效，需重新登录 |
 | 搜索请求被风控 | `risk_control` | 提示用户去平台完成安全验证后重试 |
 | 搜索接口限流 | `rate_limit` | 告诉用户稍后重试 |

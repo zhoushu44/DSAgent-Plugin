@@ -253,7 +253,7 @@ Harness 要求 `name` 必须是**绝对路径**，且本项目**不支持** YAML
 | `dsagent_xiaohongshu_publish` | 发布笔记到小红书（视频 / 图文） |
 | `dsagent_xianyu_publish` | 发布商品到闲鱼 |
 | `dsagent_taobao_publish` | 发布商品到淘宝 / 天猫卖家中心 |
-| `dsagent_pdd_publish` | 发布商品到拼多多商家后台 |
+| `dsagent_pdd_publish2` | 发布商品到拼多多商家后台（统一商品数据格式） |
 
 ### 采集类（只读）
 

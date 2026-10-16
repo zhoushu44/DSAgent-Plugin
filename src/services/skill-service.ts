@@ -14,7 +14,7 @@
  */
 
 import { readdir, readFile, writeFile, stat } from 'node:fs/promises'
-import { existsSync, readdirSync, type Dirent } from 'node:fs'
+import { existsSync, readdirSync, type Dirent, type Stats } from 'node:fs'
 import { delimiter, join, resolve, sep } from 'node:path'
 import { spawn, execSync } from 'node:child_process'
 import { extractTokens } from './account-service.js'
@@ -287,7 +287,7 @@ const SKILL_PLATFORM: Record<string, string> = {
   'bilibili-publish': 'bilibili',
   // pdd 平台（拼多多）
   'pdd-crawl': 'pdd',
-  'pdd-publish': 'pdd',
+  'pdd-publish-2': 'pdd',
 }
 
 /**
@@ -499,9 +499,16 @@ export function createSkillService(skillRoot: string, opts?: { statsPath?: strin
     for (const entry of entries) {
       const dir = join(root, entry)
       const skillFile = join(dir, 'SKILL.md')
+      // 无 SKILL.md 的目录不是技能（.dsagent runtime 基建 / workflows YAML /
+      // Python 包布局等），正常跳过，不计错误、不打噪声
+      let st: Stats
       try {
-        const st = await stat(skillFile)
-        if (!st.isFile()) continue
+        st = await stat(skillFile)
+      } catch {
+        continue
+      }
+      if (!st.isFile()) continue
+      try {
         const raw = await readFile(skillFile, 'utf8')
         const id = pickFrontmatter(raw, 'name') || entry
         const split = splitSkillMarkdown(raw)

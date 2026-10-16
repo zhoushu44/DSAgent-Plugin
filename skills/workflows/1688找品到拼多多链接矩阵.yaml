@@ -1,0 +1,49 @@
+name: 1688找品到拼多多链接矩阵
+category: 店铺经营
+mode: batch
+count_input: count
+description: |
+  从找品开始的一条龙工作流。每一轮处理一个关键词：
+  ① 在 1688 按关键词搜货源，按产地/应季/口碑打分选出最优款，打开详情页抓 SKU、属性与图片，产出素材包；
+  ② 用该素材包生成差异化链接的主图（3:4 / 1:1 / 白底图）与整套 8 屏详情页 + 长图。
+  一轮约 2.5 分钟，跑几轮就出几条完整链接。
+inputs:
+  - key: keywords
+    label: 找品关键词（逗号或换行分隔）
+    type: textarea
+    default: 儿童睡衣,儿童家居服,儿童睡衣男孩2026新款,儿童绒绒家居服,儿童睡衣女孩
+    required: true
+  - key: count
+    label: 生成链接数量（即轮次）
+    type: number
+    default: "5"
+    required: true
+    min: 1
+    max: 100
+  - key: origin
+    label: 产地筛选
+    type: text
+    default: 宜山,苍南,温州,浙江
+    required: false
+  - key: out
+    label: 输出目录（留空=工作区 pdd-matrix-output）
+    type: text
+    default: ""
+    required: false
+steps:
+  - name: 1688找品取数
+    skill: ali1688-pick
+    args:
+      keywords: "{{keywords}}"
+      index: "{{loop.index}}"
+      origin: "{{origin}}"
+      out: "{{out}}"
+    output: pick
+  - name: 生成链接矩阵
+    skill: pdd-link-matrix
+    args:
+      keywords: "{{keywords}}"
+      index: "{{loop.index}}"
+      pack: "{{pick.pack_dir}}"
+      out: "{{out}}"
+    output: matrix

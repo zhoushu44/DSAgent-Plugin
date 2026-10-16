@@ -1,0 +1,35 @@
+name: 拼多多多链接矩阵
+category: 店铺经营
+mode: batch
+count_input: count
+description: |
+  一个款批量生成多条差异化链接：输入关键词与数量，每条链接按「颜色×场景×机位×模特×文案」五维差异化，
+  产出 3 张主图（3:4 长图 / 1:1 方图 / 白底图）+ 8 屏详情页 + 详情长图。
+  适用于拼多多测款铺链接场景。
+inputs:
+  - key: keywords
+    label: 关键词（逗号或换行分隔）
+    type: textarea
+    default: 儿童睡衣,儿童家居服,儿童睡衣男孩2026新款,儿童绒绒家居服,儿童睡衣女孩
+    required: true
+  - key: count
+    label: 生成链接数量
+    type: number
+    default: "5"
+    required: true
+    min: 1
+    max: 100
+  - key: out
+    label: 输出目录（留空=工作区 pdd-matrix-output）
+    type: text
+    default: ""
+    required: false
+steps:
+  - name: 生成一条链接
+    skill: pdd-link-matrix
+    args:
+      keywords: "{{keywords}}"
+      count: "{{count}}"
+      index: "{{loop.index}}"
+      out: "{{out}}"
+    output: step1

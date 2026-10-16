@@ -67,38 +67,44 @@
 
 ## 四、缓存层（省模型 API 调用）
 
-同类目发相似商品时，上次成功填的属性值直接复用，不调模型：
+同类目发相似商品时，上次成功填的属性值直接复用，不调模型。**淘宝走 g5 类目档案**（`category-profile.ts`，`platform+catId` 精确键，发布成功自动落档，档案边界到类目属性为止）；**拼多多走 attr-cache**（`platform:categoryKeyword` 键）：
 
 ```
 填属性循环：
   1. 展开下拉 → 读当前真实选项
-  2. 查缓存（平台+类目+属性名）→ 有上次成功填的值？
-     ├─ 有且值在当前选项里 → 直接用，标"缓存命中"（不调模型）
+  2. 查档案/缓存 → 有上次成功填的值？
+     ├─ 有且值在当前选项里 → 直接用，标"档案回放/缓存命中"（不调模型）
      └─ 无 / 不在选项里 → fallback 到模型选
   3. 点选 → 回读校验
-  4. 成功：模型选的记进缓存；缓存命中的不重复记
+  4. 成功：模型选的记进档案/缓存；命中的不重复记
 ```
 
-**接入方式**（每个新平台加 3 行）：
+**接入方式**（淘宝模式，推荐——照 `taobao-publish.ts` 的 `fillCategoryAttrs` 抄）：
+
+```typescript
+import { createCategoryProfileStore, type CategoryProfileStore } from './services/category-profile.js'
+
+const profileStore: CategoryProfileStore = createCategoryProfileStore(/* ~/.dsh/publish-profiles 目录 */)
+```
+
+在 `fillXxxAttrs` 里 `profileStore.load(platform, catId)` 回放（值仍在当前候选里才用），发布成功时把本次 confirmed 属性 + freightTemplate + schemaFp `profileStore.save(...)` 落档。
+
+**pdd 旧模式**（attr-cache，`platform:categoryKeyword` 键）：
 
 ```typescript
 import { createAttrCache, type AttrCache } from './services/attr-cache.js'
 
-const attrCache: AttrCache = createAttrCache(
-  (() => {
-    const p = require('node:path')
-    return p.join(require('node:os').homedir(), '.dsh', '.attr-cache.json')
-  })()
-)
+const attrCache: AttrCache = createAttrCache(/* ~/.dsh/.attr-cache.json */)
 ```
 
-然后在 `fillXxxAttrs` 循环里加缓存查询/验证/记录（照 taobao-publish 的 `fillCategoryAttrs` 循环体抄）。
+然后在 `fillXxxAttrs` 循环里加缓存查询/验证/记录（照 pdd-publish 的 `fillAttributes` 循环体抄）。
 
-**关键安全设计**：
+**关键安全设计**（两种模式通用）：
 - 只缓存成功且经页面验证的值（confirmed=true 才记）
 - 命中后仍读当前下拉选项做验证——选项变了就 fallback，不硬塞旧值
 - 只缓存枚举型（下拉选值），不缓存文本型
 - 写串行化 + 原子写（tmp+rename），失败不影响发布
+- 档案 schemaFp 指纹变化 → 旧值降级为「待验证」
 
 ---
 
@@ -147,11 +153,11 @@ SKU 规格是上架里仅次于类目属性的第二大填值环节。它和类�
 
 | 平台 | 函数 | 方式 |
 |---|---|---|
-| 淘宝 | `fillDetailImages` | 打开详情编辑器（iframe `#desc-editor`）→ 逐张上传到素材库 → 插入编辑器 |
 | 拼多多 | `uploadDetailImages` | 直接 `input[type=file]` 批量上传（最多 50 张、单张 ≤3MB） |
 
+> 淘宝 `fillDetailImages`（跨域 Lite 详情编辑器链路）已按 2026-10 精简决策删除——对话路径不可达的死代码（工具 schema 不暴露、dev 入口不传），详情图交由人工在窗口内补。
+
 **关键约束**：
-- 淘宝详情编辑器是 iframe，需要在 iframe 上下文里操作（`page.frames()` 切换）
 - 拼多多单张 ≤3MB、最多 50 张
 - 上传失败不阻断发布，只记 `missed`
 
@@ -230,8 +236,8 @@ SKU 规格是上架里仅次于类目属性的第二大填值环节。它和类�
 - [ ] 标题/价格/库存/货号（通用字段）
 
 ### 缓存
-- [ ] import `createAttrCache`，创建实例
-- [ ] `fillXxxAttrs` 循环里加缓存查询/验证/记录
+- [ ] 接 g5 类目档案（`createCategoryProfileStore`，推荐）：`fillXxxAttrs` 里 `profileStore.load(platform, catId)` 回放 + 发布成功 `save` 落档
+- [ ] 或 pdd 旧模式：import `createAttrCache` + `fillXxxAttrs` 循环里加缓存查询/验证/记录
 
 ### 安全
 - [ ] 品牌 `ATTR_SKIP_RE` 跳过（授权风险）
@@ -245,7 +251,7 @@ SKU 规格是上架里仅次于类目属性的第二大填值环节。它和类�
 
 | 平台 | 类目树 | 属性表 | 缓存 | 现状 |
 |---|---|---|---|---|
-| 淘宝/天猫 | ✅ 搜索选第一个 | ✅ 7 函数链 | ✅ attrCache | **完整** |
+| 淘宝/天猫 | ✅ 搜索选第一个 | ✅ 7 函数链 | ✅ g5 类目档案（attr-cache 已退场） | **完整**（含多规格 SKU / 运费模板档案回放） |
 | 拼多多 | ✅ 入口自动推荐 | ✅ 7 函数链 | ✅ attrCache | **完整** |
 | 闲鱼 | ❌ 无强制树 | ❌ | — | 不适用（自由填） |
 | bilibili/douyin/xiaohongshu/zhihu | ❌ 内容发布 | ❌ | — | 不适用（无商品类目） |

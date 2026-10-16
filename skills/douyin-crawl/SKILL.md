@@ -152,7 +152,7 @@ python3 {baseDir}/scripts/fetch_data.py --mode user [--count 18] [--max-cursor 0
 
 | 错误场景 | failure_kind | 处理方式 |
 |---------|-------------|---------|
-| DSCONNECT_URL 未设置 | `not_bound` | 引导用户到「账号连接」页面绑定抖音账号 |
+| 网关不可达（env 未注入且自动发现失败） | `not_bound` | 先确认 DSAgent 宿主在运行；在运行仍报错才引导用户到「账号连接」页面绑定抖音账号 |
 | 拿不到账号真实身份（sec_uid 为空） | `token_expired` | 提示抖音登录态可能失效，需重新登录 |
 | 搜索返回 `search_nil_type=verify_check` | `risk_control` | 提示用户去抖音完成安全验证后重试，勿当作 0 条结果 |
 | 接口返回非 0 `status_code` | `api_error` | 展示 `status_msg`（如 `status_code=5` 表示参数不合法） |

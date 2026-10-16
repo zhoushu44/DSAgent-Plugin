@@ -14,6 +14,8 @@
  *      回复顺带提及其他平台不得抢走主话题平台（实测场景 5 踩坑）
  *   G. 边界词：词表部分匹配（如「红书」命中小红书）、「分析」缺字不误判
  *   H. chips 数量与稳定性：恒 ≤5、同输入同输出
+ *   I. 真实会话回放：浏览器实测多轮对话
+ *   J. 拼多多链路：新增平台链路项（含「上架2」发布入口）
  *
  * 用法：node dev/suggest-rules.test.mjs
  */
@@ -217,6 +219,21 @@ ctx = inferContext([
 eq('I1 实测会话：stage=analyze（不被 turn2 的 manage 抢占）', ctx.stage, 'analyze')
 r = pickSuggestions(ctx)
 eq('I2 实测会话：首推发布类', r[0]?.stage, 'publish')
+
+// ── J. 拼多多链路（新增平台链路项，含「上架2」发布入口）──
+console.log('J. 拼多多链路')
+ctx = inferContext([t('采集拼多多商品数据', '完成')])
+eq('J1 采集拼多多 → platform=pdd', ctx.platform, 'pdd')
+eq('J2 采集拼多多 → stage=collect', ctx.stage, 'collect')
+r = pickSuggestions(ctx)
+eq('J3 采集拼多多 → 首推分析拼多多商品', r[0]?.label, '分析拼多多商品')
+ctx = inferContext([t('分析拼多多商品数据', '完成')])
+eq('J4 分析拼多多 → 首推发布拼多多商品', pickSuggestions(ctx)[0]?.label, '发布拼多多商品')
+ctx = inferContext([t('帮我上架一个拼多多商品', '已提交')])
+eq('J5 上架拼多多 → platform=pdd 且 stage=publish', `${ctx.platform}/${ctx.stage}`, 'pdd/publish')
+// 拼多多发布入口的 text 即「上架2」路由触发语
+const pddPublish = SUGGESTIONS.find((s) => s.platform === 'pdd' && s.stage === 'publish')
+eq('J6 拼多多发布 chip 文本', pddPublish?.text, '帮我上架一个拼多多商品')
 
 console.log(`\n[suggest-rules] 结果：${passed} 通过 / ${failed} 失败`)
 if (failed > 0) {

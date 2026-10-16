@@ -6,7 +6,7 @@
 import { CredentialStore, keyCookies, credentialPlatform, isRiskPassCookie, type AccountEnv } from './services/credential-store.js'
 import { clearRiskCooldown, probePlatformPermission, invalidateGatewayCache, desktopUserAgent } from './gateway-proxy.js'
 import * as authOp from './services/auth-operation.js'
-import { existsSync, mkdirSync, readdirSync, renameSync, rmSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 
@@ -38,6 +38,18 @@ async function closeActiveBrowser(): Promise<void> {
   const current = activeBrowser
   if (!current) return
   try { await current.close() } catch { /* 忽略 */ }
+  // Windows：close() resolve 后 Chrome 进程退出与文件句柄释放是异步的，
+  // 立即对该 Profile 目录做 rename / cpSync 会 EPERM（登录收编即踩中）。
+  // 主动等进程真正退出（上限 2s，正常路径几乎零延迟）。
+  try {
+    const proc = current.browser?.process?.()
+    if (proc && proc.exitCode === null) {
+      await new Promise<void>(resolve => {
+        const timer = setTimeout(resolve, 2000)
+        proc.once('exit', () => { clearTimeout(timer); resolve() })
+      })
+    }
+  } catch { /* browser 已断连等，忽略 */ }
   activeBrowser = null
   if (current.userDataDir) releaseProfile(current.userDataDir)
 }
@@ -433,24 +445,65 @@ export function profileDir(platform: string, shopKey?: string): string {
  * 若不收编，该目录会在下一次「添加其他账号」时被当作历史垃圾清掉，
  * 这个账号的设备身份就永远是一次性的 —— 帐号级隔离等于白做。
  *
- * 目标目录已存在时保留既有环境（设备身份更老、平台更认），丢掉本次一次性环境。
- * 迁移失败不影响本次登录结果，下次登录会直接落到账号目录。
+ * 迁移策略（按优先级）：
+ * 1. 目标已存在            → 保留既有环境（设备身份更老、平台更认），丢掉本次一次性环境；
+ *                            若既有环境连关键 Cookie 文件都没有（空壳，多为发布侧 profileDir()
+ *                            mkdirSync 副作用预建的），则用本次登录态覆盖之。
+ * 2. rename（原子、秒成）   → 失败时退化为 cpSync 拷贝（Windows 上 Chrome 文件锁异步释放，
+ *                            close() 返回后短暂窗口内 rename 会 EPERM；EXDEV 跨盘同理）。
+ * 3. 拷贝成功后尽力删除源目录，删不掉也不回退（多一份残留好过登录态丢失）。
+ *
+ * 迁移失败时【不再静默】：返回一次性目录的同时打 WARN 日志 ——
+ * 此时账号没有专属 Profile，后续发布/风控验证将退化为「空目录 + 仅注入 Cookie」，
+ * 大概率被平台风控挂起，必须让人看见。
  */
 function adoptProfileDir(fromDir: string, shopKey: string): string {
   if (!fromDir || !shopKey) return fromDir
   const target = accountProfilePath(shopKey)
   if (fromDir === target) return target
+  const log = (level: 'log' | 'warn', msg: string) =>
+    (level === 'warn' ? console.warn : console.log)(`[dsagent-login] ${msg}`)
   try {
     if (existsSync(target)) {
-      rmSync(fromDir, { recursive: true, force: true })
-      return target
+      // 空壳判定：目录存在但连 Default/Cookies（或 Network/Cookies）都没有 →
+      // 是 profileDir() 的 mkdirSync 副作用预建的空目录，本次登录态比它有价值，直接覆盖。
+      const hasCookieFile = ['Default/Cookies', 'Network/Cookies'].some(p => existsSync(join(target, p)))
+      if (hasCookieFile) {
+        rmSync(fromDir, { recursive: true, force: true })
+        log('log', `Profile 已有账号专属环境，本次一次性环境已丢弃: ${target}`)
+        return target
+      }
+      log('log', `检测到账号 Profile 空壳（无 Cookie 文件），用本次登录环境覆盖: ${target}`)
+      rmSync(target, { recursive: true, force: true })
     }
     mkdirSync(join(profilesRoot(), 'accounts'), { recursive: true })
-    renameSync(fromDir, target)
-    console.log(`[dsagent-login] Profile 已收编为账号专属: ${target}`)
+    // rename 优先：原子且零拷贝。Windows 上 close() 后 Chrome 锁异步释放，短窗内会 EPERM，
+    // 用小步重试（总等待约 1s）覆盖绝大多数场景；仍失败（EXDEV 跨盘等）则退化为拷贝。
+    let lastErr: unknown = null
+    for (let i = 0; i < 4; i++) {
+      try {
+        renameSync(fromDir, target)
+        lastErr = null
+        break
+      } catch (err) {
+        lastErr = err
+        const code = (err as NodeJS.ErrnoException)?.code
+        if (code !== 'EPERM' && code !== 'EACCES' && code !== 'EBUSY') break // 不可重试错误，走拷贝退化
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300)
+      }
+    }
+    if (lastErr) {
+      log('warn', `Profile rename 失败（${lastErr instanceof Error ? lastErr.message : String(lastErr)}），退化为拷贝`)
+      cpSync(fromDir, target, { recursive: true, force: true })
+      try { rmSync(fromDir, { recursive: true, force: true }) } catch { /* 源删不掉留着也无害 */ }
+      log('log', `Profile 已拷贝收编为账号专属: ${target}`)
+    } else {
+      log('log', `Profile 已收编为账号专属: ${target}`)
+    }
     return target
   } catch (err) {
-    console.log(`[dsagent-login] Profile 收编失败（不影响登录）: ${err instanceof Error ? err.message : String(err)}`)
+    const msg = err instanceof Error ? err.message : String(err)
+    log('warn', `Profile 收编失败（登录态未落到账号目录，后续发布可能触发平台风控）: ${msg}`)
     return fromDir
   }
 }

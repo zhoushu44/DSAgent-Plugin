@@ -4,8 +4,8 @@
  * 职责：定义 10 个「平台内容发布 + 数据采集 + 下载」工具：
  *   dsagent_douyin_publish / dsagent_zhihu_publish / dsagent_bilibili_publish /
  *   dsagent_bilibili_download / dsagent_xiaohongshu_publish / dsagent_pdd_crawl /
- *   dsagent_xianyu_publish / dsagent_taobao_publish / dsagent_pdd_publish /
- *   dsagent_xianyu_analytics
+ *   dsagent_xianyu_publish / dsagent_taobao_publish /
+ *   dsagent_pdd_publish2 / dsagent_xianyu_analytics
  *
  * 统一模式：
  *   - 发布类是 L2 真实副作用工具，两步走：先不带 confirm 拿「发布预览」→
@@ -25,19 +25,29 @@ import { xiaohongshuPublish } from './xiaohongshu-publish.js'
 import { pddCrawl } from './pdd-crawl.js'
 import { xianyuPublish } from './xianyu-publish.js'
 import { xianyuAnalytics } from './xianyu-analytics.js'
-import { taobaoPublish } from './taobao-publish.js'
-import { pddPublish } from './pdd-publish.js'
-import { defineTool, renderToolOutput, agentIdOf } from './tool-runtime.js'
+import { taobaoPublish, type TaobaoSkuInput } from './taobao-publish.js'
+import { pddPublish2 } from './pdd-publish2.js'
+import { defineTool, renderToolOutput, agentIdOf, agentModelRouteOf } from './tool-runtime.js'
+
+/** 宿主 LLM 服务的最小接口（`ctx.llm`）；宿主未提供时为 undefined。 */
+type HostLlm = { stream: (options: any) => AsyncIterable<any> }
 
 /** 插件依赖注入：index.ts apply() 内创建的服务，全部从这里进 */
 export interface PublishToolsDeps {
   /** 凭证库（各平台函数用它取 Cookie / 选号） */
   store: CredentialStore
+  /**
+   * 宿主 LLM 服务解析器（`ctx.llm`），供「商品属性」自动选值调用宿主对话模型。
+   *
+   * 传**解析函数**而非对象：宿主 LLM 服务可能晚于本插件注册，执行期再取才拿得到；
+   * 宿主未提供时返回 undefined，属性区自动降级（只走缓存），不影响发布。
+   */
+  getLlm?: () => HostLlm | undefined
 }
 
 /** 构建发布 / 采集类工具定义 */
 export function buildPublishTools(deps: PublishToolsDeps): import('@deepseek-ai/dsh-tools').ToolDefinition[] {
-  const { store } = deps
+  const { store, getLlm } = deps
 
   return [
 
@@ -371,8 +381,8 @@ export function buildPublishTools(deps: PublishToolsDeps): import('@deepseek-ai/
       description: '发布商品到淘宝 / 天猫卖家中心（商品发布，L2 风险，有真实副作用）。'
         + '通过 puppeteer 驱动淘宝/天猫网页版发布页完成「上传主图 → 填通用字段 → 提交宝贝信息」。'
         + '★ 必须两步调用：先不带 confirm 调用拿到「发布预览」给用户看，用户明确同意后再带 confirm=true 调用才会真正提交。'
-        + '★ 只自动填通用字段（主图/标题/一口价/库存/货号）；类目属性、商品详情、发货与售后设置不会自动填，'
-        + '需用户在弹出窗口内人工补全后提交；发布第一步需选类目，传 categoryKeyword 可自动搜索并选第一个类目，否则需在窗口内人工选。'
+        + '★ 只自动填通用字段（主图/标题/一口价/库存/货号/多规格 SKU）；类目属性、商品详情、发货与售后设置不会自动填，'
+        + '需用户在弹出窗口内人工补全后提交；发布第一步需选类目，传 categoryKeyword 可自动搜索并按与标题的相关性挑最匹配类目，否则需在窗口内人工选。'
         + '★ 淘宝与天猫共用同一套淘宝登录态（账号连接页只需连淘宝）。',
       parameters: {
         title: { type: 'string', required: true, description: '商品标题（必填）。淘宝/天猫要求标题必填且不超过 60 个字符' },
@@ -382,7 +392,8 @@ export function buildPublishTools(deps: PublishToolsDeps): import('@deepseek-ai/
         price: { type: 'string', description: '一口价（元，字符串数字，可选）。填则尝试自动填写，正数、1 亿元以内' },
         stock: { type: 'string', description: '库存（件，字符串数字，可选）。填则尝试自动填写，需为非负整数' },
         itemNo: { type: 'string', description: '商家编码/货号（可选）。填则尝试自动填写（天猫发布页有独立输入框）' },
-        categoryKeyword: { type: 'string', description: '选类目关键词（可选）。发布入口先落在「选类目」页，填了则自动搜索该关键词并选第一个类目后进入表单；不填需用户在窗口内人工选类目' },
+        skus: { type: 'string', description: '多规格（销售属性）JSON 数组字符串（可选），形如 [{"name":"红色","price":"99","stock":"10","outerId":"SKU001"}]，一项 = 一个规格值 = SKU 表一行。传了则自动添加销售属性值并回填 SKU 表的价格/数量/商家编码；不传则沿用单 SKU。仅旧版 SKU 面板类目生效，新版 SKU 面板（「+ 创建规格」按钮）的多规格需人工补填' },
+        categoryKeyword: { type: 'string', description: '选类目关键词（可选）。发布入口先落在「选类目」页，填了则自动搜索该关键词，候选按与商品标题的相关性（叶子类目名与标题的字词重叠）降序尝试，挑第一个能让「确认，下一步」可用的类目。★ 请传具体叶子类目词（如「儿童睡衣」「家居服」），不要传一级大类名（如「童装」）或整段标题。不填需用户在窗口内人工选类目' },
         brand: { type: 'string', description: '品牌（可选）。部分类目（如「AI软件订阅/Token充值」）在选类目页把「品牌」列为必填属性，不填则无法进入表单；填了会优先在品牌下拉里匹配，匹配不到则取列表第一项' },
         model: { type: 'string', description: '型号（可选）。部分类目在选类目页把「型号」列为必填属性，不填则无法进入表单' },
         confirm: { type: 'boolean', description: '是否已获用户确认。省略或 false 时只返回发布预览，不产生任何写操作；用户同意后传 true 才真正发布' },
@@ -406,6 +417,29 @@ export function buildPublishTools(deps: PublishToolsDeps): import('@deepseek-ai/
               images = rawImages.split(',').map(p => p.trim()).filter(Boolean)
             }
           }
+          // skus 支持 JSON 数组字符串：[{"name":"红色","price":"99","stock":"10","outerId":"SKU001"}]
+          let skus: TaobaoSkuInput[] | undefined
+          const rawSkus = String((args as any).skus ?? '').trim()
+          if (rawSkus) {
+            try {
+              const parsed = JSON.parse(rawSkus)
+              if (Array.isArray(parsed)) {
+                skus = parsed.map((s: any) => ({
+                  name: String(s?.name ?? '').trim(),
+                  price: s?.price != null ? String(s.price).trim() : undefined,
+                  stock: s?.stock != null ? String(s.stock).trim() : undefined,
+                  outerId: s?.outerId != null ? String(s.outerId).trim() : undefined,
+                })).filter(s => s.name)
+              }
+            } catch {
+              return { ok: false, failureKind: 'api_error', text: 'skus 看起来不是合法的 JSON 数组字符串，请检查格式（如 [{"name":"红色","price":"99","stock":"10"}]）。' } as any
+            }
+          }
+          const route = agentModelRouteOf(exec)
+          const llm = getLlm?.()
+          const attrModel = route && llm
+            ? { stream: (o: any) => llm.stream(o), provider: route.provider, model: route.model }
+            : undefined
           const result = await taobaoPublish(store, {
             images,
             title: String(args.title ?? ''),
@@ -413,12 +447,14 @@ export function buildPublishTools(deps: PublishToolsDeps): import('@deepseek-ai/
             price: args.price != null ? String(args.price) : '',
             stock: args.stock != null ? String(args.stock) : '',
             itemNo: args.itemNo != null ? String(args.itemNo) : '',
+            skus,
             categoryKeyword: args.categoryKeyword != null ? String(args.categoryKeyword) : '',
             brand: args.brand != null ? String(args.brand) : '',
             model: args.model != null ? String(args.model) : '',
             confirm: args.confirm === true,
             account: args.account ? String(args.account).trim() : '',
             agentId: agentIdOf(exec),
+            attrModel,
           })
           return result as any
         } catch (err) {
@@ -426,94 +462,6 @@ export function buildPublishTools(deps: PublishToolsDeps): import('@deepseek-ai/
             ok: false,
             failureKind: 'api_error',
             text: `淘宝发布异常：${err instanceof Error ? err.message : String(err)}`,
-          } as any
-        }
-      },
-    }),
-
-    /* ─── 拼多多商家后台 发布工具（L2：真实副作用，必须用户确认后才执行） ─── */
-
-    defineTool({
-      name: 'dsagent_pdd_publish',
-      description: '发布商品到拼多多商家后台（商品发布，L2 风险，有真实副作用）。'
-        + '通过 puppeteer 驱动 mms.pinduoduo.com 商家后台走真实两步式链路（商品列表 →「发布新商品」→ 第一步填主图+标题 →'
-        + '「下一步」→ 第二步表单填通用字段 →「提交并上架」）。'
-        + '★ 必须两步调用：先不带 confirm 调用拿到「发布预览」给用户看，用户明确同意后再带 confirm=true 调用才会真正提交。'
-        + '★ 类目由平台按发布入口自动推荐带出，本工具不自动选类目。'
-        + '★ 自动填通用字段（主图/标题/参考价/库存/货号）+ 详情页图片 + SKU 多规格（规格值/预览图/拼单价，'
-        + '单买价自动按「拼单价 + 1」计算）；商品属性尽力自动选（品牌除外）。'
-        + '★ 发货与售后设置、运费模板、商品资质不会自动填，需用户在弹出窗口内人工补全后提交。'
-        + '★ 拼多多商家后台与拼多多买家账号（dsagent_pdd_crawl 用的那套）是**两套完全独立的登录态**，'
-        + '需在账号连接页单独绑定「拼多多商家后台」。',
-      parameters: {
-        title: { type: 'string', required: true, description: '商品标题（必填）。拼多多要求标题必填且不超过 60 个字符' },
-        images: { type: 'string', required: true, description: '本地图片文件绝对路径，至少 1 张、最多 10 张（拼多多主轮播图上限），单张不超过 3MB。多张用英文逗号分隔，也可传 JSON 数组字符串' },
-        // DSH 校验器要求：可选参数必须整体省略 required 字段，写 false 会导致插件加载失败
-        detailImages: { type: 'string', description: '商品详情页图片的本地绝对路径（可选），最多 50 张、单张不超过 3MB。多张用英文逗号分隔，也可传 JSON 数组字符串' },
-        skus: { type: 'string', description: 'SKU 多规格（可选），JSON 数组字符串，形如 [{"name":"白色","image":"C:/img/w.jpg","price":"9.9","stock":"1000"}]。name 为规格值名（必填，如「白色」）；image 为该规格的预览图本地绝对路径（平台必填：宽高比 1:1、宽高均 >480px、单张 <3MB、仅 JPG/PNG）；price 为拼单价（元）；stock 为库存。★ 单买价由工具自动按「拼单价 + 1」填写，无需传。★ 用户没给 SKU 就别传本参数' },
-        category: { type: 'string', description: '类目关键词或完整路径（可选，如「纸杯」）。★ 实测：拼多多类目由平台按发布入口自动推荐带出，本参数仅作提示，不会自动选类目；如需改类目请在第二步页面点「修改分类」' },
-        price: { type: 'string', description: '商品参考价（元，字符串数字，可选）。填则尝试自动填写，正数、1 亿元以内' },
-        stock: { type: 'string', description: '库存（件，字符串数字，可选）。需为非负整数；★ 用户没提库存时直接省略本参数，工具会按默认 1000 填' },
-        itemNo: { type: 'string', description: '商家编码/货号（可选）。★ 默认不写：用户没给货号就别传本参数' },
-        confirm: { type: 'boolean', description: '是否已获用户确认。省略或 false 时只返回发布预览，不产生任何写操作；用户同意后传 true 才真正发布' },
-        account: { type: 'string', description: '要使用的账号 shopKey（可选）。该平台有多个可用账号时，先按返回的候选向用户确认，再把选定的 shopKey 填到这里' },
-      },
-      output: { schema: { type: 'json' }, render: renderToolOutput },
-      async execute(args, exec) {
-        try {
-          // images / detailImages 支持两种写法：JSON 数组字符串（["a.jpg","b.jpg"]）或英文逗号分隔
-          const parsePaths = (raw: any): string[] | null => {
-            const s = String(raw ?? '').trim()
-            if (!s) return []
-            if (!s.startsWith('[')) return s.split(',').map(p => p.trim()).filter(Boolean)
-            try {
-              const parsed = JSON.parse(s)
-              return Array.isArray(parsed) ? parsed.map(p => String(p ?? '').trim()).filter(Boolean) : []
-            } catch {
-              return null
-            }
-          }
-          const images = parsePaths((args as any).images)
-          if (images === null) {
-            return { ok: false, failureKind: 'api_error', text: 'images 看起来是 JSON 数组但解析失败，请检查格式（如 ["D:\\\\img\\\\1.jpg","D:\\\\img\\\\2.jpg"]），或改用英文逗号分隔。' } as any
-          }
-          const detailImages = parsePaths((args as any).detailImages)
-          if (detailImages === null) {
-            return { ok: false, failureKind: 'api_error', text: 'detailImages 看起来是 JSON 数组但解析失败，请检查格式（如 ["D:\\\\img\\\\d1.jpg","D:\\\\img\\\\d2.jpg"]），或改用英文逗号分隔。' } as any
-          }
-          // skus：JSON 数组字符串（也容忍直接传数组），形如 [{"name":"白色","image":"C:/w.jpg","price":"9.9","stock":"1000"}]
-          const rawSkusArg: any = (args as any).skus
-          let skus: any[] = []
-          if (Array.isArray(rawSkusArg)) {
-            skus = rawSkusArg
-          } else if (String(rawSkusArg ?? '').trim()) {
-            try {
-              const parsed = JSON.parse(String(rawSkusArg).trim())
-              if (!Array.isArray(parsed)) throw new Error('不是数组')
-              skus = parsed
-            } catch {
-              return { ok: false, failureKind: 'api_error', text: 'skus 解析失败，请传 JSON 数组字符串（如 [{"name":"白色","image":"C:/img/w.jpg","price":"9.9","stock":"1000"}]）。' } as any
-            }
-          }
-          const result = await pddPublish(store, {
-            images,
-            detailImages,
-            skus,
-            title: String(args.title ?? ''),
-            category: args.category != null ? String(args.category) : '',
-            price: args.price != null ? String(args.price) : '',
-            stock: args.stock != null ? String(args.stock) : '',
-            itemNo: args.itemNo != null ? String(args.itemNo) : '',
-            confirm: args.confirm === true,
-            account: args.account ? String(args.account).trim() : '',
-            agentId: agentIdOf(exec),
-          })
-          return result as any
-        } catch (err) {
-          return {
-            ok: false,
-            failureKind: 'api_error',
-            text: `拼多多发布异常：${err instanceof Error ? err.message : String(err)}`,
           } as any
         }
       },
@@ -549,6 +497,53 @@ export function buildPublishTools(deps: PublishToolsDeps): import('@deepseek-ai/
             ok: false,
             failureKind: 'api_error',
             text: `闲鱼数据分析异常：${err instanceof Error ? err.message : String(err)}`,
+          } as any
+        }
+      },
+    }),
+
+    /* ─── 拼多多商家后台 发布工具（统一商品数据格式；L2：真实副作用，必须用户确认后才执行） ─── */
+
+    defineTool({
+      name: 'dsagent_pdd_publish2',
+      description: '发布商品到拼多多商家后台（基于**统一商品数据格式**；L2 风险，有真实副作用）。'
+        + '入参只有一个统一的 product（JSON），'
+        + '规格用「维度数组」表达（如 颜色 / 尺码，最多 2 维），SKU 用「维度名 → 规格值」组合表达，'
+        + '天然支持**颜色 × 尺码 二维矩阵**；商品属性可显式指定 name→value（比让模型猜更可控）。'
+        + '执行链路：puppeteer 驱动 mms.pinduoduo.com 商家后台（商品列表 →「发布新商品」→'
+        + '类目选择页 →「确认发布该类商品」→ 表单页填字段 →「提交并上架」）。'
+        + '★ 必须两步调用：先不带 confirm 调用拿到「发布预览」给用户看，用户明确同意后再带 confirm=true 调用才会真正提交。'
+        + '★ 发货与售后（非预售+当日发货）、运费模板（如指定）会自动填；品牌和商品资质不会自动填，需用户在弹出窗口内人工补全。'
+        + '★ 拼多多商家后台与拼多多买家账号（dsagent_pdd_crawl 用的那套）是**两套完全独立的登录态**，'
+        + '需在账号连接页单独绑定「拼多多商家后台」。',
+      parameters: {
+        product: { type: 'string', required: true, description: '统一商品数据（必填），JSON 字符串。结构：{ title(必填,≤60字), images(必填,本地绝对路径数组,1~10张,单张≤3MB), detailImages?(详情图,≤50张), category?(类目关键词/路径,不传则从标题推断), price?(参考价,元), stock?(默认库存), itemNo?(货号), specs?(规格维度数组:[{name:"颜色",values:[{value:"奶油黄",image?:"C:/img/1.jpg"}]},{name:"尺码",values:[{value:"110cm"}]}],最多2维,每维值≤20,预览图仅第1维可带), skus?(SKU行数组:[{specs:{颜色:"奶油黄",尺码:"110cm"},price:"34",stock:"999"}],每行需覆盖全部维度), attributes?([{name:"主面料成分",value:"棉"}]), account?(指定账号) }。' },
+        confirm: { type: 'boolean', description: '是否已获用户确认。省略或 false 时只返回发布预览，不产生任何写操作；用户同意后传 true 才真正发布' },
+        account: { type: 'string', description: '要使用的账号 shopKey（可选）。该平台有多个可用账号时，先按返回的候选向用户确认，再把选定的 shopKey 填到这里' },
+      },
+      output: { schema: { type: 'json' }, render: renderToolOutput },
+      async execute(args, exec) {
+        try {
+          // 商品属性自动选值走「本会话正在用的聊天模型」：从会话请求头解析 provider/model，
+          // 与宿主 LLM 服务一起组装成句柄；任一缺失则不传，属性区只走缓存兜底。
+          const route = agentModelRouteOf(exec)
+          const llm = getLlm?.()
+          const attrModel = route && llm
+            ? { stream: (o: any) => llm.stream(o), provider: route.provider, model: route.model }
+            : undefined
+          const result = await pddPublish2(store, {
+            product: (args as any).product,
+            confirm: args.confirm === true,
+            account: args.account ? String(args.account).trim() : '',
+            agentId: agentIdOf(exec),
+            attrModel,
+          })
+          return result as any
+        } catch (err) {
+          return {
+            ok: false,
+            failureKind: 'api_error',
+            text: `拼多多发布（上架2）异常：${err instanceof Error ? err.message : String(err)}`,
           } as any
         }
       },

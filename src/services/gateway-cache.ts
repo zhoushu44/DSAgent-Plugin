@@ -98,6 +98,20 @@ const DEFAULT_MAX_ENTRIES = 500
 /** 单条响应体积上限：超过则不缓存（大响应缓存收益低、占用高） */
 const MAX_CACHED_BODY_BYTES = 256 * 1024
 
+/**
+ * LRU 逻辑时钟：严格单调递增。
+ *
+ * 毫秒墙钟在同毫秒内的多次写/命中会平局，`ORDER BY last_access_at ASC`
+ * 平局时退化为按 rowid（插入序）淘汰——刚访问过的热点条目会被误删。
+ * 用「不小于墙钟且每调用 +1」的逻辑时钟打破平局，保证 LRU 语义严格成立。
+ */
+let _lruClock = 0
+function lruTick(): number {
+  const wall = Date.now()
+  _lruClock = wall > _lruClock ? wall : _lruClock + 1
+  return _lruClock
+}
+
 /** 环境变量名 */
 const ENV_ENABLED = 'DSAGENT_GATEWAY_CACHE'
 const ENV_TTL = 'DSAGENT_GATEWAY_CACHE_TTL'
@@ -406,8 +420,8 @@ export function getCached(key: string): Record<string, unknown> | null {
       stats.misses++
       return null
     }
-    // 更新最后访问时间（LRU）
-    d.prepare('UPDATE cache_entries SET last_access_at = ? WHERE key = ?').run(now, key)
+    // 更新最后访问时间（LRU 逻辑时钟：同毫秒内也严格递增）
+        d.prepare('UPDATE cache_entries SET last_access_at = ? WHERE key = ?').run(lruTick(), key)
     stats.hits++
 
     // 重建响应对象（从 JSON 反序列化 + 不可枚举归属字段）
@@ -435,7 +449,7 @@ export function getCached(key: string): Record<string, unknown> | null {
     stats.misses++
     return null
   }
-  entry.lastAccessAt = now
+  entry.lastAccessAt = lruTick()
   memStore.delete(key)
   memStore.set(key, entry)
   stats.hits++
@@ -470,6 +484,7 @@ export function setCached(
 
   const now = Date.now()
   const expiresAt = now + ttlMs()
+  const lruAt = lruTick() // 逻辑时钟：同毫秒多次写也严格有序
   const shopKey = String(response._cache_shop_key ?? '')
   const platform = String(response._cache_platform ?? '')
   const statusCode = Number(response.status_code ?? 200)
@@ -487,7 +502,7 @@ export function setCached(
       INSERT OR REPLACE INTO cache_entries
         (key, payload, response_json, shop_key, platform, status_code, bytes, created_at, expires_at, last_access_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(key, payloadStr, responseJson, shopKey, platform, statusCode, bytes, now, expiresAt, now)
+    `).run(key, payloadStr, responseJson, shopKey, platform, statusCode, bytes, now, expiresAt, lruAt)
     stats.stores++
 
     // LRU 淘汰：按 last_access_at 升序删最旧的
@@ -512,7 +527,7 @@ export function setCached(
   }
   memStore.set(key, {
     key, payload, statusCode, response: stored,
-    createdAt: now, expiresAt, bytes, lastAccessAt: now,
+    createdAt: now, expiresAt, bytes, lastAccessAt: lruAt,
   })
   stats.stores++
 

@@ -717,10 +717,16 @@ def main():
                        "message": "未提供搜索关键词，请使用 --keyword 参数或在请求中注明要搜索的内容"})
         sys.exit(1)
 
+    # 网关前置检查：环境变量缺失不判死 —— runtime 已内置网关自动发现
+    # （扫描 ~/.dsagent/gateway/ 发现文件 + 健康探活），只有真正发现不了才报错
     if not os.environ.get("DSCONNECT_URL"):
-        output_result({"ok": False, "failure_kind": "not_bound",
-                       "message": "未检测到本地代理网关，请到「账号连接」页面绑定知乎账号后重试"})
-        sys.exit(1)
+        try:
+            from runtime.dsagent_runtime import api_base as _api_base
+            _api_base()  # 自动发现失败会抛 RuntimeError
+        except Exception:
+            output_result({"ok": False, "failure_kind": "not_bound",
+                           "message": "未检测到本地代理网关，请到「账号连接」页面绑定知乎账号后重试"})
+            sys.exit(1)
 
     log(f"[采集] mode={mode} keyword='{keyword}' count={count} offset={args.offset}")
 

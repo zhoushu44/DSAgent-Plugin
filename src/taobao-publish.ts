@@ -27,13 +27,19 @@
  *             窗口内补全，若提交被校验拦住，工具会继续等待并识别用户手动提交的结果。
  */
 import { CredentialStore, resolveAccountForRequest, type StoredAccount } from './services/credential-store.js'
+import { type AttrModelHandle } from './pdd-publish.js'
+import { loadPublishConfig, anchorSpec, configString, configTimeout, type PublishConfig } from './services/publish-config-loader.js'
 import { clearProfileLocks, findChromePath, profileDir, profileOwner, releaseProfile, tryAcquireProfile, registerProfilePort, registeredPortFor, verifyPortOwnership, sleep, UI_STEP_DELAY_MS } from './browser-login.js'
-import { createAttrCache, type AttrCache } from './services/attr-cache.js'
+import { schemaFingerprint } from './services/attr-cache.js'
+import { createCategoryProfileStore, type CategoryProfile, type CategoryProfileStore } from './services/category-profile.js'
 import { existsSync, readFileSync, statSync } from 'node:fs'
+import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 
-/** 发布入口（按渠道）。淘宝先落在「选类目」页，选完类目才进正式表单；天猫同理。 */
+/** 发布入口（按渠道）。淘宝先落在「选类目」页，选完类目才进正式表单；天猫同理。
+ *  URL 初值 = 历史硬编码兜底，refreshTaobaoConfig() 用 publish-config/taobao.json
+ *  urls.taobaoPublish / urls.taobaoCategory / urls.tmallPublish 覆盖。 */
 const CHANNELS: Record<string, { label: string; url: string; categoryUrl?: string }> = {
   taobao: {
     label: '淘宝',
@@ -45,78 +51,135 @@ const CHANNELS: Record<string, { label: string; url: string; categoryUrl?: strin
   tmall: { label: '天猫', url: 'https://sell.publish.tmall.com/tmall/submit.htm' },
 }
 
-/** 发布表单就绪标志（主图区或提交按钮出现） */
-const FORM_READY_SELECTOR = '#struct-mainImagesGroup, button[name="button-submit"]'
+/** 发布表单就绪标志（主图区或提交按钮出现）（anchors.formReady） */
+let FORM_READY_SELECTOR = '#struct-mainImagesGroup, button[name="button-submit"]'
 
-/** 等表单就绪（中间可能夹着用户手动选类目）*/
-const FORM_WAIT_MS = 150_000
-/** 点提交后等结果（含用户手动补全字段后自行提交的时间） */
-const PUBLISH_TIMEOUT_MS = 180_000
-/** 图片上传等待 */
-const UPLOAD_WAIT_MS = 90_000
-/** 单张主图上限：新版素材选择器实测 maxUpload=20MB / maxSize=20971520 */
-const MAX_IMAGE_BYTES = 20 * 1024 * 1024
-/** 主图张数上限（淘宝/天猫 5 张，超出以页面提示为准） */
-const MAX_IMAGES = 5
-/** 标题长度上限（淘宝/天猫均为 60 字符） */
-const MAX_TITLE_LEN = 60
-
-/**
- * 类目属性自动选值所用的文本模型（OpenAI 兼容 /chat/completions）。
- *
- * ★ 与拼多多发布（pdd-publish.ts）同一套做法：只让模型从**页面真实候选**里挑一个，
- *   绝不凭空造值；模型不可用/挑不出就跳过，只记 missed，不阻断发布。
- *   三项均可被环境变量覆盖（TAOBAO_TEXT_MODEL_BASE_URL / _API_KEY / TAOBAO_TEXT_MODEL）。
- */
-const TAOBAO_TEXT_MODEL_BASE_URL = process.env.TAOBAO_TEXT_MODEL_BASE_URL || ''
-const TAOBAO_TEXT_MODEL_API_KEY = process.env.TAOBAO_TEXT_MODEL_API_KEY || ''
-const TAOBAO_TEXT_MODEL = process.env.TAOBAO_TEXT_MODEL || 'deepseek-v4.1-flash'
-/**
- * opencode zen 端点要求携带会话标识，缺失会直接 400 MissingSessionID。
- * 其他 OpenAI 兼容端点会忽略这个额外头，故统一带上。
- */
-const TAOBAO_TEXT_MODEL_SESSION = process.env.TAOBAO_TEXT_MODEL_SESSION || 'dsagent-taobao-attr'
-/** 单次属性选值请求超时：模型不可用要快速跳过，不能拖垮发布流程 */
-const ATTR_MODEL_TIMEOUT_MS = 20_000
-/** 选值输出上限：候选最多十几项，且带思考的模型会先消耗 reasoning tokens，留足余量避免 JSON 被截断 */
-const ATTR_MODEL_MAX_TOKENS = 512
-/** 展开下拉 / 选值后的等待（next 组件有展开动画与异步选项） */
-const ATTR_DROPDOWN_WAIT_MS = 800
-/** 不自动填的类目属性：品牌涉及品牌授权，选错有侵权风险，一律留给人工 */
-const ATTR_SKIP_RE = /^品牌$/
+/** 等表单就绪（中间可能夹着用户手动选类目）（timeouts.formWaitMs） */
+let FORM_WAIT_MS = 150_000
+/** 点提交后等结果（含用户手动补全字段后自行提交的时间）（timeouts.publishTimeoutMs） */
+let PUBLISH_TIMEOUT_MS = 180_000
+/** 图片上传等待（timeouts.uploadWaitMs） */
+let UPLOAD_WAIT_MS = 90_000
+/** 单张主图上限：新版素材选择器实测 maxUpload=20MB / maxSize=20971520（limits.maxImageBytes） */
+let MAX_IMAGE_BYTES = 20 * 1024 * 1024
+/** 主图张数上限（淘宝/天猫 5 张，超出以页面提示为准）（limits.maxImages） */
+let MAX_IMAGES = 5
+/** 标题长度上限（淘宝/天猫均为 60 字符）（limits.maxTitleLen） */
+let MAX_TITLE_LEN = 60
 
 /**
- * 类目属性缓存 —— 同平台+同类目发相似商品时复用上次成功填的值，省模型 API 调用。
- * ★ 命中缓存后仍读当前下拉选项做验证，选项变了就 fallback 到模型（不硬塞旧值）。
- * 落盘在 ~/.dsh/.attr-cache.json（与凭证库、skill-stats 同目录）。
- *
- * ★ 这里必须用 **ESM import**，不能用 `require()`：
- *   本项目是 `"type": "module"`，`require` 在 ESM 作用域下不存在，
- *   会在模块求值时抛 `ReferenceError: require is not defined`。
- *   由于本文件被 index.ts 静态 import，该错误会**拖垮整个 host 半区**
- *   （不只是淘宝发布工具不可用，而是插件加载失败）。
+ * 类目属性自动选值：用宿主聊天模型（ctx.model，由 tools-publish.ts 从当前会话路由装配），
+ * 只让模型从**页面真实候选**里挑一个，绝不凭空造值；模型不可用/挑不出就跳过，只记 missed，不阻断发布。
  */
-const attrCache: AttrCache = createAttrCache(
-  join(homedir(), '.dsh', '.attr-cache.json')
+/** 单次属性选值请求超时：模型不可用要快速跳过，不能拖垮发布流程（timeouts.attrModelTimeoutMs） */
+let ATTR_MODEL_TIMEOUT_MS = 20_000
+/** 展开下拉 / 选值后的等待（next 组件有展开动画与异步选项）（timeouts.attrDropdownWaitMs） */
+let ATTR_DROPDOWN_WAIT_MS = 800
+/** 不自动填的类目属性：品牌涉及品牌授权，选错有侵权风险，一律留给人工（regexes.attrSkip） */
+let ATTR_SKIP_RE = /^品牌$/
+
+/**
+ * 类目档案库（g5）—— 按平台 + catId 精确匹配的长期发布配置档案。
+ * ★ 落盘 ~/.dsh/publish-profiles/（运行时数据目录）：不进源码库，
+ *   也不受 sync-to-host 的 cpSync force 单向覆盖影响（放 publish-config/ 会被覆盖掉）。
+ */
+const profileStore: CategoryProfileStore = createCategoryProfileStore(
+  join(homedir(), '.dsh', 'publish-profiles')
 )
 
 /** 本工具在 Profile 锁中的占用者标识（用于互斥提示文案） */
 const PROFILE_OWNER = '淘宝发布'
 
-/** 销售属性（规格）默认属性 ID：类目「AI软件订阅/Token充值」下颜色分类为 1627207（实测） */
-const SALE_PROP_ID = '1627207'
-/** 销售属性输入框占位符（实测为「主色(必选)」，用前缀匹配更稳） */
-const SALE_PROP_PLACEHOLDER_RE = /主色|颜色分类|规格值/
-/** SKU 表每个格子填完后的等待（React 归一化 + 重渲染） */
-const SKU_CELL_WAIT_MS = 500
-/** 详情图编辑器 iframe 地址特征（跨域，需 frame.evaluate） */
-const DESC_EDITOR_RE = /sell\.xiangqing\.taobao\.com\/new_user_panel/
-/** 详情图素材选择器 iframe（与主图同源选择器，但挂在详情编辑器弹窗内） */
-const DESC_SUCAI_RE = /sucai\.wangpu\.taobao\.com\/select\.htm/
-/** ★ 新版详情编辑器（Lite）用的素材选择器 iframe 特征（与主图同源选择器） */
-const DESC_NG_RE = /market\.m\.taobao\.com\/.*sucai-selector-ng/
-/** 详情图弹窗/模块出现后的等待 */
-const DESC_WAIT_MS = 4_000
+/** 销售属性（规格）默认属性 ID：类目「AI软件订阅/Token充值」下颜色分类为 1627207（实测）（salePropDefaults.propId） */
+let SALE_PROP_ID = '1627207'
+/** 销售属性输入框占位符（实测为「主色(必选)」，用前缀匹配更稳）（regexes.salePropPlaceholder） */
+let SALE_PROP_PLACEHOLDER_RE = /主色|颜色分类|规格值/
+/** SKU 表每个格子填完后的等待（React 归一化 + 重渲染）（timeouts.skuCellWaitMs） */
+let SKU_CELL_WAIT_MS = 500
+/* ══════════════════════════════════════════════════════════════════
+ * JSON 配置驱动（PUBLISH-SPEC §3）：上面所有 let 常量的初值 = 历史硬编码
+ * 兜底，refreshTaobaoConfig() 在每次发布入口处用 publish-config/taobao.json
+ * 覆盖它们 —— **改 JSON 一行无需重启宿主**（loader 带 mtime 缓存热加载）。
+ * ★ 行为零变化纪律：本步只替换「字符串常量来源」，不改任何执行逻辑；
+ *   evaluate 内联选择器（类目搜索框/品牌面板/主图区/SKU 表/详情编辑器）本步不动。
+ * ══════════════════════════════════════════════════════════════════ */
+
+/** 当前生效的 taobao.json 配置（refreshTaobaoConfig 维护） */
+let TAOBAO_CFG: PublishConfig | null = null
+
+/** submitButton 的候选（clickSubmit 消费；初值 = 历史硬编码兜底）：
+ *  selN 为第 N 个 CSS 候选；matchTextRe 为文案兜底正则源（候选 `text:` 前缀以外的文本回退）。 */
+let SUBMIT_BTN_SEL1 = 'button[name="button-submit"]'
+let SUBMIT_BTN_SEL2 = 'button[_id="button-submit"]'
+let SUBMIT_TEXT_RE_SRC = '^(提交宝贝信息|提交|确认提交|发布)$'
+
+/** 多候选锚点归一为 CSS 逗号列表（候选全是 CSS 才可用；XPath 锚点本步不在此消费） */
+function anchorCssList(cfg: PublishConfig, key: string): string {
+  return anchorSpec(cfg, key).candidates.map(c => c.selector).join(', ')
+}
+
+/**
+ * 从 publish-config/taobao.json 刷新全部配置常量。
+ * - loader fail-fast（缺配置 throw），这里捕获后返回错误信息，
+ *   由调用方决定返回 `{ok:false}` —— 配置坏宁可发布失败，也不静默用旧锚点。
+ * - 未曾成功加载过时（TAOBAO_CFG === null）保持硬编码初值，行为与改造前一致。
+ * @returns null=成功；string=错误信息
+ */
+function refreshTaobaoConfig(): string | null {
+  let cfg: PublishConfig
+  try {
+    cfg = loadPublishConfig('taobao')
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    return TAOBAO_CFG ? `发布配置刷新失败（沿用上次加载的配置）：${msg}` : `发布配置加载失败：${msg}`
+  }
+  TAOBAO_CFG = cfg
+  try {
+    const L = cfg.limits
+    if (L.maxImageBytes > 0) MAX_IMAGE_BYTES = L.maxImageBytes
+    if (L.maxImages > 0) MAX_IMAGES = L.maxImages
+    if (L.maxTitleLen && L.maxTitleLen > 0) MAX_TITLE_LEN = L.maxTitleLen
+
+    // 渠道入口 URL（CHANNELS 是 const 对象，按字段覆写值，结构不变）
+    const u1 = configString(cfg, 'urls', 'taobaoPublish')
+    if (u1) CHANNELS.taobao.url = u1
+    const u2 = configString(cfg, 'urls', 'taobaoCategory')
+    if (u2) CHANNELS.taobao.categoryUrl = u2
+    const u3 = configString(cfg, 'urls', 'tmallPublish')
+    if (u3) CHANNELS.tmall.url = u3
+
+    const rSkip = cfg.regexes?.attrSkip
+    if (rSkip) ATTR_SKIP_RE = new RegExp(rSkip)
+    const rProp = cfg.regexes?.salePropPlaceholder
+    if (rProp) SALE_PROP_PLACEHOLDER_RE = new RegExp(rProp)
+
+    FORM_WAIT_MS = configTimeout(cfg, 'formWaitMs', FORM_WAIT_MS)
+    PUBLISH_TIMEOUT_MS = configTimeout(cfg, 'publishTimeoutMs', PUBLISH_TIMEOUT_MS)
+    UPLOAD_WAIT_MS = configTimeout(cfg, 'uploadWaitMs', UPLOAD_WAIT_MS)
+    SKU_CELL_WAIT_MS = configTimeout(cfg, 'skuCellWaitMs', SKU_CELL_WAIT_MS)
+    ATTR_MODEL_TIMEOUT_MS = configTimeout(cfg, 'attrModelTimeoutMs', ATTR_MODEL_TIMEOUT_MS)
+    ATTR_DROPDOWN_WAIT_MS = configTimeout(cfg, 'attrDropdownWaitMs', ATTR_DROPDOWN_WAIT_MS)
+
+    // 锚点：多候选 join 成 CSS 列表（与原硬编码字符串形态一致，使用点零改动）
+    const formReady = anchorCssList(cfg, 'formReady')
+    if (formReady) FORM_READY_SELECTOR = formReady
+
+    // salePropDefaults.propId（自定义段，schema 为 { propId, comment }）
+    const pd = cfg['salePropDefaults'] as { propId?: string } | undefined
+    if (pd && typeof pd.propId === 'string' && pd.propId) SALE_PROP_ID = pd.propId
+
+    // submitButton：逐候选映射（clickSubmit 消费；matchTextRe 为文案兜底正则源）
+    const submitSpec = anchorSpec(cfg, 'submitButton')
+    const sels = submitSpec.candidates.filter(c => !c.selector.startsWith('text:')).map(c => c.selector)
+    if (sels.length >= 1) SUBMIT_BTN_SEL1 = sels[0]
+    if (sels.length >= 2) SUBMIT_BTN_SEL2 = sels[1]
+    if (submitSpec.matchTextRe) SUBMIT_TEXT_RE_SRC = submitSpec.matchTextRe
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    return `发布配置字段缺失/非法（沿用当前值）：${msg}`
+  }
+  return null
+}
 
 /**
  * 多规格（销售属性 / SKU）入参。
@@ -154,13 +217,10 @@ export interface TaobaoPublishOptions {
    */
   skus?: TaobaoSkuInput[]
   /**
-   * 宝贝详情图（选填）：本地图片绝对路径列表。会打开「编辑详情」跨域编辑器，
-   * 添加图片模块并上传选中。详情图非发布必填项，失败只记 missed，不阻断提交。
-   */
-  detailImages?: string[]
-  /**
    * 选类目关键词（选填）。发布入口会先落在「选类目」页，传了本参数则自动在搜索框输入
-   * 该关键词并选**第一个类目**，再点「确认，下一步」进入正式表单；不传则需人工选类目。
+   * 该关键词，候选按与商品标题的相关性降序尝试（叶子类目名与标题的字词重叠），
+   * 挑第一个能让「确认，下一步」可用的类目；不传则需人工选类目。
+   * ★ 应传具体叶子类目词（如「儿童睡衣」），不要传一级大类名（如「童装」）或整段标题。
    */
   categoryKeyword?: string
   /**
@@ -172,6 +232,17 @@ export interface TaobaoPublishOptions {
    * 型号（选填）。同上，部分类目在选类目页把「型号」列为必填属性，不填无法进入正式表单。
    */
   model?: string
+  /**
+   * 类目属性的**显式值**（选填）：`[{ name: '内衣质地', value: '云朵棉' }]`。
+   * ★ 与拼多多的 `product.attributes` 对齐：给了就按名字精确匹配填入（值仍须命中页面真实候选），
+   *   优先级高于「平台推荐值采纳」与模型选值。适合已知属性、想确定性填写的场景（含离线脚本）。
+   */
+  attributes?: { name: string; value: string }[]
+  /**
+   * 类目属性自动选值用的**宿主聊天模型**句柄（选填，对齐 pdd-publish 的 AttrModelHandle）。
+   *   由 tools-publish.ts 从当前会话路由装配后传入；未传则跳过模型选值。
+   */
+  attrModel?: AttrModelHandle
   /** 指定账号 shopKey（多账号待选时由模型回传用户选择） */
   account?: string
   /** 当前会话（智能体）ID，用于账号选择链 */
@@ -283,14 +354,12 @@ function buildPreview(account: StoredAccount, channelLabel: string, opts: Taobao
     ...images.map(p => `  - ${p}`),
     `多规格（SKU）：${(opts.skus || []).length ? `${(opts.skus || []).length} 项` : '（未填，单 SKU）'}`,
     ...((opts.skus || []).map(s => `  - ${s.name}｜价格=${s.price || '继承一口价'}｜库存=${s.stock || '0'}${s.outerId ? `｜编码=${s.outerId}` : ''}`)),
-    `详情图：${(opts.detailImages || []).length ? `${(opts.detailImages || []).length} 张` : '（未填）'}`,
-    ...((opts.detailImages || []).map(p => `  - ${p}`)),
     '',
     '★ 本工具自动填：主图 / 标题 / 一口价 / 库存 / 货号，以及**类目属性**（用文本模型从页面真实',
     '  候选中挑值：如「充值方式 / 模型或平台 / 软件类型」）和物流服务的「提取方式」（勾「使用物流配送」）。',
-    '  传了 skus 会自动加销售属性值并回填 SKU 表价格/数量/编码；传了 detailImages 会自动打开详情编辑器上传。',
+    '  传了 skus 会自动加销售属性值并回填 SKU 表价格/数量/编码。',
     '  品牌不自动填（授权风险，由 brand 参数在选类目页填）。商品详情、发货与售后等仍需人工补全。',
-    '  另外：发布第一步需要**选类目**；传了 categoryKeyword 会自动搜索并选第一个类目，',
+    '  另外：发布第一步需要**选类目**；传了 categoryKeyword 会自动搜索并按与标题的相关性挑最匹配类目，',
     '  若该类目把「品牌/型号」列为必填属性（如「AI软件订阅/Token充值」），会用 brand/model 参数自动填上。',
     '',
     '确认无误后，请让用户明确同意，然后带 confirm=true 重新调用本工具才会真正打开浏览器提交。',
@@ -355,9 +424,35 @@ async function detectRisk(page: any): Promise<{ hit: boolean; verifyUrl: string 
 async function selectCategory(
   page: any,
   keyword: string,
-  props: { brand?: string; model?: string } = {},
-): Promise<{ ok: boolean; note: string }> {
+  props: { brand?: string; model?: string; title?: string } = {},
+): Promise<{ ok: boolean; note: string; pickedPath?: string }> {
+  const title = String(props.title || '').trim()
   // 1. 定位搜索框并写入关键词（React 受控组件用原生 setter + input 事件）
+  // ★ 该页是 SPA：脚本导航后搜索框可能尚未渲染。先轮询等待其出现（最多 ~30s），
+  //   否则会在页面加载完成前就误报「未找到搜索框」。
+  const findBox = () => page.evaluate(() =>
+    !!document.querySelector('input[placeholder*="类目关键词"]')).catch(() => false)
+  let boxReady = await findBox() as boolean
+  for (let i = 0; i < 30 && !boxReady; i++) { await sleep(1000); boxReady = await findBox() as boolean }
+  if (!boxReady) {
+    // 仍找不到 → 采集真实 DOM 证据（页面 URL / 标题 / 可见 input / iframe），便于修正选择器
+    const diag = await page.evaluate(() => {
+      const inputs = Array.from(document.querySelectorAll('input')) as HTMLInputElement[]
+      const list = inputs.filter(e => e.offsetWidth || e.offsetHeight)
+        .map(e => `[${e.type}] ph="${e.placeholder}" name="${e.name}" id="${e.id}"`)
+      const frames = (Array.from(document.querySelectorAll('iframe')) as HTMLIFrameElement[])
+        .map(f => f.src).filter(Boolean)
+      return { url: location.href, title: document.title, total: inputs.length, list: list.slice(0, 20), frames: frames.slice(0, 10) }
+    }).catch(() => null)
+    console.log('[dsagent-taobao-publish] 选类目页 DOM 诊断：', JSON.stringify(diag))
+    return {
+      ok: false,
+      note: `未找到类目搜索框（input[placeholder*="类目关键词"]）。`
+        + `页面 URL=${diag?.url || '?'} 标题=${diag?.title || '?'} `
+        + `可见 input ${diag?.list?.length ?? 0} 个：${(diag?.list || []).join(' | ')}`
+        + ` iframe：${(diag?.frames || []).join(' , ')}`,
+    }
+  }
   const typed = await page.evaluate((kw: string) => {
     const inp = document.querySelector('input[placeholder*="类目关键词"]') as HTMLInputElement | null
     if (!inp) return false
@@ -383,24 +478,59 @@ async function selectCategory(
 
   /**
    * 取下一个「未尝试过」的搜索结果「类目」候选，标记 dataset.dsTried 去重。
+   * ★ 候选按与商品标题的相关性（categoryRelevance）降序尝试，不再盲目取第一个：
+   *   实测搜「童装」第一位是「兑换卡>童装卡」——与标题零重叠，但该类目无必填品牌/型号，
+   *   「确认，下一步」直接可用而被误选。现规则：有正分候选时只按分数从高到低试，
+   *   0 分（与标题零重叠）候选仅在全池无正分时兜底，杜绝「无关类目恰好无必填属性」的误选路径。
    * 返回中心点坐标（元素自身的 .click() 在该页对部分节点无效，必须真实鼠标点击）。
    */
-  const nextCategoryCandidate = () => page.evaluate(() => {
+  const nextCategoryCandidate = () => page.evaluate((titleText: string) => {
     const vis = (e: HTMLElement) => !!(e.offsetWidth || e.offsetHeight)
-    const pool = Array.from(document.querySelectorAll(
+    const all = Array.from(document.querySelectorAll(
       '.sell-component-general-category-result-cate.result-item .sell-component-general-category-result-cate-path',
     )) as HTMLElement[]
-    const el = pool.find(e => vis(e) && e.dataset.dsTried !== '1')
-    if (!el) return null
-    el.dataset.dsTried = '1'
-    el.scrollIntoView({ block: 'center' })
-    const r = el.getBoundingClientRect()
+    const pool = all.filter(e => vis(e) && e.dataset.dsTried !== '1')
+    if (!pool.length) return null
+
+    // ── 相关性打分（与 Node 侧 categoryRelevance 同一算法，页内重算避免序列化往返）──
+    const bigrams = (s: string) => {
+      const t = (s || '').replace(/\s+/g, '')
+      const out = new Set<string>()
+      for (let i = 0; i + 1 < t.length; i++) out.add(t.slice(i, i + 2))
+      return out
+    }
+    const tt = bigrams(titleText)
+    const score = (path: string) => {
+      if (!tt.size) return 0
+      const segs = path.split(/[>＞/／]/).map((x: string) => x.trim()).filter(Boolean)
+      if (!segs.length) return 0
+      const overlap = (s: string) => {
+        let n = 0
+        for (const g of bigrams(s)) if (tt.has(g)) n++
+        return n
+      }
+      return overlap(segs[segs.length - 1]) * 2 + overlap(segs.slice(0, -1).join(''))
+    }
+    const items = pool.map(e => ({
+      el: e,
+      score: tt.size ? score((e.innerText || '').replace(/\s+/g, ' ').trim()) : 0,
+    }))
+    const anyPositive = items.some(it => it.score > 0)
+    const ranked = items
+      .filter(it => (anyPositive ? it.score > 0 : true))
+      .sort((a, b) => b.score - a.score)
+    const hit = ranked[0]
+    if (!hit) return null
+    hit.el.dataset.dsTried = '1'
+    hit.el.scrollIntoView({ block: 'center' })
+    const r = hit.el.getBoundingClientRect()
     return {
       x: r.x + r.width / 2,
       y: r.y + r.height / 2,
-      text: (el.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 80),
-    } as { x: number; y: number; text: string }
-  }).catch(() => null)
+      text: (hit.el.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 80),
+      score: hit.score,
+    } as { x: number; y: number; text: string; score: number }
+  }, title).catch(() => null)
 
   /**
    * 填右侧「类目必填属性」：品牌（下拉点选）+ 型号（文本）。
@@ -514,7 +644,7 @@ async function selectCategory(
     return done
   }
 
-  // 2. 逐个尝试「类目」搜索结果，填必填属性直到「确认，下一步」可用
+  // 2. 逐个尝试「类目」搜索结果（按与标题的相关性降序），填必填属性直到「确认，下一步」可用
   const tried: string[] = []
   const brand = String(props.brand || '').trim()
   const model = String(props.model || '').trim()
@@ -526,6 +656,7 @@ async function selectCategory(
       cand = await nextCategoryCandidate()
       if (!cand) break
     }
+    console.log(`[dsagent-taobao-publish] 候选类目「${cand.text}」（相关分 ${cand.score}），尝试中...`)
     await page.mouse.move(cand.x, cand.y).catch(() => { /* 忽略 */ })
     await sleep(300)
     await page.mouse.click(cand.x, cand.y).catch(() => { /* 忽略 */ })
@@ -566,12 +697,13 @@ async function selectCategory(
     await page.mouse.click(btn.x, btn.y).catch(() => { /* 忽略 */ })
 
     const propNote = filled.length ? `，必填属性：${filled.join('、')}` : ''
-    return { ok: true, note: `已选类目「${pickedPath || cand.text}」${propNote}，并点击「确认，下一步」` }
+    return { ok: true, note: `已选类目「${pickedPath || cand.text}」${propNote}，并点击「确认，下一步」`, pickedPath }
   }
 
   return {
     ok: false,
-    note: `搜索「${keyword}」后尝试了 ${tried.length} 个类目（${tried.join('、') || '无'}），均未能让「确认，下一步」变为可用（多为必填「品牌/型号」未填全）。`,
+    note: `搜索「${keyword}」后尝试了 ${tried.length} 个类目（${tried.join('、') || '无'}），均未能让「确认，下一步」变为可用（多为必填「品牌/型号」未填全）。`
+      + (title ? `提示：候选已按与标题「${title.slice(0, 30)}」的相关性降序尝试，仍失败可换更具体的叶子类目词（如「儿童睡衣」而非一级大类「童装」）重试，或在窗口内人工选类目。` : ''),
   }
 }
 
@@ -668,6 +800,7 @@ async function uploadImages(page: any, images: string[]): Promise<{ ok: boolean;
   // 2. 上传文件：点「本地上传」→ 等素材 iframe 导航出 input[type=file] → 直接 uploadFile 注入
   //    （实测 waitForFileChooser 捕获不到原生文件框，改用 input[type=file] + uploadFile）
   if (images.length) {
+    // ★ 退化路径 A：素材弹层模式——点「本地上传」后在 iframe 内找 input[type=file]
     await realClick(await rectInFrame(FN_UP))
     let fileInput: any = null
     for (let i = 0; i < 15; i++) {
@@ -677,6 +810,70 @@ async function uploadImages(page: any, images: string[]): Promise<{ ok: boolean;
       fileInput = await fr.$('input[type=file]').catch(() => null)
       if (fileInput) break
     }
+
+    // ★ 退化路径 B：主页面直接找 input[type=file]（新版发布页不走素材弹层）
+    if (!fileInput) {
+      console.log('[dsagent-taobao-publish] 素材弹层内未找到 input[type=file]，尝试主页面直接上传…')
+      // 关闭弹层（如有）
+      await page.evaluate(() => {
+        const close = document.querySelector('[class*=close], .next-dialog-close, button[aria-label*=close]') as HTMLElement | null
+        if (close) close.click()
+      }).catch(() => {})
+      await sleep(500)
+      // 找主图区的上传按钮并点击，然后等 input[type=file] 出现
+      const clicked = await page.evaluate(() => {
+        const area = document.querySelector('#struct-mainImagesGroup') as HTMLElement | null
+        if (!area) return false
+        // 找含「上传图片」文本的按钮
+        const btns = Array.from(area.querySelectorAll('button, [role=button], a, div')) as HTMLElement[]
+        const target = btns.find(el => {
+          const t = (el.innerText || el.textContent || '').trim()
+          return /上传图片|本地上传|点击上传/.test(t) && el.offsetParent !== null && el.children.length <= 3
+        })
+        if (target) { (target as HTMLElement).click(); return true }
+        // 退化：直接点击虚线占位区
+        const dashed = area.querySelector('[class*=dashed], .image-empty') as HTMLElement
+        if (dashed) { (dashed as HTMLElement).click(); return true }
+        return false
+      }).catch(() => false) as boolean
+      if (clicked) {
+        for (let i = 0; i < 10; i++) {
+          await sleep(800)
+          fileInput = await page.$('input[type=file]').catch(() => null)
+          if (fileInput) break
+        }
+      }
+    }
+
+    // ★ 退化路径 C：用 Puppeteer waitForFileChooser（部分页面用原生文件框）
+    if (!fileInput) {
+      console.log('[dsagent-taobao-publish] 主页面也未找到 input[type=file]，尝试 waitForFileChooser…')
+      const clicked = await page.evaluate(() => {
+        const area = document.querySelector('#struct-mainImagesGroup') as HTMLElement | null
+        if (!area) return false
+        const all = Array.from(area.querySelectorAll('*')) as HTMLElement[]
+        const target = all.find(el => {
+          const t = (el.innerText || el.textContent || '').trim()
+          return /上传/.test(t) && el.offsetParent !== null && el.children.length <= 3
+        })
+        if (target) { (target as HTMLElement).click(); return true }
+        return false
+      }).catch(() => false) as boolean
+      if (clicked) {
+        try {
+          const fc = await page.waitForFileChooser({ timeout: 5000 })
+          await fc.accept(images)
+          // 跳过 uploadFile 路径，直接等上传完成
+          console.log('[dsagent-taobao-publish] 已通过 waitForFileChooser 上传主图')
+          await sleep(3000)
+          // 校验主图区
+          const cnt = await page.evaluate(() => document.querySelectorAll('#struct-mainImagesGroup img').length).catch(() => 0) as number
+          if (cnt > 0) return { ok: true, note: `已上传主图（主图区已出现 ${cnt} 张）` }
+          return { ok: false, note: 'waitForFileChooser 已上传但主图区未确认到图片。请在浏览器窗口内确认主图。' }
+        } catch { /* 继续 */ }
+      }
+    }
+
     if (!fileInput) {
       return { ok: false, note: '未找到主图上传的文件输入框（点「本地上传」后素材 iframe 未就绪）。请在浏览器窗口内人工上传主图。' }
     }
@@ -806,6 +1003,8 @@ interface TbCatPropItem {
   maxlength: number
   /** 字段下方的校验提示文案（如「请选择」「不能超过 X 字」），类目规则的页面体现 */
   hint: string
+  /** 当前页面已有值（预填/一键采纳推荐值/本次脚本填的；filled=true 时非空），档案落盘用 */
+  value: string
 }
 
 /**
@@ -817,7 +1016,7 @@ interface TbCatPropItem {
  */
 async function readCatPropItems(page: any): Promise<TbCatPropItem[]> {
   return await page.evaluate(() => {
-    const out: { id: string; name: string; required: boolean; filled: boolean; kind: string; maxlength: number; hint: string }[] = []
+    const out: { id: string; name: string; required: boolean; filled: boolean; kind: string; maxlength: number; hint: string; value: string }[] = []
     const root = document.getElementById('struct-catProp')
     if (!root) return out
     const items = Array.from(root.querySelectorAll('[id^="struct-p-"]')) as HTMLElement[]
@@ -838,7 +1037,11 @@ async function readCatPropItems(page: any): Promise<TbCatPropItem[]> {
       const ml = inp ? (Number(inp.getAttribute('maxlength')) || (inp.maxLength > 0 ? inp.maxLength : 0)) : 0
       const hintEl = field.querySelector('.sell-component-info-wrapper-explain, .next-form-item-help, [class*="error"], [class*="help"]') as HTMLElement | null
       const hint = (hintEl?.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 120)
-      out.push({ id: it.id, name, required, filled: !!(val || shown), kind, maxlength: ml, hint })
+      // ★ 页面已有值：输入框 value 优先，select 组件用展示文本（.next-select-values），
+      //   过滤「请选择」类占位符。filled=true 时非空——档案快照直接用这个。
+      const placeholder = /^(请选择|请输入|请填写|—|-)$/
+      const curVal = val || (placeholder.test(shown) ? '' : shown)
+      out.push({ id: it.id, name, required, filled: !!(val || shown), kind, maxlength: ml, hint, value: curVal })
     }
     return out
   }).catch(() => []) as TbCatPropItem[]
@@ -891,6 +1094,24 @@ async function readPropOptions(page: any): Promise<string[]> {
   }).catch(() => []) as string[]
 }
 
+/**
+ * 等待 next 下拉面板展开（100ms 步进轮询，而非固定 sleep）。
+ * 实测面板 200-400ms 即渲染好，固定 sleep 白等 60-75% 时间；
+ * 超时上限取 attrDropdownWaitMs 与 2000ms 的较大者。
+ */
+async function waitForPropPanel(page: any, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + Math.max(timeoutMs, 2000)
+  while (Date.now() < deadline) {
+    const has = await page.evaluate(() => {
+      const panels = Array.from(document.querySelectorAll('.next-overlay-wrapper.opened')) as HTMLElement[]
+      return panels.some(p => p.offsetParent !== null)
+    }).catch(() => false)
+    if (has) return true
+    await sleep(100)
+  }
+  return false
+}
+
 /** 在已展开的下拉面板里点中文本完全匹配的选项（同样用 JS 原生 click） */
 async function clickPropOption(page: any, text: string): Promise<boolean> {
   return await page.evaluate((t: string) => {
@@ -938,14 +1159,36 @@ async function closePropDropdown(page: any): Promise<void> {
 }
 
 /**
+ * 惰性加载宿主 LLM 包的 `BlockAssembler`（把流式分片拼成内容块的官方算法）。
+ *
+ * ★ 与 pdd-publish 同一处坑：本文件被 `dev/publish-taobao.mjs` 在**普通 node**
+ *   （无宿主模块回退）下直接 import，静态 import `@deepseek-ai/dsh-llm` 会让
+ *   `lib/taobao-publish.js` 整个加载失败（ERR_MODULE_NOT_FOUND）。
+ *   动态 import 只在真正要调宿主模型时求值，失败被 catch 吞掉 → 属性区降级。
+ */
+let blockAssemblerCtor: (new () => {
+  push(chunk: unknown): void
+  blocks(): Array<{ type: string; text?: string }>
+  readonly finish: { kind: string }
+}) | undefined
+async function loadBlockAssembler() {
+  if (!blockAssemblerCtor) {
+    const mod: any = await import('@deepseek-ai/dsh-llm')
+    blockAssemblerCtor = mod.BlockAssembler
+  }
+  return blockAssemblerCtor!
+}
+
+/**
  * 让文本模型从**页面真实选项**里为某类目属性挑一个值。
  * ★ 安全边界：只接受「原样命中候选值」的返回 —— 模型改写、编造或返回 null 一律当作放弃，
  *   宁可标「未自动填」也不许它自由发挥（类目属性填错会导致商品被下架或流量损失）。
+ * ★ 取值优先级：① 宿主聊天模型句柄（ctx.model，对齐 pdd）→ 不可用则返回 null（由人工确认）。
  */
 async function pickPropValue(
   attrName: string,
   options: string[],
-  ctx: { title: string },
+  ctx: { title: string; model?: AttrModelHandle },
 ): Promise<{ value: string; hesitated: boolean; candidates: number } | null> {
   if (!options.length) return null
   const sys = '你是电商商品发布助手。根据商品标题，从「候选值」中为该属性挑选最合适的一个。\n'
@@ -954,28 +1197,9 @@ async function pickPropValue(
     + '③ 只有候选值全部明显不相关时才返回 null。\n'
     + '只输出 JSON，形如 {"value":"候选值原文"} 或 {"value":null}，不要输出任何解释。'
   const user = `商品标题：${ctx.title}\n属性名：${attrName}\n候选值：${options.join(' / ')}`
-  try {
-    const resp = await fetch(`${TAOBAO_TEXT_MODEL_BASE_URL.replace(/\/+$/, '')}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        authorization: `Bearer ${TAOBAO_TEXT_MODEL_API_KEY}`,
-        'x-opencode-session': TAOBAO_TEXT_MODEL_SESSION,
-      },
-      body: JSON.stringify({
-        model: TAOBAO_TEXT_MODEL,
-        messages: [{ role: 'system', content: sys }, { role: 'user', content: user }],
-        temperature: 0,
-        max_tokens: ATTR_MODEL_MAX_TOKENS,
-      }),
-      signal: AbortSignal.timeout(ATTR_MODEL_TIMEOUT_MS),
-    })
-    if (!resp.ok) {
-      console.warn(`[dsagent-taobao-publish] 属性「${attrName}」模型请求失败：HTTP ${resp.status}`)
-      return null
-    }
-    const data = await resp.json() as { choices?: { message?: { content?: string } }[] }
-    const raw = data?.choices?.[0]?.message?.content || ''
+
+  // 统一的「从原始文本解析出候选值」逻辑（两种后端共用）
+  const parse = (raw: string): { value: string; hesitated: boolean; candidates: number } | null => {
     const jsonText = raw.match(/\{[\s\S]*\}/)?.[0]
     if (!jsonText) {
       console.warn(`[dsagent-taobao-publish] 属性「${attrName}」模型未返回 JSON：${raw.slice(0, 120)}`)
@@ -988,33 +1212,159 @@ async function pickPropValue(
       return null
     }
     // 犹豫信号：模型返回了值但不在候选里 —— 它想改写/编造，按放弃处理但标记犹豫
-    const hesitated = !options.includes(picked)
-    if (hesitated) {
+    if (!options.includes(picked)) {
       console.warn(`[dsagent-taobao-publish] 属性「${attrName}」模型返回「${picked}」不在候选中，按放弃处理`)
       return null
     }
     return { value: picked, hesitated: false, candidates: options.length }
-  } catch (e) {
-    console.warn(`[dsagent-taobao-publish] 属性「${attrName}」模型请求异常：${e instanceof Error ? e.message : String(e)}`)
-    return null
   }
+
+  // ── ① 宿主聊天模型句柄（推荐路径，无需任何环境变量）──
+  if (ctx.model) {
+    try {
+      const BlockAssembler = await loadBlockAssembler()
+      const assembler = new BlockAssembler()
+      let finished = false
+      for await (const chunk of ctx.model.stream({
+        provider: ctx.model.provider,
+        model: ctx.model.model,
+        system: sys,
+        messages: [{ role: 'user', content: [{ type: 'text', text: user }] }],
+        temperature: 0,
+        maxTokens: 200,
+        signal: AbortSignal.timeout(ATTR_MODEL_TIMEOUT_MS),
+      })) {
+        if (finished) break
+        assembler.push(chunk)
+        if ((chunk as { type?: string })?.type === 'finish') finished = true
+      }
+      // 只有正常收尾（stop）才采信输出；错误/取消/截断一律放弃
+      if (!finished || assembler.finish.kind !== 'stop') return null
+      const raw = assembler.blocks().filter(b => b.type === 'text').map(b => b.text || '').join('')
+      return parse(raw)
+    } catch (e) {
+      console.warn(`[dsagent-taobao-publish] 属性「${attrName}」宿主模型异常：${e instanceof Error ? e.message : String(e)}`)
+      return null
+    }
+  }
+
+  return null
 }
 
 /**
- * 自动填「类目属性」区：逐个属性「展开下拉 → 读真实选项 → 模型选值 → 点中 → 回读」。
+ * ★ 复刻上架助手 6.33 的核心设计：点「一键采纳推荐值」按钮，让平台 AI 自动填属性。
+ *
+ * 上架助手走 MTOP `mtop.taobao.sell.wireless.ai.publish.render`，平台侧 AI 直接返回推荐属性值；
+ * 网页发布表单的等价功能是页面上的「一键采纳推荐值」按钮（填写率提示如 26%）。
+ * 这比外部 LLM 逐项选值更准确、更快、且不会张冠李戴。
+ *
+ * ★ 真实实测（2026-10）：按钮文本含「采纳推荐值」或「一键采纳」，通常位于类目属性区顶部或底部。
+ *   点击后页面逐项填入平台推荐值（部分项可能无推荐 → 仍为空，需后续补）。
+ */
+async function adoptRecommendations(page: any): Promise<boolean> {
+  // ★ 先滚动到类目属性区，触发懒加载渲染
+  await page.evaluate(() => {
+    const cat = document.getElementById('struct-catProp')
+    if (cat) cat.scrollIntoView({ behavior: 'instant', block: 'start' })
+    else window.scrollTo(0, document.body.scrollHeight / 3)
+  }).catch(() => {})
+  await sleep(1000)
+
+  // 轮询等待「一键采纳推荐值」按钮渲染——按钮可能依赖平台 AI 接口回调，渲染较慢
+  // ★ 部分新版页面不再有此按钮（用「填写助手」替代），轮询 15s 即可避免空等
+  for (let attempt = 0; attempt < 15; attempt++) {
+    const found = await page.evaluate(() => {
+      // 用 innerText（合并子元素文本，不受 React 文本拆分影响）
+      const all = Array.from(document.querySelectorAll('a, button, span, [role="button"], .next-btn, div')) as HTMLElement[]
+      // 精确匹配——叶子元素
+      const target = all.find(el => {
+        const t = (el.innerText || '').trim()
+        return (t === '一键采纳推荐值' || t === '采纳推荐值') && el.offsetParent !== null
+      })
+      if (target) { (target as HTMLElement).click(); return true }
+      // 宽松匹配——含关键词且子元素少
+      const target2 = all.find(el => {
+        const t = (el.innerText || '').trim()
+        return /采纳推荐值|一键采纳|全部采纳/.test(t) && el.offsetParent !== null && el.children.length <= 1
+      })
+      if (target2) { (target2 as HTMLElement).click(); return true }
+      return false
+    }).catch(() => false) as boolean
+    if (found) {
+      console.log('[dsagent-taobao-publish] 已点击「一键采纳推荐值」')
+      await sleep(3000)
+      return true
+    }
+    await sleep(1000) // 等待渲染（平台 AI 回调较慢）
+  }
+
+  // 诊断：dump 包含「采纳」的元素
+  const diag = await page.evaluate(() => {
+    const results: string[] = []
+    const all = Array.from(document.querySelectorAll('*')) as HTMLElement[]
+    for (const el of all) {
+      const t = (el.textContent || '').trim()
+      if (t && /采纳/.test(t) && el.offsetParent !== null) {
+        results.push(`<${el.tagName.toLowerCase()} class="${el.className}" children="${el.children.length}"> text="${t.slice(0, 80)}"`)
+        if (results.length >= 10) break
+      }
+    }
+    return results
+  }).catch(() => [] as string[]) as string[]
+  console.log(`[dsagent-taobao-publish] 未找到「一键采纳推荐值」按钮（轮询 15s）。页面含「采纳」的元素：\n${diag.join('\n') || '(无)'}`)
+  return false
+}
+
+/**
+ * 自动填「类目属性」区。
+ *
+ * ★ 复刻上架助手 6.33 的设计（优先级从高到低）：
+ *   ① 显式 attributes（用户/脚本传了就精确匹配填入）
+ *   ② 类目档案 profileStore（g5：平台+catId 精确匹配的长期档案，用户可手编）
+ *   ③ 宿主模型句柄 attrModel（对齐 pdd-publish）
+ *   ④ 以上全没填 → 在 fillCategoryAttrs 之前先调 adoptRecommendations 点「一键采纳推荐值」
+ *
+ * ★ 每层都是「命中即验证」：候选里必须仍有该值才用；档案值不在候选 → 降级到下一层
+ *   （降级后新值成功生效会随发布成功写回档案 = 自动修复，见 save 的合并语义）。
  * ★ 品牌跳过（品牌授权风险，且选类目页已用 brand 参数填过）。
  * ★ 纯文本类属性不在此处处理（无可选候选，交由人工）。
  * ★ 填失败不阻断发布，只记入 missed 回报。
+ *
+ * 返回 profile 快照（g5 落盘用）：
+ *   - confirmed：本次实际生效的属性（页面预填值 + 本函数确认填上的）
+ *   - schemaNames/schemaFp：当前类目属性结构（save 清除已消失的旧属性用）
  */
 async function fillCategoryAttrs(
   page: any,
-  ctx: { title: string; categoryKeyword: string },
-): Promise<{ filled: string[]; missed: string[] }> {
+  ctx: {
+    title: string
+    model?: AttrModelHandle
+    explicit?: { name: string; value: string }[]
+    /** 发布页 catId（类目档案的精确身份键；空 = 无档案可查/不落档） */
+    catId?: string
+    /** 渠道键（'taobao'/'tmall'，档案按渠道分开存） */
+    platform?: string
+  },
+): Promise<{ filled: string[]; missed: string[]; confirmed: Record<string, string>; schemaNames: string[]; schemaFp: string; profile: CategoryProfile | null }> {
   const filled: string[] = []
   const missed: string[] = []
-  const cat = ctx.categoryKeyword || ''
-  const PLATFORM = 'taobao'
+  /** 本次确认生效的属性值（档案落盘 patch；含页面预填值，见函数尾部） */
+  const confirmedAttrs: Record<string, string> = {}
+  /** 档案/日志用的平台键（'taobao'/'tmall'，档案按渠道分开存） */
+  const PLATFORM = ctx.platform || 'taobao'
+  const explicitMap = new Map((ctx.explicit || []).map(a => [a.name, a.value]))
   const all = await readCatPropItems(page)
+  const schemaNames = all.map(i => i.name)
+  const schemaFp = schemaFingerprint(schemaNames)
+  // ── 类目档案（g5）：平台+catId 精确匹配；命中的档案作为优先级 ② ──
+  let profile: CategoryProfile | null = null
+  if (ctx.catId) {
+    profile = await profileStore.load(PLATFORM, ctx.catId).catch(() => null)
+    if (profile) {
+      console.log(`[dsagent-taobao-publish] 类目档案命中（${profile.file || PLATFORM + '-' + ctx.catId}，`
+        + `上次更新 ${new Date(profile.updatedAt).toLocaleString()}，属性 ${Object.keys(profile.attributes).length} 项）`)
+    }
+  }
   const todo = all.filter(i => i.name && !i.filled && !ATTR_SKIP_RE.test(i.name) && i.kind !== 'text')
   if (all.length) {
     console.log(`[dsagent-taobao-publish] 类目属性共 ${all.length} 项，待填 ${todo.length} 项`
@@ -1024,7 +1374,7 @@ async function fillCategoryAttrs(
   for (const it of todo) {
     const opened = await openPropDropdown(page, it.id)
     if (!opened) { missed.push(`${it.name}（未能展开下拉）`); continue }
-    await sleep(ATTR_DROPDOWN_WAIT_MS)
+    await waitForPropPanel(page, ATTR_DROPDOWN_WAIT_MS)
     const options = await readPropOptions(page)
     if (!options.length) {
       await closePropDropdown(page)
@@ -1032,25 +1382,38 @@ async function fillCategoryAttrs(
       continue
     }
 
-    // ── 缓存优先：同类目上次成功填的值，若仍在当前选项里就直接用（省模型 API）──
     let pick: { value: string; hesitated: boolean; candidates: number } | null = null
-    let fromCache = false
-    if (cat) {
-      const cached = await attrCache.lookup(PLATFORM, cat, it.name).catch(() => null)
-      if (cached && options.includes(cached)) {
-        pick = { value: cached, hesitated: false, candidates: options.length }
-        fromCache = true
+    let source = ''
+
+    // ── ① 显式值优先（精确匹配页面真实候选）──
+    const explicitVal = explicitMap.get(it.name)
+    if (explicitVal && options.includes(explicitVal)) {
+      pick = { value: explicitVal, hesitated: false, candidates: options.length }
+      source = '显式'
+    }
+
+    // ── ② 类目档案（g5）：平台+catId 档案里上次生效的值，仍在当前候选里就直接用 ──
+    //    ★ 命中即验证：不在候选 → 降级走 ③模型（新值生效后随成功写回 = 自动修复）。
+    if (!pick && profile) {
+      const profileVal = profile.attributes[it.name]
+      if (profileVal && options.includes(profileVal)) {
+        pick = { value: profileVal, hesitated: false, candidates: options.length }
+        source = '档案命中'
+      } else if (profileVal) {
+        console.log(`[dsagent-taobao-publish] 档案值「${it.name}=${profileVal}」不在当前候选（类目属性候选已变），自动降级重选`)
       }
     }
-    // ── 缓存未命中或值已不在选项里 → fallback 到模型 ──
+
+    // ── ③ 模型选值（宿主模型句柄）──
     if (!pick) {
-      pick = await pickPropValue(it.name, options, ctx)
+      pick = await pickPropValue(it.name, options, { title: ctx.title, model: ctx.model })
+      if (pick) source = '模型'
     }
 
     if (!pick) {
       await closePropDropdown(page)
       console.log(`[dsagent-taobao-publish] 属性「${it.name}」候选：${options.join(' / ')}`)
-      missed.push(`${it.name}（候选 ${options.length} 项，模型未选）`)
+      missed.push(`${it.name}（候选 ${options.length} 项，未选到值）`)
       continue
     }
     const ok = await clickPropOption(page, pick.value)
@@ -1058,17 +1421,21 @@ async function fillCategoryAttrs(
     const confirmed = ok && await verifyPropValue(page, it.id, pick.value)
     await closePropDropdown(page)
     if (confirmed) {
-      const tag = fromCache ? '缓存命中' : `候选${pick.candidates}项`
-      filled.push(`${it.name}=${pick.value}（${tag}）`)
-      // 只记模型选的值（缓存命中的已记过，不重复刷 hits）
-      if (!fromCache && cat) {
-        await attrCache.record(PLATFORM, cat, it.name, pick.value).catch(() => {})
-      }
+      filled.push(`${it.name}=${pick.value}（${source}）`)
+      confirmedAttrs[it.name] = pick.value
     } else {
       missed.push(`${it.name}（点选「${pick.value}」${ok ? '后未确认到值' : '失败'}）`)
     }
   }
-  return { filled, missed }
+
+  // ── 档案快照（g5）：本次页面确认生效的全部属性值 = 页面预填值（含一键采纳推荐值）
+  //    + 本函数确认填上的。品牌预填值也入档（同类目品牌恒定，但填值仍跳过人工）。
+  //    发布成功后以此为 patch 保存档案（save 里 schemaNames 清单外的旧属性自动清除）。
+  for (const it of all) {
+    if (it.name && it.value) confirmedAttrs[it.name] = it.value
+  }
+
+  return { filled, missed, confirmed: confirmedAttrs, schemaNames, schemaFp, profile }
 }
 
 /**
@@ -1081,7 +1448,7 @@ async function fillCategoryAttrs(
  *      模板是店铺真实数据，不能硬编码：展开下拉读真实候选，优先取含「默认模板」的一项，
  *      取不到就取第一项；一项都没有（店铺未配置模板）时只勾选并记 missed，交人工。
  */
-async function fillExtractWay(page: any): Promise<boolean> {
+async function fillExtractWay(page: any, cachedTemplate?: string | null): Promise<{ ok: boolean; template?: string }> {
   const checked = await page.evaluate(() => {
     const box = document.getElementById('struct-tbExtractWay') as HTMLElement | null
     if (!box) return false
@@ -1092,7 +1459,7 @@ async function fillExtractWay(page: any): Promise<boolean> {
     ;(label || inp).click()
     return true
   }).catch(() => false) as boolean
-  if (!checked) return false
+  if (!checked) return { ok: false }
   await sleep(600)
 
   // ① 展开运费模板下拉（next 组件必须用 JS 原生 click）
@@ -1105,36 +1472,40 @@ async function fillExtractWay(page: any): Promise<boolean> {
   }).catch(() => false) as boolean
   if (!opened) {
     // 没有模板下拉（少数类目不需要），勾选即算完成
-    return true
+    return { ok: true }
   }
-  await sleep(ATTR_DROPDOWN_WAIT_MS)
+  await waitForPropPanel(page, ATTR_DROPDOWN_WAIT_MS)
 
-  // ② 读真实候选并点中「默认模板」（没有则第一项）
-  const picked = await page.evaluate(() => {
+  // ② 读真实候选并点中（优先级：类目档案上次成功模板 > 「默认模板」启发式 > 第一项）
+  //    ★ 命中即验证：档案值必须仍在当前候选 texts 里才用，不在则落回启发式。
+  const cachedTpl = cachedTemplate || null
+  const picked = await page.evaluate((cached: string | null) => {
     const overlay = document.querySelector('.next-overlay-wrapper.opened')
     if (!overlay) return ''
     const items = Array.from(overlay.querySelectorAll('.options-item, li, .next-menu-item, [role="option"]')) as HTMLElement[]
     const texts = items.map(el => (el.textContent || '').trim()).filter(Boolean)
     if (!texts.length) return ''
-    const target = texts.find(t => /默认模板/.test(t)) || texts[0]
+    const target = (cached && texts.includes(cached) ? cached : '')
+      || texts.find(t => /默认模板/.test(t)) || texts[0]
     const hit = items.find(el => (el.textContent || '').trim() === target)
     if (hit) hit.click()
     return target
-  }).catch(() => '') as string
+  }, cachedTpl).catch(() => '') as string
   if (!picked) {
     console.warn('[dsagent-taobao-publish] 提取方式：未读到运费模板候选，仅勾选「使用物流配送」')
-    return true
+    return { ok: true }
   }
   await sleep(600)
 
   // ③ 回读确认：勾选 + 模板都生效才算成功
-  return await page.evaluate(() => {
+  const confirmed = await page.evaluate(() => {
     const box = document.getElementById('struct-tbExtractWay') as HTMLElement | null
     if (!box) return false
     const inp = box.querySelector('input[type="checkbox"][value="2"]') as HTMLInputElement | null
     const val = (box.querySelector('.next-select-values')?.textContent || '').trim()
     return !!inp?.checked && !!val
   }).catch(() => false) as boolean
+  return { ok: confirmed, template: confirmed ? picked : undefined }
 }
 
 /**
@@ -1151,6 +1522,9 @@ async function fillExtractWay(page: any): Promise<boolean> {
  *   3) 行内的格子用 `td[id$="..."]` 精确定位（id 形如 `{row}-skuPrice`），
  *      比按列序 or placeholder 稳。
  *
+ * ★ 新版 SKU 面板（部分新类目）：检测到「+ 创建规格」按钮时**不自动填**，
+ *   missed 转人工补填（+ 对话引导）。机制细节见 skills/taobao-publish/SOURCE.md §4.6。
+ *
  * @returns filled / missed 文案，供主流程汇总
  */
 async function fillSkus(
@@ -1163,6 +1537,24 @@ async function fillSkus(
     .map(s => ({ ...s, name: String(s?.name || '').trim() }))
     .filter(s => s.name)
   if (!wanted.length) return { filled, missed }
+
+  // ── ⓪ 新版 SKU 面板检测（新版类目无旧版销售属性输入框）──
+  // 新版面板为「+ 创建规格」按钮 + 属性卡选择 + 交叉乘积表，与旧版单属性
+  // 输入框语义完全不同；自动适配已按决策放弃（见 SOURCE.md §4.6），转人工补填。
+  const hasNewPanel = await page.evaluate(() => {
+    const box = document.getElementById('struct-sku') || document.getElementById('struct-saleProp')
+    if (!box) return false
+    return Array.from(box.querySelectorAll('button, a, div, span'))
+      .some((el): boolean => {
+        const e = el as HTMLElement
+        return e.offsetParent !== null && /^\s*\+\s*创建规格/.test((e.innerText || '').trim())
+      })
+  }).catch(() => false) as boolean
+
+  if (hasNewPanel) {
+    missed.push('多规格（新版SKU面板：请在浏览器窗口内人工点「+ 创建规格」选属性/填规格值，再确认创建并填价格/数量；其余字段已自动填好，不影响发布）')
+    return { filled, missed }
+  }
 
   // ── ① 定位销售属性输入框（#struct-saleProp 内的规格值输入框）──
   const inputPos = await page.evaluate((re: string, propId: string) => {
@@ -1270,150 +1662,6 @@ async function fillSkus(
 }
 
 /**
- * 宝贝详情图上传：在「新版详情编辑器（Lite 装修编辑器）」内添加图片并上传。
- *
- * ★ 真实实测（2026-09）链路（编辑页 `publish.htm?...&itemId=...`）：
- *   1) 详情区**默认展开的就是 Lite 编辑器** `#lite-decoration-editor`
- *      （外层 `#struct-descRepublicOfSell`；而旧版 `#struct-desc`/`#struct-descType` 是 `hidden`）；
- *      其「添加」面板里 `[class*=add_item-NH_hk3]` 文本「图片」= 图片模块入口；
- *   2) 顶层真实鼠标点击该「图片」→ 弹出 `sucai-selector-ng` **跨域 iframe**
- *      （`market.m.taobao.com/app/crs-qn/sucai-selector-ng/index?type=pic...`，与主图同一套选择器）；
- *   3) 该 iframe 内按钮 `button` 文本「本地上传」→ `el.click()` → 轮询 `input[type=file]` → `uploadFile(...)`；
- *   4) 上传完成后面板出现 `button[class*=UploadPanel_footer]` 文本「完成」→ `el.click()` 关闭上传面板；
- *   5) 点目标瓦片 `[class*=PicList_pic_background]` → `el.click()`（选中后出现计数）；
- *   6) 点 `button` 文本 `/^确定/`（实际文案是「确定（N）」，**必须前缀匹配**）→ 关闭选择器并把图片回填到画布。
- *
- * ★ 关键教训：跨域 iframe 内**不要**用「坐标换算 + page.mouse.click」，实测点击落空；
- *   素材选择器的 React 合成事件挂在 document 上，`el.click()` 即可生效。
- *
- * 详情图非发布必填项：任一步失败只记 missed，不阻断提交；浏览器窗口保持打开供人工补传。
- */
-async function fillDetailImages(
-  page: any,
-  images: string[],
-): Promise<{ ok: boolean; note: string }> {
-  const want = images.map(p => String(p || '').trim()).filter(Boolean)
-  if (!want.length) return { ok: true, note: '未指定详情图' }
-
-  /** 找素材选择器 frame（跨域 sucai-selector-ng） */
-  const findSucai = () => page.frames().find((f: any) => {
-    try { return /sucai-selector-ng/.test(String(f.url() || '')) } catch { return false }
-  })
-
-  // ── ① 确认 Lite 编辑器存在（没有则说明详情区结构变更）──
-  const hasLite = await page.evaluate(() =>
-    !!document.querySelector('#lite-decoration-editor')).catch(() => false) as boolean
-  if (!hasLite) return { ok: false, note: '未找到新版详情编辑器（#lite-decoration-editor）' }
-
-  /** 关掉可能残留的上传面板 / 选择器（幂等，失败忽略） */
-  const dismiss = async () => {
-    const s = findSucai()
-    if (!s) return
-    await s.evaluate(() => {
-      const done = Array.from(document.querySelectorAll('button'))
-        .find(x => (x.textContent || '').trim() === '完成' && /UploadPanel/.test(String((x as HTMLElement).className || ''))) as HTMLElement | undefined
-      done?.click()
-      const cancel = Array.from(document.querySelectorAll('button'))
-        .find(x => /^取消/.test((x.textContent || '').trim())) as HTMLElement | undefined
-      cancel?.click()
-    }).catch(() => { /* 忽略 */ })
-    await sleep(1500)
-  }
-
-  let doneCount = 0
-  const notes: string[] = []
-
-  for (let n = 0; n < want.length; n++) {
-    // ── ② 点「添加 → 图片」打开素材选择器（顶层真实鼠标点击）──
-    await dismiss()
-    const opened = await page.evaluate(() => {
-      const el = Array.from(document.querySelectorAll('#lite-decoration-editor [class*=add_item]'))
-        .find(x => (x.textContent || '').trim() === '图片' && ((x as HTMLElement).offsetWidth || (x as HTMLElement).offsetHeight)) as HTMLElement | null
-      if (!el) return null
-      el.scrollIntoView({ block: 'center' })
-      const r = el.getBoundingClientRect()
-      return { x: r.x + r.width / 2, y: r.y + r.height / 2 }
-    }).catch(() => null) as { x: number; y: number } | null
-    if (!opened) { notes.push(`第${n + 1}张：未找到「图片」模块入口`); break }
-    await page.mouse.move(opened.x, opened.y).catch(() => { /* 忽略 */ })
-    await sleep(300)
-    await page.mouse.click(opened.x, opened.y).catch(() => { /* 忽略 */ })
-
-    let sucai: any = null
-    for (let i = 0; i < 12; i++) {
-      await sleep(1000)
-      sucai = findSucai()
-      if (sucai) break
-    }
-    if (!sucai) { notes.push(`第${n + 1}张：素材选择器未打开`); break }
-    await sleep(1500)
-
-    // ── ③ 点「本地上传」→ 注入文件 ──
-    await sucai.evaluate(() => {
-      const b = Array.from(document.querySelectorAll('button'))
-        .find(x => (x.textContent || '').trim() === '本地上传') as HTMLElement | undefined
-      b?.click()
-    }).catch(() => { /* 忽略 */ })
-    let fileInput: any = null
-    for (let i = 0; i < 15; i++) {
-      await sleep(900)
-      fileInput = await sucai.$('input[type=file]').catch(() => null)
-      if (fileInput) break
-    }
-    if (!fileInput) { notes.push(`第${n + 1}张：未找到文件输入框`); break }
-    await fileInput.uploadFile(want[n]).catch(() => { /* 忽略 */ })
-    await sleep(8000) // 等上传 + 列表刷新
-
-    // ── ④ 点「完成」关闭上传面板（否则瓦片列表不可点）──
-    await sucai.evaluate(() => {
-      const b = Array.from(document.querySelectorAll('button'))
-        .find(x => (x.textContent || '').trim() === '完成' && /UploadPanel/.test(String((x as HTMLElement).className || ''))) as HTMLElement | undefined
-      b?.click()
-    }).catch(() => { /* 忽略 */ })
-    await sleep(UI_STEP_DELAY_MS)
-
-    // ── ⑤ 选中本次上传的瓦片（按文件名匹配，回退第一个）──
-    const base = want[n].split(/[\\/]/).pop() || ''
-    const picked = await sucai.evaluate((fileName: string) => {
-      const tiles = Array.from(document.querySelectorAll('[class*=PicList_pic_background]')) as HTMLElement[]
-      if (!tiles.length) return { ok: false, cnt: 0 }
-      let target = tiles.find(t => {
-        const item = t.closest('li,div')
-        return fileName && item && (item.textContent || '').includes(fileName)
-      })
-      if (!target) target = tiles[0]
-      target.scrollIntoView({ block: 'center' })
-      target.click()
-      return { ok: true, cnt: tiles.length }
-    }, base).catch(() => ({ ok: false, cnt: 0 })) as { ok: boolean; cnt: number }
-    if (!picked.ok) { notes.push(`第${n + 1}张：素材列表为空`); break }
-    await sleep(1200)
-
-    // ── ⑥ 点「确定（N）」（前缀匹配）关闭选择器并回填 ──
-    const confirmed = await sucai.evaluate(() => {
-      const b = Array.from(document.querySelectorAll('button'))
-        .find(x => /^确定/.test((x.textContent || '').trim()) && ((x as HTMLElement).offsetWidth || (x as HTMLElement).offsetHeight)) as HTMLElement | undefined
-      if (!b) return false
-      b.click()
-      return true
-    }).catch(() => false) as boolean
-    if (!confirmed) notes.push(`第${n + 1}张：未找到「确定」按钮`)
-    await sleep(4000)
-
-    // 校验：Lite 编辑器画布内图片数量增加
-    const imgCount = await page.evaluate(() =>
-      document.querySelectorAll('#lite-decoration-editor img.image-item').length).catch(() => 0) as number
-    if (imgCount >= n + 1) doneCount++
-    else notes.push(`第${n + 1}张：确定后画布未见图片（画布现有 ${imgCount} 张）`)
-  }
-
-  if (doneCount === want.length) {
-    return { ok: true, note: `已上传 ${doneCount} 张详情图（新版详情编辑器画布已回填）` }
-  }
-  return { ok: false, note: `详情图部分完成（${doneCount}/${want.length}）${notes.length ? `；${notes.join('；')}` : ''}` }
-}
-
-/**
  * 读「提交后被拦」的真实原因 —— 吸收拼多多的 readSubmitErrors 三路诊断。
  *
  * 淘宝提交被拦时页面不弹 toast，拦因只在三处：
@@ -1430,11 +1678,14 @@ function readSubmitErrors(page: any): Promise<{ hard: string; panel: string }> {
   return page.evaluate(() => {
     const hard: string[] = []
 
-    // ① next 组件 toast（排除成功文案）
+    // ① next 组件 toast（排除成功文案 + 页面常驻的公告条）
+    //   ★ `.next-message` 会命中页面**常驻的公告/通知组件**（如「即日起平台将调整升级部分类目的
+    //     属性信息，点击查看详情」这类平台公告），它不是提交被拦的原因。只有**像报错**的文案才当硬拦因。
     const toastSelectors = '.next-message-notice, .next-message, .next-toast, [class*="toast"], [class*="Toast"]'
     const toastEl = document.querySelector(toastSelectors) as HTMLElement | null
     const toastTxt = (toastEl?.innerText || '').replace(/\s+/g, ' ').trim()
-    if (toastTxt && !/提交成功|发布成功|上架成功/.test(toastTxt)) {
+    const errorish = /失败|错误|不能|不可|必填|请输入|请选择|请填写|请上传|请完善|不正确|超出|不支持|违规|重复|无效|已下架|已存在|限制/
+    if (toastTxt && errorish.test(toastTxt) && !/提交成功|发布成功|上架成功/.test(toastTxt)) {
       hard.push(`页面提示：${toastTxt.slice(0, 120)}`)
     }
 
@@ -1472,18 +1723,21 @@ function readSubmitErrors(page: any): Promise<{ hard: string; panel: string }> {
 
 /** 点「提交宝贝信息 / 提交」（2026-09 实测按钮属性为 name="button-submit"，旧版为 _id） */
 async function clickSubmit(page: any): Promise<boolean> {
-  return await page.evaluate(() => {
-    const primary = (document.querySelector('button[name="button-submit"]')
-      || document.querySelector('button[_id="button-submit"]')) as HTMLButtonElement | null
+  // 配置驱动（anchors.submitButton）：SEL1/SEL2 为 CSS 候选（refreshTaobaoConfig 维护），
+  // TEXT_RE_SRC 为文案兜底正则源 —— 初值 = 历史硬编码，JSON 覆盖后行为同构。
+  return await page.evaluate((sel1: string, sel2: string, textReSrc: string) => {
+    const primary = (document.querySelector(sel1)
+      || document.querySelector(sel2)) as HTMLButtonElement | null
     if (primary && !primary.disabled) { primary.click(); return true }
     const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[]
+    const re = new RegExp(textReSrc)
     const hit = btns.find(b =>
-      /^(提交宝贝信息|提交|确认提交|发布)$/.test((b.innerText || '').trim())
+      re.test((b.innerText || '').trim())
       && !b.disabled && b.offsetParent !== null)
     if (!hit) return false
     hit.click()
     return true
-  }).catch(() => false) as boolean
+  }, SUBMIT_BTN_SEL1, SUBMIT_BTN_SEL2, SUBMIT_TEXT_RE_SRC).catch(() => false) as boolean
 }
 
 /**
@@ -1496,6 +1750,13 @@ export async function taobaoPublish(
   store: CredentialStore,
   opts: TaobaoPublishOptions,
 ): Promise<TaobaoPublishResult> {
+  // ── 配置热加载（publish-config/taobao.json，mtime 变化自动重读）──
+  // ★ 必须最先做：下面的入参校验就用 MAX_IMAGES/MAX_IMAGE_BYTES/MAX_TITLE_LEN 等配置值。
+  const cfgErr = refreshTaobaoConfig()
+  if (cfgErr) {
+    return { ok: false, failureKind: 'api_error', text: cfgErr }
+  }
+
   // ── 入参校验 ────────────────────────────────────────────
   const channelKey = ['taobao', 'tmall'].includes(String(opts.channel || '').trim().toLowerCase())
     ? String(opts.channel).trim().toLowerCase()
@@ -1508,6 +1769,8 @@ export async function taobaoPublish(
   const categoryKeyword = String(opts.categoryKeyword ?? '').trim()
   const brand = String(opts.brand ?? '').trim()
   const model = String(opts.model ?? '').trim()
+  const attrModel = opts.attrModel
+  const attributes = opts.attributes
   const images = (Array.isArray(opts.images) ? opts.images : [])
     .map(p => String(p || '').trim())
     .filter(Boolean)
@@ -1520,9 +1783,6 @@ export async function taobaoPublish(
       outerId: String(s?.outerId ?? '').trim(),
     }))
     .filter(s => s.name)
-  const detailImages = (Array.isArray(opts.detailImages) ? opts.detailImages : [])
-    .map(p => String(p || '').trim())
-    .filter(Boolean)
 
   if (!images.length) {
     return { ok: false, failureKind: 'api_error', text: '缺少 images（本地图片绝对路径列表，至少 1 张）。' }
@@ -1546,22 +1806,6 @@ export async function taobaoPublish(
       }
     } catch (e) {
       return { ok: false, failureKind: 'api_error', text: `无法读取图片文件：${e instanceof Error ? e.message : String(e)}` }
-    }
-  }
-  for (const p of detailImages) {
-    if (!existsSync(p)) {
-      return { ok: false, failureKind: 'api_error', text: `详情图文件不存在：${p}` }
-    }
-    try {
-      const st = statSync(p)
-      if (!st.isFile() || st.size === 0) {
-        return { ok: false, failureKind: 'api_error', text: `详情图不可用（非文件或大小为 0）：${p}` }
-      }
-      if (st.size > MAX_IMAGE_BYTES) {
-        return { ok: false, failureKind: 'api_error', text: `详情图超过单张上限 20MB：${p}（${(st.size / 1024 / 1024).toFixed(2)}MB）。` }
-      }
-    } catch (e) {
-      return { ok: false, failureKind: 'api_error', text: `无法读取详情图文件：${e instanceof Error ? e.message : String(e)}` }
     }
   }
   if (!title) {
@@ -1621,6 +1865,10 @@ export async function taobaoPublish(
   let attached = false
   // ★ 只有发布成功才关闭窗口；未成功时保留窗口供用户人工补全字段 / 处理风控后手动提交。
   let succeeded = false
+  /** 发布页 URL 的 catId（类目档案的精确身份键）；从发布页 URL 解析，可能在切页后才拿到 */
+  let publishCatId = ''
+  /** 类目显示名（选类目页页脚的完整路径，如「童装>>儿童外套」）；档案命名用 */
+  let publishCategoryName = ''
 
   try {
     const puppeteer = await import(/* @vite-ignore */ 'puppeteer-core' as string) as {
@@ -1728,15 +1976,16 @@ export async function taobaoPublish(
     await page.goto(entryUrl, { waitUntil: 'domcontentloaded', timeout: 45_000 })
     await sleep(4000)
 
-    // ── 1.5 选类目：传了 categoryKeyword 自动选第一个，否则等用户手动选 ──
+    // ── 1.5 选类目：传了 categoryKeyword 自动选（候选按与标题相关性降序），否则等用户手动选 ──
     // 选完类目会**新开标签页** sell/v2/publish.htm?catId=...，需把 page 切到新页继续。
     const onCategoryPage = /category\.htm/i.test(page.url())
       || await page.evaluate(() =>
         !!document.querySelector('input[placeholder*="类目关键词"]')).catch(() => false)
     if (onCategoryPage) {
       if (categoryKeyword) {
-        const cat = await selectCategory(page, categoryKeyword, { brand, model })
+        const cat = await selectCategory(page, categoryKeyword, { brand, model, title })
         console.log(`[dsagent-taobao-publish] 自动选类目：${cat.note}`)
+        if (cat.pickedPath) publishCategoryName = cat.pickedPath
       } else {
         console.log('[dsagent-taobao-publish] 当前为「选类目」页，等待用户在窗口内选好类目...')
       }
@@ -1750,6 +1999,17 @@ export async function taobaoPublish(
       } else {
         console.log('[dsagent-taobao-publish] 未捕获到新发布标签页，继续在当前页等待表单。')
       }
+    }
+
+    // ── 1.6 解析发布页 URL 的 catId（类目档案精确身份键，g5）────────
+    // catId 是档案查找/保存的唯一键（铁律：平台+catId 精确匹配，不做文件名模糊兜底）。
+    // 无论自动选类目还是用户手动选，发布页 URL 都形如 sell/v2/publish.htm?catId=123...。
+    {
+      const m = String(page.url()).match(/catId=(\d+)/i)
+      if (m) publishCatId = m[1]
+    }
+    if (publishCatId) {
+      console.log(`[dsagent-taobao-publish] 发布页 catId=${publishCatId}${publishCategoryName ? `（${publishCategoryName}）` : ''}`)
     }
 
     // ── 2. 等发布表单就绪（可能需要用户先手动选类目）────────
@@ -1816,6 +2076,17 @@ export async function taobaoPublish(
     const up = await uploadImages(page, images)
     console.log(`[dsagent-taobao-publish] 主图上传：${up.note}`)
 
+    // ── 3.5 表单就绪后补解析 catId（g5）───────────────────────
+    // 用户手动选类目时，1.6 那次解析可能发生在用户还没选完 → URL 里还没有 catId。
+    // 表单就绪 = 类目已定，此处再解析一次兜底。
+    if (!publishCatId) {
+      const m = String(page.url()).match(/catId=(\d+)/i)
+      if (m) {
+        publishCatId = m[1]
+        console.log(`[dsagent-taobao-publish] 发布页 catId=${publishCatId}（表单就绪后解析）`)
+      }
+    }
+
     // ── 4. 自动填通用字段 ──────────────────────────────────
     const filled: string[] = []
     const missed: string[] = []
@@ -1836,27 +2107,28 @@ export async function taobaoPublish(
       if (iHit) filled.push(`货号=${itemNo}`); else missed.push('货号')
     }
 
-    // ── 4.5 自动填类目属性（充值方式 / 模型或平台 / 软件类型 等）──
-    const attrs = await fillCategoryAttrs(page, { title, categoryKeyword })
+    // ── 4.5 类目属性 ──
+    // ★ 复刻上架助手 6.33：先点「一键采纳推荐值」让平台 AI 填属性（等价于 MTOP wireless.ai.publish.render），
+    //   再用显式值/档案/模型逐项补全未被推荐覆盖的必填项。
+    const adopted = await adoptRecommendations(page)
+    if (adopted) filled.push('一键采纳推荐值')
+    const attrs = await fillCategoryAttrs(page, {
+      title, model: attrModel, explicit: attributes,
+      catId: publishCatId, platform: channelKey,
+    })
     filled.push(...attrs.filled)
     missed.push(...attrs.missed)
 
-    // ── 4.6 物流服务「提取方式」勾选「使用物流配送」+ 选运费模板 ──
-    const exOk = await fillExtractWay(page)
-    if (exOk) filled.push('提取方式=使用物流配送+运费模板'); else missed.push('提取方式')
+    // ── 4.6 物流服务「提取方式」勾选「使用物流配送」+ 选运费模板（优先回放类目档案）──
+    const ex = await fillExtractWay(page, attrs.profile?.freightTemplate)
+    if (ex.ok) filled.push(`提取方式=使用物流配送+运费模板${ex.template ? `（${ex.template}）` : ''}`)
+    else missed.push('提取方式')
 
     // ── 4.7 多规格（销售属性）填写：规格值 + SKU 表价格/数量/编码 ──
     if (skus.length) {
       const skuRes = await fillSkus(page, skus)
       filled.push(...skuRes.filled.map(s => `SKU ${s}`))
       missed.push(...skuRes.missed)
-    }
-
-    // ── 4.8 宝贝详情图（跨域详情编辑器）──
-    if (detailImages.length) {
-      const dRes = await fillDetailImages(page, detailImages)
-      console.log(`[dsagent-taobao-publish] 详情图：${dRes.note}`)
-      if (dRes.ok) filled.push(`详情图=${detailImages.length}张`); else missed.push(`详情图（${dRes.note}）`)
     }
 
     console.log(`[dsagent-taobao-publish] 已填：${filled.join('、') || '（无）'}；未命中：${missed.join('、') || '（无）'}`)
@@ -1932,6 +2204,31 @@ export async function taobaoPublish(
       succeeded = true
       // 发布成功说明登录态确实有效，顺带订正可能被误标的状态
       try { await store.setStatus(shopKey, 'valid') } catch { /* 忽略 */ }
+
+      // ── 类目档案自动保存（g5 铁律 2+3）：发布成功 → 本次实际生效值全量写回 ──
+      // ★ 必须在页面跳转后立即保存吗？不用——快照在填写期间已收集（attrs.confirmed 等）。
+      // ★ save 的合并语义即「自动修复」：patch 覆盖旧同名键（过期值被实际生效值修复）、
+      //   schemaNames 清单外的旧属性清除（类目改版）、schema 内未生效的旧属性保留（用户手写）。
+      // ★ 写失败只 warn 不影响发布结果（对齐 attr-cache 纪律）。
+      let profileSaved = ''
+      if (publishCatId) {
+        try {
+          const saved = await profileStore.save(channelKey, publishCatId, publishCategoryName, {
+            attributes: attrs.confirmed,
+            schemaNames: attrs.schemaNames,
+            schemaFp: attrs.schemaFp,
+            freightTemplate: ex.template,
+          })
+          if (saved) {
+            profileSaved = saved.file || ''
+            console.log(`[dsagent-taobao-publish] 类目档案已保存：${profileSaved}（属性 ${Object.keys(saved.attributes).length} 项）`)
+          }
+        } catch (e) {
+          console.warn('[dsagent-taobao-publish] 类目档案保存失败（不影响发布）:',
+            e instanceof Error ? e.message : String(e))
+        }
+      }
+
       return {
         ok: true,
         shopKey,
@@ -1942,6 +2239,7 @@ export async function taobaoPublish(
           + (successId ? `商品ID：${successId}\n` : '')
           + (filled.length ? `已自动填写：${filled.join('、')}\n` : '')
           + (missed.length ? `未自动填写（需人工确认）：${missed.join('、')}\n` : '')
+          + (profileSaved ? `类目档案已更新：~/.dsh/publish-profiles/${profileSaved}（下次发布同类目直接复用）\n` : '')
           + `当前页面：${finalUrl}\n`
           + '注意：平台仍可能对商品做审核，最终状态请在千牛/卖家中心的「出售中的宝贝」确认。',
       }
@@ -1960,6 +2258,20 @@ export async function taobaoPublish(
       }
     }
 
+    // ★ 诊断：把页面可见文本 + 截图落盘，供定位「为何 180s 内未发布成功」
+    let pageText = ''
+    try {
+      pageText = await page.evaluate(() => (document.body?.innerText || '').replace(/\s+/g, ' ').slice(0, 1200))
+    } catch { /* 忽略 */ }
+    let shotPath = ''
+    try {
+      const shotDir = join(process.cwd(), 'dev', '.ui-shots')
+      await mkdir(shotDir, { recursive: true })
+      shotPath = join(shotDir, `taobao-fail-${Date.now()}.png`)
+      await page.screenshot({ path: shotPath })
+      console.log(`[dsagent-taobao-publish] 失败截屏：${shotPath}`)
+    } catch { /* 忽略 */ }
+
     return {
       ok: false,
       failureKind: 'api_error',
@@ -1968,6 +2280,8 @@ export async function taobaoPublish(
       text: `提交后 ${PUBLISH_TIMEOUT_MS / 1000}s 内未检测到成功标志（当前 URL：${finalUrl}）。\n`
         + (filled.length ? `已自动填写：${filled.join('、')}\n` : '')
         + (missed.length ? `★ 未能自动填写：${missed.join('、')}\n` : '')
+        + (shotPath ? `失败截屏：${shotPath}\n` : '')
+        + (pageText ? `页面文本：${pageText}\n` : '')
         + '请打开浏览器窗口查看具体提示：\n'
         + '  · 若页面仍有红色校验提示（类目属性、详情、发货设置等），补全后手动点「提交宝贝信息」；\n'
         + '  · 若出现滑块/安全验证，请人工完成；\n'

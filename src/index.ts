@@ -740,7 +740,19 @@ export function apply(ctx: Context, cfg: Config = config) {
       keyCookies,
       loginOwnerPlatform,
     }),
-    ...buildPublishTools({ store }),
+    ...buildPublishTools({
+      store,
+      // 宿主 LLM 服务（`ctx.llm`）：供拼多多发布的「商品属性」自动选值调用
+      // 本会话正在用的聊天模型。此处传**惰性解析函数**——服务可能晚于本插件注册，
+      // 且宿主测试桩不提供该服务，故不在 inject 里硬依赖，取不到时属性区自动降级。
+      getLlm: () => {
+        const get = (ctx as any).get
+        const svc = typeof get === 'function'
+          ? (get.call(ctx, 'llm') ?? get.call(ctx, 'llm', false))
+          : (ctx as any).llm
+        return typeof svc?.stream === 'function' ? svc : undefined
+      },
+    }),
     ...buildSkillTools({
       skill,
       account,

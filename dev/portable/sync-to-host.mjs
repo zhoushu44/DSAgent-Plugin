@@ -86,6 +86,7 @@ function findPluginLinks(harnessDir) {
 const sourceLib = join(repoRoot, 'lib')
 const sourceClient = join(sourceLib, 'client.js')
 const sourcePkg = join(repoRoot, 'package.json')
+const sourcePublishConfig = join(repoRoot, 'publish-config')
 
 if (!existsSync(sourceClient)) {
   console.error('[sync-to-host] 找不到 lib/client.js，请先构建：npm run build')
@@ -143,6 +144,10 @@ for (const harnessDir of harnessDirs) {
     cpSync(sourceLib, join(target, 'lib'), { recursive: true, force: true })
     // package.json 也同步（exports / dsh.client 声明可能变更）
     cpSync(sourcePkg, join(target, 'package.json'), { force: true })
+    // publish-config/ 也同步（JSON 驱动发布的平台锚点配置，loader 要求与 lib/ 同级）
+    if (existsSync(sourcePublishConfig)) {
+      cpSync(sourcePublishConfig, join(target, 'publish-config'), { recursive: true, force: true })
+    }
 
     const afterRev = artifactRevision(join(target, 'lib', 'client.js'))
     console.log(

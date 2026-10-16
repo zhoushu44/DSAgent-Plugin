@@ -211,7 +211,7 @@ const FALLBACK_SKILLS_RAW: FallbackSkill[] = [
   { id: 'taobao-analytics', name: '淘宝·数据分析', description: '拉取生意参谋核心指标，分析流量来源、转化率与客单价，生成经营诊断报告。', version: '1.0.0', platform: 'taobao', capability: 'analytics', risk: 'L0', enabled: true, dir: '', body: '' },
   /* 拼多多 */
   { id: 'pdd-crawl', name: '拼多多·数据采集', description: '采集商品搜索、竞品价格销量与评价数据，生成竞品对比报表。', version: '1.0.0', platform: 'pinduoduo', capability: 'analytics', risk: 'L1', enabled: true, dir: '', body: '' },
-  { id: 'pdd-publish', name: '拼多多·商品管理', description: '发布商品（pdd.goods.add）、查询商品列表（pdd.goods.list.get）并更新商品信息。', version: '1.0.0', platform: 'pinduoduo', capability: 'copywriting', risk: 'L2', enabled: true, dir: '', body: '' },
+  { id: 'pdd-publish-2', name: '拼多多·商品管理', description: '发布商品到拼多多商家后台（统一商品数据格式，支持颜色×尺码二维规格）、查询商品列表并更新商品信息。', version: '1.0.0', platform: 'pinduoduo', capability: 'copywriting', risk: 'L2', enabled: true, dir: '', body: '' },
   { id: 'pdd-order', name: '拼多多·订单履约', description: '查询订单、发货、电子面单取号与售后处理；资金类操作需强确认。', version: '1.0.0', platform: 'pinduoduo', capability: 'shop-ops', risk: 'L3', enabled: true, dir: '', body: '' },
   { id: 'pdd-stock', name: '拼多多·库存管理', description: '更新库存（pdd.goods.quantity.update）、上下架与 SKU 管理。', version: '1.0.0', platform: 'pinduoduo', capability: 'shop-ops', risk: 'L2', enabled: true, dir: '', body: '' },
   { id: 'pdd-im', name: '拼多多·客服消息', description: '收发商家客服消息，支持自动回复规则与话术模板。', version: '1.0.0', platform: 'pinduoduo', capability: 'cs-script', risk: 'L2', enabled: true, dir: '', body: '' },

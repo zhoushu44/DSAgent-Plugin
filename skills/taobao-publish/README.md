@@ -71,5 +71,5 @@
 ## 相关技能
 
 - **采集 / 比价淘宝商品** → `taobao-crawl` 系技能
-- **拼多多发布** → `pdd-publish`；**闲鱼发布** → `xianyu-publish`
+- **拼多多发布** → `pdd-publish-2`；**闲鱼发布** → `xianyu-publish`
 - **生意参谋数据分析** → sycm 系技能

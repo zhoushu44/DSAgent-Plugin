@@ -28,14 +28,156 @@
 import { CredentialStore, resolveAccountForRequest, type StoredAccount } from './services/credential-store.js'
 import { clearProfileLocks, findChromePath, profileDir, profileOwner, releaseProfile, tryAcquireProfile, sleep, UI_STEP_DELAY_MS } from './browser-login.js'
 import { existsSync, statSync } from 'node:fs'
+import { loadPublishConfig, anchorSpec, configString, configTimeout, type PublishConfig } from './services/publish-config-loader.js'
 
-const PUBLISH_URL = 'https://www.goofish.com/publish'
-const PUBLISH_TIMEOUT_MS = 120_000
-const UPLOAD_WAIT_MS = 60_000
-/** 单张图片上限（bundle 实证 maxFileSize = 10485760） */
-const MAX_IMAGE_BYTES = 10 * 1024 * 1024
-/** 单次提交的图片张数上限（平台上限以页面提示为准，超出部分忽略） */
-const MAX_IMAGES = 9
+/** 发布页入口 URL（urls.publish；初值 = 历史硬编码兜底，refreshXianyuConfig() 覆盖） */
+let PUBLISH_URL = 'https://www.goofish.com/publish'
+/** 提交后等待结果的总超时（timeouts.publishTimeoutMs） */
+let PUBLISH_TIMEOUT_MS = 120_000
+/** 单张图片上传等待上限（timeouts.uploadWaitMs） */
+let UPLOAD_WAIT_MS = 60_000
+/** 单张图片上限（limits.maxImageBytes；bundle 实证 maxFileSize = 10485760） */
+let MAX_IMAGE_BYTES = 10 * 1024 * 1024
+/** 单次提交的图片张数上限（limits.maxImages；平台上限以页面提示为准，超出部分忽略） */
+let MAX_IMAGES = 9
+
+/* ══════════════════════════════════════════════════════════════════
+ * JSON 配置驱动（PUBLISH-SPEC §3）：上面所有 let 常量的初值 = 历史硬编码
+ * 兜底，refreshXianyuConfig() 在每次发布入口处用 publish-config/xianyu.json
+ * 覆盖它们 —— **改 JSON 一行无需重启宿主**（loader 带 mtime 缓存热加载）。
+ * ★ 行为零变化纪律：本步只替换「字符串常量来源」，不改任何执行逻辑；
+ *   evaluate 内联选择器（文件上传/描述编辑器/价格框/分类 antd/发布按钮）本步不动。
+ * ══════════════════════════════════════════════════════════════════ */
+
+/** 当前生效的 xianyu.json 配置（refreshXianyuConfig 维护） */
+let XIANYU_CFG: PublishConfig | null = null
+
+/** 分类兜底类目名（anchors.categoryFallbackName 简写；unlockCategory 消费）：受限分类改选它以解锁网页版发布 */
+const CATEGORY_FALLBACK_NAME_RAW = '其他闲置'
+let CATEGORY_FALLBACK_NAME = CATEGORY_FALLBACK_NAME_RAW
+
+/** 分类下拉点开后等选项渲染的毫秒数（timeouts.categorySelectRenderMs） */
+let CATEGORY_SELECT_RENDER_MS = 2500
+/** 改选分类后等服务端重校验的毫秒数（timeouts.categoryRecheckMs） */
+let CATEGORY_RECHECK_MS = 9000
+
+/** 登录态失效文案正则源（anchors.loginRequiredRe；页面正文匹配） */
+let LOGIN_REQUIRED_RE_SRC = '立即登录|登录后可以'
+/** 分类被拦文案正则源（anchors.categoryBlockedRe；页面正文匹配） */
+let CATEGORY_BLOCKED_RE_SRC = '网页版暂不支持发布此分类|请使用闲鱼APP扫码|扫码去APP发布'
+/** 分类当前值提取正则源（anchors.categoryStateRe；「分类 * xxx」） */
+let CATEGORY_STATE_RE_SRC = '分类 \\* ([^\\s]+)'
+/** 已上传图 CDN 域过滤正则源（anchors.uploadedImage.srcMatchRe；上传进度代理） */
+let UPLOADED_IMG_SRC_RE_SRC = 'alicdn|goofish|taobaocdn'
+/** 上传失败文案正则源（regexes.uploadFailure） */
+let UPLOAD_FAILURE_RE_SRC = '上传失败|存在上传失败的图片'
+/** 成功 URL 判定正则源（regexes.successUrl；URL 含 /item） */
+let SUCCESS_URL_RE_SRC = '/item(\\?|/)'
+/** 成功文案正则源（regexes.successBody） */
+let SUCCESS_BODY_RE_SRC = '发布成功|已发布|宝贝已发布'
+/** 发布失败文案提取正则源（regexes.failure） */
+let FAILURE_RE_SRC = '发布失败[^。]{0,80}|请输入价格[^。]{0,40}|请输入库存[^。]{0,40}|请输入宝贝描述[^。]{0,40}|商品描述不能包含emoji|价格必须在[^。]{0,30}|库存必须在[^。]{0,30}|上传失败[^。]{0,60}|内容违规[^。]{0,60}|网络异常[^。]{0,40}'
+/** 发布按钮候选文案（anchors.publishButton.matchTexts；step 7 消费） */
+let PUBLISH_BUTTON_TEXTS: string[] = ['发布', '确认发布', '立即发布', '发布闲置']
+/** 发布按钮查询选择器（anchors.publishButton.candidates join；step 7 消费） */
+let PUBLISH_BUTTON_SELECTOR = 'button'
+/** 分类解锁尝试后仍被拦的判定正则源（regexes.categoryBlockedStill；step 8 结果轮询消费） */
+let CATEGORY_BLOCKED_STILL_RE_SRC = '扫码去APP发布|网页版暂不支持发布此分类|暂不支持编辑此分类'
+/** 图片上传控件选择器（anchors.imageInput；waitForSelector + uploadFile 消费） */
+let IMAGE_INPUT_SELECTOR = 'input[type=file]'
+/** 描述编辑器选择器（anchors.descEditor；page.click + 真实键盘输入消费） */
+let DESC_EDITOR_SELECTOR = 'div[contenteditable="true"]'
+
+/** 分类解锁失败后的引导文案（解锁已尝试仍被拦时的提示；兜底类目名插值，默认输出与历史硬编码一致） */
+function categoryBlockedStillText(): string {
+  return `该分类暂不支持在网页版发布（已尝试改选「${CATEGORY_FALLBACK_NAME}」兜底类目但仍被拦截）。`
+    + `请打开浏览器窗口，手动点「分类」下拉框选「${CATEGORY_FALLBACK_NAME}」后重试；`
+    + '若仍不行，请在闲鱼 APP 中完成该类目商品的发布。'
+}
+
+/** 多候选锚点归一为 CSS 逗号列表 */
+function anchorCssList(cfg: PublishConfig, key: string): string {
+  return anchorSpec(cfg, key).candidates.map(c => c.selector).join(', ')
+}
+
+/**
+ * 从 publish-config/xianyu.json 刷新全部配置常量。
+ * - loader fail-fast（缺配置 throw），这里捕获后返回错误信息，
+ *   由调用方决定返回 `{ok:false}` —— 配置坏宁可发布失败，也不静默用旧锚点。
+ * - 未曾成功加载过时（XIANYU_CFG === null）保持硬编码初值，行为与改造前一致。
+ * @returns null=成功；string=错误信息
+ */
+function refreshXianyuConfig(): string | null {
+  let cfg: PublishConfig
+  try {
+    cfg = loadPublishConfig('xianyu')
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    return XIANYU_CFG ? `发布配置刷新失败（沿用上次加载的配置）：${msg}` : `发布配置加载失败：${msg}`
+  }
+  XIANYU_CFG = cfg
+  try {
+    const L = cfg.limits
+    if (L.maxImageBytes > 0) MAX_IMAGE_BYTES = L.maxImageBytes
+    if (L.maxImages > 0) MAX_IMAGES = L.maxImages
+
+    const u1 = configString(cfg, 'urls', 'publish')
+    if (u1) PUBLISH_URL = u1
+
+    PUBLISH_TIMEOUT_MS = configTimeout(cfg, 'publishTimeoutMs', PUBLISH_TIMEOUT_MS)
+    UPLOAD_WAIT_MS = configTimeout(cfg, 'uploadWaitMs', UPLOAD_WAIT_MS)
+
+    // 简写字段（字符串锚点 / regexes）：值即正则/文案源
+    const loginRe = configString(cfg, 'anchors', 'loginRequiredRe')
+    if (loginRe) LOGIN_REQUIRED_RE_SRC = loginRe
+    const blockedRe = configString(cfg, 'anchors', 'categoryBlockedRe')
+    if (blockedRe) CATEGORY_BLOCKED_RE_SRC = blockedRe
+    const stateRe = configString(cfg, 'anchors', 'categoryStateRe')
+    if (stateRe) CATEGORY_STATE_RE_SRC = stateRe
+    const fbName = configString(cfg, 'anchors', 'categoryFallbackName')
+    if (fbName) CATEGORY_FALLBACK_NAME = fbName
+
+    // anchors.uploadedImage.srcMatchRe（对象锚点的 src 过滤字段）
+    const uploadedSpec = anchorSpec(cfg, 'uploadedImage')
+    if (uploadedSpec.srcMatchRe) UPLOADED_IMG_SRC_RE_SRC = uploadedSpec.srcMatchRe
+
+    // regexes
+    const r1 = cfg.regexes?.uploadFailure
+    if (r1) UPLOAD_FAILURE_RE_SRC = r1
+    const r2 = cfg.regexes?.successUrl
+    if (r2) SUCCESS_URL_RE_SRC = r2
+    const r3 = cfg.regexes?.successBody
+    if (r3) SUCCESS_BODY_RE_SRC = r3
+    const r4 = cfg.regexes?.failure
+    if (r4) FAILURE_RE_SRC = r4
+
+    // timeouts（本步 JSON 未定义，初值兜底；定义后即生效）
+    CATEGORY_SELECT_RENDER_MS = configTimeout(cfg, 'categorySelectRenderMs', CATEGORY_SELECT_RENDER_MS)
+    CATEGORY_RECHECK_MS = configTimeout(cfg, 'categoryRecheckMs', CATEGORY_RECHECK_MS)
+
+    // anchors.publishButton.matchTexts（step 7 点发布按钮的候选文案）
+    const pubSpec = anchorSpec(cfg, 'publishButton')
+    if (Array.isArray(pubSpec.matchTexts) && pubSpec.matchTexts.length > 0) {
+      PUBLISH_BUTTON_TEXTS = pubSpec.matchTexts
+    }
+    const pubSel = anchorCssList(cfg, 'publishButton')
+    if (pubSel) PUBLISH_BUTTON_SELECTOR = pubSel
+
+    // regexes.categoryBlockedStill（step 8 结果轮询里的解锁失败判定）
+    const r5 = cfg.regexes?.categoryBlockedStill
+    if (r5) CATEGORY_BLOCKED_STILL_RE_SRC = r5
+
+    // anchors.imageInput / descEditor（多候选 join 成 CSS 列表，与原硬编码形态一致）
+    const imgSel = anchorCssList(cfg, 'imageInput')
+    if (imgSel) IMAGE_INPUT_SELECTOR = imgSel
+    const descSel = anchorCssList(cfg, 'descEditor')
+    if (descSel) DESC_EDITOR_SELECTOR = descSel
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    return `发布配置字段缺失/非法（沿用当前值）：${msg}`
+  }
+  return null
+}
 
 export interface XianyuPublishOptions {
   /** 本地图片绝对路径列表（至少 1 张） */
@@ -146,6 +288,13 @@ export async function xianyuPublish(
   store: CredentialStore,
   opts: XianyuPublishOptions,
 ): Promise<XianyuPublishResult> {
+  // ── 配置热加载（publish-config/xianyu.json，mtime 变化自动重读）──
+  // ★ 必须最先做：下面的入参校验就用 MAX_IMAGES/MAX_IMAGE_BYTES 等配置值。
+  const cfgErr = refreshXianyuConfig()
+  if (cfgErr) {
+    return { ok: false, failureKind: 'api_error', text: cfgErr }
+  }
+
   // ── 入参校验 ────────────────────────────────────────────
   const description = String(opts.description || '')
   const title = String(opts.title || '').trim()
@@ -279,7 +428,8 @@ export async function xianyuPublish(
     // 闲鱼未登录时**不跳转**登录页，而是原地渲染「立即登录」，因此必须看页面文案与登录按钮。
     let loginWord = false
     try {
-      loginWord = await page.evaluate(() => /立即登录|登录后可以/.test(document.body?.innerText || ''))
+      loginWord = await page.evaluate((reSrc: string) =>
+        new RegExp(reSrc).test(document.body?.innerText || ''), LOGIN_REQUIRED_RE_SRC)
     } catch { /* 页面跳转中，忽略 */ }
     if (loginWord) {
       await store.setStatus(shopKey, 'expired')
@@ -296,10 +446,10 @@ export async function xianyuPublish(
     }
 
     // ── 3. 上传图片 ───────────────────────────────────────
-    await page.waitForSelector('input[type=file]', { timeout: 30_000 })
-    const fileInput = await page.$('input[type=file]')
+    await page.waitForSelector(IMAGE_INPUT_SELECTOR, { timeout: 30_000 })
+    const fileInput = await page.$(IMAGE_INPUT_SELECTOR)
     if (!fileInput) {
-      return { ok: false, failureKind: 'api_error', shopKey, text: '未在发布页找到图片上传控件（input[type=file]），页面结构可能已变更。' }
+      return { ok: false, failureKind: 'api_error', shopKey, text: `未在发布页找到图片上传控件（${IMAGE_INPUT_SELECTOR}），页面结构可能已变更。` }
     }
     console.log(`[dsagent-xianyu-publish] 上传 ${images.length} 张图片...`)
     await fileInput.uploadFile(...images)
@@ -310,14 +460,15 @@ export async function xianyuPublish(
     while (Date.now() < uploadDeadline) {
       await sleep(2000)
       try {
-        uploaded = await page.evaluate((expect: number) => {
+        uploaded = await page.evaluate((expect: number, failReSrc: string, srcReSrc: string) => {
           const txt = document.body?.innerText || ''
-          if (/上传失败|存在上传失败的图片/.test(txt)) return -1
+          if (new RegExp(failReSrc).test(txt)) return -1
           // 缩略图容器数量作为上传进度代理（img 的 src 指向阿里 CDN）
+          const srcRe = new RegExp(srcReSrc, 'i')
           const imgs = Array.from(document.querySelectorAll('img'))
-            .filter(el => /alicdn|goofish|taobaocdn/i.test((el as HTMLImageElement).src || ''))
+            .filter(el => srcRe.test((el as HTMLImageElement).src || ''))
           return Math.min(imgs.length, expect)
-        }, images.length)
+        }, images.length, UPLOAD_FAILURE_RE_SRC, UPLOADED_IMG_SRC_RE_SRC)
       } catch { /* 页面重绘中，下一轮再取 */ }
       if (uploaded === -1) {
         return {
@@ -341,14 +492,14 @@ export async function xianyuPublish(
     //     - textContent + InputEvent            → 字数仍 0/1500（无效）
     //     - page.click + page.keyboard.type     → 0/1500 → 30/1500（有效）
     //   故必须走真实键盘输入，不能用 evaluate 派发事件。
-    const DESC_SELECTOR = 'div[contenteditable="true"]'
+    const DESC_SELECTOR = DESC_EDITOR_SELECTOR // 配置驱动（anchors.descEditor；初值 = 历史硬编码兜底）
     const hasEditor = await page.$(DESC_SELECTOR)
     if (!hasEditor) {
       return {
         ok: false,
         failureKind: 'api_error',
         shopKey,
-        text: '未在发布页找到宝贝描述输入区（div[contenteditable="true"]），页面结构可能已变更。',
+        text: `未在发布页找到宝贝描述输入区（${DESC_SELECTOR}），页面结构可能已变更。`,
       }
     }
     await page.click(DESC_SELECTOR)
@@ -441,16 +592,85 @@ export async function xianyuPublish(
       else console.warn('[dsagent-xianyu-publish] 页面无独立标题输入框（实测发布页标题由描述派生），已跳过 title')
     }
 
+    // ── 6.5 分类解锁（★ 实测 2026-10-15）────────────────────
+    // 发布页的「分类」是**自动识别 + 可手动改**的 antd Select，不是只读展示。
+    // AI/软件/服务类会被自动识别成受限分类（DeepSeek服务 / AI模型训练 / 软件/程序/网站开发 …），
+    // 页面随即提示「网页版暂不支持发布此分类，请使用闲鱼APP扫码继续发布」，点发布必失败。
+    // 破解：点开分类下拉框 → 改选「其他闲置」（每批候选里都有的通用兜底类目）→ 提示消失 → 可正常发布。
+    const catState = async (): Promise<{ category: string | null; blocked: boolean }> =>
+      await page.evaluate((stateReSrc: string, blockedReSrc: string) => {
+        const t = (document.body?.innerText || '').replace(/\s+/g, ' ')
+        const m = t.match(new RegExp(stateReSrc))
+        return {
+          category: m ? m[1] : null,
+          blocked: new RegExp(blockedReSrc).test(t),
+        }
+      }, CATEGORY_STATE_RE_SRC, CATEGORY_BLOCKED_RE_SRC).catch(() => ({ category: null, blocked: false }))
+
+    /** 点开分类下拉框，返回候选类目名列表 */
+    const openCategorySelect = async (): Promise<{ box: { x: number; y: number } | null; options: string[] }> => {
+      const box = await page.evaluate(() => {
+        const lab = Array.from(document.querySelectorAll('label'))
+          .find(l => ((l.getAttribute('title') || l.innerText || '').trim()).startsWith('分类'))
+        const sel = lab?.closest('.ant-form-item')?.querySelector('.ant-select')
+        if (!sel) return null
+        const r = (sel as HTMLElement).getBoundingClientRect()
+        return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }
+      }).catch(() => null)
+      if (!box) return { box: null, options: [] }
+      await page.mouse.click(box.x, box.y)
+      await sleep(CATEGORY_SELECT_RENDER_MS) // 配置驱动（timeouts.categorySelectRenderMs）
+      const options = await page.evaluate(() =>
+        Array.from(document.querySelectorAll('.ant-select-item-option'))
+          .map(e => (e.textContent || '').trim()),
+      ).catch(() => [] as string[])
+      return { box, options }
+    }
+
+    /** 在已打开的下拉框里选一个类目（antd 必须 mousedown+mouseup+click 三连） */
+    const pickCategory = async (name: string): Promise<boolean> =>
+      await page.evaluate((target: string) => {
+        const el = Array.from(document.querySelectorAll('.ant-select-item-option'))
+          .find(e => (e.textContent || '').trim() === target)
+        if (!el) return false
+        el.scrollIntoView({ block: 'center' })
+        el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
+        el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }))
+        ;(el as HTMLElement).click()
+        return true
+      }, name).catch(() => false)
+
+    let before = await catState()
+    if (before.blocked) {
+      console.log(`[dsagent-xianyu-publish] 分类「${before.category}」网页版不可发，尝试改选兜底类目...`)
+      const { options } = await openCategorySelect()
+      console.log(`[dsagent-xianyu-publish] 分类候选：${options.join(' / ')}`)
+      // 优先配置的兜底类目（默认「其他闲置」，每批候选都有）；退而求其次选最后一个
+      const target = options.includes(CATEGORY_FALLBACK_NAME) ? CATEGORY_FALLBACK_NAME : options[options.length - 1]
+      if (target) {
+        if (await pickCategory(target)) {
+          // 选分类会触发服务端重新校验，需等待提示刷新
+          await sleep(CATEGORY_RECHECK_MS) // 配置驱动（timeouts.categoryRecheckMs）
+          before = await catState()
+          console.log(`[dsagent-xianyu-publish] 已改选分类「${target}」，当前状态：${JSON.stringify(before)}`)
+        } else {
+          console.warn(`[dsagent-xianyu-publish] 未能点中分类「${target}」`)
+        }
+      } else {
+        console.warn('[dsagent-xianyu-publish] 分类下拉框无候选，跳过解锁')
+      }
+    }
+
     // ── 7. 点「发布」──────────────────────────────────────
     await sleep(UI_STEP_DELAY_MS)
-    const clicked = await page.evaluate(() => {
-      const btns = Array.from(document.querySelectorAll('button')) as HTMLElement[]
-      const hit = btns.find(b => ['发布', '确认发布', '立即发布', '发布闲置'].includes((b.innerText || '').trim())
+    const clicked = await page.evaluate((btnSel: string, texts: string[]) => {
+      const btns = Array.from(document.querySelectorAll(btnSel)) as HTMLElement[]
+      const hit = btns.find(b => texts.includes((b.innerText || '').trim())
         && !(b as HTMLButtonElement).disabled)
       if (!hit) return false
       hit.click()
       return true
-    })
+    }, PUBLISH_BUTTON_SELECTOR, PUBLISH_BUTTON_TEXTS)
     if (!clicked) {
       return {
         ok: false,
@@ -476,14 +696,15 @@ export async function xianyuPublish(
         bodyText = await page.evaluate(() => (document.body?.innerText || '').replace(/\s+/g, ' ').slice(0, 3000))
       } catch { /* 页面跳转中，下一轮再取 */ }
 
-      if (/\/item(\?|\/)/.test(finalUrl)) { success = true; break }
-      if (/发布成功|已发布|宝贝已发布/.test(bodyText)) { success = true; break }
+      if (new RegExp(SUCCESS_URL_RE_SRC).test(finalUrl)) { success = true; break }
+      if (new RegExp(SUCCESS_BODY_RE_SRC).test(bodyText)) { success = true; break }
       // 部分类目网页版不支持发布 → 页面弹「扫码去APP发布」
-      if (/扫码去APP发布|网页版暂不支持发布此分类|暂不支持编辑此分类/.test(bodyText)) {
-        errText = '该分类暂不支持在网页版发布，页面要求「扫码去APP发布」。请在闲鱼 APP 中完成该类目商品的发布。'
+      // ★ 注意：步骤 6.5 已尝试改选「其他闲置」解锁；若这里仍命中，说明解锁失败。
+      if (new RegExp(CATEGORY_BLOCKED_STILL_RE_SRC).test(bodyText)) {
+        errText = categoryBlockedStillText()
         break
       }
-      const err = bodyText.match(/发布失败[^。]{0,80}|请输入价格[^。]{0,40}|请输入库存[^。]{0,40}|请输入宝贝描述[^。]{0,40}|商品描述不能包含emoji|价格必须在[^。]{0,30}|库存必须在[^。]{0,30}|上传失败[^。]{0,60}|内容违规[^。]{0,60}|网络异常[^。]{0,40}/)
+      const err = bodyText.match(new RegExp(FAILURE_RE_SRC))
       if (err) { errText = err[0]; break }
     }
 

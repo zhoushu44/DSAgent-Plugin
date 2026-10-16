@@ -22,6 +22,8 @@
 import * as nodeHttp from 'node:http'
 import * as nodeHttps from 'node:https'
 import * as nodeDns from 'node:dns'
+import * as nodeFs from 'node:fs'
+import * as nodePath from 'node:path'
 import * as crypto from 'node:crypto'
 import { URL } from 'node:url'
 import { readdirSync } from 'node:fs'
@@ -559,8 +561,10 @@ export function invalidateGatewayCache(filter?: { shopKey?: string; platform?: s
   return invalidateCache(filter)
 }
 
-/** 清空全部网关缓存 */
+/** 清空全部网关缓存，并重置路由冷却状态（用于测试隔离 / 手动清障） */
 export function clearGatewayCache(): number {
+  routeFailures.clear()
+  routeCooldownUntil.clear()
   return clearCache()
 }
 
@@ -761,15 +765,72 @@ export function startGatewayProxy(store: CredentialStore): Promise<GatewayProxy>
       const port = typeof addr === 'object' && addr ? addr.port : 0
       const url = `http://127.0.0.1:${port}`
       console.log(`[dsagent-gateway] 本地代理网关已启动: ${url}`)
+      // ★ 网关自动发现（discovery file）：
+      //   端口是系统随机分配的，只有经 dsagent_execute_skill 注入 env 的子进程知道。
+      //   会话里模型直接跑 CLI（shell 工具）时没有这套 env，只能翻进程找端口。
+      //   写一个固定路径的发现文件后，任何进程都能找到网关。
+      //   多实例（web/desktop/tui 多 profile 同时开）时各写一份，读最新存活的那份。
+      const discoveryPath = writeGatewayDiscovery(port)
       resolve({
         url,
         close() {
           server.close()
+          removeGatewayDiscovery(discoveryPath)
           console.log('[dsagent-gateway] 已关闭')
         },
       })
     })
   })
+}
+
+// ─────────────── 网关发现文件（discovery）───────────────────
+//
+// 目录：%USERPROFILE%\.dsagent\gateway\
+// 文件：gateway-<pid>.json，内容 { pid, port, url, startedAt, workspace }
+// 读取方（runtime_http.py 的 discover_gateway()）：列目录 → 按 mtime 降序 →
+// 逐个 GET /api/v1/health 验活，第一个存活即用；全挂则报"未找到运行中的网关"。
+
+/** 发现文件目录：跟随用户主目录，多 profile/多实例共用 */
+function gatewayDiscoveryDir(): string {
+  const home = process.env.USERPROFILE || process.env.HOME || process.cwd()
+  return nodePath.join(home, '.dsagent', 'gateway')
+}
+
+/** 写发现文件（失败静默 —— 不影响网关本身工作）。
+ *  同时清理残留文件：进程被强杀（宿主重启/崩溃）时 removeGatewayDiscovery 不会执行，
+ *  旧的 gateway-<死pid>.json 会一直留在目录里。写入前扫描目录，pid 已不存在的文件删掉，
+ *  读方（runtime_http.py）就不用对着一堆死实例挨个探活。 */
+function writeGatewayDiscovery(port: number): string | null {
+  try {
+    const dir = gatewayDiscoveryDir()
+    nodeFs.mkdirSync(dir, { recursive: true })
+    // 清理死 pid 的残留发现文件（Windows/Unix 通用：process.kill(pid, 0) 不发送信号，仅探测存在性）
+    for (const entry of nodeFs.readdirSync(dir)) {
+      if (!/^gateway-(\d+)\.json$/.test(entry)) continue
+      const deadPid = Number(entry.match(/^gateway-(\d+)\.json$/)![1])
+      if (deadPid === process.pid) continue
+      try { process.kill(deadPid, 0) } catch { /* pid 不存在 → 残留文件，删除 */ try { nodeFs.rmSync(nodePath.join(dir, entry), { force: true }) } catch { /* 尽力而为 */ } }
+    }
+    const file = nodePath.join(dir, `gateway-${process.pid}.json`)
+    const payload = {
+      pid: process.pid,
+      port,
+      url: `http://127.0.0.1:${port}`,
+      startedAt: Date.now(),
+      workspace: process.env.DSAGENT_WORKSPACE ?? process.cwd(),
+    }
+    nodeFs.writeFileSync(file, JSON.stringify(payload, null, 2), 'utf8')
+    return file
+  } catch (e) {
+    console.warn('[dsagent-gateway] 发现文件写入失败（不影响网关运行）:', e instanceof Error ? e.message : String(e))
+    return null
+  }
+}
+
+/** 关闭时清理发现文件（进程被强杀时残留文件靠读方验活兜底） */
+function removeGatewayDiscovery(file: string | null): void {
+  if (!file) return
+  try { nodeFs.rmSync(file, { force: true }) } catch { /* 尽力而为 */ }
 }
 
 // ─────────────── 代理逻辑 ───────────────
@@ -1053,8 +1114,12 @@ export async function handleProxy(body: any, store: CredentialStore): Promise<an
     // 对非 JSON 的字符串 payload 做清洗（移除控制字符 + 智能截断）
     if (typeof payload === 'string') {
       payload = payload.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '')
-      // 智能头尾保留：日志/HTML 类响应的尾部常有错误信息或结论
-      if (payload.length > 5000) payload = smartTruncateJsonAware(payload, 5000)
+      // 智能头尾保留：日志/HTML 类响应的尾部常有错误信息或结论。
+      // ★ HTML 网页截断上限 60KB（详情页等场景技能要从中提取 og:image / JSON-LD，
+      //   5KB 会把 head 外的结构全切掉）；JSON/文本类维持 5KB。
+      const isHtmlPayload = /^\s*<!doctype|^\s*<html/i.test(payload)
+      const limit = isHtmlPayload ? 60_000 : 5_000
+      if (payload.length > limit) payload = smartTruncateJsonAware(payload, limit)
     }
 
     // ★ 风控检测增强（吸收 Accio 的风控分类链路）：
@@ -1081,7 +1146,15 @@ export async function handleProxy(body: any, store: CredentialStore): Promise<an
     //   否则 404 会被判为 waf-html → risk_control，掩盖真正的 URL 错误（FIX-LOG #53）。
     const isHttpErrorPage = result.status >= 400 && result.status < 500
       && !bodyStr0.includes('punish') && !bodyStr0.includes('rgv587_error')
-    const isHtmlResponse = !isHttpErrorPage && (
+    // ★★ HTML 误报修复：http_get/http_post 抓「本来就是网页」的 URL（详情页/列表页/
+    //    店铺页）时，正常响应也是 HTML —— 不看 Content-Type 一律判 waf-html，
+    //    会把 200 的正常网页判成 WAF 拦截，技能侧 PlatformRequestError(risk_control)
+    //    直接中断（实测 1688 详情页 so：https://detail.1688.com/offer/{id}.html）。
+    //    规则：响应 Content-Type 明确是 text/html 且非 HTTP 错误页 → 正常网页，
+    //    只有「期望 JSON 却收到 HTML」（CT 非 html、或无 CT）才可能是风控拦截页。
+    const respCt = String(result.responseHeaders?.['content-type'] ?? result.responseHeaders?.['Content-Type'] ?? '')
+    const respIsHtmlPage = /text\/html/i.test(respCt)
+    const isHtmlResponse = !isHttpErrorPage && !respIsHtmlPage && (
       /^\s*<!doctype|^\s*<html/i.test(bodyStr0)
       || bodyStr0.includes('bixi-intl.alicdn.com/punish')
     )
@@ -1092,6 +1165,9 @@ export async function handleProxy(body: any, store: CredentialStore): Promise<an
       riskSubtype = 'waf-block'
     } else if (isHtmlResponse) {
       riskSubtype = bodyStr0.includes('punish') ? 'bixi-punish' : 'waf-html'
+    } else if (respIsHtmlPage && bodyStr0.includes('bixi-intl.alicdn.com/punish')) {
+      // ★ CT=text/html 豁免下，仍要抓住真实滑块页（punish URL 是权威信号，不误伤正常网页）
+      riskSubtype = 'bixi-punish'
     }
 
     // 提取 Set-Cookie 头（用于闲鱼 _m_h5_tk 等 token 获取）
@@ -1803,25 +1879,42 @@ function httpRequest(
     //   某些网络环境下（VPN/代理/ hosts 污染），域名会解析到 198.18.x / 19.x 等
     //   fake-IP 测试网段，导致请求发到错误地址。检测到 fake-IP 时，用公共 DNS
     //   交叉解析获取真实 IP，替换 hostname 并设置 Host 头保持 SNI 正确。
+    //
+    //   ★★ lookup 回调契约（两个坑都在这）★★
+    //   1. 签名：Node net 层以 (hostname, options, callback) 三参调用 lookup。
+    //      旧实现只声明 (cb)，cb 实际收到 hostname 字符串 → dns 回调栈里抛
+    //      "cb is not a function" → 打崩宿主（dsh fatal load failure）。
+    //   2. 回调形态：Node http/https 走 net.connect 时以 {all:true, hints:0}
+    //      调 lookup，此时回调要求**数组形态** cb(err, [{address, family}])；
+    //      回单值 cb(null, ip, 4) 会得到 undefined → "Invalid IP address:
+    //      undefined"，所有代理出网请求全挂。按 options.all 分支返回。
     const hostname = parsed.hostname
-    const lookup = (cb: (err: NodeJS.ErrnoException | null, address: string, family: number) => void) => {
-      // 先用系统默认解析拿到 IP
+    const lookup = (
+      _hostname: string,
+      opts: { all?: boolean; family?: number },
+      cb: (err: NodeJS.ErrnoException | null, result: string | { address: string; family: number }[], family?: number) => void,
+    ) => {
       nodeDns.lookup(hostname, { family: 4 }, async (sysErr, sysIp) => {
+        const finish = (err: NodeJS.ErrnoException | null, ip: string) => {
+          if (err) { cb(err, '' as any); return }
+          if (opts.all) cb(null, [{ address: ip, family: 4 }])
+          else cb(null, ip, 4)
+        }
         if (!sysErr && sysIp && !isFakeIp(sysIp)) {
           // 系统 DNS 正常，直接用
-          cb(null, sysIp, 4)
+          finish(null, sysIp)
           return
         }
         // 系统 DNS 返回 fake-IP 或失败 → 用公共 DNS 交叉解析
         const realIp = await resolveWithPublicDns(hostname)
         if (realIp) {
           console.log(`[dsagent-gateway] DNS 绕过: ${hostname} 系统 DNS=${sysIp || '(失败)'} → 公共 DNS=${realIp}`)
-          cb(null, realIp, 4)
+          finish(null, realIp)
         } else if (sysIp) {
           // 公共 DNS 也失败了，回退系统 DNS（总比没有强）
-          cb(null, sysIp, 4)
+          finish(null, sysIp)
         } else {
-          cb(sysErr || new Error(`DNS 解析失败: ${hostname}`), '', 4)
+          finish(sysErr || new Error(`DNS 解析失败: ${hostname}`) as NodeJS.ErrnoException, '')
         }
       })
     }

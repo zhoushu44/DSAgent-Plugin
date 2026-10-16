@@ -213,6 +213,10 @@ export function apply(ctx: ClientContext, cfg?: Config) {
     // 小红书链路
     { label: '分析小红书笔记', text: '分析采集到的小红书笔记数据', platform: 'xiaohongshu', stage: 'analyze' },
     { label: '发布小红书笔记', text: '帮我发布一篇小红书笔记', platform: 'xiaohongshu', stage: 'publish' },
+    // 拼多多链路
+    { label: '采集拼多多商品', text: '采集拼多多商品数据', platform: 'pdd', stage: 'collect' },
+    { label: '分析拼多多商品', text: '分析拼多多商品数据', platform: 'pdd', stage: 'analyze' },
+    { label: '发布拼多多商品', text: '帮我上架一个拼多多商品', platform: 'pdd', stage: 'publish' },
     // 通用下一步
     { label: '发布到其他平台', text: '把结果整理后发布到', stage: 'publish' },
   ]

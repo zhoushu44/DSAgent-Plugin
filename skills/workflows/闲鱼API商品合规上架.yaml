@@ -1,0 +1,53 @@
+name: 闲鱼API商品合规上架
+category: 店铺经营
+mode: single
+description: |
+  闲鱼 API/虚拟商品「合规上架」一条龙：输入关键词 → 生成合规主图与文案（内置违禁词闸门）→ 输出可直接发布的物料包。
+
+  ★ 为什么是单次执行而不是批量循环：
+    实测 2026-10-15，用同一套模板批量发 8 条，全部被下架。平台判定要点是
+    「同模板批量铺货」+「类目错放」。因此本工作流强制一轮一条、逐条差异化。
+
+  ★ 合规闸门会硬拦截这些写法（这是真实被删的原因）：
+    · 冒充官方：「官方2折」「官方直营」→ 应写「官网价2折」
+    · 贬损同业：「不做套路」「不掺量」「不共享号池」
+    · 极限词：「最低」「第一」「100%」「唯一」
+
+  ★ 发布提示：网页版选不到正确的服务类目（「软件/程序/网站开发」被拦），
+    正确类目只能用闲鱼 APP 发布并选择。本工作流只产物料，不代发布。
+inputs:
+  - key: keyword
+    label: 关键词（如 DeepSeek API）
+    type: text
+    default: DeepSeek API
+    required: true
+  - key: discount
+    label: 折扣口径（勿写「官方N折」）
+    type: text
+    default: 官网价 2 折起
+    required: true
+  - key: price
+    label: 参考价（元）
+    type: text
+    default: "1"
+    required: false
+  - key: models
+    label: 支持模型（逗号分隔）
+    type: text
+    default: DeepSeek,Claude,GPT,Gemini,GLM,Kimi,Qwen,MiniMax
+    required: false
+  - key: out
+    label: 输出目录（留空=工作区 xianyu-out）
+    type: text
+    default: ""
+    required: false
+steps:
+  - name: 生成合规物料
+    skill: xianyu-listing-prep
+    args:
+      keyword: "{{keyword}}"
+      discount: "{{discount}}"
+      price: "{{price}}"
+      models: "{{models}}"
+      out: "{{out}}"
+    output: prep

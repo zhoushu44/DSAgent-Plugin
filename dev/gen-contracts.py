@@ -79,7 +79,7 @@ RESERVED_TOOL_NAMES = {
     "dsagent_pdd_crawl",
     "dsagent_xianyu_publish",
     "dsagent_taobao_publish",
-    "dsagent_pdd_publish",
+    "dsagent_pdd_publish2",
     "dsagent_xianyu_analytics",
     "dsagent_list_skills",
     "dsagent_get_skill_detail",

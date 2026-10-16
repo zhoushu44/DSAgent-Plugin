@@ -40,7 +40,43 @@ declare module '@deepseek-ai/cordis' {
     tools: {
       register(tool: unknown): () => void
     }
+    /**
+     * 宿主 LLM 服务（`@deepseek-ai/dsh-llm` 注册名 `llm`）。
+     * 用 `ctx.llm.stream()` 直接调用「用户在 DSH 里选的聊天模型」，无需任何 API Key。
+     * 宿主测试桩可能不提供该服务，读取处务必防御（可选链 / `ctx.get('llm', false)`）。
+     */
+    llm: {
+      stream(options: LlmStreamOptions): AsyncIterable<LlmStreamChunk>
+      listProviders(): Array<{ id: string; name?: string }>
+      listModels(provider: string): Promise<Array<{ id: string; name?: string }>>
+    }
   }
+}
+
+/** `ctx.llm.stream()` 入参（官方 GenerateOptions 的最小子集）。 */
+interface LlmStreamOptions {
+  provider: string
+  model: string
+  /** 系统提示词（字符串形式） */
+  system?: string
+  messages: Array<{ role: string; content: Array<{ type: string; text: string }> }>
+  temperature?: number
+  maxTokens?: number
+  stop?: string[]
+  signal?: AbortSignal
+}
+
+/**
+ * 流式分片。`finish` 是每流的唯一终止分片：
+ * 失败 `{ kind: 'error', failure: { code, message } }`、取消 `{ kind: 'aborted', failure }`。
+ */
+interface LlmStreamChunk {
+  type: 'block-start' | 'text-delta' | 'reasoning-delta' | 'tool-call-delta' | 'block-end' | 'usage' | 'finish'
+  index?: number
+  text?: string
+  block?: unknown
+  reason?: { kind: string; failure?: { code: string; message: string } }
+  [key: string]: unknown
 }
 
 declare module '@deepseek-ai/dsh-tools' {
@@ -83,3 +119,28 @@ declare module '@deepseek-ai/dsh-tools' {
 
 declare module '@deepseek-ai/dsh-client-locale/client' {}
 declare module '@deepseek-ai/dsh-client-ui-renderer/client' {}
+
+/**
+ * 宿主 LLM 包（`@deepseek-ai/dsh-llm`）。
+ * 与 `@deepseek-ai/dsh-tools` 同样：运行时由宿主提供（模块回退），构建期靠本声明。
+ * 这里只声明插件用到的 `BlockAssembler` —— 官方把流式分片拼成内容块的规范算法。
+ */
+declare module '@deepseek-ai/dsh-llm' {
+  export interface LlmBlock {
+    type: string
+    text?: string
+    id?: string
+    name?: string
+    arguments?: string
+  }
+  export interface LlmFinish {
+    kind: string
+    failure?: { code: string; message: string }
+  }
+  export class BlockAssembler {
+    push(chunk: unknown): void
+    blocks(): LlmBlock[]
+    readonly finish: LlmFinish
+    readonly usage: unknown
+  }
+}

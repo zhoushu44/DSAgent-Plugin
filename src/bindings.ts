@@ -49,7 +49,7 @@ export const BINDING_RULES: Array<[string, string]> = [
   // pdd 平台（拼多多）
   ['pdd-crawl', 'pdd'],
   // pdd_mms 平台（拼多多商家后台 —— 与买家 H5 是两套独立登录态）
-  ['pdd-publish', 'pdd_mms'],
+  ['pdd-publish-2', 'pdd_mms'],
   // taobao 平台（淘宝 / 天猫，共用同一套登录态）
   ['taobao-publish', 'taobao'],
   // alibaba 平台（1688 B2B —— 独立登录态，Cookie 在 .1688.com 域）

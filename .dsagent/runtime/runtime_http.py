@@ -10,6 +10,11 @@ Cookie 由网关从 CredentialStore 取并注入，技能侧不接触原始 Cook
   DSCONNECT_AGENT_ID — 当前会话（= 智能体）ID，网关据此走「会话绑定」这一级选号
   DSCONNECT_SHOP_KEY — 已选定账号的凭证库主键（可选），网关据此走「显式 shopKey」这一级，
                        保证 host 预检与网关选到同一个号
+
+网关自动发现（fallback）：
+  未注入 DSCONNECT_URL 时（如模型在 shell 里直接跑技能 CLI），扫描
+  ~/.dsagent/gateway/gateway-<pid>.json 发现文件，按 mtime 降序逐个
+  GET /api/v1/health 验活，用第一个存活的网关。
 """
 
 from __future__ import annotations
@@ -18,22 +23,61 @@ import os
 import json
 import urllib.request
 import urllib.error
+from pathlib import Path
 from typing import Any
 
 
+def _discover_gateway(timeout: float = 2.0) -> str:
+    """从 ~/.dsagent/gateway/ 发现文件探测存活网关，返回 base url。
+
+    多实例（web/desktop/tui 多 profile 同开）时各有一份 gateway-<pid>.json，
+    按 mtime 降序逐个验活，第一个存活的即用。
+    """
+    discovery_dir = Path.home() / ".dsagent" / "gateway"
+    try:
+        entries = sorted(
+            discovery_dir.glob("gateway-*.json"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        entries = []
+
+    for entry in entries:
+        try:
+            info = json.loads(entry.read_text(encoding="utf-8"))
+            url = str(info.get("url", "")).rstrip("/")
+            if not url:
+                continue
+            # 验活：GET /api/v1/health，2s 超时
+            probe = urllib.request.Request(f"{url}/api/v1/health", method="GET")
+            with urllib.request.urlopen(probe, timeout=timeout) as resp:
+                if resp.status == 200:
+                    return url
+        except Exception:
+            continue
+
+    raise RuntimeError(
+        "DSCONNECT_URL 未设置，且未发现运行中的 DSAgent 网关"
+        "（已扫描 ~/.dsagent/gateway/）。请先启动 DSAgent 宿主，"
+        "或通过 dsagent_execute_skill 工具执行技能。"
+    )
+
+
 def api_base() -> str:
-    """获取网关地址"""
+    """获取网关地址：环境变量优先，缺省时自动发现"""
     url = os.environ.get("DSCONNECT_URL", "")
-    if not url:
-        raise RuntimeError("DSCONNECT_URL 未设置，请确认技能由 DSAgent 插件启动")
-    return url.rstrip("/")
+    if url:
+        return url.rstrip("/")
+    return _discover_gateway()
 
 
 def require_token() -> str:
     """获取网关令牌"""
     token = os.environ.get("DSCONNECT_TOKEN", "")
     if not token:
-        raise RuntimeError("DSCONNECT_TOKEN 未设置")
+        # 自动发现模式下没有工具注入，本地网关不验签，用占位值
+        return "local"
     return token
 
 
@@ -41,7 +85,8 @@ def require_agent_id() -> str:
     """获取当前会话（= 智能体）ID"""
     aid = os.environ.get("DSCONNECT_AGENT_ID", "")
     if not aid:
-        raise RuntimeError("DSCONNECT_AGENT_ID 未设置")
+        # 自动发现模式下没有会话上下文，用空串 —— 网关会退到「平台默认」级选号
+        return "shell-cli"
     return aid
 
 

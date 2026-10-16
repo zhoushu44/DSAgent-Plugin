@@ -129,6 +129,9 @@ result = search_products(
 
 1. 从链接 `/offer/{offerId}.html` 中提取 `offerId`。
 2. 调用 `query_offer_detail(offer_id=...)` 获取 `image` 字段。
+   - 实现说明：原 mtop 详情 API（mtop.1688.offer.detail.query.fortrade）已下线，
+     现走抓取 PC 详情页 HTML 提取 `mainImage`（og:image 兜底）。返回结构不变：
+     `{"data": {"image": ..., "title": ..., "offerId": ...}}`，调用方无需关心实现。
 3. 用该 `image` 调用 `search_products(image_url=...)`。
 4. 将结果交给 Python 后处理。
 
@@ -221,6 +224,17 @@ Python 后处理脚本会将网关返回字段映射为稳定字段：
 2. 鉴权相关错误（401/403）提示用户在「账号连接」页面重新登录 1688 账号。
 3. 限流、超时、服务异常：提示稍后重试。
 4. 禁止浏览器降级或网页搜索降级。
+
+## 网关地址（重要：不需要自己找端口）
+
+技能 runtime 已内置网关**自动发现**：不设置任何环境变量时，会扫描
+`~/.dsagent/gateway/` 下的发现文件（网关启动时自动写入，含 pid/port/url），
+按 mtime 取最新并做 `/api/v1/health` 探活，用第一个存活的网关。
+
+- 会话注入了 `DSAGENT_GATEWAY_URL` / `DSCONNECT_URL` 等环境变量 → 直接用（优先）。
+- 没有环境变量（在 shell 里直跑 CLI / 复刻网关调用）→ **不要扫描端口、不要猜
+  127.0.0.1:xxxx**，runtime 会自动发现。
+- 多个网关实例（web + desktop 同开）各写一份发现文件，探活保证选到活着的那个。
 
 ## 如果提示没拿到登录状态
 

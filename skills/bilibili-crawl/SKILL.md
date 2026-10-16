@@ -153,7 +153,7 @@ UP 主搜索结果项：`mid` / `uname` / `sign` / `fans` / `videos` / `level` /
 
 | 错误场景 | failure_kind | 处理方式 |
 |---------|-------------|---------|
-| DSCONNECT_URL 未设置 | `not_bound` | 引导用户到「账号连接」页面绑定 B站 账号 |
+| 网关不可达（env 未注入且自动发现失败） | `not_bound` | 先确认 DSAgent 宿主在运行；在运行仍报错才引导用户到「账号连接」页面绑定 B站 账号 |
 | 账号资料返回 `code=-101`（账号未登录） | `token_expired` | 提示 B站 登录态已失效，需重新登录 |
 | 接口返回 `code=-412`（request was banned） | `risk_control` | 提示用户去 B站 完成安全验证后重试，勿当作 0 条结果 |
 | 接口返回 `code=-352`（风控校验失败） | `risk_control` | 同上，稍后重试或降低请求频率 |

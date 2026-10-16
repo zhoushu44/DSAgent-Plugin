@@ -1,0 +1,231 @@
+{
+  "$comment": "拼多多商家后台（mms）发布锚点集。来源：本仓真机实测（skills/pdd-publish-2/SOURCE.md + src/pdd-publish.ts 头注）。锚点分级规范见 PUBLISH-SPEC.md §3.3：L1 埋点 viewid > L2 语义层 > L3 容器相对层 > L4 绝对路径（禁止）。改本文件无需重启宿主（发布时现读）。",
+  "platform": "pdd",
+  "version": 1,
+  "limits": {
+    "maxImageBytes": 3145728,
+    "maxImages": 10,
+    "maxTitleLen": 60,
+    "maxDetailImages": 50,
+    "defaultStock": "1000"
+  },
+  "urls": {
+    "goodsList": "https://mms.pinduoduo.com/goods/goods_list"
+  },
+  "flow": [
+    { "step": "openEntry", "url": "https://mms.pinduoduo.com/goods/goods_list" },
+    { "step": "clickPublishEntry", "args": { "buttonText": "发布新商品" } },
+    { "step": "selectCategory", "args": { "confirmText": "确认发布该类商品" } },
+    { "step": "waitFor", "match": "/goods/goods_add/" },
+    { "step": "fillTitle" },
+    { "step": "uploadMainImages" },
+    { "step": "uploadDetailImages" },
+    { "step": "fillSku" },
+    { "step": "fillAttributes" },
+    { "step": "fillShipping" },
+    { "step": "submit", "args": { "buttonTextRe": "^(提交并上架|提交|确认提交|发布)$" } }
+  ],
+  "anchors": {
+    "cateSearchInput": {
+      "candidates": [
+        { "level": 1, "selector": "input[placeholder*=\"搜索分类\"]" }
+      ],
+      "comment": "★ 不能放宽为 [placeholder*=\"搜索\"]：会先命中顶部全局搜索框（跳课程页）"
+    },
+    "cateConfirmButton": {
+      "candidates": [
+        { "level": 1, "selector": "button[data-tracking-click-viewid=\"cate_confirm\"]" },
+        { "level": 2, "selector": "button[data-tracking-impr-viewid=\"confirm_publish_this_type_product\"]" },
+        { "level": 3, "selector": "text:确认发布该类商品" }
+      ]
+    },
+    "step1Ready": {
+      "candidates": [
+        { "level": 1, "selector": "input[placeholder*=\"搜索分类\"]" }
+      ]
+    },
+    "step2Ready": {
+      "candidates": [
+        { "level": 1, "selector": "input[data-tracking-click-viewid=\"title_input_area\"]" },
+        { "level": 2, "selector": "#goods-category" }
+      ]
+    },
+    "titleInput": {
+      "candidates": [
+        { "level": 1, "selector": "#goods_name input[data-testid=\"beast-core-input-htmlInput\"]" },
+        { "level": 2, "selector": "input[data-tracking-click-viewid=\"title_input_area\"]" }
+      ],
+      "placeholderFallbackRe": "商品标题组成|最多输入30个汉字",
+      "fillFieldFallbackRe": "商品标题|请输入标题|标题"
+    },
+    "mainImageInput": {
+      "candidates": [
+        { "level": 1, "selector": "input[data-tracking-click-viewid=\"carousel_img_localfile_upload\"]" }
+      ]
+    },
+    "detailImageInput": {
+      "candidates": [
+        { "level": 1, "selector": "input[data-tracking-click-viewid=\"detail_img_localfile_upload\"]" }
+      ],
+      "comment": "离屏隐藏 input，直接投递即可"
+    },
+    "guideBubbleDismissText": "^\\s*知道了\\s*$",
+    "uploadCountRe": "已上传\\s*(\\d+)\\s*/\\s*(\\d+)\\s*张",
+    "categoryReadback": {
+      "candidates": [
+        { "level": 1, "selector": "#goods-category" }
+      ]
+    },
+    "specBox": {
+      "candidates": [
+        { "level": 1, "selector": "#goods-spec-sku" },
+        { "level": 2, "selector": ".goods-spec-sku-v2" },
+        { "level": 3, "selector": ".goods-spec" }
+      ]
+    },
+    "skuSpecColorInput": {
+      "candidates": [
+        { "level": 2, "selector": "input[placeholder*=\"主色\"]" }
+      ],
+      "scope": "specBox"
+    },
+    "skuTableHeaderRe": "拼单价",
+    "attrItem": {
+      "candidates": [
+        { "level": 1, "selector": ".goods-propertys .property-item" },
+        { "level": 2, "selector": "[id^=\"basic.propertys.\"]" }
+      ]
+    },
+    "attrSelectInput": {
+      "candidates": [
+        { "level": 1, "selector": "input[data-testid=\"beast-core-select-htmlInput\"]" }
+      ]
+    },
+    "attrSelectHeader": {
+      "candidates": [
+        { "level": 1, "selector": "[data-testid=\"beast-core-select-header\"]" }
+      ]
+    },
+    "attrRequiredMark": {
+      "candidates": [
+        { "level": 2, "selector": "[class*=\"important\"], [class*=\"required\"], .required" }
+      ]
+    },
+    "attrErrorHint": {
+      "candidates": [
+        { "level": 2, "selector": "[class*=\"Error\"], [class*=\"error\"], [class*=\"help\"], [class*=\"tip\"]" }
+      ]
+    },
+    "attrDropdownPanel": {
+      "candidates": [
+        { "level": 2, "selector": "[class*=\"dropdownPanel\"], [class*=\"dropdownMain\"]" },
+        { "level": 3, "selector": "[class*=\"ST_item\"]" }
+      ],
+      "comment": "body 级 portal，取最后一个可见面板"
+    },
+    "attrDropdownOption": {
+      "candidates": [
+        { "level": 2, "selector": "li, [role=\"option\"], [class*=\"ST_item\"]" }
+      ]
+    },
+    "shippingPresaleLabel": {
+      "candidates": [
+        { "level": 1, "selector": "//div[@id=\"service.is_pre_sale\"]//label[.//text()=\"非预售\"]" }
+      ]
+    },
+    "shippingShipmentLimitLabel": {
+      "candidates": [
+        { "level": 1, "selector": "//div[@id=\"service.shipment_limit_second\"]//label[.//text()=\"{shipmentLimitText}\"]" }
+      ],
+      "comment": "shipmentLimitText ∈ {当日发货, 24小时发货, 48小时发货, 24小时揽收...}，模板占位符"
+    },
+    "shippingOtherTemplateLabel": {
+      "candidates": [
+        { "level": 1, "selector": "//div[@id=\"service.is_default_template_id\"]//label[.//text()=\"其他模板\"]" }
+      ]
+    },
+    "freightTemplateSelect": {
+      "candidates": [
+        { "level": 2, "selector": ".template-box-select input" }
+      ]
+    },
+    "freightTemplateOption": {
+      "candidates": [
+        { "level": 1, "selector": "//ul[@role=\"listbox\"]//li[.//text()=\"{templateName}\"]" }
+      ],
+      "fallback": "first",
+      "comment": "精确匹配失败时兜底选第一个 li"
+    },
+    "submitErrorsToast": {
+      "candidates": [
+        { "level": 1, "selector": "div[data-testid=\"beast-core-toast\"]" }
+      ],
+      "excludeTextRe": "提交成功|发布成功"
+    },
+    "submitErrorsFormItem": {
+      "candidates": [
+        { "level": 2, "selector": "[class*=\"Form_itemError\"]" }
+      ]
+    },
+    "optimizationPanel": {
+      "candidates": [
+        { "level": 2, "selector": "[class*=\"goods-optimization-container\"]" }
+      ]
+    },
+    "optimizationTabLabel": {
+      "candidates": [
+        { "level": 2, "selector": "[class*=\"common_tabLabel\"]" }
+      ],
+      "matchTextRe": "错误"
+    },
+    "optimizationTabContent": {
+      "candidates": [
+        { "level": 2, "selector": "[class*=\"TAB_content\"]" }
+      ]
+    },
+    "optimizationItem": {
+      "candidates": [
+        { "level": 2, "selector": "[class*=\"optimize-item_container\"]" }
+      ]
+    },
+    "optimizationItemHeader": {
+      "candidates": [
+        { "level": 2, "selector": "[class*=\"optimize-header\"]" }
+      ]
+    },
+    "submitButton": {
+      "candidates": [
+        { "level": 2, "selector": "button" }
+      ],
+      "matchTextRe": "^(提交并上架|提交|确认提交|发布)$"
+    },
+    "sliderCaptcha": {
+      "candidates": [
+        { "level": 2, "selector": "#slide-captcha-dialog, .captcha-wrapper__slider, .slide-handlebar, #slide-button, .slide-button-wrapper" }
+      ]
+    },
+    "listReadyBodyRe": "发布新商品",
+    "listReadyTitleRe": "商品列表",
+    "navExclusionSelector": "nav, aside, [class*=\"sidenav\"], [class*=\"sideNav\"], [class*=\"menu\"]"
+  },
+  "fieldStrategies": {
+    "title": { "type": "type", "anchor": "titleInput", "maxLength": 60, "source": "data.title" },
+    "price": { "type": "type", "anchor": "priceInput", "source": "data.price" },
+    "stock": { "type": "type", "anchor": "stockInput", "source": "data.stock", "default": "1000" },
+    "category": { "type": "categorySearch", "confirmText": "确认发布该类商品" }
+  },
+  "regexes": {
+    "step1Url": "/goods/category\\?",
+    "step2Url": "/goods/goods_add/",
+    "attrSkip": "^品牌$",
+    "uploadFailure": "图片格式不正确|文件过大|超过大小限制|不支持的文件"
+  },
+  "timeouts": {
+    "listWaitMs": 60000,
+    "formWaitMs": 150000,
+    "publishTimeoutMs": 180000,
+    "sliderWaitMs": 120000,
+    "attrModelTimeoutMs": 20000,
+    "attrDropdownWaitMs": 800
+  }
+}

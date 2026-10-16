@@ -13,6 +13,13 @@
  *   4. 写串行化（同 skill-stats 的模式），避免读-改-写竞态
  *   5. 原子写（tmp + rename），失败不影响发布
  *
+ * ★ 缓存分层（PUBLISH-SPEC §3.6，2026-10 扩展）——顶层键名空间：
+ *   `${platform}:${category}`          → 属性桶：{ 属性名 → 上次成功值 }（原有）
+ *   `${platform}:${category}:sku`      → SKU 维度：{ dims → 维度名数组 JSON }（店铺同类目规格类型偏好）
+ *   `${platform}:${category}:schema`   → schema 指纹：{ fp → 控件清单 hash }（类目改版检测）
+ *   `${platform}:freight`              → 运费模板/发货时间：{ template|delivery → 上次成功值 }（店铺级）
+ * 新层全部沿用「命中即验证」纪律：缓存值必须仍在当前页面候选里才用。
+ *
  * 落盘位置：与凭证库同级的 `.attr-cache.json`
  */
 import { readFile, writeFile, mkdir } from 'node:fs/promises'
@@ -28,8 +35,23 @@ export interface AttrCacheEntry {
   lastUsedAt: number
 }
 
-/** 缓存键 = `${platform}:${categoryKeyword}` → { 属性名 → 条目 } */
+/** 缓存键 = `${platform}:${categoryKeyword}` → { 属性名 → 条目 } 或分层扩展键（见头部注释） */
 export type AttrCacheMap = Record<string, Record<string, AttrCacheEntry>>
+
+/**
+ * 类目属性 schema 指纹：对「排序后的属性名清单」做 hash（FNV-1a 32 位）。
+ * 页面新增/删除/改名一栏属性 → 指纹变化 → 属性桶自动失效（缓存值降级为待验证，AI 重填）。
+ * ★ 顺序无关：平台调整属性渲染顺序不会误判改版。
+ */
+export function schemaFingerprint(names: string[]): string {
+  const sorted = names.map(n => String(n || '').replace(/\s+/g, '')).filter(Boolean).sort()
+  let h = 0x811c9dc5
+  for (const s of sorted.join('\n')) {
+    h ^= s.charCodeAt(0)
+    h = (h * 0x01000193) >>> 0
+  }
+  return `fnv1a32:${sorted.length}:${h.toString(36)}`
+}
 
 /**
  * 创建属性缓存实例。
@@ -115,6 +137,84 @@ export function createAttrCache(storePath: string) {
     /** 诊断：返回全部缓存条目（市场页/调试用） */
     async snapshot(): Promise<AttrCacheMap> {
       return await load()
+    },
+
+    // ── 分层扩展（PUBLISH-SPEC §3.6）─────────────────────────────
+
+    /**
+     * SKU 维度缓存：查该平台+类目上次成功使用的规格类型名（如「身高」「颜色」）。
+     * ★ 命中后仍需验证它在当前规格类型下拉候选里（specTypeScore 语义打分优先），不在就丢弃。
+     */
+    async lookupSkuDims(platform: string, categoryKeyword: string): Promise<string[]> {
+      const map = await load()
+      const raw = map[`${key(platform, categoryKeyword)}:sku`]?.dims?.value
+      if (!raw) return []
+      try {
+        const arr = JSON.parse(raw)
+        return Array.isArray(arr) ? arr.map(String).filter(Boolean).slice(0, 4) : []
+      } catch {
+        return []
+      }
+    },
+
+    /** SKU 维度缓存：记一次成功选中的规格类型名（按维度顺序） */
+    async recordSkuDims(platform: string, categoryKeyword: string, dims: string[]): Promise<void> {
+      const list = dims.map(d => String(d || '').trim()).filter(Boolean).slice(0, 4)
+      if (!list.length) return
+      const map = await load()
+      const k = `${key(platform, categoryKeyword)}:sku`
+      const prev = (() => { try { const a = JSON.parse(map[k]?.dims?.value || '[]'); return Array.isArray(a) ? a.map(String) : [] } catch { return [] } })()
+      // 并集合并去重（保序：旧维度在前，新维度补后），最新 4 个——多维场景 d1/d2 不互相覆盖
+      const merged = [...new Set([...prev, ...list])].slice(-4)
+      map[k] = { ...map[k], dims: { value: JSON.stringify(merged), hits: (map[k]?.dims?.hits || 0) + 1, lastUsedAt: Date.now() } }
+      await persist(map)
+    },
+
+    /**
+     * 店铺级枚举缓存（运费模板/发货时间等）：查上次成功值。
+     * @param kind 键名（如 'template' / 'delivery'）
+     */
+    async lookupFreight(platform: string, kind: string): Promise<string | null> {
+      const map = await load()
+      return map[`${platform}:freight`]?.[kind]?.value || null
+    },
+
+    /** 店铺级枚举缓存：记一次成功值（模板名/发货文案，均须页面验证过才记） */
+    async recordFreight(platform: string, kind: string, value: string): Promise<void> {
+      const v = String(value || '').trim()
+      if (!v) return
+      const map = await load()
+      const k = `${platform}:freight`
+      if (!map[k]) map[k] = {}
+      const existing = map[k][kind]
+      map[k][kind] = { value: v, hits: (existing?.hits || 0) + 1, lastUsedAt: Date.now() }
+      await persist(map)
+    },
+
+    /**
+     * schema 指纹比对：指纹没变返回 { changed: false }；变了 → 刷新指纹 + 失效该类目
+     * 属性桶（缓存值下次自然走模型重填）+ 返回 { changed: true, prev, next }。
+     * ★ 首次（无旧指纹）只记指纹不失效。
+     */
+    async checkSchemaFingerprint(
+      platform: string,
+      categoryKeyword: string,
+      names: string[],
+    ): Promise<{ changed: boolean; prev?: string; next?: string }> {
+      const fp = schemaFingerprint(names)
+      const map = await load()
+      const k = `${key(platform, categoryKeyword)}:schema`
+      const prev = map[k]?.fp?.value
+      if (prev === fp) return { changed: false, prev, next: fp }
+      map[k] = { ...map[k], fp: { value: fp, hits: 1, lastUsedAt: Date.now() } }
+      const bucketKey = key(platform, categoryKeyword)
+      const hadAttrs = !!map[bucketKey]
+      if (prev && hadAttrs) {
+        delete map[bucketKey]
+        console.warn(`[dsagent-attr-cache] 类目 schema 指纹变化（${prev} → ${fp}），已失效属性缓存桶`)
+      }
+      await persist(map)
+      return prev ? { changed: true, prev, next: fp } : { changed: false, prev, next: fp }
     },
   }
 }

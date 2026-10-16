@@ -165,3 +165,27 @@ export function agentIdOf(exec: any): string {
   const id = exec?.agent?.id
   return typeof id === 'string' && id ? id : 'default'
 }
+
+/** 当前会话「正在用的聊天模型」路由（provider + model）。 */
+export interface AgentModelRoute {
+  provider: string
+  model: string
+}
+
+/**
+ * 从工具运行上下文解析当前会话使用的聊天模型路由。
+ *
+ * DSH 把「本会话请求头里配的 provider/model」折叠在 `session.requestHeader()` 上
+ * （同步返回，未发过请求时为 undefined）。这正是用户选的「dsh 聊天的模型」，
+ * 官方 `dsh-experimental-auto-review` 也是这么取路由的。
+ *
+ * 解析不出完整路由（缺 provider 或 model）时返回 undefined —— 调用方据此降级
+ * （如属性自动填直接跳过），绝不能猜一个模型名硬调。
+ */
+export function agentModelRouteOf(exec: any): AgentModelRoute | undefined {
+  const config = exec?.agent?.session?.requestHeader?.()?.config
+  const provider = typeof config?.provider === 'string' ? config.provider.trim() : ''
+  const model = typeof config?.model === 'string' ? config.model.trim() : ''
+  if (!provider || !model) return undefined
+  return { provider, model }
+}

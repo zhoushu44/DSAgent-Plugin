@@ -70,3 +70,11 @@ accio-staging/
 
 # 临时优化文档（开发过程产物，已沉淀到代码注释和项目规则）
 anti-bot-optimization.md
+
+# ── 第三方安装包与下载产物（逆向分析原料，26GB+，不入库）──
+# 需要重做提取时按 skills/*/SOURCE.md 的「提取方法」重新准备
+电商软件/
+downloads/
+
+# 发布链路真机测试的失败截图（每次运行重建）
+dev/.ui-shots/

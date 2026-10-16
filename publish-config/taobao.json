@@ -1,0 +1,132 @@
+{
+  "$comment": "淘宝/天猫卖家中心发布锚点集。来源：本仓真机实测（src/taobao-publish.ts 头注与注释）。锚点分级规范见 PUBLISH-SPEC.md §3.3。改本文件无需重启宿主（发布时现读）。",
+  "platform": "taobao",
+  "version": 1,
+  "limits": {
+    "maxImageBytes": 20971520,
+    "maxImages": 5,
+    "maxTitleLen": 60
+  },
+  "urls": {
+    "taobaoPublish": "https://item.upload.taobao.com/sell/publish.htm",
+    "taobaoCategory": "https://item.upload.taobao.com/sell/ai/category.htm?force=true",
+    "tmallPublish": "https://sell.publish.tmall.com/tmall/submit.htm"
+  },
+  "flow": [
+    { "step": "openEntry", "url": "https://item.upload.taobao.com/sell/ai/category.htm?force=true" },
+    { "step": "selectCategory" },
+    { "step": "waitFor", "match": "#struct-mainImagesGroup, button[name=\"button-submit\"]" },
+    { "step": "fillTitle" },
+    { "step": "uploadMainImages" },
+    { "step": "fillSku" },
+    { "step": "fillAttributes" },
+    { "step": "uploadDetailImages" },
+    { "step": "submit", "args": { "buttonTextRe": "^(提交宝贝信息|提交|确认提交|发布)$" } }
+  ],
+  "anchors": {
+    "formReady": {
+      "candidates": [
+        { "level": 1, "selector": "#struct-mainImagesGroup" },
+        { "level": 1, "selector": "button[name=\"button-submit\"]" }
+      ]
+    },
+    "cateSearchInput": {
+      "candidates": [
+        { "level": 2, "selector": "input[placeholder*=\"类目关键词\"]" }
+      ]
+    },
+    "cateResultItem": {
+      "candidates": [
+        { "level": 2, "selector": ".sell-component-general-category-result-cate.result-item .sell-component-general-category-result-cate-path" }
+      ]
+    },
+    "brandPropItem": {
+      "candidates": [
+        { "level": 2, "selector": ".sell-catProp-item-common" }
+      ],
+      "matchTextRe": "品牌"
+    },
+    "brandOptionItem": {
+      "candidates": [
+        { "level": 2, "selector": ".options-item, li, .next-menu-item, [role=\"option\"]" }
+      ],
+      "scope": ".next-overlay-wrapper.opened"
+    },
+    "mainImageGroup": {
+      "candidates": [
+        { "level": 1, "selector": "#struct-mainImagesGroup" }
+      ],
+      "comment": "必须真实鼠标点击（untrusted click 被忽略）"
+    },
+    "uploadCountRe": "已上传|上传成功",
+    "specSection": {
+      "candidates": [
+        { "level": 1, "selector": "#struct-saleProp" }
+      ]
+    },
+    "specInputById": {
+      "candidates": [
+        { "level": 1, "selector": "#struct-p-{propId}" }
+      ],
+      "comment": "propId 由页面真实销售属性结构决定（如颜色分类 1627207），模板占位符"
+    },
+    "skuTableSection": {
+      "candidates": [
+        { "level": 1, "selector": "#struct-sku" }
+      ]
+    },
+    "skuTableRow": {
+      "candidates": [
+        { "level": 2, "selector": "tr.sku-table-row" }
+      ],
+      "scope": "#struct-sku"
+    },
+    "detailEditor": {
+      "candidates": [
+        { "level": 1, "selector": "#lite-decoration-editor" }
+      ]
+    },
+    "submitButton": {
+      "candidates": [
+        { "level": 1, "selector": "button[name=\"button-submit\"]" },
+        { "level": 2, "selector": "text:提交宝贝信息" }
+      ],
+      "matchTextRe": "^(提交宝贝信息|提交|确认提交|发布)$"
+    },
+    "baxiaDialog": {
+      "candidates": [
+        { "level": 2, "selector": "#baxia-dialog-content, .baxia-dialog, .baxia-punish" }
+      ]
+    },
+    "sliderHandle": {
+      "candidates": [
+        { "level": 2, "selector": "#nc_1_n1z, #nc_1_wrapper" }
+      ]
+    },
+    "successContainer": {
+      "candidates": [
+        { "level": 1, "selector": "#success-container" }
+      ]
+    }
+  },
+  "fieldStrategies": {
+    "title": { "type": "type", "anchor": "titleInput", "maxLength": 60, "source": "data.title" },
+    "category": { "type": "categorySearch" }
+  },
+  "regexes": {
+    "salePropPlaceholder": "主色|颜色分类|规格值",
+    "attrSkip": "^品牌$"
+  },
+  "timeouts": {
+    "formWaitMs": 150000,
+    "publishTimeoutMs": 180000,
+    "uploadWaitMs": 90000,
+    "skuCellWaitMs": 500,
+    "attrModelTimeoutMs": 20000,
+    "attrDropdownWaitMs": 800
+  },
+  "salePropDefaults": {
+    "propId": "1627207",
+    "comment": "类目「AI软件订阅/Token充值」下颜色分类实测属性 ID"
+  }
+}

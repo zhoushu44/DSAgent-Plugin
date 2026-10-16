@@ -1,0 +1,99 @@
+{
+  "$comment": "闲鱼（goofish）网页版发布锚点集——anchors 最小集（闲鱼无类目/属性/SKU）。来源：本仓真机实测（src/xianyu-publish.ts 头注，实测 2026-10-15）。改本文件无需重启宿主（发布时现读）。",
+  "platform": "xianyu",
+  "version": 1,
+  "limits": {
+    "maxImageBytes": 10485760,
+    "maxImages": 9
+  },
+  "urls": {
+    "publish": "https://www.goofish.com/publish"
+  },
+  "flow": [
+    { "step": "openEntry", "url": "https://www.goofish.com/publish" },
+    { "step": "uploadImages" },
+    { "step": "fillDescription" },
+    { "step": "fillPrice" },
+    { "step": "unlockCategory" },
+    { "step": "submit", "args": { "buttonTexts": ["发布", "确认发布", "立即发布", "发布闲置"] } }
+  ],
+  "anchors": {
+    "imageInput": {
+      "candidates": [
+        { "level": 2, "selector": "input[type=file]" }
+      ]
+    },
+    "uploadedImage": {
+      "candidates": [
+        { "level": 2, "selector": "img" }
+      ],
+      "srcMatchRe": "alicdn|goofish|taobaocdn"
+    },
+    "descEditor": {
+      "candidates": [
+        { "level": 2, "selector": "div[contenteditable=\"true\"]" }
+      ],
+      "comment": "必须 page.click + Control+A + Backspace + page.keyboard.type 真实键盘（execCommand / 派发事件均无效）"
+    },
+    "priceInput": {
+      "candidates": [
+        { "level": 2, "selector": "input[placeholder=\"0.00\"]" }
+      ],
+      "comment": "3 个可见框靠祖先链 4 层文本区分：[0] 价格 [1] 原价 [2] 邮费(隐藏不填)；兜底 visible[0]/visible[1]"
+    },
+    "priceAncestorLabelRe": "价格|原价|邮费",
+    "titleInput": {
+      "candidates": [
+        { "level": 2, "selector": "input[placeholder*=\"请输入标题\"], input[placeholder*=\"宝贝标题\"], input[placeholder^=\"标题\"]" }
+      ],
+      "comment": "选填：实测发布页无独立标题框（标题由描述派生），有则填"
+    },
+    "categoryLabel": {
+      "candidates": [
+        { "level": 2, "selector": ".ant-form-item" }
+      ],
+      "matchTextStart": "分类"
+    },
+    "categorySelect": {
+      "candidates": [
+        { "level": 2, "selector": ".ant-select" }
+      ],
+      "comment": "中心坐标真实鼠标点开后 sleep(2500) 等选项渲染"
+    },
+    "categoryOption": {
+      "candidates": [
+        { "level": 2, "selector": ".ant-select-item-option" }
+      ],
+      "comment": "选「其他闲置」兜底（否则最后一个）；必须 mousedown+mouseup+click 三连；选后 sleep(9000) 等服务端重校验"
+    },
+    "categoryBlockedRe": "网页版暂不支持发布此分类|请使用闲鱼APP扫码|扫码去APP发布",
+    "categoryStateRe": "分类 \\* ([^\\s]+)",
+    "categoryFallbackName": "其他闲置",
+    "publishButton": {
+      "candidates": [
+        { "level": 2, "selector": "button" }
+      ],
+      "matchTexts": ["发布", "确认发布", "立即发布", "发布闲置"],
+      "requireEnabled": true
+    },
+    "loginRequiredRe": "立即登录|登录后可以"
+  },
+  "fieldStrategies": {
+    "description": { "type": "typeRealKeyboard", "anchor": "descEditor", "source": "data.description" },
+    "price": { "type": "typeZeroInput", "anchor": "priceInput", "source": "data.price" },
+    "title": { "type": "type", "anchor": "titleInput", "source": "data.title", "optional": true }
+  },
+  "regexes": {
+    "uploadFailure": "上传失败|存在上传失败的图片",
+    "successUrl": "/item(\\?|/)",
+    "successBody": "发布成功|已发布|宝贝已发布",
+    "categoryBlockedStill": "扫码去APP发布|网页版暂不支持发布此分类|暂不支持编辑此分类",
+    "failure": "发布失败[^。]{0,80}|请输入价格[^。]{0,40}|请输入库存[^。]{0,40}|请输入宝贝描述[^。]{0,40}|商品描述不能包含emoji|价格必须在[^。]{0,30}|库存必须在[^。]{0,30}|上传失败[^。]{0,60}|内容违规[^。]{0,60}|网络异常[^。]{0,40}"
+  },
+  "timeouts": {
+    "publishTimeoutMs": 120000,
+    "uploadWaitMs": 60000,
+    "categorySelectRenderMs": 2500,
+    "categoryRecheckMs": 9000
+  }
+}

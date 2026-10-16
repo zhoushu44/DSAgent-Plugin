@@ -46,14 +46,14 @@ API_SEARCH = "mtop.relationrecommend.WirelessRecommend.recommend"
 API_SEARCH_V = "2.0"
 APP_ID = "32517"  # PC offer search
 
-# 1688 商品详情 API（用于链接找同款时获取主图）
-API_OFFER_DETAIL = "mtop.1688.offer.detail.query.fortrade"
-API_OFFER_DETAIL_V = "1.0"
-
 # 1688 供应商搜索 API（复用搜索接口，改 keywords + method）
 # 1688 没有独立的供应商搜索 mtop，供应商信息从商品搜索结果的 company 字段提取
 
 PLATFORM = "alibaba"
+
+# 商品详情：mtop.1688.offer.detail.query.fortrade 已下线（FAIL_SYS_API_NOT_FOUNDED，
+# 2026-10 实测 15+ 候选 API 名全部不存在）。改抓 PC 详情页 HTML 提取 og:image 主图 ——
+# 这条链路只需要主图 URL（用于以图搜图找同款），页面 head 里的 og:image 足够且稳定。
 
 # 排序值映射（SKILL.md 层 → 1688 mtop sortType）
 _SORT_MAP = {
@@ -137,26 +137,57 @@ def search_products(
 
 def query_offer_detail(offer_id: str) -> dict[str, Any]:
     """
-    调用 1688 MTOP 商品详情 API，获取商品主图等信息。
-    用于链接找同款流程的第一步。
+    获取 1688 商品主图等信息（用于链接找同款流程的第一步）。
+
+    原 mtop.1688.offer.detail.query.fortrade API 已下线，改抓 PC 详情页 HTML
+    提取 og:image（<meta property="og:image">）作为主图，返回结构对齐旧 API：
+    {"data": {"image": "<主图 URL>", "title": "<标题>", "offerId": "<id>"}}
     """
     _check_binding()
 
-    data = {"offerId": offer_id}
+    from platform_client import http_get
 
-    resp = mtop_jsonp(
-        url=f"https://h5api.m.1688.com/h5/{API_OFFER_DETAIL}/{API_OFFER_DETAIL_V}/",
+    resp = http_get(
+        url=f"https://detail.1688.com/offer/{offer_id}.html",
         platform=PLATFORM,
-        api=API_OFFER_DETAIL,
-        version=API_OFFER_DETAIL_V,
-        data=json.dumps(data, ensure_ascii=False),
         headers={
-            "Referer": "https://detail.1688.com/",
-            "Origin": "https://detail.1688.com",
+            "Referer": "https://s.1688.com/",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         },
+        timeout=30,
     )
 
-    return resp
+    payload = resp.get("payload", {}) if isinstance(resp, dict) else {}
+    body = payload if isinstance(payload, str) else ""
+    if not body and isinstance(payload, dict):
+        body = payload.get("body") or payload.get("text") or ""
+
+    import re
+
+    # 主图提取（详情页无 og:image，主图在内嵌 JSON 的 mainImage 数组）：
+    #   "mainImage":["https://cbu01.alicdn.com/img/ibank/xxx.jpg", ...]
+    image = ""
+    m = re.search(r'"mainImage"\s*:\s*\[\s*"([^"]+)"', body)
+    if not m:
+        # 兜底：og:image（部分模板/站点有配）
+        m = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', body)
+    if not m:
+        m = re.search(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']', body)
+    if m:
+        image = m.group(1)
+
+    title = ""
+    t = re.search(r"<title>([^<]{0,120})", body)
+    if t:
+        title = t.group(1)
+
+    if not image:
+        raise RuntimeError(
+            f"1688 详情页未提取到主图（og:image）。offerId={offer_id}，"
+            f"页面长度={len(body)}。可能是页面结构变化或被风控，请重试或换 offerId 验证。"
+        )
+
+    return {"data": {"image": image, "title": title, "offerId": offer_id}}
 
 
 def search_suppliers(*, query: str) -> dict[str, Any]:

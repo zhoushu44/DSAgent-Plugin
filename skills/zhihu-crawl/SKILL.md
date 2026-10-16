@@ -154,7 +154,7 @@ python3 {baseDir}/scripts/fetch_data.py --mode search --keyword "关键词" [--c
 
 | 错误场景 | failure_kind | 处理方式 |
 |---------|-------------|---------|
-| DSCONNECT_URL 未设置 | `not_bound` | 引导用户到「账号连接」页面绑定知乎账号 |
+| 网关不可达（env 未注入且自动发现失败） | `not_bound` | 先确认 DSAgent 宿主在运行；在运行仍报错才引导用户到「账号连接」页面绑定知乎账号 |
 | 拿不到当前账号资料（`/api/v4/me` 无 url_token） | `token_expired` | 提示知乎登录态可能失效，需重新登录 |
 | 命中风控（403 / 文案含未登录） | `risk_control` | 提示用户去知乎完成安全验证后重试，勿当作 0 条结果 |
 | 接口返回 `error.code=4041` | `api_error` | 资源不存在（问题/回答/用户不存在），展示 message |

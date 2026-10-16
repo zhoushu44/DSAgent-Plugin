@@ -86,7 +86,7 @@ const BUILTIN_RULES: TriggerRule[] = [
       '【风控预提示】本技能可能返回 failureKind=risk_control（阿里系技能尤为常见）。',
       '若命中：**不要**重复调用原技能 —— 先调 dsagent_risk_verify(platform=对应平台) 拉起验证页，',
       '用户完成滑块后凭证会自动写回账号并解除冷却，**然后**再重试原技能。',
-      '例外：拼多多发布（dsagent_pdd_publish）的滑块是页内内联的，不能用 dsagent_risk_verify，',
+      '例外：拼多多发布（dsagent_pdd_publish2）的滑块是页内内联的，不能用 dsagent_risk_verify，',
       '需在弹出的可见窗口内手动拖动，超时才报 risk_control。',
       '风控处置办法详见对应技能的 SKILL.md「错误处理」小节。',
     ].join('\n'),
