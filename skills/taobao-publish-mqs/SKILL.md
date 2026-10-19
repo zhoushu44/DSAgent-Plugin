@@ -30,7 +30,7 @@ metadata:
 
 ## 边界
 
-- **不做天猫发布** → 用 `skills/tmall-publish-mqs/SKILL.md`（同为 goods_manager 引擎，域名 sell.publish.tmall.com）。
+- **不做天猫发布** → 用同族技能 tmall-publish-mqs（同为 goods_manager 引擎，域名 sell.publish.tmall.com）。
 - **不做拼多多 / 闲鱼 / 抖店 / 京东 / 1688 发布** → 分别用 pdd-publish-2、xianyu-publish 与本系列其它 mqs 技能。
 - **不做商品采集与比价** → 用 taobao-crawl；**不做生意参谋分析** → 用 sycm 系技能。
 - **不做批量 / 定时发布**：当前只支持**单件**商品发布，多件需逐件调用。
@@ -110,7 +110,7 @@ openEntry（类目搜索页）→ selectCategory → waitFor 表单就绪 → fi
 
 - 共享接入规范：PUBLISH-MATRIX.md（7 函数链 / 三路错误回读 / 各平台现状）与 PUBLISH-SPEC.md（JSON 驱动、XPath 四级锚点、能力块六步协议）。
 - 锚点集：`publish-config/taobao.json`（分级 selector、timeouts、regexes，发布时现读）。
-- 觅千手 v5.61 平台矩阵与字符偏移坐标：`docs/mqs-publish-platform-matrix.md`。
+- 觅千手 v5.61 平台矩阵与字符偏移坐标：见 PUBLISH-MATRIX.md 的「平台矩阵」小节，旧实现记录见 `skills/taobao-publish/SOURCE.md`。
 - 同族旧实现对照：`skills/taobao-publish/SKILL.md`。
 
 ## 环境变量
