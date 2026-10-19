@@ -365,6 +365,18 @@ export interface PddPublishOptions {
   deliveryTime?: number
   /** 是否已获用户确认；为 false 时只返回预览，不执行任何写操作 */
   confirm?: boolean
+  /**
+   * 模式2（劫持填价）配置（选填）。提供后本函数进入劫持模式：
+   *   - 跳过「第二步-价格及库存」的 UI 填价（规格建结构仍走 UI，价格列留白）
+   *   - 点「提交」前挂 pdd-mode2 的请求拦截器，截下原生 edit 请求改包重放
+   *   - 成功/失败以 HijackOutcome 为准，绕过页面 toast 判定
+   * goodsDetail / onTrace 的类型来自 pdd-mode2；此处用 inline type import 避免运行时循环依赖，
+   * 运行时在使用点动态 `await import('./pdd-mode2.js')`。
+   */
+  hijack?: {
+    goodsDetail: import('./pdd-mode2.js').GoodsDetail
+    onTrace?: (step: string, data?: Record<string, unknown>) => void
+  }
 }
 
 export interface PddPublishResult {
@@ -3741,21 +3753,26 @@ export async function pddPublish(
     // 价格及库存 SKU 表：placeholder 全是「请输入」，必须按表头列序定位（见 fillPriceTable）
     // ★ 套看门狗：该表曾静默卡死 9 分钟（弹层遮挡 → click 空等），卡住时自动截图留证。
     // ★ 多维规格时 rows 带 `specs`（维度名 → 规格值），由 fillPriceTable 按表格行序重排。
-    const priceRows = specs.length
-      ? skuRows.map(r => ({ price: r.price, stock: r.stock, specs: r.specs }))
-      : skus.map(s => ({ price: s.price, stock: s.stock }))
-    const sku = await withStallWatch(
-      step2, '第二步-价格及库存', 150_000,
-      () => fillPriceTable(step2, {
-        price, stock, itemNo,
-        // 逐行覆盖：第 i 行对应第 i 个规格值；缺项自动回落到顶层 price / stock
-        rows: priceRows,
-      }),
-    )
-    filled.push(...sku.filled)
-    missed.push(...sku.missed)
-    console.log(`[dsagent-pdd-publish] 通用字段已填：${filled.join('、') || '（无）'}；未命中：${missed.join('、') || '（无）'}`)
-    await sleep(1500)
+    // 模式2（劫持填价）：跳过 UI 填价，价格列留白，提交时由 pdd-mode2 拦截原生请求改包注入。
+    if (!opts.hijack) {
+      const priceRows = specs.length
+        ? skuRows.map(r => ({ price: r.price, stock: r.stock, specs: r.specs }))
+        : skus.map(s => ({ price: s.price, stock: s.stock }))
+      const sku = await withStallWatch(
+        step2, '第二步-价格及库存', 150_000,
+        () => fillPriceTable(step2, {
+          price, stock, itemNo,
+          // 逐行覆盖：第 i 行对应第 i 个规格值；缺项自动回落到顶层 price / stock
+          rows: priceRows,
+        }),
+      )
+      filled.push(...sku.filled)
+      missed.push(...sku.missed)
+      console.log(`[dsagent-pdd-publish] 通用字段已填：${filled.join('、') || '（无）'}；未命中：${missed.join('、') || '（无）'}`)
+      await sleep(1500)
+    } else {
+      console.log('[dsagent-pdd-publish] 模式2：跳过 UI 填价（价格及库存由劫持改包注入）')
+    }
 
     // ── 段 4-b：填「商品属性」（建议项，失败不阻断发布）──
     // 属性值由**宿主聊天模型**从「页面真实下拉选项」里选（见 fillAttributes）。
@@ -3788,6 +3805,57 @@ export async function pddPublish(
     console.log(`[dsagent-pdd-publish] 发货售后后累计已填：${filled.join('、') || '（无）'}；未命中：${missed.join('、') || '（无）'}`)
 
     // ── 段 4 收尾：点提交 ─────────────────────────────────
+    if (opts.hijack) {
+      // ════ 模式2（劫持填价）分支 ════
+      // 时序铁律：先 setupHijack 挂 listener（同步），再开 setRequestInterception，
+      // 最后点提交——避免「拦截已开但无 handler」窗口内其他请求挂起。
+      const mode2 = await import('./pdd-mode2.js')
+      const ctrl = mode2.setupHijack(step2, opts.hijack.goodsDetail, {
+        onProxyFallback: ctx => mode2.sendPddEditViaHttp(ctx),
+        onTrace: opts.hijack.onTrace,
+      })
+      let hijackOutcome: import('./pdd-mode2.js').HijackOutcome | null = null
+      try {
+        await step2.setRequestInterception(true)
+        const clicked = await clickSubmit(step2)
+        console.log(`[dsagent-pdd-publish] 模式2 提交按钮点击：${clicked ? '已点击（等待劫持改包）' : '未点到（可能仍需补全必填项）'}`)
+        hijackOutcome = await mode2.waitHijackOutcome(ctrl, mode2.PDD_HIJACK_WAIT_MS)
+      } finally {
+        await mode2.teardownHijack(step2, ctrl).catch(() => { /* 页面可能已关闭 */ })
+      }
+      const finalUrl = step2.url()
+      const detailMessage = String(hijackOutcome?.detailMessage || '')
+      if (hijackOutcome?.success) {
+        try { await store.setStatus(shopKey, 'valid') } catch { /* 忽略 */ }
+        return {
+          ok: true,
+          shopKey,
+          finalUrl,
+          text: '拼多多商品发布已提交成功（模式2-劫持填价）。\n'
+            + `账号：${account.display_label || account.account_id}（${shopKey}）\n`
+            + `标题：${title}\n`
+            + (detailMessage ? `${detailMessage}\n` : '')
+            + (filled.length ? `已自动填写：${filled.join('、')}\n` : '')
+            + (missed.length ? `未自动填写（需人工确认）：${missed.join('、')}\n` : '')
+            + `当前页面：${finalUrl}\n`
+            + '注意：平台仍会对商品做审核，最终状态请在商家后台「商品管理 → 出售中」确认。',
+        }
+      }
+      // 失败：按 errorCode 语义映射 failureKind（PDD_SEND_NETWORK→network_error，其余含 API_BIZ→api_error）
+      const failureKind = hijackOutcome?.errorCode === mode2.PDD_ERROR_CODE.SEND_NETWORK
+        ? 'network_error'
+        : 'api_error'
+      return {
+        ok: false,
+        failureKind,
+        shopKey,
+        finalUrl,
+        text: `发布失败（模式2-劫持填价）：${detailMessage || hijackOutcome?.errorCode || '未知错误'}\n`
+          + `错误码：${hijackOutcome?.errorCode || '未知'}\n`
+          + (missed.length ? `★ 未自动填写的字段：${missed.join('、')}\n` : '')
+          + '可在浏览器窗口内核对必填项后重试，或回退模式1（不传 hijack 配置）。',
+      }
+    }
     const clicked = await clickSubmit(step2)
     console.log(`[dsagent-pdd-publish] 提交按钮点击：${clicked ? '已点击' : '未点到（可能仍需补全必填项）'}`)
 

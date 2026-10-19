@@ -1,0 +1,2 @@
+// ==== messageListener_pdd_cases @7174 ====
+setupMessageListener(){if("undefined"===typeof window||!window.__PDD_MSG_LISTENER_BOUND){if(window.addEventListener("message",(async e=>{if(e.source!==window)return;const t=e.data;if(t&&"pdd_hijack_result"===t.type&&"kdcm_extension_v3"===t.source)this._onPddHijackResultMessage(t);else if(t&&"pdd_tra

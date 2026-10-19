@@ -3,7 +3,21 @@
  *
  * 用法：
  *   node dev/patrol-publish.mjs <pdd|taobao|xianyu> [类目关键词] [账号过滤]
+ *   node dev/patrol-publish.mjs pdd [类目关键词] [账号过滤] --mode 2 --product <ProductData.json>
  *   node dev/patrol-publish.mjs --selftest     # 只跑内置自检（不启动浏览器）
+ *
+ * 模式说明（仅 pdd）：
+ *   缺省（模式1）—— 只读巡检：到达发布表单页后逐锚点打点 + 类目属性指纹比对，不点提交。
+ *   --mode 2      —— 真机发布：跳过巡检导航，直接走 pddPublish2（模式2-劫持填价），
+ *                    用 --product 指定的 ProductData JSON（见 services/product-schema.ts）
+ *                    真实提交一次，结果进同一套三级报告（成功=绿 / 失败=红）。
+ *                    可选：--cost-template <运费模板名>、--delivery-time <1|2|3> 透传发布链。
+ *
+ * 模式2 真机验收线（PDD-MODE2 交付标准）：
+ *   ① 同类目连续 10 次发布成功（--selftest + 10 轮 --mode 2 全绿）；
+ *   ② 覆盖 ≥3 个类目各跑一轮（换 --product 样例）；
+ *   ③ 全程零风控（无滑块 / 无 bxpunish，failureKind 无 risk_control）；
+ *   ④ 一键回退模式1：不传 --mode 即回模式1 巡检，两条代码路径互不影响。
  *
  * 做什么：
  *   复刻 verify-pdd-newflow.mjs 蓝本启动链（生产 Profile + Cookie 注入 + 分段导航），
@@ -24,7 +38,7 @@
 import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const PLUGIN_ROOT = resolve(dirnameOf(import.meta.url), '..')
@@ -94,6 +108,13 @@ export const CONDITIONAL_ANCHORS = {
     optimizationItemHeader: '提交后才出现',
     sliderCaptcha: '风控触发才出现',
     guideBubbleDismissText: '新手引导气泡才出现',
+    // ★ 表单渲染依赖型：模式1 巡检只到「到达表单页」为止，不填字段，下面这些区域
+    //   只在属性区/发货区已渲染（部分类目有）或表单完全 hydrate 后才存在于 DOM。
+    attrItem: '属性区渲染才有（部分类目无属性时为空）',
+    shippingPresaleLabel: '发货与服务区渲染才有',
+    shippingShipmentLimitLabel: '发货与服务区渲染才有',
+    shippingOtherTemplateLabel: '发货与服务区渲染才有',
+    freightTemplateSelect: '运费模板区渲染才有',
   },
   taobao: {
     baxiaDialog: '风控（Baxia）触发才出现',
@@ -355,7 +376,7 @@ async function captureEvidence(page, reporter, key) {
  * 遍历平台 anchors 打点（在正确的页面上）。
  * anchorsOnPage: { [anchorKey]: page } —— 平台导航函数返回每类锚点应打点的页面。
  */
-async function probeAllAnchors(platform, anchorsRaw, anchorSpecOf, pages, reporter) {
+async function probeAllAnchors(platform, anchorsRaw, anchorSpecOf, pages, reporter, preProbed) {
   const cond = CONDITIONAL_ANCHORS[platform] || {}
   const short = SHORTHAND_KIND[platform] || {}
 
@@ -363,6 +384,11 @@ async function probeAllAnchors(platform, anchorsRaw, anchorSpecOf, pages, report
     // 简写锚点 → 单列报告节，不打点
     if (isShorthandAnchor(raw)) {
       reporter.add({ key, status: 'shorthand', note: short[key] || '字符串简写锚点' })
+      continue
+    }
+    // ★ 预打结果优先（pdd step1 锚点在类目页阶段已预打，避免同 tab 跳转后 URL 变化导致失联）
+    if (preProbed && preProbed[key]) {
+      reporter.add(preProbed[key])
       continue
     }
     // 找该锚点应打点的页面（默认表单页）
@@ -500,6 +526,20 @@ async function patrolPdd(browser, page, cfg, keyword) {
   console.log(`[patrol-pdd] 段 2 ✓ 已点选类目：${picked}`)
   await sleep(800)
 
+  // ★ 预打 step1 锚点：段 3 跳转后 step1/step2 是同一 tab，URL 已变 goods_add。
+  //   step1 锚点（cateSearchInput/step1Ready/cateConfirmButton）必须趁类目页还在时打点，
+  //   否则后续 probeAllAnchors 拿到的是表单页 URL，step1 锚点必失联。
+  const preProbed = {}
+  for (const k of ['cateSearchInput', 'step1Ready', 'cateConfirmButton']) {
+    try {
+      const spec = anchorSpec(cfg, k)
+      preProbed[k] = await probeAnchor(step1, k, spec)
+    } catch (e) {
+      preProbed[k] = { key: k, status: 'lost', note: `预打异常：${e?.message || e}` }
+    }
+  }
+  console.log(`[patrol-pdd] 段 2 ✓ step1 锚点预打完成：${Object.values(preProbed).map((r) => `${r.key}=${r.status}`).join(', ')}`)
+
   // 确认按钮：与生产同款（text: 候选拆出来做文本匹配，CSS 候选逐个试）
   const confirmSpec = anchorSpec(cfg, 'cateConfirmButton')
   const { css: confirmCss, texts: confirmTexts } = splitTextCandidates(confirmSpec)
@@ -534,7 +574,7 @@ async function patrolPdd(browser, page, cfg, keyword) {
   if (!step2Ready) throw new Error(`段 3 失败：表单页 ${formWaitMs}ms 内未就绪 URL=${step2.url()}`)
   console.log('[patrol-pdd] 段 3 ✓ 表单页就绪:', step2.url())
 
-  return { categoryPage: step1, formPage: step2, keyword, picked }
+  return { categoryPage: step1, formPage: step2, keyword, picked, preProbed }
 }
 
 /** pdd 现场读类目属性名（复刻 readAttrItems 的 name 提取，src/pdd-publish.ts L2555-2575） */
@@ -852,21 +892,101 @@ function printReport(platform, keyword, reporter, fpResult) {
 
 // ─── 主流程 ───
 async function main() {
-  const args = process.argv.slice(2)
-  if (args[0] === '--selftest') {
+  const rawArgs = process.argv.slice(2)
+  if (rawArgs[0] === '--selftest') {
     const ok = await selftest()
     process.exit(ok ? 0 : 1)
+  }
+
+  // 具名参数解析（--mode/--product/--cost-template/--delivery-time），其余为位置参数
+  const named = { mode: 1, product: '', costTemplate: '', deliveryTime: 0 }
+  const args = []
+  for (let i = 0; i < rawArgs.length; i++) {
+    if (rawArgs[i] === '--mode') named.mode = Number(rawArgs[++i]) || 1
+    else if (rawArgs[i] === '--product') named.product = rawArgs[++i] || ''
+    else if (rawArgs[i] === '--cost-template') named.costTemplate = rawArgs[++i] || ''
+    else if (rawArgs[i] === '--delivery-time') named.deliveryTime = Number(rawArgs[++i]) || 0
+    else args.push(rawArgs[i])
   }
 
   const platform = args[0]
   if (!platform || !PLATFORM_META[platform]) {
     console.error('用法：node dev/patrol-publish.mjs <pdd|taobao|xianyu> [类目关键词] [账号过滤]')
+    console.error('      node dev/patrol-publish.mjs pdd [类目关键词] [账号过滤] --mode 2 --product <ProductData.json>')
     console.error('      node dev/patrol-publish.mjs --selftest   # 内置自检（不启动浏览器）')
     process.exit(1)
   }
   const meta = PLATFORM_META[platform]
   const keyword = args[1] || meta.defaultKeyword
   const accountFilterText = args[2] || ''
+
+  // ── 模式2：真机发布分支（仅 pdd） ──
+  if (named.mode === 2) {
+    if (platform !== 'pdd') {
+      console.error('❌ --mode 2 目前仅支持 pdd')
+      process.exit(1)
+    }
+    if (!named.product) {
+      console.error('❌ 模式2 需要 --product <ProductData.json>（统一商品数据，见 services/product-schema.ts）')
+      process.exit(1)
+    }
+    if (!existsSync(named.product)) {
+      console.error(`❌ 商品数据文件不存在：${named.product}`)
+      process.exit(1)
+    }
+    let product
+    try {
+      product = JSON.parse(readFileSync(named.product, 'utf8'))
+    } catch (e) {
+      console.error(`❌ 商品数据解析失败（${e?.message || e}）`)
+      process.exit(1)
+    }
+    const mode2Label = '[模式2] '
+    console.log(`${mode2Label}真机发布：pddPublish2（劫持填价）`)
+    console.log(`${mode2Label}商品：${product?.title || '（未命名）'}`)
+    if (accountFilterText) console.log(`${mode2Label}账号过滤：${accountFilterText}`)
+
+    // 账号选择复用主流程（生产同款过滤）——模式2 也需要 shopKey 做 Cookie 注入
+    const storeMod2 = await libImport('services/credential-store.js').catch(() => null)
+    if (!storeMod2?.CredentialStore) {
+      console.error('❌ 无法加载 lib/services/credential-store.js —— 请先 npm run build:host')
+      process.exit(1)
+    }
+    const cs2 = new storeMod2.CredentialStore(join(homedir(), '.dsh', 'dsagent-accounts.json'))
+    let accounts2 = []
+    try { accounts2 = cs2.listAccounts().filter(meta.accountFilter) } catch { /* 空列表走下方报错 */ }
+    if (accountFilterText) accounts2 = accounts2.filter((a) => String(a.shop_key || '').includes(accountFilterText))
+    if (!accounts2.length) {
+      console.error(`❌ 凭证库里没有可用的 ${platform} 账号${accountFilterText ? `（过滤「${accountFilterText}」后）` : ''}`)
+      process.exit(1)
+    }
+    // pddPublish2 内部会自己 launch 浏览器（生产 Profile + Cookie），这里不再启动
+    const { pddPublish2 } = await libImport('pdd-publish2.js')
+    let result
+    try {
+      result = await pddPublish2(cs2, {
+        product,
+        confirm: true,
+        account: accounts2[0].shop_key,
+        mode2: true,
+        ...(named.costTemplate ? { costTemplate: named.costTemplate } : {}),
+        ...(named.deliveryTime ? { deliveryTime: named.deliveryTime } : {}),
+      })
+    } catch (e) {
+      console.error(`${mode2Label}发布异常：${e?.message || e}`)
+      process.exit(2)
+    }
+    // 统计框架沿用三级判定：成功=绿（0）/ 失败=红（4）
+    const ok2 = result?.ok === true
+    console.log('══════════════════════════════════════════════')
+    console.log(`巡检报告（模式2-真机发布）：pdd  ${new Date().toISOString()}`)
+    console.log(`  ${ok2 ? '✓ 发布成功' : '✗ 发布失败'}（failureKind=${result?.failureKind || '-'}）`)
+    console.log(result?.text || '（无结果文本）')
+    console.log('── 验收线回执 ──')
+    console.log(`  风控：${result?.failureKind === 'risk_control' ? '✗ 命中风控' : '✓ 零风控'}`)
+    console.log('══════════════════════════════════════════════')
+    process.exit(ok2 ? 0 : 4)
+  }
 
   // ── 配置与依赖加载 ──
   const { loadPublishConfig, anchorSpec } = await libImport('services/publish-config-loader.js')
@@ -958,7 +1078,7 @@ async function main() {
     const pages = (key) => (categoryPageAnchors.includes(key) ? nav.categoryPage : nav.formPage)
 
     console.log(`[patrol] 开始逐锚点打点（${Object.keys(cfg.anchors || {}).length} 个）…`)
-    await probeAllAnchors(platform, cfg.anchors || {}, (k) => anchorSpec(cfg, k), pages, reporter)
+    await probeAllAnchors(platform, cfg.anchors || {}, (k) => anchorSpec(cfg, k), pages, reporter, nav.preProbed)
 
     // ── 指纹比对（pdd/taobao；xianyu 无属性缓存链路） ──
     let fpResult = null

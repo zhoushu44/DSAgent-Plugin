@@ -590,6 +590,45 @@ const LOGIN_MAX_TIMEOUT_MS = 900_000
  */
 let activeLogin: { platform: string; freshLogin: boolean; userDataDir: string } | null = null
 
+/**
+ * loginUrl 是否为「登录路径型」：pathname 含 /login 或 /signin，或主机为 passport.* / login.*。
+ * 拼多多商家后台（mms…/login）、阿里系（login.taobao.com）、知乎（…/signin）都是；
+ * 抖音（www.douyin.com/ 主页 + 页内弹窗）不是。
+ */
+function isLoginLikeUrl(loginUrl: string): boolean {
+  try {
+    const a = new URL(loginUrl)
+    const loginPathRe = /\/(login|signin)(\/|$)/i
+    const isLoginHost = (h: string) => /^passport\./i.test(h) || /^login\./i.test(h)
+    return loginPathRe.test(a.pathname) || isLoginHost(a.hostname)
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 判定当前页面是否已跳离登录页（登录路径型平台的登录成功强证据，FIX：重登假阳性）。
+ *
+ * 这些平台登录成功后必然 302 离开登录页；**过期票据只会被留在登录页**
+ * （如 mms.pinduoduo.com/login/?redirectUrl=…），因此「已跳离」不可伪造。
+ * 反之，仅凭「关键 Cookie 存在」不可信：重登复用旧 Profile 时残留的过期票据
+ * （如 pdd_mms 的 PASS_ID）会让旧判据在 2s 内假阳性（实测复现）。
+ */
+function isOffLoginPage(loginUrl: string, currentUrl: string): boolean {
+  if (!isLoginLikeUrl(loginUrl)) return false
+  try {
+    const a = new URL(loginUrl)
+    const b = new URL(currentUrl)
+    if (b.protocol !== 'http:' && b.protocol !== 'https:') return false
+    if (b.origin !== a.origin) return true
+    const loginPathRe = /\/(login|signin)(\/|$)/i
+    const isLoginHost = (h: string) => /^passport\./i.test(h) || /^login\./i.test(h)
+    return !loginPathRe.test(b.pathname) && !isLoginHost(b.hostname)
+  } catch {
+    return false
+  }
+}
+
 export async function doBrowserLogin(
   platform: string,
   loginUrl: string,
@@ -756,6 +795,20 @@ export async function doBrowserLogin(
     const pollIntervalMs = 2000
     const startTime = Date.now()
 
+    // ★ 登录前基线快照（FIX：重登假阳性）：goto 登录页后立即记录关键 Cookie 的
+    //   当前值。重登场景复用旧 Profile，里面残留的**过期**票据（如 pdd_mms 的
+    //   PASS_ID）会让「任一关键 Cookie 存在即成功」的旧判据在 2s 内误判成功，
+    //   把过期 Cookie 原样搬进凭证库（实测复现：poll 2s | found=[PASS_ID]，
+    //   用户还没来得及扫码）。改为只认「值发生变化」——重新扫码必然轮换票据。
+    const baselineJar: Record<string, string> = {}
+    try {
+      const baseCookies = await getAllDomainCookies(page, platform)
+      for (const c of baseCookies) baselineJar[c.name] = c.value
+    } catch { /* 导航中读取失败则基线为空，退化为旧行为 */ }
+    if (kc.some(name => baselineJar[name])) {
+      console.log(`[dsagent-login] 检测到 Profile 内残留旧票据（${kc.filter(name => baselineJar[name]).join(',')}），登录成功判据已收紧（登录路径型平台只认跳离登录页，弹窗型平台只认票据值轮换）`)
+    }
+
     // 截止时间而非固定总时长：用户每有操作就把 deadline 顺延到「此刻 + LOGIN_ACTIVITY_EXTEND_MS」，
     // 滑块验证期间持续拖动鼠标就不会被判超时；同时用硬上限防止窗口永挂（FIX-LOG #66）。
     let deadline = startTime + LOGIN_TIMEOUT_MS
@@ -841,11 +894,35 @@ export async function doBrowserLogin(
         console.log(`[dsagent-login] poll ${Math.round((Date.now() - startTime) / 1000)}s | total=${cookies.length} | found=[${found.join(',')}] | missing=[${missing.join(',')}] | url=${page.url()?.slice(0, 80)}`)
 
         if (kc.length > 0) {
-          // ★ 任一关键 Cookie 出现即视为登录成功（原为 every：要求全部存在）。
-          //   阿里系各子域下发的 Cookie 不同，sycm 的 cookie2 只有拿到权限后访问该域才会有；
-          //   用 every 会把「已登录但未授权生意参谋」误判成「没登录」（FIX-LOG #66）。
-          const anyPresent = kc.some(name => jar[name])
-          if (anyPresent) {
+          // ★ 判据收紧（FIX：重登假阳性）——按 loginUrl 类型分支：
+          //   ① 登录路径型（loginUrl 的 pathname 含 /login、/signin，或主机为
+          //      passport.* / login.*：pdd_mms、阿里系、知乎）：只认「已跳离登录页」。
+          //      登录成功必然 302 离开；过期票据只会被留在登录页跳不走，
+          //      「已跳离」不可伪造。值轮换但仍在登录页（平台刷新过期票据的极端
+          //      场景）不算成功。也天然覆盖 resuming（已登录态页面早已跳走）。
+          //   ② 弹窗型（如抖音：主页 + 页内登录弹窗，URL 前后不变）：
+          //      - resuming：Profile 是上次登录窗口的延续，票据可能是用户刚扫的
+          //        （基线快照已含新值，轮换检测失效），保留旧判据「任一关键
+          //        Cookie 存在」以维持 FIX-LOG #66 的续登行为；
+          //      - 首登/重登：只认值轮换（重新扫码必然轮换票据）。
+          //   旧的「任一关键 Cookie 存在即成功」对全新 Profile 是对的，但对复用
+          //   旧 Profile 的重登会把过期残留票据误判成新登录（2s 假阳性，实测复现：
+          //   poll 2s | found=[PASS_ID]，用户还没来得及扫码）。
+          const loginPathPlatform = isLoginLikeUrl(loginUrl)
+          const anyRotated = kc.some(name => jar[name] && jar[name] !== baselineJar[name])
+          const leftLogin = isOffLoginPage(loginUrl, page.url() || '')
+          const success = loginPathPlatform
+            ? leftLogin
+            : resuming
+              ? kc.some(name => jar[name])
+              : anyRotated
+          if (success) {
+            if (leftLogin && !anyRotated) {
+              // 跳离登录页但票据未轮换：多为 resuming 已登录态，多等 2s 让 Cookie 稳定
+              console.log(`[dsagent-login] URL 已跳离登录页（${page.url()?.slice(0, 80)}），等待 Cookie 稳定…`)
+              await new Promise(r => setTimeout(r, 2000))
+              cookies = await getAllDomainCookies(page, platform)
+            }
             loginSuccess = true
             break
           }

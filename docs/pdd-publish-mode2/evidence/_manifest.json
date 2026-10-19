@@ -1,0 +1,182 @@
+{
+  "archivedAt": "2026-10-18T17:12:43.308Z",
+  "count": 44,
+  "files": [
+    {
+      "file": "8087_anti_content_172432.js",
+      "bytes": 1409
+    },
+    {
+      "file": "8087_anti_generator_def.js",
+      "bytes": 1818
+    },
+    {
+      "file": "8087_antiContent_passthrough.js",
+      "bytes": 615
+    },
+    {
+      "file": "8087_applyPddElecGoodsAttributes_def.js",
+      "bytes": 653
+    },
+    {
+      "file": "8087_applyPddMarketReferencePrice_def.js",
+      "bytes": 1234
+    },
+    {
+      "file": "8087_buildStablePriceDetailForFill_def.js",
+      "bytes": 3573
+    },
+    {
+      "file": "8087_const_underscore_34301.js",
+      "bytes": 762
+    },
+    {
+      "file": "8087_fetch_anti_105443.js",
+      "bytes": 2220
+    },
+    {
+      "file": "8087_fetch_anti_85776.js",
+      "bytes": 782
+    },
+    {
+      "file": "8087_fetch_anti_97349.js",
+      "bytes": 1545
+    },
+    {
+      "file": "8087_fillImageData_def.js",
+      "bytes": 826
+    },
+    {
+      "file": "8087_fillNoSpecSkuPriceDataInRequest_def.js",
+      "bytes": 4676
+    },
+    {
+      "file": "8087_fillShippingConfig_def.js",
+      "bytes": 1140
+    },
+    {
+      "file": "8087_fillSkuPriceData_def.js",
+      "bytes": 2959
+    },
+    {
+      "file": "8087_findPriceDataForMultiDimensionalSku_def.js",
+      "bytes": 1003
+    },
+    {
+      "file": "8087_getOrderedSkuKeyIdsWithPrice_def.js",
+      "bytes": 2448
+    },
+    {
+      "file": "8087_getPddStockMode_def.js",
+      "bytes": 1058
+    },
+    {
+      "file": "8087_hijackWait_block.js",
+      "bytes": 1607
+    },
+    {
+      "file": "8087_localstorage_keys_table.js",
+      "bytes": 1060
+    },
+    {
+      "file": "8087_messageListener_pdd_cases.js",
+      "bytes": 345
+    },
+    {
+      "file": "8087_msg_listener_tail.js",
+      "bytes": 970
+    },
+    {
+      "file": "8087_pdd_transform_request_handler.js",
+      "bytes": 980
+    },
+    {
+      "file": "8087_resolveSafePddOutGoodsSn_def.js",
+      "bytes": 2643
+    },
+    {
+      "file": "8087_send_modified_request_branch.js",
+      "bytes": 833
+    },
+    {
+      "file": "8087_setupMessageListener.js",
+      "bytes": 1458
+    },
+    {
+      "file": "8087_summarizeEditBody_def.js",
+      "bytes": 3671
+    },
+    {
+      "file": "8087_testFillSkuPrice_diag.js",
+      "bytes": 1169
+    },
+    {
+      "file": "8087_transform_call_site.js",
+      "bytes": 823
+    },
+    {
+      "file": "8087_transform_request_body_handler.js",
+      "bytes": 954
+    },
+    {
+      "file": "8087_transformRequestBody_def.js",
+      "bytes": 6832
+    },
+    {
+      "file": "sw_finish_success_failure_62294.js",
+      "bytes": 1878
+    },
+    {
+      "file": "sw_handlePddSetHijackFlag_87605.js",
+      "bytes": 1583
+    },
+    {
+      "file": "sw_sendPagePddEditRequest_58940.js",
+      "bytes": 2850
+    },
+    {
+      "file": "sw_sendProxyRequestOnce_57433.js",
+      "bytes": 1655
+    },
+    {
+      "file": "sw_shouldUseProxyFallback_61112.js",
+      "bytes": 589
+    },
+    {
+      "file": "sw_sw_dnr_88623.js",
+      "bytes": 1091
+    },
+    {
+      "file": "sw_sw_dnr_setup_23890.js",
+      "bytes": 3561
+    },
+    {
+      "file": "sw_sw_dnr_update_52926.js",
+      "bytes": 2205
+    },
+    {
+      "file": "sw_sw_hijack_goods_commit_51753.js",
+      "bytes": 3418
+    },
+    {
+      "file": "sw_sw_set_hijack_flag_74943.js",
+      "bytes": 2645
+    },
+    {
+      "file": "sw_sw_webRequest_63874.js",
+      "bytes": 1892
+    },
+    {
+      "file": "sw_transform_timeout_55198.js",
+      "bytes": 1688
+    },
+    {
+      "file": "sw_webrequest_tail.js",
+      "bytes": 3735
+    },
+    {
+      "file": "sw_webrequest_tail2.js",
+      "bytes": 3603
+    }
+  ]
+}

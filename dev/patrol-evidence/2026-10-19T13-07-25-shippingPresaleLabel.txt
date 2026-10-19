@@ -1,0 +1,6 @@
+锚点: shippingPresaleLabel
+URL: https://mms.pinduoduo.com/goods/goods_add/index?type=add&from=category&id=204063541154&goods_id=1018366923351&sourcePage=goodsList
+时间: 2026-10-19T13:07:26.107Z
+
+DOM 片段（前 800 字）：
+<svg aria-hidden="true" style="position: absolute; width: 0px; height: 0px; overflow: hidden;"><symbol id="ic-xiazai" viewBox="0 0 1024 1024"><path d="M128 810.662857h768V896H128z m426.662857-248.662857L813.714286 302.937143l60.331428 60.331428L512 725.337143 149.977143 363.302857 210.285714 302.937143l259.051429 258.982857v-476.571429h85.337143z"></path></symbol><symbol id="ic-arrow-down" viewBox="0 0 1024 1024"><path d="M800.82 289.28L512 684.24l-288.82-395a8 8 0 0 0-6.45-3.28h-79.29a8 8 0 0 0-6.44 12.76l342.25 468.06A48.18 48.18 0 0 0 512 786.45a48.18 48.18 0 0 0 38.75-19.67L893 298.72a8 8 0 0 0-6.44-12.72h-79.29a8 8 0 0 0-6.45 3.28z"></path></symbol><symbol id="ic-arrow-up" viewBox="0 0 1024 1024"><path d="M223.18 734.72L512 339.76l288.82 395a8 8 0 0 0 6.45 3.28h79.29a8 8 0 0 0 6.44-12

@@ -34,6 +34,11 @@ export interface PddPublish2Options {
   costTemplate?: string
   /** 发货时间（选填）：1=当日发货、2=24小时发货、3=48小时发货；默认1 */
   deliveryTime?: number
+  /**
+   * 模式2（劫持填价，选填）。为 true 时跳过 UI 填价，提交时由 pdd-mode2
+   * 拦截原生 edit 请求改包注入价格/库存（见 pdd-publish.ts 的 hijack 分支）。
+   */
+  mode2?: boolean
 }
 
 /**
@@ -93,5 +98,25 @@ export async function pddPublish2(
   if (invalid) {
     return { ok: false, failureKind: 'api_error', text: `商品数据校验未通过：${invalid}` }
   }
-  return pddPublish(store, toPddOptions(parsed.product, opts))
+  const pddOpts = toPddOptions(parsed.product, opts)
+  if (opts.mode2) {
+    // 模式2：动态 import 规避编译期/运行时循环依赖，在使用点加载劫持引擎。
+    // costTemplate 传模板名（字符串）时原样透传：模式2 movingConfig.template 期望的是
+    // 模板 ID，由 buildGoodsDetailFromProduct 负责把模板名解析为 ID（模式1 的 fillShippingAndFreight
+    // 走 UI 搜索模板名，两者数据形态不同，故此处不做转换）。
+    const mode2 = await import('./pdd-mode2.js')
+    pddOpts.hijack = {
+      goodsDetail: mode2.buildGoodsDetailFromProduct(parsed.product, {
+        costTemplate: opts.costTemplate,
+        deliveryTime: opts.deliveryTime,
+      }),
+    }
+    // PDD_MODE2_TRACE=1 时把拦截链路 trace 打到 console（排查 via=page 失败原因用）
+    if (process.env.PDD_MODE2_TRACE === '1') {
+      pddOpts.hijack.onTrace = (step, data) => {
+        try { console.log(`[pdd-mode2][trace] ${step}`, data ? JSON.stringify(data) : '') } catch { /* 忽略 */ }
+      }
+    }
+  }
+  return pddPublish(store, pddOpts)
 }
