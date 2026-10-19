@@ -1,0 +1,111 @@
+150:   step('示例指令条', () => {
+151:     ctx.effect(() => {
+152:       const disposeSuggest = ctx.slots.inject('conversation.input.dock', () =>
+153:         ctx.slots.register(
+154:           {
+155:             name: 'conversation.input.dock',
+156:             id: 'dsagent-suggest',
+157:             order: 15,
+158:             locale: NS,
+159:           },
+160:           SuggestDock,
+161:         ),
+162:       )
+163:       return () => disposeSuggest()
+164:     }, 'dsagent: suggest dock')
+165:   })
+166: 
+167:   // ── 动态推荐：数据 ──
+168:   // 链路：collect（采集）→ analyze（分析）→ publish（发布）→ manage（账号/工具）
+169:   type Stage = 'collect' | 'analyze' | 'publish' | 'manage'
+170:   interface Suggestion {
+171:     readonly label: string
+172:     readonly text: string
+173:     readonly platform?: string
+174:     readonly stage: Stage
+175:   }
+176: 
+177:   // 平台词表：聊天文本命中即判定当前平台（含别名）
+178:   const PLATFORM_WORDS: ReadonlyArray<{ readonly platform: string; readonly words: readonly string[] }> = [
+179:     { platform: 'douyin', words: ['抖音', 'douyin', 'tiktok'] },
+180:     { platform: 'taobao', words: ['淘宝', 'taobao', '天猫'] },
+181:     { platform: '1688', words: ['1688', '阿里巴巴批发', '批发市场'] },
+182:     { platform: 'xiaohongshu', words: ['小红书', 'xiaohongshu', '红书'] },
+183:     { platform: 'zhihu', words: ['知乎', 'zhihu'] },
+184:     { platform: 'bilibili', words: ['b站', '哔哩哔哩', 'bilibili', '哔站'] },
+185:     { platform: 'xianyu', words: ['闲鱼', 'xianyu'] },
+186:     { platform: 'pdd', words: ['拼多多', 'pdd'] },
+187:     { platform: 'dingtalk', words: ['钉钉', 'dingtalk'] },
+188:   ]
+189: 
+190:   // 动作词表：判定最近完成的链路阶段
+191:   const STAGE_WORDS: ReadonlyArray<{ readonly stage: Stage; readonly words: readonly string[] }> = [
+192:     { stage: 'collect', words: ['采集', '爬取', '抓取', '爬虫', '抓取数据'] },
+193:     { stage: 'analyze', words: ['分析', '统计', '对比', '选品', '分层', '评价分析'] },
+194:     { stage: 'publish', words: ['发布', '上传视频', '发笔记', '上架'] },
+195:     { stage: 'manage', words: ['账号', '绑定', '连接状态', '登录'] },
+196:   ]
+197: 
+198:   // 推荐清单：按「平台 × 链路阶段」索引；platform 缺省 = 任意平台可用
+199:   const SUGGESTIONS: readonly Suggestion[] = [
+200:     // 初始态：平台入口（各平台代表动作）
+201:     { label: '采集抖音热门视频', text: '采集抖音热门视频数据', platform: 'douyin', stage: 'collect' },
+202:     { label: '采集小红书笔记', text: '采集小红书笔记数据', platform: 'xiaohongshu', stage: 'collect' },
+203:     { label: '1688智能选品', text: '帮我做1688选品分析', platform: '1688', stage: 'analyze' },
+204:     { label: '分析商品评价', text: '分析这个商品的评价，链接：', stage: 'analyze' },
+205:     { label: '查看账号连接状态', text: '查看我的账号连接状态', stage: 'manage' },
+206:     // 抖音链路
+207:     { label: '分析刚采集的视频', text: '分析刚才采集的抖音视频数据', platform: 'douyin', stage: 'analyze' },
+208:     { label: '采集抖音商品榜', text: '采集抖音商品榜数据', platform: 'douyin', stage: 'collect' },
+209:     { label: '发布抖音视频', text: '帮我发布一条抖音视频', platform: 'douyin', stage: 'publish' },
+210:     // 淘宝链路
+211:     { label: '分析淘宝商品评价', text: '分析这个淘宝商品的评价，链接：', platform: 'taobao', stage: 'analyze' },
+212:     { label: '发布淘宝商品', text: '帮我上架一个淘宝商品', platform: 'taobao', stage: 'publish' },
+213:     // 小红书链路
+214:     { label: '分析小红书笔记', text: '分析采集到的小红书笔记数据', platform: 'xiaohongshu', stage: 'analyze' },
+215:     { label: '发布小红书笔记', text: '帮我发布一篇小红书笔记', platform: 'xiaohongshu', stage: 'publish' },
+216:     // 拼多多链路
+217:     { label: '采集拼多多商品', text: '采集拼多多商品数据', platform: 'pdd', stage: 'collect' },
+218:     { label: '分析拼多多商品', text: '分析拼多多商品数据', platform: 'pdd', stage: 'analyze' },
+219:     { label: '发布拼多多商品', text: '帮我上架一个拼多多商品', platform: 'pdd', stage: 'publish' },
+220:     // 通用下一步
+221:     { label: '发布到其他平台', text: '把结果整理后发布到', stage: 'publish' },
+222:   ]
+223: 
+224:   // ── 动态推荐：规则引擎 ──
+225:   /** 从最近几轮 prompt/response 文本推断「平台 × 已完成阶段」。 */
+226:   function inferContext(items: readonly { readonly prompt: string; readonly response: string }[]): { platform?: string; stage?: Stage } {
+227:     // 取最近 3 轮，从最新往回扫：最新一轮命中的才算数（话题会切换，
+228:     // 旧轮次的动作词不该覆盖新话题；如「查看账号连接状态」的「账号」
+229:     // 不该把之后的「分析商品评价」阶段抢成 manage）。
+230:     const recent = items.slice(-3)
+231:     if (recent.length === 0) return {}
+232: 
+233:     // 平台：逐轮（新→旧）在 prompt+response 里找；助手回复也常提平台名
+234:     // （如「已采集抖音视频 50 条」），可作辅助。轮内 prompt 优先于
+235:     // response——用户说的是主话题，回复里顺带提到其他平台（如「也可
+236:     // 试试闲鱼」）不该抢走平台；同段内词表序先命中先得。
+237:     let platform: string | undefined
+238:     for (let i = recent.length - 1; i >= 0 && !platform; i--) {
+239:       const { prompt, response } = recent[i]
+240:       for (const segment of [prompt, response]) {
+241:         for (const entry of PLATFORM_WORDS) {
+242:           if (entry.words.some((w) => segment.includes(w))) {
+243:             platform = entry.platform
+244:             break
+245:           }
+246:         }
+247:         if (platform) break
+248:       }
+249:     }
+250: 
+251:     // 阶段：逐轮（新→旧）只看用户 prompt——助手回复常含「账号 xxx」
+252:     // 「分析完成」等系统噪声，会把刚完成的动作误判成 manage/analyze（实测踩坑）。
+253:     // 轮内取词表序最后一个命中（collect→analyze→publish→manage，越靠后越是刚完成的动作）。
+254:     let stage: Stage | undefined
+255:     for (let i = recent.length - 1; i >= 0 && !stage; i--) {
+256:       const prompt = recent[i].prompt
+257:       for (const entry of STAGE_WORDS) {
+258:         if (entry.words.some((w) => prompt.includes(w))) stage = entry.stage
+259:       }
+260:     }
