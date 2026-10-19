@@ -1,0 +1,11 @@
+files=10
+  00-architecture.md size=12194 hits=3 lines=13,63,101
+  01-interceptor.md size=21602 hits=0 lines=
+  02-publish-engine.md size=11572 hits=5 lines=3,11,35,54,56
+  02b-publish-request-chain.md size=7845 hits=2 lines=26,36
+  02c-publish-engine-appendix.md size=11668 hits=1 lines=24
+  03-multi-platform.md size=12704 hits=6 lines=30,36,49,63,97,179
+  04-data-model.md size=14462 hits=0 lines=
+  05-principle.md size=6508 hits=2 lines=45,54
+  06-evidence.md size=8717 hits=0 lines=
+  README.md size=4622 hits=2 lines=29,30

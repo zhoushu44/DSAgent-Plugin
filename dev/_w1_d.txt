@@ -1,0 +1,111 @@
+87| ## 4. L3 取数适配器层：元数据每家接口都不一样，用一张分派表兜住
+88| 
+89| 平台判定完成之后，引擎需要三类「平台自己的元数据」：运费模板、图片空间目录、尺码模板。这三类只能从各平台自己的商家后台接口取，路径、鉴权、返回结构都不一样。引擎的处理办法是一张对象分派表（`scripts/_gm.js@411267`）：
+90| 
+91| | 平台 | 取数实现 | 特殊点 |
+92| | --- | --- | --- |
+93| | `taobao` | `Promise.all([运费, 图片空间, 尺码])` 三路并发 | 三份元数据齐全 |
+94| | `tmall` | 同淘宝，但尺码模板走另一组接口 | 与淘宝代码几乎对称 |
+95| | `pinduoduo` | 运费 + 图片空间两路 | 无尺码模板 |
+96| | `jd` | 运费 + 图片空间两路 | 无尺码模板 |
+97| | `douyin` | 运费 + 尺码模板 | 回填 `sizeTemplateMap` / `sizeTemplateErrorMsg`（`scripts/_gm.js@411817`） |
+98| | `xiaohongshu` | 运费 + 图片空间 | — |
+99| | `weidian` | 只取运费，图片空间固定返回空数组兜底数组 | 走微信小店接口（`scripts/_gm.js@290601`） |
+100| | `kuaishou` | 只取运费，图片空间固定返回空数组兜底数组 | — |
+101| | `xianyu` | 直接返回空运费列表 + 空图片空间 | 不参与模板取数 |
+102| | `1688` | 直接返回空运费列表 + 空图片空间 | 不参与模板取数 |
+103| 
+104| 闲鱼与 1688 直接返回空数组，是「适配」而不是「缺失」：这两家后台没有可复用的运费模板选择接口，硬取只会失败，所以引擎把「没有模板可选」当作合法状态返回，让 UI 走手动填写分支。这解释了为什么在这两家平台上运费模板下拉框经常是空的却仍能发布。
+105| 
+106| 同一层里还有三张平台专属常量表，用来说明「有些能力只有部分平台有」：
+107| 
+108| - 异步类目入口表（`scripts/_gm.js@412324`）：只有 `taobao` 与 `tmall` 两个键，分别指向 `item.upload.taobao.com/router/asyncOpt.htm` 与 `sell.publish.tmall.com/router/asyncOpt.htm`。其余平台没有异步类目接口，只能同步拉类目树。
+109| - AI 类目表（`scripts/_gm.js@412448`）：同样只有淘宝/天猫，指向 `/sell/ai/category.htm` 与 `/tmall/ai/category.htm`。
+110| - 能力开关表（`scripts/_gm.js@412719`）：`{taobao:!0,tmall:!0}`——「是否支持某能力」用一张只有两个真值的对象表达，比在每个分支里写平台名比较更好维护。
+111| 
+112| 运费模板的具体取数也因平台而异：微信小店走 `store.weixin.qq.com/shop-faas/mmecnodeproductupload/express/cgi/goods/getFreightTemplate`，并且要先从 cookie 里解出 `biz_magic`（`scripts/_gm.js@194132`、`scripts/_gm.js@289239`）；这是唯一需要自己从 cookie 抠 token 的平台，其余平台靠页面已登录态。
+113| 
+114| ## 5. L4 字段填充层：一次 `transformRequestBody` 里串起四步
+115| 
+116| 真正把「采集到的商品」变成「目标平台请求体」的地方是 `transformRequestBody`（`scripts/_gm.js@912763`）。骨架非常短：记录改写前摘要 → 四个填充步骤 → 记录改写后摘要 → 落 `localStorage` 便于取证。四步调用连写在同一行（`scripts/_gm.js@913211`）：
+117| 
+118| ```
+119| this.fillImageData(e,t),this.fillSkuPriceData(e,t),this.fillShippingConfig(e,t),this.applyPddElecGoodsAttributes(e);
+120| ```
+121| 
+122| ### 5.1 `fillImageData`：图片、装修楼层、视频三件套（`scripts/_gm.js@913599`）
+123| 
+124| | 采集源字段 | 目标字段 | 语义 |
+125| | --- | --- | --- |
+126| | `t.gallery` | `e.gallery` | 主图/详情图数组，整体覆盖 |
+127| | `t.floor_list` | `e.decorationDetail` | 详情页装修楼层 |
+128| | `t.preview_url` | `e.decorationPreview` | 装修预览图 |
+129| | `t.video_upload` | `e.gallery.push({file_id,type:6,video_url,url,width,height})` + `e.carousel_video` | 视频作为 `type:6` 的 gallery 项插入 |
+130| 
+131| 容易被忽略的语义细节：`gallery` 数组用 `type` 区分媒体种类（`1` 主图、`2` 详情图、`6` 视频）。`fillImageData` 在覆盖前会分别统计源与目标的 `type1` / `type2` 数量，这是为了在 trace 里算出 `type1Delta` / `type2Delta`，从而在请求被平台拒绝时能判断是「主图丢了」还是「详情图丢了」。视频只有在 `t.video_upload.check_comment` 等于「通过」（审核通过）时才插入——未过审的视频不会进请求体。
+132| 
+133| ### 5.2 `fillSkuPriceData`：把采集端的 SKU 矩阵翻译成目标端的价格矩阵（`scripts/_gm.js@914335`）
+134| 
+135| 这是四层里最复杂的一层，因为它要处理「规格维度数量不一致」这个真实问题：采集端可能 1 维（颜色），目标端可能 2 维（颜色 × 尺码）。函数开头取三样东西：`sku_sort`（规格顺序）、`sku_key`（规格键 → 取值数组）、`sku_price`（规格键 → 价格数组），三者按下标对齐，缺一不可。
+136| 
+137| 要点：
+138| 
+139| - 维度数 `n` 超过 2 时直接放弃矩阵构造（代码里 `c=n.length>2`），走另一条降级路径；因为 `price_detail` 只接受最多二维矩阵。
+140| - 拼多多单买规则三件套（`pdd_single_buy_rule_type` / `pdd_single_buy_percent` / `pdd_single_buy_fixed_yuan`）从 `movingConfig` 优先读取、回落商品自身字段——这是「用户在移动配置里改的值优先于采集到的值」这一原则的具体实现。
+141| - 价格矩阵的构造另有稳定化函数 `buildStablePriceDetailForFill`（`scripts/_gm.js@781534`），它处理 `sku_sort` 为空但 `sku_key` 有值的畸形数据：从 `sku_key` 的第一个键反推维度数，并夹到 1 或 2。
+142| 
+143| ### 5.3 `fillShippingConfig`：运费模板、发货时限、两件折扣（`scripts/_gm.js@922380`）
+144| 
+145| 三处细节值得单独说明：
+146| 
+147| 1. **发货时限的枚举归一**：`selectTime` 同时接受 `"today"/"1"/"24h"/"2"` 四种写法映射到 86400 秒，`"48h"/"3"` 映射到 172800 秒（`scripts/_gm.js@922634`）。这是为了兼容不同版本 UI 存下来的历史值——老数据是数字，新数据是字符串。
+148| 2. **两件折扣的夹取与放大**：输入是折扣率（5~9.9），输出 `Math.round(10*n)` 变成 50~99 的整数（`scripts/_gm.js@922771`）。若输入非法或越界一律回落 9.9（即 99，等于不打折）。这是静默纠正：用户填了 3 折也不会报错，而是被悄悄改成 9.9 折。
+149| 3. **`is_default_template_id=1` 与模板 id 同时写**（`scripts/_gm.js@922449`）：平台接口要求两者成对出现，只写 `cost_template_id` 会被判为「未指定默认模板」。
+150| 
+151| 页面上还有一条 DOM 侧的补偿路径（`scripts/_gm.js@657816`）：如果 `selectTime` 有值但请求体字段没生效，会去 `#shipment_limit_second label` 里按中文文案（「当日」「24小时」「48小时」）找对应单选项并点击。也就是说同一语义有「写字段」与「点 DOM」两条实现，前者优先、后者兜底。
+152| 
+153| ### 5.4 `applyPddElecGoodsAttributes`：平台专属分支
+154| 
+155| 前三步是跨平台通用的（虽然字段名带 `pdd_` 前缀），第四步才是真正的平台专属：把电器类目必填属性（能效等级、3C 认证等）补进请求体。它排在通用链路之后，因为输入依赖前三步已经写好的字段。
+156| 
+157| ## 6. 拼多多：唯一一个「字段映射被单独工程化」的平台
+158| 
+159| 拼多多在引擎里占据的代码量明显超过其他平台，原因是它的编辑接口需要原样改写一个已存在的请求体，而不是从零构造。相关映射逻辑集中在这几处：
+160| 
+161| | 函数 | 作用 | 坐标 |
+162| | --- | --- | --- |
+163| | `resolveSafePddOutGoodsSn` | 商家编码（`out_goods_sn`）按 `productCode_radio` 三选一策略生成，并做加权长度截断 | `scripts/_gm.js@772198` |
+164| | `getPddStockMode` | 库存模式 1/2（统一库存 vs 按 SKU 库存） | `scripts/_gm.js@718934` |
+165| | `buildStablePriceDetailForFill` | 把畸形 SKU 数据结构稳定化成 1~2 维价格矩阵 | `scripts/_gm.js@781534` |
+166| | `_buildListBody` | 商品列表查询体，固定带 `out_goods_sn_gray_flag:!0` 与 `pre_sale_type`、`shipment_time_type` | `scripts/_gm.js@512625` |
+167| 
+168| `resolveSafePddOutGoodsSn` 的取值策略最能说明字段映射在真实场景里有多琐碎：`productCode_radio` 为 `"2"` 时用 `goods_id`/`productId`，为 `"3"` 时用 `base_attr` 里的「货号」，否则用商品自身编码；再按 `PDD_OUT_GOODS_SN_MAX_WEIGHTED_LEN` 做加权长度截断（中文算 2、英文算 1），超长时返回 `{truncated:!0}` 让上层决定是否提示用户。为什么是加权长度而不是字符数？因为后端按字节长度校验，中文一个字符两字节，纯按字符数截断会在中文商家编码上被拒。
+169| 
+170| ## 7. 一张总表：十平台的差异到底落在哪几个字段上
+171| 
+172| 把 L2/L3/L4 三层的信息合起来看，平台差异最终收敛到下面这张表（`—` 表示该层对该平台无差异，`✗` 表示该能力不适用）：
+173| 
+174| | 平台 | 发布域 | 路径限定 | 运费模板 | 图片空间 | 尺码模板 | 异步类目 | AI 类目 | 特殊字段 |
+175| | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+176| | 淘宝 | `item.upload.taobao.com` 等 5 个 | 无 | 真实接口 | 有 | 有 | 有 | 有 | `cost_template_id`、`shipment_limit_second` |
+177| | 天猫 | `sell.publish.tmall.com` | 无 | 真实接口 | 有 | 有 | 有 | 有 | 同上 |
+178| | 拼多多 | `mms.pinduoduo.com` | 无 | 有 | 有 | ✗ | ✗ | ✗ | `out_goods_sn`、`stock_mode`、`price_detail` 矩阵 |
+179| | 抖店 | `fxg.jinritemai.com` | 无 | 有 | 有 | 有 `sizeTemplateMap` | ✗ | ✗ | 尺码模板映射 |
+180| | 小红书 | `ark.xiaohongshu.com` | 无 | 有 | 有 | ✗ | ✗ | ✗ | — |
+181| | 快手 | `s.kwaixiaodian.com` | 无 | 有 | 空数组兜底 | ✗ | ✗ | ✗ | — |
+182| | 微店 | `store.weixin.qq.com` | 无 | 有，需 `biz_magic` | 空数组兜底 | ✗ | ✗ | ✗ | cookie token |
+183| | 京东 | `wares-jdm.jd.com` | 无 | 有 | 有 | ✗ | ✗ | ✗ | — |
+184| | 1688 | `offer-new.1688.com` | 无 | 空数组 | 空数组兜底 | ✗ | ✗ | ✗ | 手动填运费 |
+185| | 闲鱼 | `goofish.com` | `/publish` | 空数组 | 空数组兜底 | ✗ | ✗ | ✗ | 手动填运费 |
+186| 
+187| 这张表就是「多平台适配层」的全部内容。十行里只有「发布域」「路径限定」「三类元数据」「两个专有字段组」四类差异，其余全部由同一份代码承担。
+188| 
+189| ## 8. 边界与风险
+190| 
+191| - **证据边界**：本篇所有引擎侧坐标都来自落盘的 `scripts/_gm.js`（单行压缩，5,832,042 字符），偏移是 `indexOf` 结果；明文坐标来自 `src-mirror/` 只读副本。两者都能用 `node scripts/verify-facts.mjs` 逐条复验（PLAT-01 ~ PLAT-08 即本篇 L2 层的八条事实）。
+192| - **静态分析边界**：压缩后的变量名（`i`、`n`、`ye`、`be`、`Se`、`xe`）是构建产物名，结论以行为为准而非命名。`weidian_publisher` 的 pattern 里同时有 `store.weixin.qq.com` 与 `weidian.com`，但引擎注册表 `weidian` 只认 `store.weixin.qq.com`——即微店页面会加载引擎，但引擎判定平台时会落到「该平台」兜底分支。这是模块表与注册表不一致留下的真实缺口。
+193| - **时效风险**：引擎走 CDN 热更新（`src-mirror/config/app-config.json:4` 的 `cdnHost`），8 个 publisher 共用同一份产物，本文描述只对应 v5.61 落盘那一刻的包。云端随时可能改字段映射，届时坐标仍在、语义可能已变。
+194| - **合规风险**：注册表与填充层的存在意义是「在第三方商家后台以页面身份提交数据」，绕开平台官方开放接口。本文只做原理还原，不构成可用性建议。
+195| - **未验证项**：十个平台的字段级差异只覆盖到引擎侧代码可见的部分；各平台后端实际校验规则（例如哪些字段组合会被拒）需逐平台实测才能穷举。
+196| 
+TOTAL_LINES=207
