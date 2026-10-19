@@ -110,7 +110,7 @@ openEntry（类目搜索页）→ selectCategory → waitFor 表单就绪 → fi
 
 - 共享接入规范：PUBLISH-MATRIX.md（7 函数链 / 三路错误回读 / 各平台现状）与 PUBLISH-SPEC.md（JSON 驱动、XPath 四级锚点、能力块六步协议）。
 - 锚点集：`publish-config/taobao.json`（分级 selector、timeouts、regexes，发布时现读）。
-- 觅千手 v5.61 平台矩阵与字符偏移坐标：`docs/mqs-publish-platform-matrix.md`。
+- 觅千手 v5.61 平台矩阵与字符偏移坐标：见 `PUBLISH-MATRIX.md` 第八节「各平台现状对照」。
 - 同族旧实现对照：`skills/taobao-publish/SKILL.md`。
 
 ## 环境变量
