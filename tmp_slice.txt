@@ -1,0 +1,101 @@
+300: }
+301: 
+302: /** 平台别名归一化（前端用 xiaohongshu/pinduoduo，后端用 xhs/pdd） */
+303: const PLATFORM_ALIASES: Record<string, string> = {
+304:   xiaohongshu: 'xhs',
+305:   pinduoduo: 'pdd',
+306:   jd: 'jd',
+307: }
+308: 
+309: // ── 辅助函数 ──────────────────────────────────────────────
+310: 
+311: /** 业务平台别名归一化（xiaohongshu→xhs、pinduoduo→pdd），不做凭证层映射 */
+312: export function normalizePlatform(platform: string): string {
+313:   return PLATFORM_ALIASES[platform] ?? platform
+314: }
+315: 
+316: /** 业务平台 -> 凭证平台。生意参谋系（sycm/万相台/达摩盘/天猫洞察）与闲鱼都落在 taobao 上。 */
+317: export function credentialPlatform(platform: string): string {
+318:   return CREDENTIAL_PLATFORM[normalizePlatform(platform)] ?? normalizePlatform(platform)
+319: }
+320: 
+321: /**
+322:  * **不可独立登录**的平台 -> 应去登录的平台（单一真源，UI 与 host 半区共用）。
+323:  *
+324:  * 这些平台在凭证层复用淘宝登录态，账号连接页不设入口（FIX-LOG #67）。
+325:  *
+326:  * ★ 闲鱼也在表内（FIX-LOG #70）：它的凭证行由 `ensureXianyuFromTaobao()` 在
+327:  * **淘宝登录成功后自动派生**并刷新 goofish 域 Cookie，用户不需要（也无法）单独登录闲鱼。
+328:  * 与生意参谋系的唯一区别是闲鱼仍保留独立凭证行（goofish 域 Cookie 必须落在自己的条目上），
+329:  * 只是该行在账号页被隐藏（见 `ui/account-page.ts` 的 `HIDDEN_ROW_PLATFORMS`）。
+330:  *
+331:  * 用途：堵住「存量这类账号 → 账号页『重新登录』」与「模型直接调 dsagent_browser_login」
+332:  * 两条残留入口 —— 少了这道守卫，闲鱼/生意参谋登录窗会重新被拉起来。
+333:  */
+334: const SHARED_LOGIN_PLATFORM: Record<string, string> = {
+335:   tmall: 'taobao',
+336:   xianyu: 'taobao',
+337:   sycm: 'taobao',
+338:   alimama: 'taobao',
+339:   dmp: 'taobao',
+340:   sycm_insight: 'taobao',
+341: }
+342: 
+343: /**
+344:  * 该平台是否可独立登录。
+345:  *
+346:  * 返回空串 = 可独立登录；返回平台名 = 不可独立登录，应改为登录该平台（如 `sycm` → `'taobao'`）。
+347:  */
+348: export function loginOwnerPlatform(platform: string): string {
+349:   return SHARED_LOGIN_PLATFORM[normalizePlatform(platform)] ?? ''
+350: }
+351: 
+352: // ── 派生关系注册表（数据驱动，吸收 Accio 的 logicalStoreKey 分组语义）──────
+353: 
+354: /**
+355:  * 平台间的**登录态派生关系**及其级联影响，单一真源。
+356:  *
+357:  * ## 为什么要把关系从代码里提出来
+358:  *
+359:  * 改造前，「淘宝登录 → 生意参谋可用」「淘宝登录 → 闲鱼自动派生」这两件事的真相
+360:  * 分散在三处：`CREDENTIAL_PLATFORM`（凭证落哪）、`SHARED_LOGIN_PLATFORM`（谁能独立登录）、
+361:  * 以及 `ensureXianyuFromTaobao()` 里的硬编码判断。
+362:  *
+363:  * 后果是**断开一个账号时无法预知会波及谁**：用户删掉淘宝账号，生意参谋系与闲鱼的
+364:  * 凭证行会变成孤儿（`credential_platform` 仍指向已不存在的 taobao），
+365:  * 直到下次跑技能才报「未绑定」，用户完全不知道原因。
+366:  *
+367:  * Accio 用 `logicalStoreKey` 把多区域/多子店收敛成一个逻辑店铺，并支持
+368:  * `managedShopDisconnectGroup` 按逻辑店铺**整组断开** —— 正是为了解决同一类问题。
+369:  *
+370:  * 本注册表把这层关系显式化，从而支持：
+371:  *   1. `derivedPlatformsOf(platform)` —— 断开会波及谁（用于删前提示与级联清理）
+372:  *   2. `derivationChainFor(platform)` —— 该平台的完整上游链（用于引导文案）
+373:  *
+374:  * ## 字段语义
+375:  *
+376:  * - `owner`：登录态的**所有者**平台（用户应当去登录的那个）
+377:  * - `derived`：依赖 owner 登录态的**下游**平台
+378:  * - `keepsOwnRow`：下游是否保留独立凭证行
+379:  *     · `false`（生意参谋系）—— 凭证层直接复用 owner 的 Cookie，无独立行
+380:  *     · `true`（闲鱼）—— 必须保留独立行（goofish 域 Cookie 要落在自己的条目上），
+381:  *       但由 owner 登录成功后自动派生；账号页隐藏该行
+382:  * - `note`：面向用户的一句话解释（引导文案与删除提示复用）
+383:  */
+384: export interface DerivationRelation {
+385:   owner: string
+386:   derived: string
+387:   keepsOwnRow: boolean
+388:   note: string
+389: }
+390: 
+391: export const DERIVATION_REGISTRY: readonly DerivationRelation[] = [
+392:   // 阿里系 SSO：登录淘宝后，生意参谋 / 万相台 / 达摩盘 / 天猫洞察立即可用。
+393:   // 这些平台在凭证层「借用」淘宝的 Cookie，不落自己的凭证行（keepsOwnRow=false）。
+394:   { owner: 'taobao', derived: 'sycm', keepsOwnRow: false, note: '生意参谋复用淘宝登录态' },
+395:   { owner: 'taobao', derived: 'alimama', keepsOwnRow: false, note: '万相台复用淘宝登录态' },
+396:   { owner: 'taobao', derived: 'dmp', keepsOwnRow: false, note: '达摩盘复用淘宝登录态' },
+397:   { owner: 'taobao', derived: 'sycm_insight', keepsOwnRow: false, note: '天猫洞察复用淘宝登录态' },
+398:   { owner: 'taobao', derived: 'tmall', keepsOwnRow: false, note: '天猫与淘宝共用同一套登录态' },
+399:   // 闲鱼是特例：身份同源（unb 一致），但 mtop 网关只认 goofish 域 Cookie，
+400:   // 故必须保留独立凭证行 —— 只是该行由淘宝登录成功后自动派生，账号页不提供入口。
