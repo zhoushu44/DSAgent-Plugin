@@ -1,24 +1,25 @@
-import fs from 'node:fs'
-import path from 'node:path'
-
-const ROOT = process.cwd()
-const hits = []
+import fs from 'node:fs';
+import path from 'node:path';
+const KWS = process.argv.slice(2);
+const SKIP = new Set(['.git','node_modules','.dsagent']);
+const hits = new Map();
 function walk(d) {
-  let ents = []
-  try { ents = fs.readdirSync(d, { withFileTypes: true }) } catch { return }
-  for (const e of ents) {
-    if (e.name === '.git' || e.name === 'node_modules') continue
-    const p = path.join(d, e.name)
-    if (e.isDirectory()) { walk(p); continue }
-    if (!/\.(md|txt|ts|js|mjs|cjs|json|yml|ps1)$/i.test(e.name)) continue
-    let t = ''
-    try { t = fs.readFileSync(p, 'utf8') } catch { continue }
-    const mqs = (t.match(/觅千手/g) || []).length
-    const mqs2 = (t.match(/mqs/gi) || []).length
-    if (mqs || mqs2) hits.push({ p: path.relative(ROOT, p), mqs, mqs2, size: t.length })
+  for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+    if (SKIP.has(e.name)) continue;
+    const f = path.join(d, e.name);
+    if (e.isDirectory()) { walk(f); continue; }
+    if (!/\.(md|json|ts|mjs|cjs|js|txt|yml|py)$/.test(e.name)) continue;
+    let s; try { s = fs.readFileSync(f, 'utf8'); } catch { continue; }
+    for (const k of KWS) {
+      let i = s.indexOf(k);
+      while (i >= 0) {
+        const line = s.slice(0, i).split('\n').length;
+        if (!hits.has(f)) hits.set(f, []);
+        hits.get(f).push(`${k}@L${line}`);
+        i = s.indexOf(k, i + 1);
+      }
+    }
   }
 }
-walk(ROOT)
-hits.sort((a, b) => b.mqs - a.mqs || b.mqs2 - a.mqs2)
-for (const h of hits) console.log(h.mqs + '\t' + h.mqs2 + '\t' + h.size + '\t' + h.p)
-console.log('total files with hits:', hits.length)
+walk('.');
+for (const [f, v] of hits) console.log(f + ' :: ' + v.slice(0, 8).join(', ') + (v.length > 8 ? ` (+${v.length - 8})` : ''));
