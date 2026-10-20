@@ -1,0 +1,138 @@
+
+function printHuman(result, strict) {
+  console.log('=== mqs 技能 ↔ 宿主实现 一致性门禁 ===')
+  if (result.missingSkills.length) {
+    console.log('缺失技能目录：' + result.missingSkills.join(' / '))
+  }
+  const tag = { error: 'ERROR', gap: 'GAP  ', warn: 'WARN ' }
+  for (const r of result.reports) {
+    const head = r.id + '（' + r.label + '）'
+    if (!r.issues.length) {
+      console.log('[OK]    ' + head)
+      continue
+    }
+    console.log('[ISSUE] ' + head)
+    for (const i of r.issues) console.log('  ' + tag[i.severity] + ' ' + i.code + ' — ' + i.message)
+  }
+  console.log(
+    '合计：' + result.errorCount + ' error / ' + result.gapCount + ' gap / ' + result.warnCount + ' warn',
+  )
+  const failed = result.errorCount > 0 || result.missingSkills.length > 0 || (strict && result.gapCount > 0)
+  if (failed) console.log('❌ 门禁失败' + (strict ? '（--strict：gap 也算失败）' : ''))
+  else console.log('✅ 门禁通过')
+  return failed
+}
+
+/* ─────────── 内置自测：合成正反样例，不读真实仓库 ─────────── */
+
+function selftest() {
+  const spec = {
+    id: 'x-publish-mqs',
+    label: 'X',
+    domains: ['pub.x.com'],
+    configs: ['publish-config/x.json'],
+  }
+  const env = (over) => ({
+    srcText: 'https://pub.x.com/a',
+    registered: new Set(['dsagent_x_publish_mqs']),
+    configExists: (p) => p === 'publish-config/x.json',
+    ...(over || {}),
+  })
+  const run = (text, over) => analyzeSkill({ id: spec.id, text }, spec, env(over))
+  const codes = (r) => r.issues.map((i) => i.code).sort().join(',')
+
+  const cases = []
+  const GOOD = '调用 `dsagent_x_publish_mqs`，发布域 pub.x.com，锚点集 `publish-config/x.json`。'
+
+  // 正样例：工具已注册、域名有实现、锚点集存在 -> 无 issue
+  cases.push({ name: '全绿', got: codes(run(GOOD)), want: '' })
+
+  // 反样例：工具未注册且没给降级路径 -> tool_missing
+  cases.push({
+    name: '工具未注册且无降级',
+    got: codes(run('调用 `dsagent_y_publish_mqs`，发布域 pub.x.com，锚点集 `publish-config/x.json`。')),
+    want: 'tool_missing',
+  })
+
+  // 反样例：工具未注册但给了降级路径 -> 只 warn，不 error
+  const downgrade = run('调用 `dsagent_y_publish_mqs`，未注册时降级为指令型人工上架；发布域 pub.x.com，锚点集 `publish-config/x.json`。')
+  cases.push({ name: '工具未注册但有降级', got: codes(downgrade), want: 'downgrade_only' })
+  cases.push({
+    name: '降级不算 error',
+    got: String(downgrade.issues.filter((i) => i.severity === 'error').length),
+    want: '0',
+  })
+
+  // 反样例：正文一个 publish 工具都没提 -> no_publish_tool
+  cases.push({
+    name: '没提发布工具',
+    got: codes(run('本技能靠人工上架，发布域 pub.x.com。')),
+    want: 'config_not_referenced,no_publish_tool',
+  })
+
+  // 反样例：引用了不存在的锚点集 -> config_missing
+  cases.push({
+    name: '锚点集不存在',
+    got: codes(run(GOOD + '另见 `publish-config/nope.json`。')),
+    want: 'config_missing',
+  })
+
+  // 反样例：域名在技能里有、在 src 里没有 -> gap
+  cases.push({
+    name: '域名无实现证据',
+    got: codes(run(GOOD, { srcText: 'nothing here' })),
+    want: 'domain_not_in_src',
+  })
+
+  // 反样例：技能没写自家域名 -> domain_not_declared
+  cases.push({
+    name: '没写自家域名',
+    got: codes(run('调用 `dsagent_x_publish_mqs`，锚点集 `publish-config/x.json`。')),
+    want: 'domain_not_declared',
+  })
+
+  // scanPrefixed 边界：必须停在非 id 字符上
+  cases.push({
+    name: 'scanPrefixed 截断',
+    got: scanPrefixed('用 `dsagent_a_publish_mqs`，再看 dsagent_b_publish。', 'dsagent_').join(','),
+    want: 'dsagent_a_publish_mqs,dsagent_b_publish',
+  })
+  cases.push({
+    name: 'scanPrefixed 前缀不误报',
+    got: String(scanPrefixed('dsagent_', 'dsagent_').length),
+    want: '0',
+  })
+
+  let fail = 0
+  for (const c of cases) {
+    const ok = c.got === c.want
+    if (!ok) fail++
+    console.log((ok ? '[PASS] ' : '[FAIL] ') + c.name + (ok ? '' : '  期望 ' + c.want + ' 实得 ' + c.got))
+  }
+  console.log('自测：' + (cases.length - fail) + '/' + cases.length + ' 通过')
+  return fail === 0
+}
+
+/* ─────────── CLI ─────────── */
+
+function main(argv) {
+  if (argv.includes('--selftest')) {
+    process.exitCode = selftest() ? 0 : 1
+    return
+  }
+  const strict = argv.includes('--strict')
+  const json = argv.includes('--json')
+  const dirIdx = argv.indexOf('--dir')
+  const dir = dirIdx >= 0 ? path.resolve(argv[dirIdx + 1] || '') : undefined
+
+  const result = runCheck({ dir })
+  if (json) {
+    console.log(JSON.stringify({ ...result, strict }, null, 2))
+    const failed = result.errorCount > 0 || result.missingSkills.length > 0 || (strict && result.gapCount > 0)
+    process.exitCode = failed ? 1 : 0
+    return
+  }
+  process.exitCode = printHuman(result, strict) ? 1 : 0
+}
+
+main(process.argv.slice(2))
