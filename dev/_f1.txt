@@ -1,0 +1,38 @@
+14: *   - 淘宝组 criteria="https://item.upload.taobao.com"
+15: *   - 天猫组 criteria="https://sell.publish.tmall.com"
+17: *     - 提交按钮：  button[_id="button-submit"]（#float-bottom.sell-float-bottom > #struct-buttons.com-struct）
+55: let FORM_READY_SELECTOR = '#struct-mainImagesGroup, button[name="button-submit"]'
+112: let SUBMIT_BTN_SEL1 = 'button[name="button-submit"]'
+113: let SUBMIT_BTN_SEL2 = 'button[_id="button-submit"]'
+408: *   ① 搜索框 input[placeholder*="类目关键词"]，**必须按 Enter 才会出结果**；
+434: !!document.querySelector('input[placeholder*="类目关键词"]')).catch(() => false)
+442: .map(e => `[${e.type}] ph="${e.placeholder}" name="${e.name}" id="${e.id}"`)
+450: note: `未找到类目搜索框（input[placeholder*="类目关键词"]）。`
+457: const inp = document.querySelector('input[placeholder*="类目关键词"]') as HTMLInputElement | null
+465: if (!typed) return { ok: false, note: '未找到类目搜索框（input[placeholder*="类目关键词"]）。' }
+553: const BRAND_OPT_SEL = '.options-item, li, .next-menu-item, [role="option"]'
+1013: *   根容器 `#struct-catProp`（class com-struct），每个属性项是 `<div id="struct-p-XXXX">`，
+1022: const items = Array.from(root.querySelectorAll('[id^="struct-p-"]')) as HTMLElement[]
+1038: const hintEl = field.querySelector('.sell-component-info-wrapper-explain, .next-form-item-help, [class*="error"], [class*="help"]') as HTMLElement | null
+1084: panel.querySelectorAll('.options-item, li, .next-menu-item, [role="option"]'),
+1123: panel.querySelectorAll('.options-item, li, .next-menu-item, [role="option"]'),
+1198: + '只输出 JSON，形如 {"value":"候选值原文"} 或 {"value":null}，不要输出任何解释。'
+1278: const all = Array.from(document.querySelectorAll('a, button, span, [role="button"], .next-btn, div')) as HTMLElement[]
+1308: results.push(`<${el.tagName.toLowerCase()} class="${el.className}" children="${el.children.length}"> text="${t.slice(0, 80)}"`)
+1445: *   1) checkbox 组：`input[type=checkbox][value="2"]` = 使用物流配送，`value="0"` = 电子交易凭证；
+1455: const inp = box.querySelector('input[type="checkbox"][value="2"]') as HTMLInputElement | null
+1485: const items = Array.from(overlay.querySelectorAll('.options-item, li, .next-menu-item, [role="option"]')) as HTMLElement[]
+1504: const inp = box.querySelector('input[type="checkbox"][value="2"]') as HTMLInputElement | null
+1522: *   3) 行内的格子用 `td[id$="..."]` 精确定位（id 形如 `{row}-skuPrice`），
+1597: const td = (suffix: string) => tr.querySelector(`td[id$="${suffix}"]`) as HTMLElement | null
+1632: const inp = document.querySelector(`#struct-sku td[id$="${suffix}"] input`) as HTMLInputElement | null
+1655: const inp = document.querySelector(`#struct-sku td[id$="${suffix}"] input`) as HTMLInputElement | null
+1684: const toastSelectors = '.next-message-notice, .next-message, .next-toast, [class*="toast"], [class*="Toast"]'
+1693: const errSelectors = '.sell-component-info-wrapper-explain, .next-form-item-help-error, [class*="Form_itemError"], [class*="error-text"], [class*="validate-error"]'
+1702: const optSelectors = '.sell-optimization-container, .sell-component-optimization, [class*="optimization-container"], [class*="goods-optimization"]'
+1705: const tabLabels = Array.from(opt.querySelectorAll('[class*="tabLabel"], [class*="tab-label"], .next-tabs-tab')) as HTMLElement[]
+1708: const errTxt = ((opt.querySelector('[class*="TAB_content"], [class*="tab-content"], .next-tabs-content') as HTMLElement | null)?.textContent || '')
+1710: const advice = (Array.from(opt.querySelectorAll('[class*="optimize-item"], [class*="advice-item"], [class*="suggest-item"]')) as HTMLElement[])
+1716: const header = (opt.querySelector('[class*="optimize-header"], [class*="header"]') as HTMLElement | null)?.innerText || ''
+1724: /** 点「提交宝贝信息 / 提交」（2026-09 实测按钮属性为 name="button-submit"，旧版为 _id） */
+1983: !!document.querySelector('input[placeholder*="类目关键词"]')).catch(() => false)
