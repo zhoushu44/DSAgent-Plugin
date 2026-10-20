@@ -1,4 +1,0 @@
-=== src\tools-publish.ts
-  https://www.bilibili.com/video/BV1xx411c7mD
-  https://www.goofish.com/publish）完成「上传图片
-=== src\client.ts
