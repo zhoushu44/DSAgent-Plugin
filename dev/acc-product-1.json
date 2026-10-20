@@ -1,0 +1,67 @@
+{
+  "title": "秋冬新款儿童宽松睡衣摇粒绒卡通糖果男童女童家居服套装开衫",
+  "images": [
+    "e:\\360MoveData\\Users\\Administrator\\Desktop\\DSAgent-Plugin\\skills\\pdd-link-matrix\\assets\\src\\main_06.jpg",
+    "e:\\360MoveData\\Users\\Administrator\\Desktop\\DSAgent-Plugin\\skills\\pdd-link-matrix\\assets\\src\\main_07.jpg",
+    "e:\\360MoveData\\Users\\Administrator\\Desktop\\DSAgent-Plugin\\skills\\pdd-link-matrix\\assets\\src\\main_08.jpg",
+    "e:\\360MoveData\\Users\\Administrator\\Desktop\\DSAgent-Plugin\\skills\\pdd-link-matrix\\assets\\src\\main_09.jpg",
+    "e:\\360MoveData\\Users\\Administrator\\Desktop\\DSAgent-Plugin\\skills\\pdd-link-matrix\\assets\\src\\main_10.jpg"
+  ],
+  "detailImages": [
+    "e:\\360MoveData\\Users\\Administrator\\Desktop\\DSAgent-Plugin\\skills\\pdd-link-matrix\\assets\\src\\detail_10.jpg",
+    "e:\\360MoveData\\Users\\Administrator\\Desktop\\DSAgent-Plugin\\skills\\pdd-link-matrix\\assets\\src\\detail_11.jpg",
+    "e:\\360MoveData\\Users\\Administrator\\Desktop\\DSAgent-Plugin\\skills\\pdd-link-matrix\\assets\\src\\detail_12.jpg"
+  ],
+  "category": "童装",
+  "price": "42",
+  "stock": "100",
+  "itemNo": "M2ACC-001",
+  "specs": [
+    {
+      "name": "颜色",
+      "values": ["奶油黄", "星光粉", "格蕾灰", "迷雾紫", "银河蓝"]
+    },
+    {
+      "name": "尺码",
+      "values": ["110cm", "120cm", "130cm", "140cm", "150cm", "160cm"]
+    }
+  ],
+  "skus": [
+    { "specs": { "颜色": "奶油黄", "尺码": "110cm" }, "price": "34", "stock": "50" },
+    { "specs": { "颜色": "奶油黄", "尺码": "120cm" }, "price": "35", "stock": "50" },
+    { "specs": { "颜色": "奶油黄", "尺码": "130cm" }, "price": "36", "stock": "50" },
+    { "specs": { "颜色": "奶油黄", "尺码": "140cm" }, "price": "38", "stock": "50" },
+    { "specs": { "颜色": "奶油黄", "尺码": "150cm" }, "price": "40", "stock": "50" },
+    { "specs": { "颜色": "奶油黄", "尺码": "160cm" }, "price": "42", "stock": "50" },
+    { "specs": { "颜色": "星光粉", "尺码": "110cm" }, "price": "34", "stock": "50" },
+    { "specs": { "颜色": "星光粉", "尺码": "120cm" }, "price": "35", "stock": "50" },
+    { "specs": { "颜色": "星光粉", "尺码": "130cm" }, "price": "36", "stock": "50" },
+    { "specs": { "颜色": "星光粉", "尺码": "140cm" }, "price": "38", "stock": "50" },
+    { "specs": { "颜色": "星光粉", "尺码": "150cm" }, "price": "40", "stock": "50" },
+    { "specs": { "颜色": "星光粉", "尺码": "160cm" }, "price": "42", "stock": "50" },
+    { "specs": { "颜色": "格蕾灰", "尺码": "110cm" }, "price": "34", "stock": "50" },
+    { "specs": { "颜色": "格蕾灰", "尺码": "120cm" }, "price": "35", "stock": "50" },
+    { "specs": { "颜色": "格蕾灰", "尺码": "130cm" }, "price": "36", "stock": "50" },
+    { "specs": { "颜色": "格蕾灰", "尺码": "140cm" }, "price": "38", "stock": "50" },
+    { "specs": { "颜色": "格蕾灰", "尺码": "150cm" }, "price": "40", "stock": "50" },
+    { "specs": { "颜色": "格蕾灰", "尺码": "160cm" }, "price": "42", "stock": "50" },
+    { "specs": { "颜色": "迷雾紫", "尺码": "110cm" }, "price": "34", "stock": "50" },
+    { "specs": { "颜色": "迷雾紫", "尺码": "120cm" }, "price": "35", "stock": "50" },
+    { "specs": { "颜色": "迷雾紫", "尺码": "130cm" }, "price": "36", "stock": "50" },
+    { "specs": { "颜色": "迷雾紫", "尺码": "140cm" }, "price": "38", "stock": "50" },
+    { "specs": { "颜色": "迷雾紫", "尺码": "150cm" }, "price": "40", "stock": "50" },
+    { "specs": { "颜色": "迷雾紫", "尺码": "160cm" }, "price": "42", "stock": "50" },
+    { "specs": { "颜色": "银河蓝", "尺码": "110cm" }, "price": "34", "stock": "50" },
+    { "specs": { "颜色": "银河蓝", "尺码": "120cm" }, "price": "35", "stock": "50" },
+    { "specs": { "颜色": "银河蓝", "尺码": "130cm" }, "price": "36", "stock": "50" },
+    { "specs": { "颜色": "银河蓝", "尺码": "140cm" }, "price": "38", "stock": "50" },
+    { "specs": { "颜色": "银河蓝", "尺码": "150cm" }, "price": "40", "stock": "50" },
+    { "specs": { "颜色": "银河蓝", "尺码": "160cm" }, "price": "42", "stock": "50" }
+  ],
+  "attributes": [
+    { "name": "主面料成分", "value": "聚酯纤维（涤纶）" },
+    { "name": "面料名称", "value": "奥粒绒" },
+    { "name": "风格", "value": "休闲" },
+    { "name": "适用性别", "value": "男女通用" }
+  ]
+}

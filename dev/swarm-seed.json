@@ -1,0 +1,32 @@
+[
+  {
+    "title": "skills/taobao-publish-mqs/SKILL.md",
+    "description": "创建淘宝上架 skill（觅千手思路）：复刻 pageHooks.js 中 Json/Json2 setter 劫持 + localStorage kdds_taobao_* 体系。交付物：SKILL.md（说明文档）+ SOURCE.md（溯源文档，引用觅千手 pageHooks.js + monitorJson.js）+ 注入脚本。替换现有 skills/taobao-publish/（老的 puppeteer UI 驱动归档为 skills/taobao-publish-legacy/）。",
+    "priority": 10
+  },
+  {
+    "title": "skills/tmall-publish-mqs/SKILL.md",
+    "description": "创建天猫上架 skill（觅千手思路）：复刻 pageHooks.js 中 fetch/XHR 拦截 exportSkuTemplate + importSkuTemplate 改包。交付物：SKILL.md + SOURCE.md + 注入脚本。替换现有 skills/tmall-publish/。",
+    "priority": 10
+  },
+  {
+    "title": "skills/douyin-publish-mqs/SKILL.md",
+    "description": "创建抖音小店上架 skill（觅千手思路）：复刻 pageHooks.js 中 fxg.jinritemai.com/ffa/g/create 页面注入（beforeunload 阻塞 + 表单数据填充）。交付物：SKILL.md + SOURCE.md + 注入脚本。替换现有 skills/douyin-publish/。",
+    "priority": 10
+  },
+  {
+    "title": "skills/jd-publish-mqs/SKILL.md",
+    "description": "创建京东上架 skill（觅千手思路）：复刻 pageHooks.js 中 wares-jdm.jd.com/newPublish 和 popPublish 双入口注入（beforeunload 阻塞）。交付物：SKILL.md + SOURCE.md + 注入脚本。新建目录（无老版本）。",
+    "priority": 10
+  },
+  {
+    "title": "skills/1688-publish-mqs/SKILL.md",
+    "description": "创建 1688 上架 skill（觅千手思路）：复刻 iframeHandler 注入 offer-new.1688.com/*/publish.htm。交付物：SKILL.md + SOURCE.md + 注入脚本。新建目录（无老版本）。",
+    "priority": 10
+  },
+  {
+    "title": "src/client.ts SuggestDock 平台词表更新",
+    "description": "在 src/client.ts 的 PLATFORM_WORDS 中补充京东（jd/jd.com/京东）、1688（1688/阿里巴巴）、天猫（tmall/天猫）词条；SUGGESTIONS 补这 3 个平台的 collect/analyze/publish 链路项。跑 node dev/suggest-rules.test.mjs 回归。",
+    "priority": 9
+  }
+]

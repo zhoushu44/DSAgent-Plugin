@@ -1,0 +1,22 @@
+{
+  "title": "亲子装秋冬居家服母子款珊瑚绒睡衣套装家庭装保暖",
+  "images": [
+    "e:\\360MoveData\\Users\\Administrator\\Desktop\\DSAgent-Plugin\\skills\\pdd-link-matrix\\assets\\src\\main_07.jpg",
+    "e:\\360MoveData\\Users\\Administrator\\Desktop\\DSAgent-Plugin\\skills\\pdd-link-matrix\\assets\\src\\main_08.jpg"
+  ],
+  "category": "亲子装",
+  "price": "39",
+  "stock": "100",
+  "itemNo": "M2ACC-002",
+  "specs": [
+    {
+      "name": "颜色",
+      "values": ["奶油黄", "星光粉", "格蕾灰"]
+    }
+  ],
+  "skus": [
+    { "specs": { "颜色": "奶油黄" }, "price": "39", "stock": "30" },
+    { "specs": { "颜色": "星光粉" }, "price": "39", "stock": "30" },
+    { "specs": { "颜色": "格蕾灰" }, "price": "39", "stock": "30" }
+  ]
+}
