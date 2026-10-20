@@ -1,0 +1,11 @@
+=== PUBLISH-MATRIX.md (260 lines, 3 hits)
+11: 发布的核心动作是**图片文件上传（multipart 二进制）**，网关只支持字符串 body（http_get/http_post/mtop_jsonp），没有 multipart 能力。且发布页的类目属性与提交接口都要求页面 JS 运行时生成的签名与真实会话票据，纯 HTTP 复刻不可行。所以**一律 puppeteer 驱动网页版发布页**。
+113: 不同类目的标题字符上限、必填项、校验规则不同——**不能一套默认值打天下**。
+116: - `maxlength` 属性 → 文本型字段的字符上限
+=== PUBLISH-SPEC.md (206 lines, 2 hits)
+38: | 拼多多 [pdd-publish.ts](file:///e:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/src/pdd-publish.ts) | 3702 行，链路四段式（列表入口→类目页→表单页→填写+提交+轮询），attr-cache 已接，XPath+文本双锚点模式成熟 | 锚点散落 131 处内联 querySelector/查询，头部常量区 30+ 个
+166: - **行为零变化**：抽取不改逻辑——pdd 的 fillShippingAndFreight、fillAttributes 的缓存链原样保留，只把字符串常量换成配置引用
+=== CONTENT-PUBLISH-MATRIX.md (205 lines, 3 hits)
+15: | 标题 | 文本（有字符上限） | 都有 |
+163: - [ ] 标题输入框选择器 + 字符上限
+164: - [ ] 描述/正文输入框选择器 + 字符上限

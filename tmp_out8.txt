@@ -1,0 +1,38 @@
+=== docs\pdd-publish-mode2\SOURCE.md (133 lines, 26 hits)
+4: > **全部核心设计（拦截机制、变换流水线、字段映射、Anti-Content 破解、消息协议）来自 Chrome 扩展「觅千手 v5.61」的逆向提取**，非本仓原创。
+13: | 主来源（逆向） | **Chrome 扩展「觅千手」v5.61**（MV3，扩展安装目录 + CDN 下发引擎） |
+15: | 本体镜像 | `C:\Users\Administrator\AppData\Local\Temp\mqs-swarm\src-mirror\`（扩展包只读镜像） |
+16: | CDN 引擎副本 | `scripts/_gm.js`（约 583 万字符 / 5.83MB，仅 12 个换行，单行压缩 bundle） |
+20: | 提取方法 | REA + 本地 Node 脚本：按字符偏移从单行 bundle 切片 → 正则平衡引号 + 按 `;{}` 换行的简易美化 → 落盘 `extracted/`（44 段，已归档本目录 `evidence/`） |
+21: | 分析文档 | `C:\Users\Administrator\mqs-swarm-docs-result\`（00-06 共 7 篇 + README；`verify-facts.mjs` 84 条坐标断言可复验） |
+22: | 本地安装包位置 | `E:\360MoveData\Users\Administrator\Desktop\觅千手`（用户桌面目录，原始扩展来源） |
+28: | 觅千手官方更新页 | **待补**（当前未从扩展内提取到官方飞书 wiki/官网链接；提取方法见 §2.5：搜 `_manifest.json` 元数据与扩展商店页字段） |
+37: 全部脚本保留在 `C:\Users\Administrator\AppData\Local\Temp\mqs-swarm\scripts\`，平台改版后按序重跑：
+42: | 2. 建偏移索引 | `find-offsets.mjs` / `find-offsets2.mjs` / `find-anti.mjs` / `find-gT.mjs` / `find-sw.mjs` / `find-sw2.mjs` | 符号（函数名/字符串常量）→ 字符偏移索引；输出全部命中偏移列表 |
+43: | 3. 切片落盘 | `extract-8087.mjs` / `-round2` / `-round3` / `extract-anti.mjs` / `extract-sw.mjs` / `sw2` / `sw3` / `sw4` | 按偏移切出代码段 → 简易美化（引号平衡 + `;{}` 换行 + 缩进）→ 落盘 `extracted/` |
+49: - 单行大文件的偏移是**字符偏移**，Read 工具的行 offset 读不了 → 一律 `String.slice(start, start+len)` 落盘再读。
+50: - 锚点匹配要带完整签名 `方法名(e,t){`，`async xxx(` 前一字符可能是空格不是 `{,;`。
+51: - REA 语义 trace（property seed）匹配不到类方法 → 直接偏移直读，效率更高。
+62: **sw 系列**（Service Worker，`service_worker_new.js`，字符偏移见文件名）：
+65: ### 3.2 原始偏移索引（`Temp\mqs-swarm\src-mirror\script\service_worker_new.js`，单行，字符偏移）
+67: | 函数 | 偏移 |
+79: 模块 m_042_8087（`_gm.js` 内）偏移见各 evidence 文件名尾数（如 `fillImageData_def @256635`）。
+83: - `Temp\mqs-swarm\rea-gm-modules\m_062_8174.js`（8294B，Anti-Content 破解全文）
+84: - `Temp\mqs-swarm\src-mirror\script\content_script_loader_v3.js`（10814B，双 world 桥协议全文）
+85: - `Temp\mqs-swarm\src-mirror\script\interceptor\injected.js`（8096B）+ `content_interceptor.js`（3342B）+ `config.json`（2329B）——采集侧拦截器（与上架劫持是两套独立机制，模式2 不依赖）
+86: - `Temp\mqs-swarm\rea-gm-modules\m_001_7095.js`（9292B，模式1 UI 自动化 12 步对照清单）
+94: | REA property-seed 语义 trace 定位类方法 | 匹配不到压缩 bundle 的类方法，全部改偏移直读 |
+95: | Read 工具按行读单行大文件 | 单行文件行号恒为 1，行 offset 无意义，必须字符偏移 |
+103: ## 5. 同步更新流程（觅千手出新版 / 拼多多改版）
+108: 2. **觅千手出新版**：拿新版扩展包 → 更新 `src-mirror/` 镜像 → 重跑 §2 步骤 1~4（拆分/索引/切片/归档）→ diff `evidence/` 新旧版本差异 → 更新 BLUEPRINT.md 对应节 → 更新本文 §3 锚点表。
+=== docs\pdd-publish-mode2\BLUEPRINT.md (525 lines, 10 hits)
+3: > 逆向来源：Chrome 扩展「觅千手 v5.61」`_gm.js`（5.83MB CDN 引擎，模块 m_042_8087）+ `service_worker_new.js`（111KB）+ `content_script_loader_v3.js`（10.8KB）+ 模块 m_062_8174（Anti-Content 破解）。
+5: > 原始偏移坐标见 `C:\Users\Administrator\mqs-swarm-docs-result\`（7 篇逆向文档 + 84 条事实登记）。
+260: yuan     = extractPrice(priceRec)                          // 支持对象/数字/字符串
+346: ### 5.2 云端代理兜底（觅千手自有云端，复刻需替换）
+362: > **本项目落地替换**：`safe.koudai89.com` 是觅千手自家云端，不可依赖。等价方案：本项目 puppeteer 页面内重放本身就是「同源+同 cookie+页面指纹」，覆盖了该兜底的大部分场景（云端兜底主要救「页面 fetch 被 CSRF/风控拦」）。若仍需兜底，走本项目 `gateway-proxy`（带完整浏览器指纹头，见项目请求头规则）由 Node 侧代发，Anti-Content 与 cookie 原样透
+387: 拼多多提交接口要求 `Anti-Content` 请求头（JS 风控签名）。觅千手的做法：**借用拼多多自己的 webpack 模块生成签名，跨 world 用 localStorage 回传**。
+407: pollLocalStorage(50ms × 40, timeout 10s) → antiContent 字符串
+513: - **两件折扣夹值 [5,9.9]**、**库存默认 999**、**单买价默认 +20%**：这些默认值是觅千手调优过的风控安全值，照抄。
+520: `evidence/`（44 份，`_manifest.json` 有字节清单；源为 `Temp\mqs-swarm\extracted\`，重跑 `archive-evidence.mjs` 可从 Temp 再同步）：
+524: - **未归档整文件**（复刻时直接读）：`C:\Users\Administrator\AppData\Local\Temp\mqs-swarm\rea-gm-modules\m_062_8174.js`（Anti-Content 全文）、`...\src-mirror\script\content_script_loader_v3.js`（桥协议全文）、`C:\Users\Administrator\mqs-swarm-docs-r

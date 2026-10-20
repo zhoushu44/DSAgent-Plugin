@@ -1,0 +1,13 @@
+=== skills\taobao-publish-mqs\SKILL.md (134 lines, 12 hits)
+2: name: taobao-publish-mqs
+3: description: "淘宝商品上架（觅千手 v5.61 同款 goods_manager 链路）：把统一商品数据（标题 / 主图 / 详情图 / 规格维度 / SKU 行 / 类目属性）经浏览器驱动提交到淘宝卖家中心 item.upload.taobao.com，走「选类目 → 填属性 → 填 SKU → 选运费模板 → 提交」五段真实链路。触发：淘宝上架、淘宝发布、淘宝批量上架、用统一商品数据发淘宝、觅千手上架淘宝、把商品挂到淘
+7: display_name: "淘宝·商品上架（mqs）"
+12: # 淘宝 · 商品上架（mqs 链路）
+21: - 标题必填；页面 `maxlength` 为 60 字符，模型层对淘宝/天猫另有 30 字符的平台裁剪规则（超长会记一条 warning，见 PUBLISH-SPEC.md §3.8）。
+29: - 用户说「用觅千手那套上架淘宝」「mqs 上架」→ 用本技能（同一条 goods_manager 引擎链路）。
+33: - **不做天猫发布** → 用 `skills/tmall-publish-mqs/SKILL.md`（同为 goods_manager 引擎，域名 sell.publish.tmall.com）。
+34: - **不做拼多多 / 闲鱼 / 抖店 / 京东 / 1688 发布** → 分别用 pdd-publish-2、xianyu-publish 与本系列其它 mqs 技能。
+46: | `images` | 是 | 主图本机绝对路径，逗号分隔或 JSON 数组字符串，1~5 张 |
+47: | `title` | 是 | 标题，≤60 字符（模型层对淘宝/天猫先截到 30 字符并记 warning） |
+89: | 标题双上限 | 页面 maxlength 60 字符；模型层另有 30 字符平台裁剪规则 |
+128: - 觅千手 v5.61 平台矩阵与字符偏移坐标：见 `PUBLISH-MATRIX.md` 第八节「各平台现状对照」。
