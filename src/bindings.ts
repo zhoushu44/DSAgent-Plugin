@@ -52,6 +52,12 @@ export const BINDING_RULES: Array<[string, string]> = [
   ['pdd-publish-2', 'pdd_mms'],
   // taobao 平台（淘宝 / 天猫，共用同一套登录态）
   ['taobao-publish', 'taobao'],
+  // mqs 同引擎三平台（京东 / 抖店 / 1688）：各自独立登录态
+  ['taobao-publish-mqs', 'taobao'],
+  ['tmall-publish-mqs', 'taobao'],
+  ['jd-publish-mqs', 'jd'],
+  ['douyin-publish-mqs', 'douyin'],
+  ['1688-publish-mqs', 'alibaba'],
   // alibaba 平台（1688 B2B —— 独立登录态，Cookie 在 .1688.com 域）
   ['alibaba-product-find', 'alibaba'],
   ['alibaba-source-suppliers', 'alibaba'],
@@ -71,13 +77,15 @@ export function requiredPlatform(skillId: string): string | null {
  * 生意参谋系（sycm/万相台/达摩盘/天猫洞察）在凭证层复用淘宝登录态，
  * 账号连接页**没有**「生意参谋」入口 —— 引导文案必须说「淘宝」。
  * 否则用户按提示去账号页却找不到该平台，形成死路（「登录淘宝后生意参谋即可用」的文案侧收口）。
+ *
+ * ★ 闲鱼**不在**表内（FIX-LOG #74 反转）：闲鱼已有独立登录入口（goofish.com/login），
+ *   引导文案直接说「闲鱼」，用户照着去账号页找得到。
  */
 const GUIDED_PLATFORM: Record<string, string> = {
   sycm: '淘宝',
   alimama: '淘宝',
   dmp: '淘宝',
   sycm_insight: '淘宝',
-  xianyu: '淘宝',
 }
 
 export function guidedPlatform(platform: string): string {
@@ -87,8 +95,5 @@ export function guidedPlatform(platform: string): string {
 /** 复用淘宝登录态的平台在引导文案里的补充说明（说明为什么让用户去连淘宝） */
 export function guidedPlatformExtra(platform: string): string {
   if (!GUIDED_PLATFORM[platform]) return ''
-  if (platform === 'xianyu') {
-    return '（闲鱼复用淘宝登录态，登录淘宝后会自动同步闲鱼登录态，无需单独登录闲鱼）'
-  }
   return '（生意参谋 / 万相台 / 达摩盘共用淘宝登录态，无需单独登录生意参谋）'
 }

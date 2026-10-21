@@ -325,13 +325,21 @@ export function pickSingleNestedPriceLeaf(v: unknown): Record<string, unknown> |
   return leaves.length === 1 ? (leaves[0] as any) : null
 }
 
-/** SKU 的规格文本收集（@138217：spec_name/spec_value/value/name/text/label/alias 七键序） */
+/**
+ * SKU 的规格文本收集（@138217 七键序）。
+ *
+ * ★ 2026-10-21 实测修正：真实提交体（页面 DOM 建的规格行）的 spec 元素同时带
+ *   `spec_name`（=维度名，如「颜色分类」）和 `spec_value`（=规格值，如「格蕾灰」）。
+ *   原键序 spec_name 优先 → 收集到的是维度名 → 与 sku_key 的规格值全不匹配 →
+ *   fillSkuPriceData 匹配链全落空（skusPricedDelta=0，引擎按铁律拒绝发包）。
+ *   故改为 spec_value 优先：值语义才是匹配键，维度名只在缺值时才兜底。
+ */
 export function collectSpecTextsFromPddSku(sku: CommitSku | any): string[] {
   const specs = sku && Array.isArray(sku.spec) ? sku.spec : []
   const out: string[] = []
   for (const it of specs) {
     if (!it || typeof it !== 'object') continue
-    const picked = ['spec_name', 'spec_value', 'value', 'name', 'text', 'label', 'alias']
+    const picked = ['spec_value', 'value', 'name', 'text', 'label', 'alias', 'spec_name']
       .map(k => (it as any)[k])
       .find(v => v != null && String(v).trim() !== '')
     if (picked != null) out.push(String(picked).trim())
@@ -1129,7 +1137,11 @@ function pickUniqueBestThumbScoredId(
 /** 规格图维度索引（_resolvePddSpecImageDimIndex；结果缓存到 detail._pdd_spec_image_dim_index） */
 function resolvePddSpecImageDimIndex(detail: any): number {
   const skuSort = detail.sku_sort || []
-  const skuImg = detail.sku_img || {}
+  // ★ 觅千手原文用 detail.sku_img；我们的组装层（buildGoodsDetailFromProduct +
+  //   pdd-publish 段1.5 预上传回填）用的是 detail.upload_spec_img_map
+  //   （key=规格值名 → {url, id}）。两者取并集，否则 dimIdx 恒为 -1，
+  //   SKU 预览图（thumb_url）永远填不上。
+  const skuImg = { ...(detail.sku_img || {}), ...(detail.upload_spec_img_map || {}) }
   const skuKey = detail.sku_key || {}
   const imgKeys = Object.keys(skuImg).filter(e => (skuImg as any)[e])
   if (!imgKeys.length || !skuSort.length) { detail._pdd_spec_image_dim_index = -1; return -1 }
@@ -1445,6 +1457,56 @@ export function fillSkuPriceData(commitBody: any, detail: GoodsDetail): void {
   const hasBoth = !isMultiDim && Object.keys(skuPrice).length > 0 && Object.keys(skuKey).length > 0
   if (!isMultiDim && !table && !hasBoth) return
   const singleFallback = resolveSingleSkuPriceFallback(detail)
+  /**
+   * ★ 行数重建（模式2 精简化核心）：
+   *   跳过 DOM 建规格后，页面原生 body 只有 1 行空壳 SKU（spec 为空串/空数组），
+   *   fillSkuPriceData 的匹配循环只会跳过它 —— 改包后仍是 1 行。
+   *   这里在匹配前按 detail.sku_key 把 skus 数组重建成 N 行，
+   *   每行带上 sku_sort 维度序的 spec（spec_value + spec_name + parent_id）。
+   *   spec_id 由 detail.spec_id_map（外部规格池）提供；缺的留 0 由平台解析。
+   */
+  const expectedRows0 = Object.keys(skuKey).length
+  const validSpecRows0 = skus.filter((s: any) => Array.isArray(s.spec) && s.spec.length > 0).length
+  if (expectedRows0 > 0 && validSpecRows0 < expectedRows0) {
+    const specIds = detail.spec_id_map || {}
+    const dimNames0: string[] = skuSort
+    const rebuilt0: any[] = []
+    const keyIds0: string[] = detail.sku_key_list?.length ? detail.sku_key_list : Object.keys(skuKey)
+    for (const kid of keyIds0) {
+      const row = (skuKey as any)[kid]
+      if (!Array.isArray(row)) continue
+      const spec: any[] = []
+      for (let d = 0; d < dimNames0.length; d++) {
+        const val = row[d] != null ? String(row[d]).trim() : ''
+        if (!val) continue
+        let idRec = (specIds as any)[val] || {}
+        if (!idRec.spec_id) {
+          const stripCm = (s: unknown) => String(s || '').replace(/(cm|厘米)$/i, '').trim()
+          const hit = Object.entries(specIds).find(([k]) => stripCm(k) === stripCm(val))
+          if (hit) idRec = hit[1]
+        }
+        spec.push({
+          spec_id: idRec.spec_id || 0,
+          spec_value: val,
+          parent_id: idRec.parent_id || 0,
+          spec_name: dimNames0[d],
+          note: null,
+        })
+      }
+      if (!spec.length) continue
+      rebuilt0.push({
+        id: 0, limit_quantity: 0, out_sku_sn: '', is_onsale: 1,
+        multi_price_in_yuan: '0', price_in_yuan: '0', multi_price: 0, price: 0,
+        quantity_delta: 0, thumb_url: '', weight: 0, spec,
+        oversea_sku: {}, sku_srv_templates: '', shipment_limit_second_list: [], sku69_code: '',
+      })
+    }
+    if (rebuilt0.length > validSpecRows0) {
+      commitBody.skus = rebuilt0
+      skus.length = 0
+      skus.push(...rebuilt0)
+    }
+  }
   const withSpec = skus.filter((s: any) => s.spec && s.spec.length > 0)
   const allRowCode = withSpec.length > 0
     && withSpec.every((s: any) => specTextsLookLikeRowCodePlaceholders(collectSpecTextsFromPddSku(s)))
@@ -1585,6 +1647,9 @@ export function transformRequestBody(commitBody: any, detail: GoodsDetail): any 
     before,
     after,
     skusPricedDelta: ((after as any).skusPriced || 0) - ((before as any).skusPriced || 0),
+    // ★ 2026-10-21：行数增量（模式2 精简化后页面原生 body 只有 1 行空壳，
+    //   改包替换成 N 行矩阵时 skusPricedDelta=0 但 skusCountDelta>0）。
+    skusCountDelta: ((after as any).skus || 0) - ((before as any).skus || 0),
     type1Delta: ((after as any).type1 || 0) - ((before as any).type1 || 0),
   }
 }
@@ -1617,7 +1682,7 @@ export function transformRequestBody(commitBody: any, detail: GoodsDetail): any 
  */
 export function buildGoodsDetailFromProduct(
   product: ProductData,
-  extra?: { costTemplate?: string; deliveryTime?: number },
+  extra?: { costTemplate?: string; deliveryTime?: number; specIds?: Record<string, { spec_id: number; parent_id: number }> },
 ): GoodsDetail {
   const p = product || ({} as ProductData)
   const dims = Array.isArray(p.specs) ? p.specs.filter(d => d && d.name && Array.isArray(d.values) && d.values.length > 0) : []
@@ -1631,14 +1696,26 @@ export function buildGoodsDetailFromProduct(
   // 整组覆盖掉页面上传后回填的拼多多 CDN url，提交报「图片url不能为空」。
   // 模式2 的图片来源以页面 UI 上传为准，非 http(s) 一律不进 detail.gallery。
   const isRemoteImg = (v: unknown): v is string => typeof v === 'string' && /^https?:\/\//i.test(v)
-  const gallery: Array<{ type: number; img_url: string }> = []
+  /**
+   * gallery 元素字段照抄觅千手原文（m_042_8087 uploadAllImages 末尾）：
+   *     u.push({ url: t.url, type: 1, file_id: t.id })   // 主图
+   *     d.push({ url: t.url, type: 2, file_id: null })   // 详情图
+   *
+   * ★★ 字段必须是 `url` 不是 `img_url` —— 平台读 `gallery[].url`，
+   *   写 `img_url` 会报「图片url不能为空」（实测踩过）。
+   * ★ file_id 也要带上：queryFileDetail 返回的 id；主图必填，详情图可为 null。
+   */
+  const gallery: Array<{ url: string; type: number; file_id?: number | null }> = []
   for (const img of Array.isArray(p.images) ? p.images : []) {
-    if (isRemoteImg(img)) gallery.push({ type: 1, img_url: img })
+    if (isRemoteImg(img)) gallery.push({ url: img, type: 1 })
   }
   for (const img of Array.isArray(p.detailImages) ? p.detailImages : []) {
-    if (isRemoteImg(img)) gallery.push({ type: 2, img_url: img })
+    if (isRemoteImg(img)) gallery.push({ url: img, type: 2, file_id: null })
   }
   if (gallery.length > 0) detail.gallery = gallery
+  // ★ 2026-10-21：标题入 detail —— 改包时强制写 goods_name/goods_desc，
+  //   不依赖 DOM fillTitle 是否被 React 受理（实测偶发不被受理）。
+  if (p.title != null && String(p.title).trim() !== '') detail.title = String(p.title).trim()
 
   // ── 规则 4：默认库存 → movingConfig.inventory ──
   if (p.stock != null && String(p.stock).trim() !== '') mc.inventory = String(p.stock)
@@ -1663,6 +1740,11 @@ export function buildGoodsDetailFromProduct(
   else if (dt === 3) mc.selectTime = '48h'
 
   // ── 规则 1/2/3：规格结构 ──
+  // ★ 外部规格池（店铺历史商品采集的 规格值→spec_id 映射）灌入。
+  //   pdd-publish 段1.5 之后可把 pool 塞进 extra.specIds；行数重建时用它写 spec_id。
+  if (extra?.specIds && typeof extra.specIds === 'object') {
+    detail.spec_id_map = extra.specIds
+  }
   if (hasSkuStructure) {
     // 规则 1：维度名数组（sku_sort）
     detail.sku_sort = dims.map(d => String(d.name))
@@ -1906,34 +1988,42 @@ export const PDD_HIJACK_FLAG_TTL_MS = 300_000
  * ★ credentials:"include" 以页面身份带 cookie —— 模式2 的主通道。
  * 返回形态逐字对齐证据：{success,status?,result?,error_msg?,errorCode?,networkError?,authOrEnvError?,isBizFailure?}
  */
-const PAGE_SEND_SRC = `(async function(urlStr, bodyObj, anti) {
+/**
+ * ★ 2026-10-21 修复：必须用**真函数**传给 page.evaluate。
+ *   原实现是字符串 IIFE —— puppeteer 把字符串当「函数体」包装成
+ *   Function(...args, body) 调用，IIFE 的形参名丢失，函数内 urlStr/bodyObj/anti
+ *   全为 undefined → fetch(undefined) → 返回 {} → 上层拿到空对象误判失败。
+ */
+const PAGE_SEND_SRC = async (urlStr: string, bodyObj: unknown, anti: string): Promise<HijackOutcome> => {
   try {
     const resp = await fetch(urlStr, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Anti-Content": anti || "" },
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Anti-Content': anti || '' },
       body: JSON.stringify(bodyObj),
-      credentials: "include"
+      credentials: 'include',
     })
     const text = await resp.text()
     if (!text || !String(text).trim()) {
-      return { success: false, networkError: true, authOrEnvError: true, status: resp.status, error: "空 body", errorCode: "PDD_SEND_NETWORK", via: "page" }
+      return { success: false, networkError: true, authOrEnvError: true, status: resp.status, error: '空 body', errorCode: 'PDD_SEND_NETWORK', via: 'page' }
     }
-    let json = null
+    let json: unknown = null
     try { json = JSON.parse(text) } catch (e) {
-      return { success: false, networkError: true, authOrEnvError: true, status: resp.status, error: "非 JSON: " + (e && e.message ? e.message : String(e)), errorCode: "PDD_SEND_NETWORK", via: "page" }
+      return { success: false, networkError: true, authOrEnvError: true, status: resp.status, error: '非 JSON: ' + ((e as Error)?.message || String(e)), errorCode: 'PDD_SEND_NETWORK', via: 'page' }
     }
     if (resp.status === 401 || resp.status === 403) {
-      return { success: false, networkError: true, authOrEnvError: true, status: resp.status, error_msg: (json && (json.error_msg || json.errorMsg)) || "", result: json, errorCode: "PDD_SEND_NETWORK", via: "page" }
+      const j = json as { error_msg?: string; errorMsg?: string } | null
+      return { success: false, networkError: true, authOrEnvError: true, status: resp.status, error_msg: (j && (j.error_msg || j.errorMsg)) || '', result: json, errorCode: 'PDD_SEND_NETWORK', via: 'page' }
     }
-    if (json && json.success === true) {
-      return { success: true, status: resp.status, result: json, via: "page" }
+    const j = json as { success?: boolean; error_msg?: string; errorMsg?: string } | null
+    if (j && j.success === true) {
+      return { success: true, status: resp.status, result: json, via: 'page' }
     }
-    const errMsg = (json && (json.error_msg || json.errorMsg)) || "业务失败"
-    return { success: false, isBizFailure: true, status: resp.status, error_msg: errMsg, result: json, errorCode: "PDD_API_BIZ", via: "page" }
+    const errMsg = (j && (j.error_msg || j.errorMsg)) || '业务失败'
+    return { success: false, isBizFailure: true, status: resp.status, error_msg: errMsg, result: json, errorCode: 'PDD_API_BIZ', via: 'page' }
   } catch (e) {
-    return { success: false, networkError: true, authOrEnvError: true, error: (e && e.message) ? e.message : String(e), errorCode: "PDD_SEND_NETWORK", via: "page" }
+    return { success: false, networkError: true, authOrEnvError: true, error: (e as Error)?.message || String(e), errorCode: 'PDD_SEND_NETWORK', via: 'page' }
   }
-})`
+}
 
 /** 带超时的 Promise 包装（对应 transformRequestBodyWithTimeout / sendPagePddEditRequest 的 30s 预算） */
 function withTimeout<T>(p: Promise<T>, ms: number, code: string, label: string): Promise<T> {
@@ -2084,8 +2174,32 @@ export function setupHijack(
       }
       trace('body_decoded', { rawLen: raw.length, before: summarizeEditBody(body) })
 
+      /**
+       * ★ 原始提交体落盘（仅 PDD_MODE2_DUMP=1 时启用）。
+       *
+       * 用途：研究页面在**不同规格状态下**生成的 commitBody 真实结构 ——
+       * 尤其是 `skus[]` 数组的元素形状（spec / spec_value_id / multi_price 等字段名），
+       * 以及页面建出 30 行 vs 1 行时该数组的差异。
+       * 有了真实样本才能判断「能否按 goodsDetail 拼装完整 skus 数组」这个关键问题。
+       *
+       * 落盘位置：.dsh/pdd-mode2-body-<时间戳>.json（不写进工作区，避免污染）
+       */
+      if (process.env.PDD_MODE2_DUMP === '1') {
+        try {
+          // 本模块是纯函数（无 node 依赖），故此处动态 import，避免影响单测可移植性
+          const fsMod = await import('node:fs')
+          const pathMod = await import('node:path')
+          const osMod = await import('node:os')
+          const dir = pathMod.join(osMod.homedir(), '.dsh')
+          fsMod.mkdirSync(dir, { recursive: true })
+          const f = pathMod.join(dir, `pdd-mode2-body-${Date.now()}.json`)
+          fsMod.writeFileSync(f, JSON.stringify(body, null, 2), 'utf8')
+          trace('body_dumped', { file: f, bytes: JSON.stringify(body).length, skus: (body?.skus || []).length })
+        } catch { /* dump 失败不影响主流程 */ }
+      }
+
       // ── 2. 改包（30s 预算；失败 ⇒ TRANSFORM_*，abort 不放行 —— willUseRawBody:false 铁律）──
-      let transformed: { commitBody: any; before: unknown; after: unknown; skusPricedDelta: number }
+      let transformed: { commitBody: any; before: unknown; after: unknown; skusPricedDelta: number; skusCountDelta: number }
       try {
         transformed = await withTimeout(
           Promise.resolve().then(() => transformRequestBody(body, detail as GoodsDetail)),
@@ -2099,9 +2213,17 @@ export function setupHijack(
         // ── m5：增量验证（BLUEPRINT §9.2 第 5 项）──
         // 断言 skusPriced 增量 > 0：改包后至少有一条 SKU 被填上价格，否则视为改包无效，
         // 走 catch 的 abort + 失败收口（willUseRawBody:false 铁律 —— 失败不发包）。
-        if (!(transformed.skusPricedDelta > 0)) {
+        // ★ 2026-10-21 放宽（三种有效形态）：
+        //   ① skusPricedDelta>0     —— 改包新填了价（页面空壳 → 有价）
+        //   ② skusCountDelta>0      —— 行数增加（1 行空壳 → N 行矩阵）
+        //   ③ reachedTarget         —— DOM 兜底已把页面填成目标态，改包是等价
+        //      替换（规格矩阵/预览图/gallery 仍由改包注入），delta 全 0 但有效。
+        const targetPriced = Number((detail as any).expected_skus_priced || 0)
+        const afterPriced2 = Number((transformed.after as any)?.skusPriced || 0)
+        const reachedTarget = targetPriced > 0 && afterPriced2 >= targetPriced
+        if (!(transformed.skusPricedDelta > 0 || transformed.skusCountDelta > 0 || reachedTarget)) {
           throw Object.assign(
-            new Error(`改包增量验证失败：skusPricedDelta=${transformed.skusPricedDelta}（改包后没有任何 SKU 被填上价格）`),
+            new Error(`改包增量验证失败：skusPricedDelta=${transformed.skusPricedDelta}、skusCountDelta=${transformed.skusCountDelta}、afterPriced=${afterPriced2}/${targetPriced}（改包后没有任何 SKU 被填上价格）`),
             { errorCode: PDD_ERROR_CODE.TRANSFORM_ERROR },
           )
         }
@@ -2114,7 +2236,7 @@ export function setupHijack(
             { errorCode: PDD_ERROR_CODE.TRANSFORM_ERROR },
           )
         }
-        trace('transform_applied', { after: transformed.after, skusPricedDelta: transformed.skusPricedDelta })
+        trace('transform_applied', { after: transformed.after, skusPricedDelta: transformed.skusPricedDelta, skusCountDelta: transformed.skusCountDelta })
       } catch (e) {
         const { code, message } = pickTransformError(e)
         trace('transform_stop_no_send', { code, message, willUseRawBody: false })
@@ -2123,6 +2245,16 @@ export function setupHijack(
         return
       }
       const body2 = transformed.commitBody
+      // ★ 2026-10-21：标题强制写入（detail.title 优先）。
+      //   实测：DOM fillTitle 用原生 setter 有时不被 React 受理（页面报
+      //   「请输入商品标题」），导致页面 body 的 goods_name 为空 →
+      //   改包 body 也空 → commit/submit 报「商品标题必须填写」。
+      //   商品数据是我们自己的，直接写准，不依赖页面状态。
+      if ((detail as any).title) {
+        body2.goods_name = String((detail as any).title)
+        body2.goods_desc = body2.goods_desc || String((detail as any).title)
+      }
+      trace('body_final', { goods_name: String(body2.goods_name || '').slice(0, 40), skus: (body2.skus || []).length, gallery: (body2.gallery || []).length })
 
       // ── 3. abort 原请求（CDP：拦下即不达服务器；显式 abort 收口）──
       await req.abort('aborted').catch(() => { /* 可能已被浏览器取消，忽略 */ })
@@ -2144,7 +2276,7 @@ export function setupHijack(
       let result: HijackOutcome | any
       try {
         result = await withTimeout(
-          page.evaluate<HijackOutcome>(PAGE_SEND_SRC, url, body2, anti),
+          page.evaluate<HijackOutcome>(PAGE_SEND_SRC as never, url, body2, anti),
           PDD_PAGE_SEND_TIMEOUT_MS,
           PDD_ERROR_CODE.SEND_NETWORK,
           'page_send',
@@ -2179,15 +2311,42 @@ export function setupHijack(
 
       // ── 7. 收尾（§5.3）──
       if (result?.success) {
-        trace('hijack_success', { via: result.via || 'page', status: result.status })
+        // ★ 2026-10-21 突破：goodsCommit/action/edit 只是「暂存」，
+        //   真正上架必须再调 /glide/v2/mms/edit/commit/submit。
+        //   实证：只调 edit 返回 success 但不落库；edit + submit 才上架
+        //   （submit body 仅 6 字段，从服务端会话取 edit 暂存的数据）。
+        let submitResult: any = null
+        try {
+          const submitBody = {
+            goods_commit_id: String(body2.goods_commit_id || ''),
+            goods_id: body2.goods_id || 0,
+            is_onsale: true,
+            third_type: 0,
+            if_allow_submit_mall_checking: true,
+          }
+          trace('before_submit', { goods_id: submitBody.goods_id, commit_id: submitBody.goods_commit_id })
+          submitResult = await withTimeout(
+            page.evaluate<HijackOutcome>(PAGE_SEND_SRC as never, 'https://mms.pinduoduo.com/glide/v2/mms/edit/commit/submit', submitBody, anti),
+            PDD_PAGE_SEND_TIMEOUT_MS,
+            PDD_ERROR_CODE.SEND_NETWORK,
+            'submit',
+          )
+          trace('submit_result', { ok: !!submitResult?.success, status: submitResult?.status, body: JSON.stringify(submitResult?.result || submitResult).slice(0, 300) })
+        } catch (e) {
+          trace('submit_error', { error: (e as Error)?.message || String(e) })
+        }
+        trace('hijack_success', { via: result.via || 'page', status: result.status, submitted: !!submitResult?.success })
         finish({
           success: true,
           status: result.status,
           via: result.via || 'page',
-          detailMessage: `劫持填价成功 | via=${result.via || 'page'}`,
           before: transformed.before,
           after: transformed.after,
           skusPricedDelta: transformed.skusPricedDelta,
+          submitted: !!submitResult?.success,
+          detailMessage: submitResult?.success
+            ? '劫持填价成功 + 已确认上架（commit/submit）'
+            : `劫持填价成功（via=${result.via || 'page'}），但确认上架未成功：${submitResult?.error_msg || submitResult?.error || '未知'}`,
         })
       } else {
         const payload: HijackOutcome = result?.isBizFailure

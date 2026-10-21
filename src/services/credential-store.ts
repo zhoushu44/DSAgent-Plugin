@@ -221,6 +221,11 @@ const KEY_COOKIES: Record<string, string[]> = {
   // 1688（阿里巴巴 B2B）：与淘宝同属阿里 SSO 体系，关键 Cookie 仍是 `unb`，
   // 但 MTOP 网关需要 .1688.com 域的 _m_h5_tk 等域 Cookie，须独立登录 1688 后获取。
   alibaba: ['unb'],
+  // ★ 抖店（抖音小店商家后台）：与抖音（内容平台）复用登录态（sessionid），
+  //   但发品还要 .jinritemai.com 域 Cookie —— 登录抖音后访问抖店后台会自动补发。
+  //   ★ 故意用**独立平台键** douyin_shop：抖店是商家后台、抖音是内容平台，
+  //     两者「可用账号」语义不同（抖店需商家权限），合并会让两个技能互相抢号。
+  douyin_shop: ['sessionid'],
 }
 
 /**
@@ -261,6 +266,10 @@ const ACCOUNT_ID_FROM: Record<string, string> = {
   zhihu: 'z_c0',
   // 1688：account_id 取 `unb`（阿里 SSO 用户 ID，稳定且与淘宝同源）
   alibaba: 'unb',
+  // ★ 抖店：与抖音同一身份（sessionid），但**故意用独立平台键** douyin_shop ——
+  //   抖店是商家后台、抖音是内容平台，两者的「可用账号」语义不同（抖店需商家权限），
+  //   合并会让「发抖音视频」和「抖店上架」互相抢号。
+  douyin_shop: 'sessionid',
 }
 
 /**
@@ -323,17 +332,18 @@ export function credentialPlatform(platform: string): string {
  *
  * 这些平台在凭证层复用淘宝登录态，账号连接页不设入口（FIX-LOG #67）。
  *
- * ★ 闲鱼也在表内（FIX-LOG #70）：它的凭证行由 `ensureXianyuFromTaobao()` 在
- * **淘宝登录成功后自动派生**并刷新 goofish 域 Cookie，用户不需要（也无法）单独登录闲鱼。
- * 与生意参谋系的唯一区别是闲鱼仍保留独立凭证行（goofish 域 Cookie 必须落在自己的条目上），
- * 只是该行在账号页被隐藏（见 `ui/account-page.ts` 的 `HIDDEN_ROW_PLATFORMS`）。
+ * ★ 闲鱼**不在**表内（FIX-LOG #74 反转）：账号连接器需要能看到并管理闲鱼账号，
+ *   用户要能单独刷新它（闲鱼发布被处罚 / 换号时，走淘宝 SSO 那条自动通路
+ *   满足不了「我要登另一个闲鱼号」的需求）。
+ *   闲鱼的登录流程由 `browser-login.ts` 的 `shouldRefreshXianyuAfterLogin()`
+ *   收口：独立扫码登录成功后照样补跑一次 goofish 域 Cookie 刷新，
+ *   因此摘掉本条**不会**丢掉 SSO 派生能力，只是从「唯一通路」降级为「兜底通路」。
  *
  * 用途：堵住「存量这类账号 → 账号页『重新登录』」与「模型直接调 dsagent_browser_login」
- * 两条残留入口 —— 少了这道守卫，闲鱼/生意参谋登录窗会重新被拉起来。
+ * 两条残留入口 —— 少了这道守卫，生意参谋登录窗会重新被拉起来。
  */
 const SHARED_LOGIN_PLATFORM: Record<string, string> = {
   tmall: 'taobao',
-  xianyu: 'taobao',
   sycm: 'taobao',
   alimama: 'taobao',
   dmp: 'taobao',

@@ -64,6 +64,18 @@ export interface HttpRoutesDeps {
    * 注册表要跟着重建。index.ts 里对应 `triggersBuiltAt = 0`。
    */
   onTriggersInvalidated: () => void
+  /**
+   * 平台发布路由（供「脚本型技能」间接调用）。
+   *
+   * 背景：12 个发布技能里有 11 个是纯指令型，工作流引擎六项校验会拒绝它当步骤。
+   * 为了让「取数 → 成文 → 发布」能整条跑在工作流里，这里把 host 侧的发布实现
+   * 暴露成一个 HTTP action（publish_platform），由各技能的 scripts/publish.py
+   * 薄壳转调；真实分发逻辑见 src/platform-publish.ts。
+   *
+   * ★ L2 门禁原样保留在平台实现内部：confirm 未 true 时只回预览、不启动浏览器、
+   *   不产生任何写操作。本层只做 platform 分发与参数归一，绝不放行。
+   */
+  publishPlatform: (body: Record<string, unknown>) => Promise<unknown>
 }
 
 /**
@@ -93,6 +105,7 @@ export function registerHttpRoutes(deps: HttpRoutesDeps): void {
     hasUpdate,
     updateRepo,
     onTriggersInvalidated,
+    publishPlatform,
   } = deps
 
   ;(ctx as any).inject(['webServer'], (webCtx: any) => {
@@ -169,12 +182,21 @@ export function registerHttpRoutes(deps: HttpRoutesDeps): void {
               const rows = accounts.map(a => {
                 const isApiKey = a.auth_type === 'apikey'
                 const boundAgentIds = a.bound_agent_ids || []
+                // ★ 2026-10-21：stale 标记 —— status 是本地心跳，平台侧会话可能已被踢
+                //   （风控/异地/过期）。last_checked_at 超过 30 分钟即视为待真实探测，
+                //   供前端显示「待验证」而非误导性的「有效」。
+                const lastChecked = a.last_checked_at ? Date.parse(a.last_checked_at) : 0
+                const staleMs = Date.now() - lastChecked
+                const probeStale = a.status === 'valid' && (!lastChecked || staleMs > 30 * 60 * 1000)
                 return {
                   shopKey: a.shop_key,
                   platform: a.platform,
                   accountId: a.account_id,
                   displayLabel: isApiKey ? (a.app_id || a.account_id) : resolveDisplayNick(a.display_label, a.cookies, a.account_id, a.platform),
                   status: a.status,
+                  // 前端提示用：true = 显示「待验证」（点了才会真探测）
+                  probeStale,
+                  lastCheckedMinutes: lastChecked ? Math.round(staleMs / 60000) : null,
                   authType: a.auth_type || 'cookie',
                   appId: isApiKey ? (a.app_id || '') : '',
                   secretHint: isApiKey ? maskSecret(a.app_secret || '') : '',
@@ -464,6 +486,15 @@ export function registerHttpRoutes(deps: HttpRoutesDeps): void {
                 repo: updateRepo,
                 downloadUrl: `https://github.com/${updateRepo}/releases/latest/download/DSAgent-Update.zip`,
               }))
+            } else if (action === 'publish_platform') {
+              // 平台发布（脚本型技能 scripts/publish.py 转调）。
+              // confirm 门禁在平台实现内部：非 true 只回预览、无任何写操作。
+              const result = await publishPlatform({
+                ...rest,
+                agentId: 'default',
+              })
+              res.writeHead(200, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify(result ?? { ok: false, error: 'empty result' }))
             } else if (action.startsWith('workflow_')) {
               // 工作流 action 前缀分发：全部委托给 workflowApi.handleAction
               const result = await workflowApi.handleAction(action, rest)

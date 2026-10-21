@@ -230,7 +230,13 @@ async function getAllDomainCookies(page: any, platform: string): Promise<{ name:
     // 与买家 H5（mobile.yangkeduo.com）不共享，必须显式列全。
     pdd_mms: ['https://mms.pinduoduo.com', 'https://.pinduoduo.com'],
     // 1688（阿里巴巴 B2B）：独立登录，Cookie 写在 .1688.com 域
-    alibaba: ['https://.1688.com'],
+    alibaba: ['https://.1688.com', 'https://work.1688.com', 'https://.taobao.com'],
+    // ★ 抖店（抖音小店商家后台）：登录态来自抖音 SSO，但**发品必需的域 Cookie**
+    //   （无它可以登录抖音却打不开发布页）落在 .jinritemai.com。两个域都必须取，
+    //   否则 mqs 三平台里的「抖店上架」会表现为「明明登录了却要求登录」。
+    douyin_shop: ['https://.douyin.com', 'https://fxg.jinritemai.com', 'https://.jinritemai.com'],
+    // ★ 京东（独立登录态）：发品域 wares-jdm.jd.com 与 passport 同属 .jd.com
+    jd: ['https://passport.jd.com', 'https://.jd.com', 'https://wares-jdm.jd.com'],
   }
   const domains = domainMap[credPlatform] || domainMap[platform] || []
   if (domains.length > 0) {
@@ -754,7 +760,10 @@ export async function doBrowserLogin(
 
     // 抖音：主页加载后需要点击"登录"按钮弹出登录窗
     // 使用 page.mouse.click() 在坐标上点击，避免 ElementHandle detached 问题
-    if (platform === 'douyin') {
+    // ★ 抖店（douyin_shop）走与抖音**同一套主页登录弹窗**（阿里 SSO 之外的抖音自己的 SSO）：
+    //   显式登录抖店后台（fxg.jinritemai.com）会先跳抖音扫码，多绕一跳且 domain 判定更脆；
+    //   这里复用已验证的抖音弹窗路径，登录成功后由 getAllDomainCookies 一并取 .jinritemai.com 域。
+    if (platform === 'douyin' || platform === 'douyin_shop') {
       try {
         await page.waitForSelector('button', { timeout: 10000 })
         // 等待页面完全渲染
@@ -1042,9 +1051,15 @@ export async function doBrowserLogin(
       // 而不是等用户跑技能时才报 code=-1（FIX-LOG #66）。
       const permissionNote = await probePlatformPermission(store, platform, saved.shop_key)
       // ★ 淘宝登录成功后立即派生/刷新闲鱼登录态（FIX-LOG #70）：
-      //   闲鱼复用淘宝 SSO，账号页已无闲鱼入口，这条自动同步是闲鱼唯一的可用通路。
+      //   阿里 SSO 用户免二次扫码。闲鱼独立登录成功后同样要补一次 goofish 域刷新
+      //   （FIX-LOG #74）—— 扫码页下发的 _m_h5_tk 常是空壳，不刷新会在技能里撞
+      //   FAIL_SYS_TOKEN_EMPTY。
       //   代价是登录流程多等约 10~20s（拉起一次 headless 浏览器取 goofish 域 Cookie）。
-      const xianyuNote = platform === 'taobao' ? await syncXianyuAfterTaobaoLogin(store) : ''
+      const xianyuNote = platform === 'taobao'
+        ? await syncXianyuAfterTaobaoLogin(store)
+        : platform === 'xianyu'
+          ? await refreshXianyuAfterOwnLogin(store, saved.shop_key)
+          : ''
       rep('succeeded', `登录成功，账号 ${saved.display_label} 已保存`, {
         result: { shopKey: saved.shop_key, accountId: saved.account_id },
         detail: { permissionNote, xianyuNote },
@@ -1392,8 +1407,9 @@ export async function ensureXianyuFromTaobao(
 /**
  * 淘宝登录成功后立即同步闲鱼登录态（FIX-LOG #70）。
  *
- * 账号页已无闲鱼登录入口，本函数是闲鱼登录态唯一的自动通路，故必须在淘宝登录成功当场跑，
- * 而不是等 2h 巡检。失败只提示，不影响「淘宝登录本身已成功」这个事实。
+ * 账号页已有闲鱼独立登录入口（FIX-LOG #74），本函数不再是闲鱼唯一的可用通路，
+ * 但保留为「淘宝已登录 → 闲鱼免二次扫码」的兜底：淘宝登录成功后当场跑一次，
+ * 让阿里 SSO 用户开箱即用闲鱼技能。失败只提示，不影响「淘宝登录本身已成功」。
  */
 async function syncXianyuAfterTaobaoLogin(store: CredentialStore): Promise<string> {
   await ensureXianyuFromTaobao(store, { force: true })
@@ -1402,6 +1418,30 @@ async function syncXianyuAfterTaobaoLogin(store: CredentialStore): Promise<strin
   return xianyu.cookies?.['_m_h5_tk']
     ? '\n✅ 闲鱼登录态已同步（goofish 域 Cookie 就绪），闲鱼技能可直接使用。'
     : '\n⚠️ 闲鱼登录态同步不完整：goofish 域 Cookie 缺失，闲鱼技能可能报登录失效，请稍后重试。'
+}
+
+/**
+ * 闲鱼**独立**登录成功后的 goofish 域 Cookie 刷新（FIX-LOG #74）。
+ *
+ * 为什么必须补这一步：闲鱼扫码登录的二维码页本身就会下发 goofish 域 Cookie，
+ * 但 mtop 网关要的 `_m_h5_tk` 是**访问过 h5api.m.goofish.com 之后**才成型的
+ * （首次访问只会拿到空壳 + 一个引导响应）。扫码页停留期间 token 往往还没落地，
+ * 直接保存的凭证在跑技能时会撞上 `FAIL_SYS_TOKEN_EMPTY::令牌为空`。
+ *
+ * 与 `syncXianyuAfterTaobaoLogin` 的区别：那条走「找同号淘宝账号当 SSO 来源」的派生逻辑，
+ * 独立扫码登录后库里通常没有同号淘宝行，会被同号守卫跳过；这条用**刚保存的闲鱼凭证自身**
+ * 当 SSO 来源（unb 就写在里面），不依赖淘宝行存在。
+ *
+ * 失败只返回提示文本，不影响「闲鱼登录本身已成功」这个事实。
+ */
+async function refreshXianyuAfterOwnLogin(store: CredentialStore, shopKey: string): Promise<string> {
+  const result = await refreshXianyuCookies(store, shopKey)
+  if (result.ok) {
+    console.log(`[dsagent-login] 闲鱼独立登录后 goofish 域 Cookie 刷新完成 (${shopKey})`)
+    return '\n✅ 闲鱼 goofish 域 Cookie 已刷新，发布/采集技能可直接使用。'
+  }
+  console.warn(`[dsagent-login] 闲鱼独立登录后刷新失败 - ${result.error}`)
+  return '\n⚠️ goofish 域 Cookie 刷新失败，闲鱼技能可能报「令牌为空」，请稍后重试或重新登录。'
 }
 
 export interface RiskVerifyResult {

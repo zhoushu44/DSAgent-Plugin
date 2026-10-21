@@ -1,0 +1,52 @@
+{
+  "schema": "dsagent/skill-contract@1",
+  "id": "zhihu-works",
+  "entry": {
+    "form": "script",
+    "script": "scripts/run.py"
+  },
+  "input": {
+    "args": [
+      {
+        "required": false,
+        "name": "mode",
+        "description": "overview=全部内容指标汇总(默认)；list=仅创作列表；article=单篇汇总；trend=单篇日趋势"
+      },
+      {
+        "required": false,
+        "name": "content_id",
+        "description": "内容 ID（article / trend 模式必填，可从 list 模式的 data[].id 取）"
+      },
+      {
+        "required": false,
+        "name": "type",
+        "description": "内容类型：article(默认) / answer / pin。禁止 all"
+      },
+      {
+        "required": false,
+        "name": "days",
+        "description": "统计窗口天数，默认 30，上限 365"
+      },
+      {
+        "required": false,
+        "name": "limit",
+        "description": "内容条数上限，默认 20，上限 50"
+      },
+      {
+        "required": false,
+        "name": "csv",
+        "description": "true 时同时导出 CSV 到 workspace/artifacts"
+      },
+      {
+        "required": false,
+        "name": "account",
+        "description": "账号 shopKey（可选）；该平台多账号时必须指定"
+      }
+    ]
+  },
+  "output": {
+    "protocol": "dsagent-result",
+    "resultPrefix": "__DSAGENT_RESULT__",
+    "filesMarker": "---[OUTPUT_FILES]"
+  }
+}

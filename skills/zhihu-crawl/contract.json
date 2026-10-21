@@ -52,6 +52,43 @@
         "description": "回答排序（answers 模式，默认 default）"
       },
       {
+        "name": "search_sort",
+        "flag": "--search-sort",
+        "choices": [
+          "",
+          "upvoted_count",
+          "created_time"
+        ],
+        "default": "",
+        "description": "搜索结果排序（search 模式）：空=综合 / upvoted_count=最赞 / created_time=最新。注：upvoted_count 平台侧常返回空页，取回后建议本地按 voteup_count 排序"
+      },
+      {
+        "name": "time_interval",
+        "flag": "--time-interval",
+        "choices": [
+          "",
+          "a_day",
+          "a_week",
+          "a_month",
+          "three_months",
+          "half_a_year",
+          "a_year"
+        ],
+        "default": "",
+        "description": "搜索时间范围（search 模式，空=不限）：a_day/a_week/a_month/three_months/half_a_year/a_year"
+      },
+      {
+        "name": "vertical",
+        "choices": [
+          "",
+          "answer",
+          "article",
+          "zvideo"
+        ],
+        "default": "",
+        "description": "搜索结果类型（search 模式，空=全部）：answer 只看回答 / article 只看文章 / zvideo 只看视频。★ 仅在 search_type=content 下生效，general 会忽略"
+      },
+      {
         "name": "order",
         "choices": [
           "normal",

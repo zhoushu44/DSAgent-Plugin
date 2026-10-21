@@ -36,6 +36,15 @@ import { runKeepaliveSweep } from './services/session-keepalive.js'
 import { defineTool, renderToolOutput, agentIdOf, spillPayload } from './tool-runtime.js'
 import { buildPlatformTools } from './tools-platform.js'
 import { buildPublishTools } from './tools-publish.js'
+import { zhihuPublish } from './zhihu-publish.js'
+import { douyinPublish } from './douyin-publish.js'
+import { bilibiliPublish } from './bilibili-publish.js'
+import { xiaohongshuPublish } from './xiaohongshu-publish.js'
+import { xianyuPublish } from './xianyu-publish.js'
+import { taobaoPublish } from './taobao-publish.js'
+import { mqsPublish } from './mqs-publish.js'
+import { pddPublish2 } from './pdd-publish2.js'
+import { dispatchPlatformPublish, type PlatformPublishHandlers } from './platform-publish.js'
 import { buildSkillTools } from './tools-skill.js'
 import { buildWikiTools } from './tools-wiki.js'
 import * as nodePath from 'node:path'
@@ -366,6 +375,24 @@ export function apply(ctx: Context, cfg: Config = config) {
     hasUpdate,
     updateRepo: UPDATE_REPO,
     onTriggersInvalidated: () => { triggersBuiltAt = 0 },
+    // 平台发布：暴露给脚本型薄壳（skills/*-publish/scripts/publish.py），
+    // 使「取数 → 成文 → 发布」能整条编排进工作流。confirm 门禁仍在各平台实现内。
+    // ★ attrModel 不在此注入：HTTP 路径没有会话 LLM 路由上下文，
+    //   类目属性自动选值退化为「缓存兜底」，属预期行为（不会误填）。
+    publishPlatform: async (body) => {
+      const handlers: PlatformPublishHandlers = {
+        zhihu: (o) => zhihuPublish(store, o),
+        douyin: (o) => douyinPublish(store, o),
+        bilibili: (o) => bilibiliPublish(store, o),
+        xiaohongshu: (o) => xiaohongshuPublish(store, o),
+        xianyu: (o) => xianyuPublish(store, o),
+        taobao: (o) => taobaoPublish(store, o),
+        mqs: (channel, o) => mqsPublish(store, channel, o),
+        taobaoMqs: (o) => taobaoPublish(store, o),
+        pdd2: (o) => pddPublish2(store, o),
+      }
+      return dispatchPlatformPublish(handlers, body)
+    },
   })
 
   /* ─────────────── 1. 系统提示词 ─────────────── */

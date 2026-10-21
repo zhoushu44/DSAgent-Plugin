@@ -20,6 +20,7 @@ import json
 import os
 import re
 import sys
+import time
 from datetime import datetime, timezone, timedelta
 from urllib.parse import quote
 
@@ -48,6 +49,10 @@ THROTTLE = CallThrottle(min_interval=2.0, jitter=0.5)
 # 知乎单页上限：search_v3 / answers / root_comments 实测最大 20，热榜最大 50
 PAGE_LIMIT = 20
 HOT_LIMIT = 50
+
+# search_v3 空结果重试（平台内容配额耗尽时返回空数组而非报错）
+SEARCH_EMPTY_RETRIES = 3
+SEARCH_RETRY_BACKOFF = 4.0
 
 # 「热榜」类请求：应落 hot 模式，而不是拿「热榜」二字去搜索
 HOT_MARKERS = ("热榜", "热搜", "热门榜", "热点榜")
@@ -410,12 +415,36 @@ def parse_heat(detail_text):
         return 0
 
 
+def _exact_question_id(target):
+    """
+    从热榜 target 取「未丢精度」的问题 ID。
+
+    知乎热榜 JSON 里 target.id 是超大整数（如 2095439399555285790），
+    但同一响应里的 target.url / card_id 保留了完整字符串。
+    直接 str(id) 会拿到被 JS 数字精度截断后的 ...800 形式，
+    用它调 questions/{id}/answers 必然 404（ResourceNotFoundException）。
+
+    这里优先从 url / card_id 反解出真实 ID，解析不到才回退 id 字段。
+    """
+    if not isinstance(target, dict):
+        return ""
+    url = target.get("url") or ""
+    m = re.search(r"/questions/(\d+)", url) or re.search(r"/question/(\d+)", url)
+    if m:
+        return m.group(1)
+    card = target.get("card_id") or ""
+    m = re.search(r"(\d{6,})$", card)
+    if m:
+        return m.group(1)
+    return str(target.get("id") or "")
+
+
 def normalize_hot(e, idx):
     """热榜条目 → 统一字段（标题在 target.title，热度在 detail_text / trend）"""
     if not isinstance(e, dict):
         return None
     target = e.get("target") or {}
-    qid = str(target.get("id") or "")
+    qid = _exact_question_id(target)
     title = strip_html(target.get("title") or "")
     if not title:
         title = strip_html((e.get("card_label") or {}).get("name") or "")
@@ -437,25 +466,63 @@ def normalize_hot(e, idx):
 
 # ─── 各 mode 实现 ───
 
-def fetch_search(keyword, offset, count, search_type):
-    """关键词搜索（search_v3）"""
+def fetch_search(keyword, offset, count, search_type, sort="", time_interval="", vertical=""):
+    """
+    关键词搜索（search_v3）。
+
+    ★ 空返回的真实原因（2026-10-20 对照 MediaCrawler 实现实测确认）：
+      只发 t/q/correction/offset/limit 这 5 个「最小参数」时，知乎 search_v3 会稳定返回
+      `data: []`（HTTP 200），看起来像「没有内容」或「配额耗尽」，实际是**参数不全**。
+      平台要求带上搜索结果页的完整上下文参数，才会走正常的检索分支：
+
+        gk_version      固定 gz-gaokao
+        lc_idx          与 offset 同步（列表游标，缺了会走空分支）
+        show_all_topics 0
+        search_source   Filter
+        time_interval   时间范围（空=不限）
+        sort            "" 默认 / upvoted_count 最赞 / created_time 最新
+        vertical        "" 全部 / answer 只看回答 / article 只看文章 / zvideo 只看视频
+
+      补齐后同一账号、同一关键词立刻返回真实结果（实测 10 条满页，含 answer/article/question）。
+
+    参数说明：
+      search_type 仍对应 `t`（general/content/question/people），兼容既有调用；
+      sort / time_interval / vertical 为本次新增，用于「按最赞排序」这类复刻场景。
+
+    另外保留空结果重试：极端情况下平台仍可能给空页，重试一次成本很低。
+    """
     params = {
+        "gk_version": "gz-gaokao",
         "t": search_type,
         "q": keyword,
         "correction": 1,
         "offset": offset,
         "limit": count,
+        "filter_fields": "",
+        "lc_idx": offset,
+        "show_all_topics": 0,
+        "search_source": "Filter",
+        "time_interval": time_interval,
+        "sort": sort,
+        "vertical": vertical,
     }
-    payload = call_api(
-        f"{BASE}/api/v4/search_v3",
-        params,
-        referer=f"{BASE}/search?type=content&q={quote(keyword)}",
-    )
+    url = f"{BASE}/api/v4/search_v3"
+    referer = f"{BASE}/search?type=content&q={quote(keyword)}"
+
     items = []
-    for entry in payload.get("data") or []:
-        item = normalize_search_entry(entry)
-        if item:
-            items.append(item)
+    payload = {}
+    for i in range(SEARCH_EMPTY_RETRIES):
+        payload = call_api(url, params, referer=referer)
+        items = []
+        for entry in payload.get("data") or []:
+            item = normalize_search_entry(entry)
+            if item:
+                items.append(item)
+        if items:
+            break
+        if i < SEARCH_EMPTY_RETRIES - 1:
+            time.sleep(SEARCH_RETRY_BACKOFF * (i + 1))
+
     return {"data": items, "has_more": has_more_of(payload)}
 
 
@@ -665,6 +732,13 @@ def main():
                         help="搜索类型（默认 general）")
     parser.add_argument("--sort-by", default="default", choices=["default", "hot"],
                         help="回答排序（answers 模式，默认 default）")
+    parser.add_argument("--search-sort", default="", choices=["", "upvoted_count", "created_time"],
+                        help="搜索结果排序（search 模式）：空=综合 / upvoted_count=最赞 / created_time=最新")
+    parser.add_argument("--time-interval", default="",
+                        choices=["", "a_day", "a_week", "a_month", "three_months", "half_a_year", "a_year"],
+                        help="搜索时间范围（search 模式，空=不限）")
+    parser.add_argument("--vertical", default="", choices=["", "answer", "article", "zvideo"],
+                        help="搜索结果类型（search 模式，空=全部）")
     parser.add_argument("--order", default="normal", choices=["normal", "score"],
                         help="评论排序（comments 模式，默认 normal）")
     parser.add_argument("--with-child", action="store_true", help="评论模式同时采集二级评论")
@@ -735,7 +809,12 @@ def main():
         url_token = args.url_token or ""
 
         if mode == "search":
-            result = fetch_search(keyword, args.offset, count, args.search_type)
+            result = fetch_search(
+                keyword, args.offset, count, args.search_type,
+                sort=args.search_sort,
+                time_interval=args.time_interval,
+                vertical=args.vertical,
+            )
         elif mode == "answers":
             result = fetch_answers(args.question_id, args.offset, count, args.sort_by)
         elif mode == "answer":

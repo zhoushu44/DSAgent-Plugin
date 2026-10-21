@@ -27,6 +27,8 @@ import { xianyuPublish } from './xianyu-publish.js'
 import { xianyuAnalytics } from './xianyu-analytics.js'
 import { taobaoPublish, type TaobaoSkuInput } from './taobao-publish.js'
 import { pddPublish2 } from './pdd-publish2.js'
+import { mqsPublish, type MqsChannel } from './mqs-publish.js'
+import { parseProduct, validateProduct } from './services/product-schema.js'
 import { defineTool, renderToolOutput, agentIdOf, agentModelRouteOf } from './tool-runtime.js'
 
 /** 宿主 LLM 服务的最小接口（`ctx.llm`）；宿主未提供时为 undefined。 */
@@ -323,8 +325,11 @@ export function buildPublishTools(deps: PublishToolsDeps): import('@deepseek-ai/
       description: '发布商品到闲鱼（内容发布，L2 风险，有真实副作用）。'
         + '通过 puppeteer 驱动闲鱼网页版发布页（https://www.goofish.com/publish）完成「上传图片 → 填描述/价格 → 点发布」。'
         + '★ 必须两步调用：先不带 confirm 调用拿到「发布预览」给用户看，用户明确同意后再带 confirm=true 调用才会真正提交。'
-        + '★ 前提：只需绑定**淘宝**账号即可 —— 闲鱼复用阿里 SSO，登录淘宝成功后自动派生闲鱼登录态并同步 goofish 域 Cookie，无需扫码闲鱼 APP。'
-        + '若报登录失效（token_expired），引导用户对该淘宝账号执行「重新登录」以重新同步。',
+        + '★ 前提：只需在「账号连接」绑定**闲鱼**账号（闲鱼 App 扫码登录 goofish.com/login）。'
+        + '闲鱼凭证层与淘宝同源（credentialPlatform→taobao），但 goofish 域 Cookie 必须落在闲鱼自己的条目上，'
+        + '因此淘宝登录只能作为兜底自动派生，正式用法是单独连一个闲鱼号。'
+        + '若报登录失效（token_expired），引导用户对该闲鱼账号执行「重新登录」。'
+        + '若报「你已被限制发布」（punishId），那是平台处罚，重登无效，需去闲鱼 App「我的-安全中心-违规记录」处理。',
       parameters: {
         description: { type: 'string', required: true, description: '宝贝描述（必填）。闲鱼要求描述必填，且**不能包含 emoji**' },
         price: { type: 'string', required: true, description: '价格（元，字符串数字）。闲鱼要求 0 ~ 1 亿元之间' },
@@ -397,6 +402,10 @@ export function buildPublishTools(deps: PublishToolsDeps): import('@deepseek-ai/
         brand: { type: 'string', description: '品牌（可选）。部分类目（如「AI软件订阅/Token充值」）在选类目页把「品牌」列为必填属性，不填则无法进入表单；填了会优先在品牌下拉里匹配，匹配不到则取列表第一项' },
         model: { type: 'string', description: '型号（可选）。部分类目在选类目页把「型号」列为必填属性，不填则无法进入表单' },
         confirm: { type: 'boolean', description: '是否已获用户确认。省略或 false 时只返回发布预览，不产生任何写操作；用户同意后传 true 才真正发布' },
+        replayMode: { type: 'boolean', description: '觅千手式「Json/Json2 劫持重放」模式（可选，默认 false）。true 时进入发布页前注入劫持脚本：框架把表单 state 赋给 window.Json/Json2 的瞬间，把本地组装的商品数据原地 merge 进表单（一次门禁），命中则跳过 DOM 逐格填写（仅保留类目属性/运费模板兜底），未命中自动降级回 DOM 填写。适合框架走 Json 赋值的发布页；遇到结构变更时建议先关本参数验证。★ 传了 imageSpaceUpload（默认开）并上传成功时会自动启用，无需手动传' },
+        imageSpaceUpload: { type: 'boolean', description: '逆向 HTTP 上传（可选，默认 true）。true 时本地主图/详情图先用图片空间接口（stream-upload.taobao.com/api/upload.api，纯 HTTP multipart，无 mtop 签名、无浏览器）传成 img.alicdn.com URL，再随 Json 劫持重放注入发布表单，主图与详情图都不再走页面文件控件——与觅千手 v5.61「预上传」同链路。任一批整体失败会自动回退原 DOM 上传链路。传 false 则完全走旧的 DOM 文件上传' },
+        imageSpaceFolderId: { type: 'string', description: '图片空间目录 id（可选，默认 0＝全部图片根目录）。想把素材归进自定义目录时传该目录 id' },
+        imageSpaceConcurrency: { type: 'string', description: '图片空间上传并发（可选，字符串数字，默认 3，上限 6）。并发过高易触发账号级限流' },
         account: { type: 'string', description: '要使用的账号 shopKey（可选）。该平台有多个可用账号时，先按返回的候选向用户确认，再把选定的 shopKey 填到这里' },
       },
       output: { schema: { type: 'json' }, render: renderToolOutput },
@@ -452,6 +461,12 @@ export function buildPublishTools(deps: PublishToolsDeps): import('@deepseek-ai/
             brand: args.brand != null ? String(args.brand) : '',
             model: args.model != null ? String(args.model) : '',
             confirm: args.confirm === true,
+            replayMode: (args as any).replayMode === true,
+            imageSpaceUpload: (args as any).imageSpaceUpload !== false,
+            imageSpaceFolderId: (args as any).imageSpaceFolderId != null ? String((args as any).imageSpaceFolderId) : '',
+            imageSpaceConcurrency: (args as any).imageSpaceConcurrency != null
+              ? Number((args as any).imageSpaceConcurrency) || 3
+              : 3,
             account: args.account ? String(args.account).trim() : '',
             agentId: agentIdOf(exec),
             attrModel,
@@ -474,8 +489,10 @@ export function buildPublishTools(deps: PublishToolsDeps): import('@deepseek-ai/
       description: '统计闲鱼账号的商品表现数据（曝光/想要/收藏、爆款与滞销排行，只读操作，无副作用）。'
         + '闲鱼账号类接口需要页面 JS 生成的 sign 签名与真实 goofish 会话，纯 HTTP 请求必被拒，'
         + '因此本工具通过 puppeteer 打开闲鱼个人页、注入账号 Cookie、拦截页面自身发出的账号类接口响应取数。'
-        + '★ 前提：只需绑定**淘宝**账号即可 —— 闲鱼复用阿里 SSO，登录淘宝成功后自动派生闲鱼登录态并同步 goofish 域 Cookie，无需扫码闲鱼 APP。'
-        + '若报登录失效（token_expired），引导用户对该淘宝账号执行「重新登录」以重新同步。',
+        + '★ 前提：只需在「账号连接」绑定**闲鱼**账号（闲鱼 App 扫码登录 goofish.com/login）。'
+        + '闲鱼凭证层与淘宝同源（credentialPlatform→taobao），但 goofish 域 Cookie 必须落在闲鱼自己的条目上，'
+        + '因此淘宝登录只能作为兜底自动派生，正式用法是单独连一个闲鱼号。'
+        + '若报登录失效（token_expired），引导用户对该闲鱼账号执行「重新登录」。',
       parameters: {
         // DSH 校验器要求：可选参数必须整体省略 required 字段，写 false 会导致插件加载失败
         mode: { type: 'string', description: '分析模式（可选）：overview（账号概况 + 爆款/滞销排行，默认）/ items（全量商品明细）' },
@@ -520,6 +537,9 @@ export function buildPublishTools(deps: PublishToolsDeps): import('@deepseek-ai/
         product: { type: 'string', required: true, description: '统一商品数据（必填），JSON 字符串。结构：{ title(必填,≤60字), images(必填,本地绝对路径数组,1~10张,单张≤3MB), detailImages?(详情图,≤50张), category?(类目关键词/路径,不传则从标题推断), price?(参考价,元), stock?(默认库存), itemNo?(货号), specs?(规格维度数组:[{name:"颜色",values:[{value:"奶油黄",image?:"C:/img/1.jpg"}]},{name:"尺码",values:[{value:"110cm"}]}],最多2维,每维值≤20,预览图仅第1维可带), skus?(SKU行数组:[{specs:{颜色:"奶油黄",尺码:"110cm"},price:"34",stock:"999"}],每行需覆盖全部维度), attributes?([{name:"主面料成分",value:"棉"}]), account?(指定账号) }。' },
         confirm: { type: 'boolean', description: '是否已获用户确认。省略或 false 时只返回发布预览，不产生任何写操作；用户同意后传 true 才真正发布' },
         account: { type: 'string', description: '要使用的账号 shopKey（可选）。该平台有多个可用账号时，先按返回的候选向用户确认，再把选定的 shopKey 填到这里' },
+        mode2: { type: 'boolean', description: '觅千手式「请求劫持改包」模式（可选，默认 false）。true 时**跳过 UI 逐行填价格表/SKU**，改为：页面照常填主图/标题/详情图/规格，点「提交并上架」时在浏览器层拦下原生 goodsCommit 请求，只替换 sku 价格/库存/货号、图片、运费字段，再用页面身份（带 Anti-Content 签名）重放。优点：不受 30 行 SKU 表格渲染/滚动限制，价格一次改完；缺点：依赖平台内部接口与签名模块，改版会失效。' },
+        costTemplate: { type: 'string', description: '运费模板名（可选）。模式2 下由 buildGoodsDetailFromProduct 解析为模板 ID；模式1 下走 UI 搜索模板名' },
+        deliveryTime: { type: 'string', description: '发货时间（可选，字符串数字）：1=当日发货、2=24小时发货、3=48小时发货；默认 1' },
       },
       output: { schema: { type: 'json' }, render: renderToolOutput },
       async execute(args, exec) {
@@ -537,6 +557,11 @@ export function buildPublishTools(deps: PublishToolsDeps): import('@deepseek-ai/
             account: args.account ? String(args.account).trim() : '',
             agentId: agentIdOf(exec),
             attrModel,
+            mode2: (args as any).mode2 === true,
+            costTemplate: args.costTemplate ? String(args.costTemplate).trim() : undefined,
+            deliveryTime: args.deliveryTime != null && String(args.deliveryTime).trim() !== ''
+              ? Number(args.deliveryTime)
+              : undefined,
           })
           return result as any
         } catch (err) {
@@ -548,5 +573,172 @@ export function buildPublishTools(deps: PublishToolsDeps): import('@deepseek-ai/
         }
       },
     }),
+
+    /* ═══ mqs 同引擎三平台（京东 / 抖店 / 1688）════════════════════════
+     * 觅千手 v5.61 里这三个平台与淘宝/天猫共用 goods_manager 引擎，只是换锚点集。
+     * 这里用 `mqsPublish` 一份实现 + 三份 publish-config/*.json 暴露成三个工具，
+     * 参数表与 dsagent_pdd_publish2 同构（统一商品数据 product + confirm 门禁）。
+     * ═════════════════════════════════════════════════════════════════ */
+    defineTool({
+      name: 'dsagent_jd_publish_mqs',
+      description: '发布商品到京东商家后台（觅千手 goods_manager 同引擎；L2 风险，有真实副作用）。'
+        + '入参为统一商品数据 product（JSON）：标题 / 主图 / 详情图 / 规格维度 / SKU 行 / 类目属性。'
+        + '执行链路：puppeteer 驱动 wares-jdm.jd.com 商品发布页，走「选类目 → 填属性 → 填 SKU → 选运费模板 → 提交」五段。'
+        + '★ 必须两步调用：先不带 confirm 取「发布预览」，用户明确同意后才带 confirm=true 真正提交。'
+        + '★ 品牌、商品资质/3C 与部分类目属性不会自动填，需在弹出窗口内人工补全。'
+        + '★ 京东登录态独立（不是阿里 SSO），需在账号连接页单独绑定京东账号。',
+      parameters: MQS_PRODUCT_PARAMS,
+      output: { schema: { type: 'json' }, render: renderToolOutput },
+      async execute(args, exec) {
+        return await runMqs(store, getLlm, 'jd', args, exec)
+      },
+    }),
+
+    defineTool({
+      name: 'dsagent_douyin_shop_publish_mqs',
+      description: '发布商品到抖音小店（抖店）商家后台（觅千手 goods_manager 同引擎；L2 风险，有真实副作用）。'
+        + '入参为统一商品数据 product（JSON）：标题 / 主图 / 详情图 / 规格维度 / SKU 行 / 类目属性。'
+        + '执行链路：puppeteer 驱动 fxg.jinritemai.com/ffa/g/create 商品创建页，走「选类目 → 填属性 → 填 SKU → 选运费模板 → 提交」五段。'
+        + '★ 必须两步调用：先不带 confirm 取「发布预览」，用户明确同意后才带 confirm=true 真正提交。'
+        + '★ 品牌、商品资质与部分类目属性不会自动填，需在弹出窗口内人工补全。'
+        + '★ 抖店用抖音登录态（.jinritemai.com + .douyin.com 双域 Cookie），与淘宝/京东完全不通用。',
+      parameters: MQS_PRODUCT_PARAMS,
+      output: { schema: { type: 'json' }, render: renderToolOutput },
+      async execute(args, exec) {
+        return await runMqs(store, getLlm, 'douyin_shop', args, exec)
+      },
+    }),
+
+    defineTool({
+      name: 'dsagent_1688_publish_mqs',
+      description: '发布商品到 1688（阿里巴巴）卖家工作台（觅千手 goods_manager 同引擎；L2 风险，有真实副作用）。'
+        + '入参为统一商品数据 product（JSON）：标题 / 主图 / 详情图 / 规格维度 / SKU 行 / 类目属性。'
+        + '执行链路：puppeteer 驱动 offer-new.1688.com/<unit>/publish.htm 商品发布页，走「选类目 → 填属性 → 填 SKU → 选运费模板 → 提交」五段。'
+        + '★ 必须两步调用：先不带 confirm 取「发布预览」，用户明确同意后才带 confirm=true 真正提交。'
+        + '★ 1688 是批发平台：阶梯价/起订量属批发专属字段，工具只填一档；品牌与商品资质不自动填。'
+        + '★ 阿里 SSO 与淘宝同源，但必须是 1688 卖家（诚信通/实力商家）账号，纯买家号会在选类目阶段被挡。',
+      parameters: MQS_PRODUCT_PARAMS,
+      output: { schema: { type: 'json' }, render: renderToolOutput },
+      async execute(args, exec) {
+        return await runMqs(store, getLlm, '1688', args, exec)
+      },
+    }),
+    defineTool({
+      name: 'dsagent_taobao_publish_mqs',
+      description: '用**统一商品数据**发布商品到淘宝 C 店 / 天猫（觅千手 goods_manager 同引擎；L2 风险，有真实副作用）。'
+        + '入参只有一个 product（JSON）：标题 / 主图 / 详情图 / 规格维度 / SKU 行 / 类目属性，规格最多 2 维、SKU 用「维度名→规格值」组合表达。'
+        + '执行链路：puppeteer 驱动淘宝/天猫发布页，按 publish-config/taobao.json 的 flow 走「选类目 → 填标题/价格/库存 → 主图 → SKU → 类目属性 → 运费模板 → 提交」，'
+        + '类目档案按「平台 + catId」精确匹配回放（同级目第二次发布直接复用上次生效的属性值）。'
+        + '★ 渠道靠 product 里可选的 channel 字段区分：taobao（默认）/ tmall；两者共用同一套淘宝登录态。'
+        + '★ 必须两步调用：先不带 confirm 取「发布预览」，用户明确同意后才带 confirm=true 真正提交。'
+        + '★ 品牌、商品资质与部分类目属性不会自动填，需在弹出窗口内人工补全。'
+        + '★ 与 dsagent_taobao_publish 的区别：那个是「扁平参数 + 相关性选类目」的旧入口，本工具是统一商品 JSON 形态（与京东/抖店/1688/拼多多同构）。',
+      parameters: {
+        product: { type: 'string', required: true, description: '统一商品数据（必填），JSON 字符串。结构：{ title(必填,≤60字), images(必填,本地绝对路径数组,1~5张,单张≤20MB), detailImages?(详情图,≤20张), channel?("taobao" 默认 / "tmall"), category?(类目关键词), price?(一口价,元), stock?(库存), itemNo?(商家编码/货号), specs?(规格维度数组:[{name:"颜色分类",values:[{value:"黑色"}]}],最多2维), skus?(SKU 行数组:[{specs:{颜色分类:"黑色"},price:"99",stock:"10",itemNo:"SKU001"}],每行需覆盖全部维度), attributes?([{name:"内衣质地",value:"云朵棉"}]), account?(指定账号) }。' },
+        confirm: { type: 'boolean', description: '是否已获用户确认。省略或 false 时只返回发布预览，不产生任何写操作；用户同意后传 true 才真正提交' },
+        account: { type: 'string', description: '要使用的账号 shopKey（可选）。该平台有多个可用账号时，先按返回的候选向用户确认，再把选定的 shopKey 填到这里' },
+      },
+      output: { schema: { type: 'json' }, render: renderToolOutput },
+      async execute(args, exec) {
+        try {
+          const route = agentModelRouteOf(exec)
+          const llm = getLlm?.()
+          const attrModel = route && llm
+            ? { stream: (o: any) => llm.stream(o), provider: route.provider, model: route.model }
+            : undefined
+          const parsed = parseProduct((args as any).product)
+          if (parsed.error || !parsed.product) {
+            return {
+              ok: false,
+              failureKind: 'api_error',
+              text: parsed.error || '商品数据解析失败。',
+            } as any
+          }
+          const invalid = validateProduct(parsed.product)
+          if (invalid) {
+            return { ok: false, failureKind: 'api_error', text: `商品数据校验未通过：${invalid}` } as any
+          }
+          const p = parsed.product
+          // 统一数据的 specs/skus → 淘宝「一项 = 一个规格值 = SKU 表一行」形态
+          const skus: TaobaoSkuInput[] = (p.skus?.length
+            ? p.skus
+            : (p.specs?.[0]?.values || []).map(v => ({ specs: { [p.specs![0].name]: v.value }, price: p.price, stock: p.stock })))
+            .map((s: any) => ({
+              name: String(Object.values(s.specs || {})[0] || '').trim(),
+              price: s.price != null ? String(s.price) : undefined,
+              stock: s.stock != null ? String(s.stock) : undefined,
+              outerId: s.itemNo != null ? String(s.itemNo) : undefined,
+            }))
+            .filter(s => s.name)
+          const result = await taobaoPublish(store, {
+            images: p.images || [],
+            detailImages: p.detailImages || [],
+            title: p.title,
+            channel: String((parsed.product as any).channel || '').trim() || 'taobao',
+            price: p.price || '',
+            stock: p.stock || '',
+            itemNo: p.itemNo || '',
+            skus,
+            categoryKeyword: p.category || '',
+            attributes: p.attributes,
+            confirm: (args as any).confirm === true,
+            account: args.account ? String(args.account).trim() : '',
+            agentId: agentIdOf(exec),
+            attrModel: attrModel as any,
+          })
+          return result as any
+        } catch (err) {
+          return {
+            ok: false,
+            failureKind: 'api_error',
+            text: `淘宝/天猫发布（mqs）异常：${err instanceof Error ? err.message : String(err)}`,
+          } as any
+        }
+      },
+    }),
   ]
+}
+
+/**
+ * mqs 三平台共用的参数表（统一商品数据 + confirm 门禁 + 账号 + 诊断开关）。
+ * ★ DSH 校验器要求：可选参数必须整体省略 required 字段，写 false 会导致插件加载失败。
+ */
+const MQS_PRODUCT_PARAMS = {
+  product: { type: 'string', required: true, description: '统一商品数据（必填），JSON 字符串。结构：{ title(必填,≤60字), images(必填,本地绝对路径数组,1~5张,单张≤3MB), detailImages?(详情图), category?(类目关键词), price?(价格,元), stock?(库存), itemNo?(货号), specs?(规格维度数组:[{name:"颜色",values:[{value:"黑色"}]}],最多2维), skus?(SKU 行数组:[{specs:{颜色:"黑色"},price:"99",stock:"999"}],每行需覆盖全部维度), attributes?([{name:"主面料成分",value:"棉"}]), account?(指定账号) }。' },
+  confirm: { type: 'boolean', description: '是否已获用户确认。省略或 false 时只返回发布预览，不产生任何写操作；用户同意后传 true 才真正提交' },
+  account: { type: 'string', description: '要使用的账号 shopKey（可选）。该平台有多个可用账号时，先按返回的候选向用户确认，再把选定的 shopKey 填到这里' },
+  diagDom: { type: 'boolean', description: 'DOM 诊断模式（可选，默认 false）。true 时只打开发布页 dump 可见 input/button/file 清单 + 截图后返回，不上传不填表不提交（零风险，绕过 confirm 门禁）。用于首次接入某平台时修正锚点集' },
+} as const
+
+/** mqs 工具共用执行体：解析入参 → 交给 mqsPublish（引擎内含 confirm 门禁与账号选择） */
+async function runMqs(
+  store: CredentialStore,
+  getLlm: (() => HostLlm | undefined) | undefined,
+  channel: MqsChannel,
+  args: any,
+  exec: any,
+) {
+  try {
+    // 属性自动选值走「本会话正在用的聊天模型」（与拼多多发布同一套装配逻辑）
+    const route = agentModelRouteOf(exec)
+    const llm = getLlm?.()
+    const attrModel = route && llm
+      ? { stream: (o: any) => llm.stream(o), provider: route.provider, model: route.model }
+      : undefined
+    const result = await mqsPublish(store, channel, {
+      product: args?.product,
+      confirm: args?.confirm === true,
+      account: args?.account ? String(args.account).trim() : '',
+      diagDom: args?.diagDom === true,
+      agentId: agentIdOf(exec),
+      attrModel: attrModel as any,
+    })
+    return result as any
+  } catch (err) {
+    return {
+      ok: false,
+      failureKind: 'api_error',
+      text: `${channel} 发布异常：${err instanceof Error ? err.message : String(err)}`,
+    } as any
+  }
 }

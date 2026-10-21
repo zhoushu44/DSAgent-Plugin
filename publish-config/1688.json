@@ -1,0 +1,222 @@
+{
+  "$comment": "1688（阿里巴巴 B2B）卖家工作台发布锚点集（offer-new.1688.com/<unit>/publish.htm）。★ 状态：语义锚点层（L2/L3）先行，尚未真机逐格实测 —— 首次发布会输出 DOM 诊断（可见 input / button / file 清单 + 截图），按诊断把 L2 锚点替换成 L1 埋点即可，无需改代码（改本文件热生效）。1688 与淘宝同属阿里 SSO，但**必须有 1688 卖家（诚信通/实力商家）资质**。分级规范见 PUBLISH-SPEC.md §3.3。",
+  "platform": "1688",
+  "version": 1,
+  "limits": {
+    "maxImageBytes": 3145728,
+    "maxImages": 5,
+    "maxTitleLen": 60,
+    "maxDetailImages": 20,
+    "defaultStock": "999"
+  },
+  "urls": {
+    "goodsList": "https://work.1688.com/?spm=a26352.13672862.szcategories.0.0",
+    "aliPublish": "https://offer-new.1688.com/offer/publish.htm"
+  },
+  "cookieDomains": [".1688.com", ".taobao.com"],
+  "loginUrlRe": "login\\.1688\\.com|login\\.taobao\\.com|passport",
+  "riskSelector": "#nc_1_n1z, #nc_1_wrapper, .nc-container, [class*=\"punish\"]",
+  "flow": [
+    { "step": "openEntry", "url": "https://offer-new.1688.com/offer/publish.htm" },
+    { "step": "selectCategory" },
+    { "step": "waitFor", "match": "input[placeholder*=\"商品标题\"], input[placeholder*=\"标题\"], text:商品信息" },
+    { "step": "fillTitle" },
+    { "step": "uploadMainImages" },
+    { "step": "fillSku" },
+    { "step": "fillAttributes" },
+    { "step": "submit", "args": { "buttonTextRe": "^(发布商品|提交|确认发布|立即发布|保存并发布)$" } }
+  ],
+  "anchors": {
+    "formReady": {
+      "candidates": [
+        { "level": 1, "selector": "input[placeholder*=\"商品标题\"]" },
+        { "level": 2, "selector": "input[placeholder*=\"标题\"]" },
+        { "level": 3, "selector": "text:商品信息" },
+        { "level": 3, "selector": "text:商品主图" }
+      ]
+    },
+    "cateSearchInput": {
+      "candidates": [
+        { "level": 2, "selector": "input[placeholder*=\"类目关键词\"]" },
+        { "level": 2, "selector": "input[placeholder*=\"搜索类目\"]" },
+        { "level": 3, "selector": "input[placeholder*=\"类目\"]" }
+      ]
+    },
+    "cateResultItem": {
+      "candidates": [
+        { "level": 2, "selector": "[class*=\"category-result\"] li" },
+        { "level": 2, "selector": "[class*=\"cate-result\"] li" },
+        { "level": 3, "selector": "[class*=\"cascader\"] li" },
+        { "level": 3, "selector": "[class*=\"dropdown\"] li" }
+      ]
+    },
+    "cateConfirmButton": {
+      "candidates": [
+        { "level": 2, "selector": "text:确认，下一步" },
+        { "level": 2, "selector": "text:确认下一步" },
+        { "level": 3, "selector": "text:下一步" },
+        { "level": 3, "selector": "text:确定" }
+      ]
+    },
+    "catePathText": {
+      "candidates": [
+        { "level": 2, "selector": "[class*=\"cate-path\"]" },
+        { "level": 3, "selector": "[class*=\"category-path\"]" }
+      ]
+    },
+    "titleInput": {
+      "candidates": [
+        { "level": 1, "selector": "input[placeholder*=\"商品标题\"]" },
+        { "level": 2, "selector": "input[placeholder*=\"标题\"]" },
+        { "level": 3, "selector": "input[name=\"title\"]" }
+      ],
+      "fillFieldFallbackRe": "商品标题|标题"
+    },
+    "priceInput": {
+      "candidates": [
+        { "level": 2, "selector": "input[placeholder*=\"单价\"]" },
+        { "level": 2, "selector": "input[placeholder*=\"价格\"]" },
+        { "level": 3, "selector": "input[placeholder*=\"批发价\"]" }
+      ],
+      "fillFieldFallbackRe": "单价|批发价|价格"
+    },
+    "stockInput": {
+      "candidates": [
+        { "level": 2, "selector": "input[placeholder*=\"库存\"]" },
+        { "level": 3, "selector": "input[placeholder*=\"可售\"]" }
+      ],
+      "fillFieldFallbackRe": "库存|可售数量"
+    },
+    "itemNoInput": {
+      "candidates": [
+        { "level": 2, "selector": "input[placeholder*=\"货号\"]" },
+        { "level": 3, "selector": "input[placeholder*=\"商家编码\"]" }
+      ],
+      "fillFieldFallbackRe": "货号|商家编码|编码"
+    },
+    "mainImageInput": {
+      "candidates": [
+        { "level": 1, "selector": "input[type=\"file\"][accept*=\"image\"]" },
+        { "level": 3, "selector": "input[type=\"file\"]" }
+      ]
+    },
+    "mainImageZone": {
+      "candidates": [
+        { "level": 2, "selector": "text:商品主图" },
+        { "level": 3, "selector": "[class*=\"main-image\"]" },
+        { "level": 3, "selector": "[class*=\"mainImg\"]" }
+      ]
+    },
+    "detailImageInput": {
+      "candidates": [
+        { "level": 3, "selector": "[class*=\"detail\"] input[type=\"file\"]" },
+        { "level": 3, "selector": "[class*=\"desc\"] input[type=\"file\"]" }
+      ]
+    },
+    "specSection": {
+      "candidates": [
+        { "level": 2, "selector": "text:销售属性" },
+        { "level": 3, "selector": "[class*=\"sale-prop\"]" },
+        { "level": 3, "selector": "[class*=\"sku\"]" }
+      ]
+    },
+    "specInput": {
+      "candidates": [
+        { "level": 2, "selector": "input[placeholder*=\"规格值\"]" },
+        { "level": 2, "selector": "input[placeholder*=\"颜色\"]" },
+        { "level": 3, "selector": "input[placeholder*=\"添加\"]" }
+      ],
+      "comment": "1688 销售属性同为受控输入：键入后 Tab（onBlur）才进 state（与淘宝同源组件）"
+    },
+    "skuTableRow": {
+      "candidates": [
+        { "level": 2, "selector": "[class*=\"sku-table\"] tbody tr" },
+        { "level": 3, "selector": "table tbody tr" }
+      ]
+    },
+    "attrItem": {
+      "candidates": [
+        { "level": 2, "selector": "[class*=\"attr-item\"]" },
+        { "level": 2, "selector": "[class*=\"property-item\"]" },
+        { "level": 3, "selector": "[class*=\"prop-item\"]" }
+      ]
+    },
+    "attrLabel": {
+      "candidates": [
+        { "level": 2, "selector": "[class*=\"attr-label\"], [class*=\"attr-name\"], label, dt" }
+      ]
+    },
+    "attrRequiredMark": {
+      "candidates": [
+        { "level": 2, "selector": "[class*=\"required\"], .required, [class*=\"important\"]" }
+      ]
+    },
+    "attrDropdownPanel": {
+      "candidates": [
+        { "level": 2, "selector": "[class*=\"dropdown\"][class*=\"open\"]" },
+        { "level": 2, "selector": "[class*=\"select-list\"]" },
+        { "level": 3, "selector": "[class*=\"popover\"]" },
+        { "level": 3, "selector": "[role=\"listbox\"]" }
+      ]
+    },
+    "attrOption": {
+      "candidates": [
+        { "level": 2, "selector": "li, [role=\"option\"], [class*=\"option\"]" }
+      ]
+    },
+    "freightZone": {
+      "candidates": [
+        { "level": 2, "selector": "text:运费模板" },
+        { "level": 3, "selector": "text:物流服务" }
+      ]
+    },
+    "freightSelect": {
+      "candidates": [
+        { "level": 2, "selector": "[class*=\"freight\"] input" },
+        { "level": 3, "selector": "[class*=\"template\"] input" }
+      ]
+    },
+    "submitButton": {
+      "candidates": [
+        { "level": 2, "selector": "text:发布商品" },
+        { "level": 2, "selector": "text:确认发布" },
+        { "level": 3, "selector": "text:立即发布" },
+        { "level": 3, "selector": "text:提交" }
+      ],
+      "matchTextRe": "^(发布商品|提交|确认发布|立即发布|保存并发布)$"
+    },
+    "errorToast": {
+      "candidates": [
+        { "level": 2, "selector": "[class*=\"toast\"], [class*=\"message\"][class*=\"show\"], [class*=\"notice\"]" }
+      ],
+      "excludeTextRe": "发布成功|提交成功|保存成功"
+    },
+    "errorField": {
+      "candidates": [
+        { "level": 2, "selector": "[class*=\"error\"], [class*=\"Error\"], [class*=\"invalid\"]" }
+      ]
+    },
+    "successRe": "发布成功|提交成功|上架成功|保存成功|商品已提交|发布完成",
+    "uploadFailure": "图片格式不正确|文件过大|超过大小限制|不支持的文件|上传失败"
+  },
+  "fieldStrategies": {
+    "title": { "type": "type", "anchor": "titleInput", "maxLength": 60, "source": "data.title" },
+    "price": { "type": "type", "anchor": "priceInput", "source": "data.price" },
+    "stock": { "type": "type", "anchor": "stockInput", "source": "data.stock", "default": "999" },
+    "itemNo": { "type": "type", "anchor": "itemNoInput", "source": "data.itemNo" },
+    "category": { "type": "categorySearch" }
+  },
+  "regexes": {
+    "attrSkip": "^品牌$",
+    "salePropPlaceholder": "规格值|主色|颜色|尺码",
+    "step2Url": "publish\\.htm|offer\\/new"
+  },
+  "timeouts": {
+    "formWaitMs": 150000,
+    "publishTimeoutMs": 180000,
+    "uploadWaitMs": 90000,
+    "skuCellWaitMs": 500,
+    "attrModelTimeoutMs": 20000,
+    "attrDropdownWaitMs": 800
+  }
+}

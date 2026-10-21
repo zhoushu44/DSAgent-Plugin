@@ -1,0 +1,39 @@
+{
+  "schema": "dsagent/skill-contract@1",
+  "id": "zhihu-publish",
+  "entry": {
+    "form": "script",
+    "script": "scripts/publish.py"
+  },
+  "input": {
+    "args": [
+      {
+        "name": "title",
+        "required": true,
+        "description": "文章标题（知乎限 100 字）"
+      },
+      {
+        "name": "content",
+        "description": "正文纯文本（≤50000 字）；与 content_file 二选一"
+      },
+      {
+        "name": "content_file",
+        "flag": "--content-file",
+        "description": "从文件读正文（文件优先于 content）；适合长文与工作流传文件路径"
+      },
+      {
+        "name": "confirm",
+        "description": "确认发布：true 才真正提交；省略/false 只返回发布预览，不产生任何写操作"
+      },
+      {
+        "name": "account",
+        "description": "账号 shopKey（可选）；该平台多账号且未绑定时需先向用户确认"
+      }
+    ]
+  },
+  "output": {
+    "protocol": "dsagent-result",
+    "resultPrefix": "__DSAGENT_RESULT__",
+    "filesMarker": "---[OUTPUT_FILES]"
+  }
+}

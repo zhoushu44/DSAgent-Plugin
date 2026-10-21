@@ -1,0 +1,7 @@
+[
+  {
+    "title": "复刻觅千手上架体系到 DSAgent-Plugin",
+    "description": "基于觅千手 v5.61 逆向素材（pageHooks.js），为 DSAgent-Plugin 创建 6 个平台的上架 skill：taobao-publish-mqs、tmall-publish-mqs、douyin-publish-mqs、jd-publish-mqs、1688-publish-mqs，以及更新 src/client.ts SuggestDock 平台词表。每个 skill 需要 SKILL.md + SOURCE.md + 注入脚本。素材路径：E:\\360MoveData\\Users\\Administrator\\Desktop\\觅千手\\source\\pageHooks.js。参考已有溯源先例：docs/pdd-publish-mode2/SOURCE.md。",
+    "priority": 10
+  }
+]

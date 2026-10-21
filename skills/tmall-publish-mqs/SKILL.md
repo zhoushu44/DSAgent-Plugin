@@ -43,7 +43,7 @@ metadata:
 
 ## 输入
 
-工具名 `dsagent_taobao_publish_mqs`（天猫与淘宝共用同一工具，**靠 `product.channel` 切域**），入参为单对象 product：
+工具名 `dsagent_taobao_publish_mqs`（天猫与淘宝共用同一工具，**靠 `product.channel` 切域**），入参为单对象 product。★ 与其同构的还有 `dsagent_jd_publish_mqs` / `dsagent_douyin_shop_publish_mqs` / `dsagent_1688_publish_mqs` / `dsagent_pdd_publish2`——五者参数表一致，只有工具（=渠道）不同：
 
 | 参数 | 必需 | 说明 |
 |------|------|------|
@@ -54,9 +54,30 @@ metadata:
 product 关键字段规则：
 
 - `channel` **必须显式传 `tmall`**；省略会默认走淘宝域 item.upload.taobao.com，把商品发到错误后台。
-- `title` 必填；`images` 必填，1~5 张，单张 ≤ 3MB，本机绝对路径且真实存在。
+- `title` 必填；`images` 必填，1~5 张，**单张 ≤ 20MB**（淘宝/天猫实测上限），本机绝对路径且真实存在。
 - `price` 为**一口价**（正数，元，≤ 1 亿元）；`stock` 为非负整数。
 - `specs` ≤ 2 维；`skus` 每行必须覆盖全部维度，缺价格/库存时回落顶层 `price` / `stock`。
+
+
+## 两种执行方式
+
+| 场景 | 入口 | 说明 |
+|------|------|------|
+| 对话里单次上架 | host 工具 `dsagent_taobao_publish_mqs` | 主路径，交互式，两步确认 |
+| **工作流步骤 / 批量编排** | 脚本 `{baseDir}/scripts/publish.py` | 脚本型外壳，让上架能作为工作流步骤被执行 |
+
+```bash
+python3 {baseDir}/scripts/publish.py --product-file ./product.json                  # 只出预览
+python3 {baseDir}/scripts/publish.py --product-file ./product.json --confirm true   # 真正提交
+```
+
+入参是「一个 product JSON」（标题 / 主图 / 详情图 / 规格维度 / SKU 行 / 类目属性），
+与本技能 host 工具同构。脚本只把请求转给 host 的 `publish_platform` action，
+真实实现仍是 puppeteer 引擎（分发逻辑见 `src/platform-publish.ts`）。
+**L2 门禁完全保留**：不带 `--confirm true` 只返回预览、不启动浏览器、不产生任何写操作。
+
+> 为什么需要这个外壳：本技能原本是纯指令型（无脚本入口），工作流引擎六项校验的
+> 第二项会拒绝它当步骤（「是纯指令型（无可执行入口），不能作为步骤」）。
 
 ## 工作流
 

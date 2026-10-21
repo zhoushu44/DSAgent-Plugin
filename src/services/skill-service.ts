@@ -272,6 +272,8 @@ const SKILL_PLATFORM: Record<string, string> = {
   // douyin 平台
   'douyin-crawl': 'douyin',
   'douyin-publish': 'douyin',
+  'douyin-publish-http': 'douyin',
+  'douyin-works': 'douyin',
   'douyin-comment': 'douyin',
   'douyin-im': 'douyin',
   'douyin-analytics': 'douyin',
@@ -364,8 +366,8 @@ const SKILL_CAPABILITY: Record<string, string> = {
 
 /** 兜底：显式映射未覆盖的新技能，按名字后缀与关键词归纳 */
 const CAPABILITY_RULES: Array<[RegExp, string]> = [
-  [/-publish$/, 'publish'],
-  [/(?:-crawl|-download|-analytics)$/, 'analytics'],
+  [/-publish(?:-http)?(?:-mqs)?$/, 'publish'],
+  [/(?:-crawl|-download|-analytics|-works)$/, 'analytics'],
   [/(?:-comment|-im)$/, 'cs-script'],
   [/(?:report|chart|wordcloud|viz|cockpit)/, 'chart'],
   [/(?:patrol|store|店铺|巡店)/, 'shop-ops'],

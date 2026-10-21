@@ -36,6 +36,9 @@ import { existsSync, readFileSync, statSync } from 'node:fs'
 import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
+import { buildTaobaoJsonDocument, buildTaobaoJsonReplayInitScript } from './taobao-publish-replay.js'
+import { localImagesToSpaceUrls, checkLoginCookies } from './taobao-image-space.js'
+import { installCommitPatcher, type CommitPatchResult } from './taobao-commit-patch.js'
 
 /** 发布入口（按渠道）。淘宝先落在「选类目」页，选完类目才进正式表单；天猫同理。
  *  URL 初值 = 历史硬编码兜底，refreshTaobaoConfig() 用 publish-config/taobao.json
@@ -201,6 +204,20 @@ export interface TaobaoSkuInput {
 export interface TaobaoPublishOptions {
   /** 本地图片绝对路径列表（至少 1 张，最多 5 张） */
   images: string[]
+  /**
+   * 详情图本地绝对路径列表（选填，多张）。复刻觅千手：发布页内直传到详情编辑器，
+   * 框架把 URL 收进 formValues.wirelessDesc / descRepublicOfSell，随 Json state 提交。
+   */
+  detailImages?: string[]
+  /**
+   * 主图 URL 列表（COS/外链）。传入后主图走 replay URL 注入，跳过 DOM 文件上传（复刻觅千手搬品）。
+   */
+  imageUrls?: string[]
+  /**
+   * 详情图 URL 列表（COS/外链）。传入后详情图走 replay URL 注入（wirelessDesc/descRepublicOfSell），
+   * 跳过详情编辑器 DOM 上传。
+   */
+  detailImageUrls?: string[]
   /** 商品标题（必填，≤ 60 字符） */
   title: string
   /** 渠道：taobao（默认）/ tmall */
@@ -249,6 +266,47 @@ export interface TaobaoPublishOptions {
   agentId?: string
   /** 是否已获用户确认；为 false 时只返回预览，不执行任何写操作 */
   confirm?: boolean
+  /**
+   * 觅千手式「Json/Json2 setter 劫持重放」模式（选填，默认 false）。
+   *   true 时进入发布页前注入劫持脚本：框架把表单 state 赋给 window.Json/Json2 的瞬间，
+   *   把本地组装的商品数据原地 merge 进框架 state（一次门禁，merge 后置 hook_done）。
+   *   merge 成功后跳过 DOM 逐格填写（仅保留类目属性/运费模板兜底）；未命中则自动降级回 DOM 链路。
+   *   机制溯源：skills/taobao-publish-mqs/SOURCE.md（觅千手 v5.61 pageHooks.js）。
+   */
+  replayMode?: boolean
+  /**
+   * 逆向 HTTP 上传（选填，**默认 true**）—— 复刻觅千手「预上传」链路。
+   *   true 时本地主图/详情图先用图片空间接口（stream-upload.taobao.com/api/upload.api，
+   *   纯 HTTP multipart，无 mtop 签名、无浏览器）传成 img.alicdn.com URL，
+   *   再随 replay 注入表单；DOM 文件上传不再参与。
+   *   全程失败（如登录态缺 / 接口变更）时自动回退到原 DOM 上传链路，不会因此发不出去。
+   *   ★ 与 replayMode 的关系：拿到 URL 后必须有 replay 才能塞进表单 state，
+   *     因此本项为 true 且上传成功时会**自动启用 replayMode**。
+   */
+  imageSpaceUpload?: boolean
+  /**
+   * 图片空间目录 id（选填，默认 '0' = 全部图片根目录）。
+   *   想把素材归到自定义目录时传该目录 id（可从图片空间页面 URL / dir 查询得到）。
+   */
+  imageSpaceFolderId?: string
+  /** 图片空间上传并发（选填，默认 3，上限 6）。并发过高易触发账号级限流 */
+  imageSpaceConcurrency?: number
+  /**
+   * 直达发布页 URL（选填）。填了则**跳过选类目**，直接打开
+   * `https://item.upload.taobao.com/sell/v2/publish.htm?catId=XXXX`。
+   *
+   * ★ 为什么推荐：实测两条进入路径的页面结构不同 —— 直达时属性区完整渲染
+   *   （label.required 有 7 个，属性可填）；走「选类目页 → 确认下一步」时属性区是空壳
+   *   （28 个 struct-p-* 但 0 个 label），必填属性读不到也填不上，提交会被前端校验拦死。
+   *   已知 catId 的批量发布请优先用本参数。
+   */
+  directPublishUrl?: string
+  /**
+   * 诊断模式（选填，默认 false）。true 时表单就绪后 dump window.Json/Json2 完整结构到
+   *   dev/.ui-shots/taobao-json-dump.json，然后直接返回（不上传图片、不填表、不点提交）。
+   *   用于排查 replayMode 的字段路径问题，零风险。
+   */
+  diagDumpJson?: boolean
 }
 
 export interface TaobaoPublishResult {
@@ -339,6 +397,16 @@ function selectAccount(
 
 /** 生成发布预览文案（confirm 前给用户看） */
 function buildPreview(account: StoredAccount, channelLabel: string, opts: TaobaoPublishOptions, images: string[]): string {
+  const detImgs = (Array.isArray(opts.detailImages) ? opts.detailImages : []).filter(Boolean)
+  const imgUrls = (Array.isArray(opts.imageUrls) ? opts.imageUrls : []).filter(Boolean)
+  const detUrls = (Array.isArray(opts.detailImageUrls) ? opts.detailImageUrls : []).filter(Boolean)
+  const space = opts.imageSpaceUpload !== false
+  /** 图片链路一句话说明（预览时要让用户清楚走哪条路） */
+  const imagePath = imgUrls.length
+    ? `外链 URL 直填（主图×${imgUrls.length}${detUrls.length ? `、详情图×${detUrls.length}` : ''}）→ replay 注入`
+    : space
+      ? '逆向 HTTP 预上传图片空间 → replay 注入（DOM 文件上传仅作兜底）'
+      : 'DOM 文件上传（已手动关闭逆向 HTTP 上传）'
   return [
     '【发布预览 · 需用户确认】',
     `渠道：${channelLabel}`,
@@ -350,10 +418,18 @@ function buildPreview(account: StoredAccount, channelLabel: string, opts: Taobao
     `选类目关键词：${(opts.categoryKeyword || '').trim() || '（未填，需在窗口内人工选类目）'}`,
     `品牌：${(opts.brand || '').trim() || '（未填，自动取品牌下拉第一项）'}`,
     `型号：${(opts.model || '').trim() || '（未填，类目要求时需在窗口内人工填）'}`,
-    `主图（${images.length} 张）：`,
-    ...images.map(p => `  - ${p}`),
+    `图片链路：${imagePath}`,
+    imgUrls.length ? `主图 URL（${imgUrls.length} 张）：` : `主图（${images.length} 张）：`,
+    ...(imgUrls.length ? imgUrls.map(u => `  - ${u}`) : images.map(p => `  - ${p}`)),
+    ...(detUrls.length ? [`详情图 URL（${detUrls.length} 张）：`, ...detUrls.map(u => `  - ${u}`)] : []),
+    ...(detImgs.length && !detUrls.length ? [`详情图（${detImgs.length} 张，将先传图片空间）：`, ...detImgs.map(p => `  - ${p}`)] : []),
     `多规格（SKU）：${(opts.skus || []).length ? `${(opts.skus || []).length} 项` : '（未填，单 SKU）'}`,
     ...((opts.skus || []).map(s => `  - ${s.name}｜价格=${s.price || '继承一口价'}｜库存=${s.stock || '0'}${s.outerId ? `｜编码=${s.outerId}` : ''}`)),
+    '',
+    '★ 图片链路（复刻觅千手 v5.61）：本地图先用图片空间接口',
+    '  （stream-upload.taobao.com/api/upload.api，纯 HTTP multipart，无 mtop 签名、无浏览器）',
+    '  传成 img.alicdn.com URL，再经 Json/Json2 劫持重放塞进发布表单 state。',
+    '  主图与详情图都不再走页面文件控件；任一批整体失败会自动回退原 DOM 上传链路。',
     '',
     '★ 本工具自动填：主图 / 标题 / 一口价 / 库存 / 货号，以及**类目属性**（用文本模型从页面真实',
     '  候选中挑值：如「充值方式 / 模型或平台 / 软件类型」）和物流服务的「提取方式」（勾「使用物流配送」）。',
@@ -363,7 +439,7 @@ function buildPreview(account: StoredAccount, channelLabel: string, opts: Taobao
     '  若该类目把「品牌/型号」列为必填属性（如「AI软件订阅/Token充值」），会用 brand/model 参数自动填上。',
     '',
     '确认无误后，请让用户明确同意，然后带 confirm=true 重新调用本工具才会真正打开浏览器提交。',
-    '注意：发布是不可撤销的真实操作（L2）。',
+    '注意：发布是不可撤销的真实操作（L2）；图片空间里会多出这批素材（可在图片空间删除）。',
   ].join('\n')
 }
 
@@ -811,7 +887,9 @@ async function uploadImages(page: any, images: string[]): Promise<{ ok: boolean;
       if (fileInput) break
     }
 
-    // ★ 退化路径 B：主页面直接找 input[type=file]（新版发布页不走素材弹层）
+    // ★ 退化路径 B：主页面直接上传（新版发布页不走素材弹层）
+    //   复刻截图实测结构：#struct-mainImagesGroup 下 5 个虚线占位框，点其一弹文件框/素材层。
+    //   优先 waitForFileChooser 一次收全部主图；收不到再退化 input[type=file]。
     if (!fileInput) {
       console.log('[dsagent-taobao-publish] 素材弹层内未找到 input[type=file]，尝试主页面直接上传…')
       // 关闭弹层（如有）
@@ -820,27 +898,38 @@ async function uploadImages(page: any, images: string[]): Promise<{ ok: boolean;
         if (close) close.click()
       }).catch(() => {})
       await sleep(500)
-      // 找主图区的上传按钮并点击，然后等 input[type=file] 出现
-      const clicked = await page.evaluate(() => {
+      // 定位第一个 1:1 主图占位框中心（真实鼠标点击，元素 .click() 打不开文件框）
+      const pos = await page.evaluate(() => {
         const area = document.querySelector('#struct-mainImagesGroup') as HTMLElement | null
-        if (!area) return false
-        // 找含「上传图片」文本的按钮
-        const btns = Array.from(area.querySelectorAll('button, [role=button], a, div')) as HTMLElement[]
-        const target = btns.find(el => {
+        if (!area) return null
+        // 占位框候选：含「上传图片」文本的可见块 / dashed / image-empty / 直接子块
+        const pick = (Array.from(area.querySelectorAll('*')) as HTMLElement[]).find(el => {
           const t = (el.innerText || el.textContent || '').trim()
-          return /上传图片|本地上传|点击上传/.test(t) && el.offsetParent !== null && el.children.length <= 3
-        })
-        if (target) { (target as HTMLElement).click(); return true }
-        // 退化：直接点击虚线占位区
-        const dashed = area.querySelector('[class*=dashed], .image-empty') as HTMLElement
-        if (dashed) { (dashed as HTMLElement).click(); return true }
-        return false
-      }).catch(() => false) as boolean
-      if (clicked) {
-        for (let i = 0; i < 10; i++) {
-          await sleep(800)
-          fileInput = await page.$('input[type=file]').catch(() => null)
-          if (fileInput) break
+          return /上传图片/.test(t) && el.offsetParent !== null && el.getBoundingClientRect().width > 40 && el.getBoundingClientRect().width < 200
+        }) || (area.querySelector('[class*=dashed], .image-empty, [class*=empty], [class*=upload]') as HTMLElement)
+        if (!pick) return null
+        pick.scrollIntoView({ block: 'center' })
+        const r = pick.getBoundingClientRect()
+        return { x: r.x + r.width / 2, y: r.y + r.height / 2 }
+      }).catch(() => null) as { x: number; y: number } | null
+      if (pos) {
+        // 先挂 fileChooser 监听，再真实点击
+        const fcPromise = page.waitForFileChooser({ timeout: 8000 }).catch(() => null)
+        await page.mouse.move(pos.x, pos.y).catch(() => {})
+        await sleep(300)
+        await page.mouse.click(pos.x, pos.y).catch(() => {})
+        const fc = await fcPromise
+        if (fc) {
+          await fc.accept(images).catch(() => {})
+          console.log('[dsagent-taobao-publish] 已通过 fileChooser 一次性上传主图')
+          await sleep(4000)
+          const cnt = await page.evaluate(() => document.querySelectorAll('#struct-mainImagesGroup img').length).catch(() => 0) as number
+          if (cnt > 0) return { ok: true, note: `已上传主图（主图区已出现 ${cnt} 张）` }
+        } else {
+          // 文件框没弹 → 可能弹了素材层 → 回外层重走弹层路径
+          for (let i = 0; i < 12; i++) { await sleep(900); if (pickFrame()) break }
+          fileInput = pickFrame() ? await pickFrame().$('input[type=file]').catch(() => null) : null
+          if (fileInput) console.log('[dsagent-taobao-publish] 点击占位框后进入素材弹层，改用弹层上传')
         }
       }
     }
@@ -917,6 +1006,651 @@ async function uploadImages(page: any, images: string[]): Promise<{ ok: boolean;
     return { ok: false, note: '已在弹层内上传，但主图区未确认到图片（可能需要人工点选）。请在浏览器窗口内确认主图。' }
   }
   return { ok: true, note: `已上传并选中 ${images.length} 张主图（主图区已出现 ${count} 张）` }
+}
+
+/** 文件路径末段（日志/文案里只显示文件名，避免把长绝对路径刷满日志） */
+function basenameOf(p: string): string {
+  const s = String(p || '')
+  const i = Math.max(s.lastIndexOf('\\'), s.lastIndexOf('/'))
+  return i >= 0 ? s.slice(i + 1) : s
+}
+
+/**
+ * 详情图注入 —— **一比一照抄觅千手 iframeHandler.js 的上传段**。
+ *
+ * 觅千手源码对应位置（`source/iframeHandler.js`）：
+ *   · `getImgBlob(url)`：
+ *       去掉 .avif → 补协议 → 加 `_nocache=<时间戳_随机>` → `fetch(url,{cache:'no-store'})` → blob
+ *   · 批量段：
+ *       `const dt=new DataTransfer();`
+ *       `dt.items.add(new File([blob], name, {type:'image/jpeg'}));`
+ *       `uploadInputElement.files = dt.files;`
+ *       `uploadInputElement.dispatchEvent(new Event('change',{bubbles:true}));`
+ *   · 批大小 `chunk_size = 7`
+ *   · 入口：`document.querySelector('div[class^="HeadActions_headActionsRight"] button').click()`
+ *     → `await waitElement('input[type="file"]')` → 取 input 传文件
+ *
+ * ★ 关键认知：觅千手**不自己调上传接口**，它是把图片塞进页面自己的
+ *   `input[type=file]`，让页面内置的上传器（PLUG_UPLOAD）去传，传完由框架把结果
+ *   写进 formValues.descRepublicOfSell。所以我们也不该直接写 state（实测无效，
+ *   详情编辑器与主图一样只在挂载时读值）。
+ *
+ * ★ 与原文的唯一差异：本仓没有同源上下文里的 blob 构造权限，
+ *   所以「取 blob」这一步用 page.evaluate 在页面内 fetch 完成（同源，不跨域），
+ *   其余步骤（DataTransfer / File / files / change）逐字保留。
+ */
+async function injectDetailImages(page: any, localFiles: string[], urls: string[]): Promise<{ ok: boolean; note: string }> {
+  if (!urls.length) return { ok: true, note: '无详情图' }
+
+  // ① 详情编辑器就绪（实测默认就挂载，不做 tab 点击）
+  const tabOk = await openDescTab(page)
+  if (!tabOk) return { ok: false, note: '详情编辑器未就绪，详情图无法注入' }
+
+  // ② 点「添加 → 图片」打开素材选择层
+  const opened = await page.evaluate(() => {
+    const vis = (e: any) => !!e && e.offsetParent !== null
+    const ed = document.querySelector('#lite-decoration-editor')
+    if (!ed) return 'no-editor'
+    const items = Array.from(ed.querySelectorAll('div,span,button,a')) as HTMLElement[]
+    const addTitle = items.find(e => vis(e) && /add_title/i.test(String(e.className)) && /添加/.test(e.textContent || ''))
+    if (addTitle) { try { addTitle.click() } catch { /* 忽略 */ } }
+    const picItem = items.find(e => vis(e) && /add_item/i.test(String(e.className))
+      && (e.textContent || '').trim() === '图片')
+    if (!picItem) return 'no-pic-item'
+    try { picItem.scrollIntoView({ block: 'center' }) } catch { /* 忽略 */ }
+    picItem.click()
+    return 'clicked'
+  }).catch(() => 'err') as string
+  if (opened !== 'clicked') return { ok: false, note: `详情图：未点到「添加→图片」（${opened}）` }
+  await sleep(2500)
+
+  // ③ 等素材弹层（sucai-selector-ng）
+  let dlg: any = null
+  for (let i = 0; i < 16 && !dlg; i++) {
+    dlg = page.frames().find((f: any) => /sucai-selector|sucai\.|select\.htm|image-bank/i.test(f.url()))
+    if (!dlg) await sleep(800)
+  }
+  if (!dlg) return { ok: false, note: '详情图：素材选择层未出现' }
+
+  // ④ 切「本地上传」
+  await dlg.evaluate(() => {
+    const vis = (e: any) => !!e && e.offsetParent !== null
+    const all = Array.from(document.querySelectorAll('div,span,button,a')) as HTMLElement[]
+    const hit = all.find(e => vis(e) && /^(本地上传|上传图片|上传)$/.test((e.textContent || '').trim()) && e.children.length <= 1)
+    if (hit) { try { hit.click() } catch { /* 忽略 */ } }
+  }).catch(() => {})
+  await sleep(2500)
+
+  // ⑤ 投递文件
+  //   ★ 实测：**必须用 puppeteer 原生 uploadFile**（trusted 事件）。
+  //     觅千手在插件里用 DataTransfer + dispatchEvent('change')，那是同源脚本上下文；
+  //     我们通过 CDP 注入的合成事件会被这个上传器丢弃 —— 表现是「弹层里加了 File
+  //     但一个都没上传、也没有『确定（N）』按钮」。原生 uploadFile 走的是真实文件选择，
+  //     弹层立刻出现「确定（3）」。
+  let nativeOk = false
+  const files = localFiles.filter(Boolean)
+  if (files.length) {
+    try {
+      const inputEl = await dlg.$('input[type="file"]')
+      if (inputEl) {
+        await (inputEl as any).uploadFile(...files)
+        nativeOk = true
+      }
+    } catch { /* 落回 DataTransfer */ }
+  }
+  if (!nativeOk) {
+    // 兜底：DataTransfer（觅千手原法；部分版本可用）
+    const CHUNK = 7
+    for (let i = 0; i < urls.length; i += CHUNK) {
+      const chunk = urls.slice(i, i + CHUNK)
+      const r = await dlg.evaluate(async (list: string[]) => {
+        const getImgBlob = async (raw: string) => {
+          try {
+            let u = String(raw || '').replace('.avif', '')
+            if (u.startsWith('//')) u = 'https:' + u
+            else if (!/^https?:/.test(u)) u = 'https://' + u
+            const ts = Date.now() + '_' + Math.random().toString(36).substring(2, 15)
+            const resp = await fetch(u + (u.includes('?') ? '&' : '?') + '_nocache=' + ts, { cache: 'no-store' })
+            return resp && resp.status === 200 ? await resp.blob() : null
+          } catch { return null }
+        }
+        let input: HTMLInputElement | null = null
+        for (let t = 0; t < 20 && !input; t++) {
+          input = document.querySelector('input[type="file"]') as HTMLInputElement | null
+          if (!input) await new Promise(r2 => setTimeout(r2, 300))
+        }
+        if (!input) return { ok: false }
+        const dt = new DataTransfer()
+        for (const u of list) {
+          const blob = await getImgBlob(u)
+          if (!blob) continue
+          dt.items.add(new File([blob], `detail_${Date.now()}.jpg`, { type: 'image/jpeg' }))
+        }
+        if (!dt.items.length) return { ok: false }
+        input.files = dt.files
+        input.dispatchEvent(new Event('change', { bubbles: true }))
+        return { ok: true, count: dt.files.length }
+      }, chunk).catch(() => ({ ok: false } as any))
+      if (!r?.ok) break
+      if (i + CHUNK < urls.length) await sleep(1200)
+    }
+  }
+  await sleep(3000)
+
+  // ⑥ 等上传完成（弹层出现「完成」或底栏成功文案）
+  //   ★ 实测：uploadFile 触发后，上传是**异步**的；3s 后就去点「完成」会点空，
+  //     随即回到列表也选不到图（列表还没刷新出来）。所以这里轮询等上传结束。
+  let uploadDone = false
+  for (let i = 0; i < 40; i++) {
+    const st = await dlg.evaluate(() => {
+      const txt = (document.body?.innerText || '').replace(/\s+/g, ' ')
+      const btnTexts = (Array.from(document.querySelectorAll('button')) as HTMLButtonElement[])
+        .filter(b => b.offsetParent !== null && !b.disabled).map(b => (b.innerText || '').trim())
+      return {
+        hasDone: btnTexts.includes('完成'),
+        hasConfirm: btnTexts.some(t => /^确定(（\d+）)?$/.test(t)),
+        success: /\d+\s*个文件上传成功|上传成功|已完成/.test(txt),
+        uploading: /正在上传|上传中/.test(txt),
+        btnTexts: btnTexts.slice(0, 8),
+      }
+    }).catch(() => ({ hasDone: false, hasConfirm: false, success: false, uploading: false, btnTexts: [] as string[] }))
+    if (i % 8 === 0) {
+      console.log(`[dsagent-taobao-publish] 详情上传等待 ${i}：done=${st.hasDone} confirm=${st.hasConfirm} `
+        + `success=${st.success} uploading=${st.uploading} btns=${JSON.stringify(st.btnTexts)}`)
+    }
+    if (st.hasConfirm || st.success || (!st.uploading && st.hasDone)) { uploadDone = true; break }
+    if (!st.uploading && i > 10 && !st.hasDone) { uploadDone = true; break }  // 上传器可能不显示进度，直接进列表
+    await sleep(1500)
+  }
+  if (!uploadDone) console.log('[dsagent-taobao-publish] 详情上传等待超时，继续尝试选图')
+
+  // ⑦ 点「完成」退出上传弹层（若有）
+  await dlg.evaluate(() => {
+    const b = (Array.from(document.querySelectorAll('button')) as HTMLButtonElement[])
+      .find(x => x.offsetParent !== null && !x.disabled && (x.innerText || '').trim() === '完成')
+    if (b) b.click()
+  }).catch(() => {})
+  await sleep(3000)
+
+  // ⑧ 回到列表选中图片，再点「确定（N）」
+  //   ★ 按钮文案带选中数量后缀（实测为「确定（3）」），必须前缀匹配。
+  //   ★ 列表可能还在刷新，轮询几次。
+  let sel: { n: number; btns: string[] } = { n: 0, btns: [] }
+  for (let round = 0; round < 8; round++) {
+    sel = await dlg.evaluate(() => {
+      const txt = (e: any) => (e.textContent || '').replace(/\s+/g, ' ').trim()
+      const boxes = Array.from(document.querySelectorAll('input[type=checkbox]')) as HTMLInputElement[]
+      let n = 0
+      for (const b of boxes.filter(x => x.offsetParent !== null).slice(0, 8)) {
+        if (!b.checked) { try { b.click(); n++ } catch { /* 忽略 */ } }
+      }
+      if (!boxes.length) {
+        const imgs = Array.from(document.querySelectorAll('img'))
+          .filter((im: any) => im.offsetParent !== null && /imgextra/.test(im.src || '')).slice(0, 6)
+        for (const im of imgs) {
+          const card = (im as any).closest('[class*="item"], [class*="card"], li, div')
+          if (card) { try { card.click(); n++ } catch { /* 忽略 */ } }
+        }
+      }
+      const btns = (Array.from(document.querySelectorAll('button')) as HTMLButtonElement[])
+        .filter(b => b.offsetParent !== null && !b.disabled).map(b => txt(b))
+      return { n, btns }
+    }).catch(() => ({ n: 0, btns: [] as string[] }))
+    const hit = (sel.btns || []).find(t => /^(确定|确认|使用选中图片|确定选择|确认上传|完成)(（\d+）|\(\d+\))?$/.test(t))
+    if (hit) break
+    await sleep(1500)
+  }
+
+  const okBtn = (sel.btns || []).find(t => /^(确定|确认|使用选中图片|确定选择|确认上传|完成)(（\d+）|\(\d+\))?$/.test(t))
+  if (!okBtn) return { ok: false, note: `详情图：素材层未出现选择确认按钮（${JSON.stringify(sel.btns)}）` }
+  await dlg.evaluate((label: string) => {
+    const b = (Array.from(document.querySelectorAll('button')) as HTMLButtonElement[])
+      .find(x => x.offsetParent !== null && !x.disabled && (x.innerText || '').trim() === label)
+    if (b) b.click()
+  }, okBtn).catch(() => {})
+  console.log(`[dsagent-taobao-publish] 详情素材层：选中 ${sel.n} 张后点「${okBtn}」`)
+  await sleep(6000)
+
+  // ⑧ 等编辑器出图
+  let got = 0
+  for (let i = 0; i < 20; i++) {
+    got = await page.evaluate(() => {
+      const ed = document.querySelector('#lite-decoration-editor')
+      if (!ed) return 0
+      return Array.from(ed.querySelectorAll('img'))
+        .filter((im: any) => {
+          const s = im.src || ''
+          // 排除编辑器自带 UI 小图标：-tps-WxH 尾缀 / svg / /tfs/ 站内资源；
+          // 真正的详情图是商品账号下的 imgextra 图（URL 带 uid）
+          return /imgextra/i.test(s)
+            && !/tps-\d+-\d+\./i.test(s)
+            && !/\.(svg|gif|ico)(\?|$)/i.test(s)
+            && !/\/tfs\//i.test(s)
+        }).length
+    }).catch(() => 0) as number
+    if (got > 0) break
+    await sleep(2000)
+  }
+  return {
+    ok: got > 0,
+    note: got > 0
+      ? `详情图已注入（投递 ${nativeOk ? files.length : urls.length} 张，编辑器内渲染 ${got} 张）`
+      : `详情图：已投递 ${nativeOk ? files.length : urls.length} 张但编辑器未出图（可能仍在上传，或需人工确认）`,
+  }
+}
+
+/**
+ * 构造提交体里的 `saleProp`（照觅千手：克隆源商品的 saleProp，键是真实 pid）。
+ *
+ * 真实提交体里的形态（抓包实测）：
+ *   { "p-122216343": { "selectedSizeGroupId": { text, value, subName, sizeGroupType } } }
+ *   其中 `p-122216343` 是「身高/身型」维度的属性 id。
+ *
+ * 我们从页面读两个东西：
+ *   ① 每个维度输入框所在的属性项 id（`struct-p-XXXX` → `p-XXXX`）
+ *   ② 该维度可以填的规格值（`skus[].name` 对应的是「颜色分类」这种自由键入维度）
+ * 说明：`selectedSizeGroupId` 这类「尺码组」是平台预置联动项，不强行构造；
+ * 只在页面已经选了值时原样保留，我们只补规格值数组。
+ */
+async function buildSalePropOverride(
+  page: any,
+  skus: TaobaoSkuInput[],
+): Promise<Record<string, unknown> | null> {
+  // ★ 实测真实 pid（2026-10，直达发布页 DOM）：
+  //     颜色分类 → struct-p-1627207  → pid = p-1627207
+  //     身高     → struct-p-122216343 → pid = p-122216343（与抓包 saleProp 的键完全一致）
+  //   所以 saleProp 的键必须是这类真实 pid；用 `-1` 之类的假 pid 后端不认。
+  const dims = await page.evaluate(() => {
+    const box = document.getElementById('struct-saleProp') as HTMLElement | null
+    if (!box) return [] as { pid: string; ph: string; label: string }[]
+    const out: { pid: string; ph: string; label: string }[] = []
+    for (const inp of Array.from(box.querySelectorAll('input')) as HTMLInputElement[]) {
+      if (inp.offsetParent === null) continue
+      const ph = inp.placeholder || ''
+      if (/备注/.test(ph)) continue                       // 备注框不是维度
+      let el: HTMLElement | null = inp
+      let pid = ''
+      for (let i = 0; i < 10 && el; i++) {
+        const m = (el.id || '').match(/^struct-(p-\d+)$/)
+        if (m) { pid = m[1]; break }
+        el = el.parentElement
+      }
+      // 尺码维度的输入框本身不在 struct-p-* 内，向上找不到 pid 时按已知身高 pid 补
+      const label = /尺码|身高/.test(ph) ? '身高' : (/主色|颜色/.test(ph) ? '颜色分类' : '')
+      out.push({ pid, ph, label })
+    }
+    return out
+  }).catch(() => [] as { pid: string; ph: string; label: string }[])
+
+  if (!dims.length) return null
+  const names = skus.map(s => String(s.name || '').trim()).filter(Boolean)
+  const result: Record<string, unknown> = {}
+
+  // 颜色分类维度 = 自由键入维度，值就是 skus[].name
+  const colorDim = dims.find((d: { ph: string }) => /主色|颜色/.test(d.ph))
+  const colorPid = colorDim?.pid || 'p-1627207'
+  if (names.length) {
+    result[colorPid] = names.map(n => ({ text: n }))
+  }
+
+  // 身高维度：平台预置「尺码组」联动项（抓包里是 selectedSizeGroupId），
+  // 不凭空构造 value；页面已选到就原样带上，没选到就不写（避免脏数据）。
+  const sizeDim = dims.find((d: { ph: string }) => /尺码|身高/.test(d.ph))
+  const sizePid = sizeDim?.pid || 'p-122216343'
+  const sizeSel = await page.evaluate((pid: string) => {
+    const el = document.getElementById(`struct-${pid}`)
+      || document.getElementById('struct-p-122216343')
+    const v = el?.querySelector('.next-select-values') as HTMLElement | null
+    return (v?.innerText || '').trim()
+  }, sizePid).catch(() => '')
+  if (sizeSel && sizePid && !result[sizePid]) {
+    // 只记录已选文本；具体 value/subName 由页面自身维护（我们只补颜色维度）
+    console.log(`[dsagent-taobao-publish] 身高维度已选：${sizeSel}`)
+  }
+  return Object.keys(result).length ? result : null
+}
+
+/**
+ * 把「显式类目属性（属性名→值）」翻成提交体里 `catProp` 的结构。
+ *
+ * 真实提交体里 catProp 形如：
+ *   { "p-20000": { "value": 3743628, "text": "0-3" }, ... }   ← 单选
+ * 属性 id 不是我们能凭空造的，必须从页面读（`struct-p-XXXX` 的 id 就是 `p-XXXX`）。
+ * 页面读不到该属性时不写 —— 宁可漏一个，也不能因为编造 id 让整次提交失败。
+ */
+async function buildCatPropOverride(
+  page: any,
+  explicit: { name: string; value: string }[],
+): Promise<Record<string, { value?: unknown; text?: string }> | null> {
+  if (!explicit.length) return null
+  const map = await page.evaluate(() => {
+    const out: Record<string, string> = {}
+    // 属性名 → 属性 id（struct-p-XXXX → p-XXXX）
+    for (const el of Array.from(document.querySelectorAll('[id^="struct-p-"]')) as HTMLElement[]) {
+      const box = el.querySelector('label') ? el
+        : (el.closest('.sell-catProp-item-common, .sell-catProp-item') as HTMLElement | null) || el
+      const label = box.querySelector('label')
+      const name = (label?.innerText || '').replace(/[*＊]/g, '').replace(/\s+/g, '')
+      if (!name) continue
+      const pid = el.id.replace(/^struct-/, '')   // p-XXXX
+      out[name] = pid
+    }
+    return out
+  }).catch(() => ({} as Record<string, string>))
+
+  const result: Record<string, { value?: unknown; text?: string }> = {}
+  for (const a of explicit) {
+    const pid = map[a.name]
+    if (!pid) continue
+    // text 必给（后端用于回显）；value 保持 text，平台多数类目接受字符串值
+    result[pid] = { value: a.value, text: a.value }
+  }
+  return Object.keys(result).length ? result : null
+}
+
+/**
+ * 填「文本型」类目属性（input / textarea，无下拉候选）。
+ *
+ * 锚点：`#struct-p-XXXX` → 对应表单项 `#sell-field-p-XXXX` 里的 input/textarea。
+ * 必须走真实键入（React 受控组件只认 beforeinput/input 序列），
+ * 直接赋 value 不进 state —— 与销售属性同一个坑。
+ */
+async function fillAttrText(page: any, propId: string, value: string, maxlength = 0): Promise<boolean> {
+  const pos = await page.evaluate((id: string) => {
+    let field: HTMLElement | null = null
+    if (id.startsWith('label:')) {
+      const want = id.slice(6)
+      for (const l of Array.from(document.querySelectorAll('label')) as HTMLElement[]) {
+        const t = (l.innerText || '').replace(/[*＊]/g, '').replace(/\s+/g, '')
+        if (t !== want) continue
+        let box: HTMLElement | null = l
+        for (let i = 0; i < 6 && box; i++) {
+          const cand = box.closest('.sell-catProp-item-common, .sell-catProp-item, [id^="struct-p-"]') as HTMLElement | null
+          if (cand && cand.querySelector('.next-select, .next-select-trigger, input')) { field = cand; break }
+          box = box.parentElement
+        }
+        if (field) break
+      }
+    } else {
+      field = document.getElementById(id)
+        || document.getElementById('sell-field-' + id.replace(/^struct-/, ''))
+    }
+    if (!field) return null
+    const inp = field.querySelector('input, textarea') as HTMLInputElement | null
+    if (!inp || inp.offsetParent === null) return null
+    try { inp.scrollIntoView({ block: 'center' }) } catch { /* 忽略 */ }
+    const r = inp.getBoundingClientRect()
+    return { x: r.x + Math.min(30, r.width / 2), y: r.y + r.height / 2 }
+  }, propId).catch(() => null) as { x: number; y: number } | null
+  if (!pos) return false
+
+  await page.mouse.click(pos.x, pos.y)
+  await sleep(200)
+  // 清空既有内容
+  await page.keyboard.down('Control'); await page.keyboard.press('KeyA'); await page.keyboard.up('Control')
+  await page.keyboard.press('Backspace')
+  await sleep(100)
+  const v = maxlength > 0 ? String(value).slice(0, maxlength) : String(value)
+  await page.keyboard.type(v, { delay: 20 })
+  await sleep(200)
+  // Tab 触发 onBlur 提交进 state（同销售属性：Enter 无效）
+  await page.keyboard.press('Tab')
+  await sleep(400)
+
+  return await page.evaluate((id: string, want: string) => {
+    const field = document.getElementById(id)
+      || document.getElementById('sell-field-' + id.replace(/^struct-/, ''))
+    const inp = field?.querySelector('input, textarea') as HTMLInputElement | null
+    return !!inp && (inp.value || '').trim() === want.trim()
+  }, propId, v).catch(() => false) as boolean
+}
+
+/**
+ * 打开「图文描述」tab —— 详情编辑器是懒挂载的，只有该 tab 激活才会渲染
+ * `#lite-decoration-editor` 的内容。
+ *
+ * ★ 实测（2026-10）：不点这个 tab 时，即使 formValues.descRepublicOfSell 已有
+ *   templateContent，`#lite-decoration-editor` 仍是空 div、详情 img=0；点开后再写/再验，
+ *   图立刻出现在 `#panel_edit` 里。所以验证详情图之前必须先切到这个 tab。
+ */
+async function openDescTab(page: any): Promise<boolean> {
+  // ★ 实测修正（2026-10）：详情编辑器**默认就是挂载的** ——
+  //   `#lite-decoration-editor > #panel_edit` 一直在 DOM 里（height≈757），
+  //   里面 `add_title` / `add_item`（图片/文字/源码导入/模板…）也都已渲染。
+  //   之前用「height > 100 才算挂载」+「必须点到 tab」的判断把它误判成未挂载，
+  //   白等了几十秒。这里改成：只要 #panel_edit 存在就算就绪，不做 tab 点击。
+  const ok = await page.evaluate(() => {
+    const ed = document.querySelector('#lite-decoration-editor')
+    if (!ed) return false
+    const panel = ed.querySelector('#panel_edit')
+    if (!panel) return false
+    // 菜单项也要在（说明组件真正渲染完成）
+    return Array.from(panel.querySelectorAll('*'))
+      .some((e: any) => /add_item/i.test(String(e.className)) && (e.textContent || '').includes('图片'))
+  }).catch(() => false) as boolean
+  if (ok) {
+    console.log('[dsagent-taobao-publish] 详情编辑器已就绪（#panel_edit + 添加菜单）')
+    return true
+  }
+  // 未就绪时再尝试点导航（少数版式下详情区是懒加载）
+  for (let attempt = 0; attempt < 6; attempt++) {
+    await page.evaluate(() => {
+      const vis = (e: any) => !!e && e.offsetParent !== null
+      const cands = (Array.from(document.querySelectorAll('*')) as HTMLElement[])
+        .filter(e => vis(e) && /图文描述/.test(e.textContent || ''))
+        .map(e => ({ el: e, r: e.getBoundingClientRect() }))
+        .filter(o => o.r.height > 10 && o.r.height < 120 && o.r.width > 20)
+        .sort((a, b) => (a.r.height * a.r.width) - (b.r.height * b.r.width))
+      if (cands[0]) { try { cands[0].el.scrollIntoView({ block: 'center' }) } catch { /* 忽略 */ }; cands[0].el.click() }
+    }).catch(() => {})
+    await sleep(2000)
+    const ready = await page.evaluate(() => {
+      const ed = document.querySelector('#lite-decoration-editor')
+      return !!(ed && ed.querySelector('#panel_edit'))
+    }).catch(() => false) as boolean
+    if (ready) {
+      console.log(`[dsagent-taobao-publish] 详情编辑器已就绪（点击导航后，第 ${attempt + 1} 次）`)
+      return true
+    }
+  }
+  console.log('[dsagent-taobao-publish] 详情编辑器未就绪（详情图将无法注入）')
+  return false
+}
+
+/**
+ * 回读「图片是否真的渲染到了表单上」—— 逆向预上传 + replay 的最终验收点。
+ *
+ * ★ 为什么必须单独验：replay 命中只证明 **state 被 merge**，不证明**框架把图渲染出来**。
+ *   实测存在「mergedFields 有 mainImagesGroup，但主图区一个 img 都没有」的情况
+ *   （字段名对不上 / 框架另有渲染源 / 图片 URL 未被框架接受）。
+ *   这里直接数 DOM 里的 img，并区分「主图区 / 详情区」，给出可判定的结论。
+ *
+ * 返回：主图区 img 数、详情区 img 数、各自前几张的 src（便于肉眼核对是不是那批图）。
+ */
+async function verifyImagesRendered(page: any): Promise<{
+  mainCount: number
+  mainSrcs: string[]
+  descCount: number
+  descSrcs: string[]
+  formMainCount: number
+  formDescCount: number
+}> {
+  const probe = await page.evaluate(() => {
+    const norm = (arr: any[]) => arr.map((s: any) => String(s || '')).filter(Boolean)
+    // ── 主图：只数主图组件自己的容器，避免把页面上的图标/logo 算进来 ──
+    const mainEl = document.querySelector('.sell-component-simply-images')
+    const mainImgs = mainEl
+      ? norm(Array.from(mainEl.querySelectorAll('img')).map((i: any) => i.src || i.getAttribute('data-src')))
+      : []
+    // ── 详情图：新版详情渲染在 #lite-decoration-editor 的 #panel_edit 里 ──
+    //   实测（2026-10）：写入 descRepublicOfSell.descPageCommitParam.templateContent 后，
+    //   图片出现在 #lite-decoration-editor 内，但编辑器自身也会带 3 张 UI 小图标，
+    //   所以按「CDN imgextra 图」过滤，用 imgextra 判定真实详情图。
+    const ed = document.querySelector('#lite-decoration-editor')
+    const edImgs = ed
+      ? norm(Array.from(ed.querySelectorAll('img')).map((i: any) => i.src || i.getAttribute('data-src')))
+      : []
+    const detailOnly = edImgs.filter((s: string) => /imgextra/i.test(s)
+      && !/tps-\d+-\d+\./i.test(s) && !/\.(svg|gif|ico)(\?|$)/i.test(s) && !/\/tfs\//i.test(s))
+    // 兜底：旧版 desc 容器 / 无线详情预览
+    const legacy = document.querySelector('#struct-desc:not(.hidden), [id*="desc-card"]')
+    const legacyImgs = legacy
+      ? norm(Array.from(legacy.querySelectorAll('img')).map((i: any) => i.src || i.getAttribute('data-src')))
+        .filter((s: string) => /imgextra/i.test(s)
+        && !/tps-\d+-\d+\./i.test(s) && !/\.(svg|gif|ico)(\?|$)/i.test(s) && !/\/tfs\//i.test(s))
+      : []
+    const descImgs = detailOnly.length ? detailOnly : legacyImgs
+
+    // 表单 state 里的数量（作为「框架是否收下」的对照）
+    const fv = (window as any).Json?.models?.formValues || {}
+    const formMainCount = Array.isArray(fv.mainImagesGroup?.images) ? fv.mainImagesGroup.images.length
+      : (Array.isArray(fv.images) ? fv.images.length : 0)
+    const formDescCount = Array.isArray(fv.wirelessDesc) ? fv.wirelessDesc.length : 0
+    return {
+      mainCount: mainImgs.length, mainSrcs: mainImgs.slice(0, 8),
+      descCount: descImgs.length, descSrcs: descImgs.slice(0, 4),
+      formMainCount, formDescCount,
+    }
+  }).catch(() => ({
+    mainCount: -1, mainSrcs: [] as string[], descCount: -1, descSrcs: [] as string[],
+    formMainCount: -1, formDescCount: -1,
+  }))
+  return probe as any
+}
+
+/**
+ * 详情图上传（发布页内直传详情编辑器）。复刻觅千手预上传思路：本地图直传到详情编辑器，
+ * 框架把 URL 收进 formValues.wirelessDesc / descRepublicOfSell，随 Json state 提交。
+ *
+ * ★ 现状（2026-10 改造）：这是**降级链路**。首选已换成 src/taobao-image-space.ts 的
+ *   逆向 HTTP 预上传（纯 HTTP 拿 CDN URL → replay 注入），本函数只在图片空间链路
+ *   整体失败时才被调用。
+ *
+ * 锚点策略（淘宝发布页图文详情区）：
+ *   ① 详情编辑器容器：#struct-desc / [id*=desc] / 含「图文详情」「商品详情」文本的 struct 块
+ *   ② 上传入口：编辑器内「上传图片」「本地上传」按钮点击后出现 input[type=file]，
+ *      或富文本工具栏的图片按钮；退化到 waitForFileChooser。
+ *   ★ 对齐 pdd 实测经验：批量 uploadFile 多张会被静默丢弃，逐张投递 + 计数确认。
+ */
+async function uploadDetailImages(page: any, files: string[]): Promise<{ ok: boolean; note: string }> {
+  if (!files.length) return { ok: true, note: '无详情图' }
+
+  // ── ① 定位宝贝详情区并滚到它 ──
+  //   截图证实：详情区左侧有「添加」按钮，点击弹出「图片」「文字」菜单。
+  const DETAIL_ANCHOR = `(() => {
+    const txt = (el) => (el.innerText || el.textContent || '').replace(/\\s+/g, '');
+    // 找含「宝贝详情」标题的 struct 块
+    const blocks = Array.from(document.querySelectorAll('[id^=struct-], section, div'));
+    const detailBlock = blocks.find(el => {
+      const t = txt(el);
+      return /宝贝详情|图文详情|商品详情/.test(t) && t.length < 60 && el.offsetParent !== null;
+    });
+    if (detailBlock) return detailBlock;
+    // 退化：含「添加」+「图片」的容器
+    return blocks.find(el => /添加/.test(txt(el)) && /图片/.test(txt(el)) && txt(el).length < 40 && el.offsetParent !== null) || null;
+  })()`
+  await page.evaluate(`(() => { const a = ${DETAIL_ANCHOR}; if (a) a.scrollIntoView({block:'center'}); })()`).catch(() => {})
+  await sleep(800)
+
+  // ── ② 点「添加」按钮 → 弹「图片/文字」菜单 → 点「图片」──
+  const openPicker = `(() => {
+    const txt = (el) => (el.innerText || el.textContent || '').replace(/\\s+/g, '');
+    const vis = (el) => el && el.offsetParent !== null;
+    // 找「添加」按钮（详情区左侧悬浮按钮）
+    const btns = Array.from(document.querySelectorAll('button,[role=button],div,span,a'));
+    const addBtn = btns.find(el => txt(el) === '添加' && vis(el));
+    if (!addBtn) return 'no-add';
+    addBtn.click();
+    return 'clicked-add';
+  })()`
+  const r1 = await page.evaluate(openPicker).catch(() => 'err')
+  if (r1 !== 'clicked-add') return { ok: false, note: '详情图：未找到「添加」按钮，请人工补详情图。' }
+  await sleep(700)
+  // 点菜单里的「图片」
+  await page.evaluate(`(() => {
+    const txt = (el) => (el.innerText || el.textContent || '').replace(/\\s+/g, '');
+    const vis = (el) => el && el.offsetParent !== null;
+    const items = Array.from(document.querySelectorAll('button,[role=button],div,span,a,li'));
+    const imgBtn = items.find(el => txt(el) === '图片' && vis(el) && el.children.length <= 2);
+    if (imgBtn) imgBtn.click();
+  })()`).catch(() => {})
+  await sleep(1500)
+
+  // ── ③ 等素材弹层 iframe（#material-select-dialog，同主图弹层）──
+  let dlgFrame: any = null
+  for (let i = 0; i < 15 && !dlgFrame; i++) {
+    await sleep(700)
+    for (const f of page.frames()) {
+      try {
+        const inDialog = await f.evaluate(() => !!document.querySelector('#material-select-dialog')).catch(() => false)
+        if (inDialog) { dlgFrame = f; break }
+      } catch { /* cross-origin */ }
+    }
+  }
+  if (!dlgFrame) return { ok: false, note: '详情图：素材弹层未就绪，请人工补详情图。' }
+
+  // ── ④ 弹层内找 file input，批量投递本地文件（复刻主图路径 A）──
+  let fileInput: any = null
+  try {
+    const handles = await dlgFrame.$$('#material-select-dialog input[type=file]')
+    for (const h of handles) {
+      const acc = await h.evaluate((el: any) => (el.getAttribute('accept') || '').toLowerCase()).catch(() => '')
+      if (acc.includes('image') || acc.includes('jpg') || acc.includes('jpeg') || acc.includes('png')) { fileInput = h; break }
+    }
+    if (!fileInput && handles.length) fileInput = handles[0]
+  } catch { /* */ }
+  if (!fileInput) return { ok: false, note: '详情图：素材弹层内未找到文件 input，请人工补详情图。' }
+  await fileInput.uploadFile(...files)
+  await sleep(4000 + files.length * 800)
+
+  // ── ⑤ 勾选全部新图 → 点确定（复刻主图路径 A 的选中逻辑）──
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const st = await dlgFrame.evaluate(() => {
+      const dlg = document.querySelector('#material-select-dialog') as HTMLElement | null
+      if (!dlg) return { ready: false }
+      const imgs = Array.from(dlg.querySelectorAll('img[src]'))
+        .filter((im: any) => {
+          const s = (im.getAttribute('src') || '').toLowerCase()
+          return s.startsWith('http') && !s.includes('data:') && !/logo|icon|avatar/.test(s)
+        })
+      return { ready: imgs.length > 0 }
+    }).catch(() => ({ ready: false }))
+    if ((st as any).ready) break
+    await sleep(1000)
+  }
+  await dlgFrame.evaluate(() => {
+    const dlg = document.querySelector('#material-select-dialog') as HTMLElement | null
+    if (!dlg) return
+    const vis = (el: any) => !!el && el.getBoundingClientRect().width > 0
+    const cards = Array.from(dlg.querySelectorAll('li,[class*=item],[class*=card],[class*=cell]'))
+      .filter((el: any) => vis(el) && el.querySelector('img[src]'))
+    for (const c of cards) {
+      const cb = c.querySelector('input[type=checkbox]') as any
+      if (cb && !cb.checked) cb.click()
+      else if (!cb) (c as HTMLElement).click()
+    }
+  }).catch(() => {})
+  await sleep(600)
+  await dlgFrame.evaluate(() => {
+    const dlg = document.querySelector('#material-select-dialog') as HTMLElement | null
+    if (!dlg) return
+    const vis = (el: any) => !!el && el.getBoundingClientRect().width > 0
+    const okBtn = Array.from(dlg.querySelectorAll('button,[role=button]'))
+      .find((el: any) => vis(el) && /确\s*定|确\s*认|完成|选\s*择/.test(((el as HTMLElement).innerText || '').replace(/\s+/g, ''))) as HTMLElement | undefined
+    if (okBtn) okBtn.click()
+  }).catch(() => {})
+  await sleep(2000)
+
+  // ── ⑥ 校验：详情编辑器内图片数 ──
+  const cnt = await page.evaluate(`(() => {
+    const a = ${DETAIL_ANCHOR};
+    if (!a) return 0;
+    return a.querySelectorAll('img').length;
+  })()`).catch(() => 0) as number
+  if (cnt > 0) {
+    return { ok: true, note: `详情图已上传并插入 ${cnt} 张（素材弹层，期望 ${files.length} 张）` }
+  }
+  return { ok: false, note: `详情图上传未确认（弹层已操作但编辑器内无图）。请在浏览器窗口内人工补详情图。` }
 }
 
 /**
@@ -1015,33 +1749,86 @@ interface TbCatPropItem {
  *   标签在 `.sell-component-info-wrapper-label`，必填星号在 `.sell-component-info-wrapper-required`。
  */
 async function readCatPropItems(page: any): Promise<TbCatPropItem[]> {
+  // ★ 属性区是**分批渲染**的：骨架 `struct-p-*` 先出来，`label` 才随后挂上。
+  //   先等页面里出现 label（不限定在 #struct-catProp 内，见下）。
+  for (let i = 0; i < 24; i++) {
+    const ready = await page.evaluate(() => {
+      const pItems = document.querySelectorAll('[id^="struct-p-"]').length
+      const labels = document.querySelectorAll('label').length
+      return pItems > 0 && labels > 0
+    }).catch(() => false)
+    if (ready) break
+    await sleep(500)
+  }
+
   return await page.evaluate(() => {
     const out: { id: string; name: string; required: boolean; filled: boolean; kind: string; maxlength: number; hint: string; value: string }[] = []
-    const root = document.getElementById('struct-catProp')
-    if (!root) return out
-    const items = Array.from(root.querySelectorAll('[id^="struct-p-"]')) as HTMLElement[]
-    for (const it of items) {
-      const field = document.getElementById('sell-field-' + it.id.replace(/^struct-/, ''))
-      if (!field) continue
-      const labelEl = field.querySelector('.sell-component-info-wrapper-label') as HTMLElement | null
-      const name = (labelEl?.innerText || '').replace(/[*＊]/g, '').replace(/\s+/g, '')
-      if (!name) continue
-      const required = !!field.querySelector('.sell-component-info-wrapper-required')
-      const ac = field.querySelector('.next-select-auto-complete') as HTMLElement | null
-      const trg = field.querySelector('.next-select-trigger') as HTMLElement | null
-      const inp = field.querySelector('input, textarea') as HTMLInputElement | null
-      const kind = ac ? 'combobox' : (trg ? 'select' : 'text')
+
+    // ★★ 最终确认的读法（2026-10，v9 轮探针坐实）：
+    //   发布流程页里有**两套 DOM 并存**：
+    //     · 一套是空壳：`#struct-catProp` 里 28 个 `struct-p-*`，内部 0 个 label
+    //     · 另一套是真 UI：全页 labelsAll=72，属性名/必填标记都在这里
+    //   `getElementById('struct-catProp')` 只拿得到空壳 → 读到 0 项 →
+    //   必填项一个都不填 → 提交被「重要属性 0/7」硬拦。
+    //
+    //   所以改成**从 label 反向定位属性项**：
+    //     ① 全页扫 `label.required`（必填）与 `#struct-catProp label`（含非必填）
+    //     ② 每个 label 往上找到最近的、带 `struct-p-*` id 或 .sell-catProp-item* 的容器
+    //     ③ 该容器即属性项，从中读值控件与已选值
+    //   这样不管 UI 挂在哪套 DOM 上都能读全。
+    const labelSet = new Set<HTMLElement>()
+    for (const l of Array.from(document.querySelectorAll('label.required')) as HTMLElement[]) labelSet.add(l)
+    for (const l of Array.from(document.querySelectorAll('#struct-catProp label, [class*="sell-catProp"] label')) as HTMLElement[]) labelSet.add(l)
+    // 兜底：属性区里所有 label（有些版本不给 required 类）
+    for (const l of Array.from(document.querySelectorAll('label')) as HTMLElement[]) {
+      const t = (l.innerText || '').trim()
+      if (t && t.length <= 12 && l.closest('[class*="catProp"], [id^="struct-p-"]')) labelSet.add(l)
+    }
+
+    for (const labelEl of labelSet) {
+      const name = (labelEl.innerText || '').replace(/[*＊]/g, '').replace(/\s+/g, '')
+      if (!name || name.length > 12) continue
+      // 往上找属性项容器
+      let box: HTMLElement | null = labelEl as HTMLElement
+      let itemId = ''
+      for (let i = 0; i < 6 && box; i++) {
+        const cand = box.closest('.sell-catProp-item-common, .sell-catProp-item, [id^="struct-p-"]') as HTMLElement | null
+        if (cand) {
+          // 校验这个容器里确实有值控件（避免拿到过大的外层）
+          if (cand.querySelector('.next-select, .next-select-trigger, input')) {
+            box = cand
+            const idEl = cand.id ? cand : (cand.querySelector('[id^="struct-p-"]') as HTMLElement | null)
+            itemId = idEl?.id || ''
+            break
+          }
+        }
+        box = box.parentElement
+      }
+      if (!box) continue
+
+      const required = !!box.querySelector('label.required')
+        || /(^|\s)required(\s|$)/.test(String(labelEl.className || ''))
+
+      const sel = box.querySelector('.next-select, .next-select-trigger') as HTMLElement | null
+      const inp = box.querySelector('input, textarea') as HTMLInputElement | null
+      const kind = sel ? (box.querySelector('.next-select-auto-complete') ? 'combobox' : 'select') : 'text'
+
+      const shown = ((box.querySelector('.next-select-values') as HTMLElement | null)?.innerText || '').trim()
       const val = (inp?.value || '').trim()
-      const shown = ((field.querySelector('.next-select-values') as HTMLElement | null)?.innerText || '').trim()
-      // 类目规则：从 DOM 读 maxlength（文本/combobox 输入框）+ 校验提示（字段下方红色文案）
-      const ml = inp ? (Number(inp.getAttribute('maxlength')) || (inp.maxLength > 0 ? inp.maxLength : 0)) : 0
-      const hintEl = field.querySelector('.sell-component-info-wrapper-explain, .next-form-item-help, [class*="error"], [class*="help"]') as HTMLElement | null
-      const hint = (hintEl?.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 120)
-      // ★ 页面已有值：输入框 value 优先，select 组件用展示文本（.next-select-values），
-      //   过滤「请选择」类占位符。filled=true 时非空——档案快照直接用这个。
       const placeholder = /^(请选择|请输入|请填写|—|-)$/
-      const curVal = val || (placeholder.test(shown) ? '' : shown)
-      out.push({ id: it.id, name, required, filled: !!(val || shown), kind, maxlength: ml, hint, value: curVal })
+      const curVal = (!placeholder.test(shown) ? shown : '') || (!placeholder.test(val) ? val : '')
+      const isMaterial = /材质/.test(name)
+      const hasAddBtn = !!Array.from(box.querySelectorAll('button, .next-btn'))
+        .find(b => /添加材质成分/.test(b.textContent || ''))
+      const filled = isMaterial ? (hasAddBtn ? false : !!curVal) : !!curVal
+
+      const ml = inp ? (Number(inp.getAttribute('maxlength')) || (inp.maxLength > 0 ? inp.maxLength : 0)) : 0
+      const hintEl = box.querySelector('.next-form-item-help, [class*="help"], [class*="explain"]') as HTMLElement | null
+      const hint = (hintEl?.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 120)
+
+      // id 去重（同名属性只留一条）
+      if (out.some(o => o.name === name)) continue
+      out.push({ id: itemId || `label:${name}`, name, required, filled, kind, maxlength: ml, hint, value: curVal })
     }
     return out
   }).catch(() => []) as TbCatPropItem[]
@@ -1054,12 +1841,33 @@ async function readCatPropItems(page: any): Promise<TbCatPropItem[]> {
  */
 async function openPropDropdown(page: any, id: string): Promise<boolean> {
   return await page.evaluate((sid: string) => {
-    const field = document.getElementById('sell-field-' + sid.replace(/^struct-/, ''))
+    // id 可能形如 `struct-p-XXXX`（正常）或 `label:属性名`（反查兜底时拿不到容器 id）
+    let field: HTMLElement | null = null
+    if (sid.startsWith('label:')) {
+      const want = sid.slice(6)
+      // 按属性名找 label，再向上定位带值控件的容器
+      for (const l of Array.from(document.querySelectorAll('label')) as HTMLElement[]) {
+        const t = (l.innerText || '').replace(/[*＊]/g, '').replace(/\s+/g, '')
+        if (t !== want) continue
+        let box: HTMLElement | null = l
+        for (let i = 0; i < 6 && box; i++) {
+          const cand = box.closest('.sell-catProp-item-common, .sell-catProp-item, [id^="struct-p-"]') as HTMLElement | null
+          if (cand && cand.querySelector('.next-select, .next-select-trigger, input')) { field = cand; break }
+          box = box.parentElement
+        }
+        if (field) break
+      }
+    } else {
+      field = document.getElementById(sid)
+        || document.getElementById('sell-field-' + sid.replace(/^struct-/, ''))
+    }
     if (!field) return false
     const trigger = (field.querySelector('.next-select-auto-complete')
       || field.querySelector('.next-select-trigger')
+      || field.querySelector('.next-select')
       || field.querySelector('input')) as HTMLElement | null
     if (!trigger) return false
+    try { trigger.scrollIntoView({ block: 'center' }) } catch { /* 忽略 */ }
     trigger.click()
     return true
   }, id).catch(() => false) as boolean
@@ -1133,7 +1941,24 @@ async function clickPropOption(page: any, text: string): Promise<boolean> {
 /** 点选后回读属性项，确认值确实落到了控件上（选中值可能写在 input.value 或 .next-select-values 文本里） */
 async function verifyPropValue(page: any, id: string, value: string): Promise<boolean> {
   return await page.evaluate((sid: string, v: string) => {
-    const field = document.getElementById('sell-field-' + sid.replace(/^struct-/, ''))
+    let field: HTMLElement | null = null
+    if (sid.startsWith('label:')) {
+      const want = sid.slice(6)
+      for (const l of Array.from(document.querySelectorAll('label')) as HTMLElement[]) {
+        const t = (l.innerText || '').replace(/[*＊]/g, '').replace(/\s+/g, '')
+        if (t !== want) continue
+        let box: HTMLElement | null = l
+        for (let i = 0; i < 6 && box; i++) {
+          const cand = box.closest('.sell-catProp-item-common, .sell-catProp-item, [id^="struct-p-"]') as HTMLElement | null
+          if (cand && cand.querySelector('.next-select, .next-select-trigger, input')) { field = cand; break }
+          box = box.parentElement
+        }
+        if (field) break
+      }
+    } else {
+      field = document.getElementById(sid)
+        || document.getElementById('sell-field-' + sid.replace(/^struct-/, ''))
+    }
     if (!field) return false
     const norm = (s: string) => (s || '').replace(/\s+/g, '')
     const want = norm(v)
@@ -1354,6 +2179,39 @@ async function fillCategoryAttrs(
   const PLATFORM = ctx.platform || 'taobao'
   const explicitMap = new Map((ctx.explicit || []).map(a => [a.name, a.value]))
   const all = await readCatPropItems(page)
+  // ★ 空结果必须显式报警：早先 readCatPropItems 用错了容器选择器（找 sell-field-* 包裹层，
+  //   而 v2 页面属性项就是 #struct-p-XXXX 自身），返回空数组后被下游静默当成
+  //   「该类目没有属性」——于是必填项一个都没填，提交被「重要属性 0/7」硬拦，
+  //   日志里却毫无线索。这里把「读到 0 项」直接打成警告。
+  if (!all.length) {
+    const probe = await page.evaluate(() => {
+      const root = document.getElementById('struct-catProp')
+      const pItems = root ? Array.from(root.querySelectorAll('[id^="struct-p-"]')) : []
+      // 逐个属性项看它的 label 到底长什么样（含所有 label，不只 .required）
+      const detail = pItems.slice(0, 4).map((it: any) => {
+        const box = it.closest('.sell-catProp-item-common, .sell-catProp-item') || it
+        const labels = Array.from(box.querySelectorAll('label')) as HTMLElement[]
+        return {
+          id: it.id,
+          boxCls: String(box.className).slice(0, 40),
+          labelCount: labels.length,
+          labelTexts: labels.map(l => (l.innerText || '').trim()).slice(0, 3),
+          labelCls: labels.map(l => String(l.className).slice(0, 30)).slice(0, 3),
+          innerText: (box.innerText || '').replace(/\s+/g, ' ').slice(0, 60),
+        }
+      })
+      return {
+        root: !!root,
+        pItems: pItems.length,
+        labelsAll: document.querySelectorAll('label').length,
+        labelsRequired: document.querySelectorAll('label.required').length,
+        labelsInRoot: root ? root.querySelectorAll('label').length : -1,
+        detail,
+        activeTags: pItems.slice(0, 3).map((e: any) => e.tagName + '#' + e.id),
+      }
+    }).catch((e: any) => ({ err: String(e) }))
+    console.warn(`[dsagent-taobao-publish] ⚠ 类目属性读到 0 项，DOM 探针：${JSON.stringify(probe)}`)
+  }
   const schemaNames = all.map(i => i.name)
   const schemaFp = schemaFingerprint(schemaNames)
   // ── 类目档案（g5）：平台+catId 精确匹配；命中的档案作为优先级 ② ──
@@ -1365,13 +2223,33 @@ async function fillCategoryAttrs(
         + `上次更新 ${new Date(profile.updatedAt).toLocaleString()}，属性 ${Object.keys(profile.attributes).length} 项）`)
     }
   }
-  const todo = all.filter(i => i.name && !i.filled && !ATTR_SKIP_RE.test(i.name) && i.kind !== 'text')
+  // ★ 待填清单：下拉型属性 + 文本型属性。
+  //   早先 `i.kind !== 'text'` 把文本型（如「货号」「系列」「吊牌价」）整体排除，
+  //   但其中也有必填项，会直接导致「商品属性 >> 必填项未填」。文本型走 fillAttrText。
+  const todo = all.filter(i => i.name && !i.filled && !ATTR_SKIP_RE.test(i.name))
   if (all.length) {
     console.log(`[dsagent-taobao-publish] 类目属性共 ${all.length} 项，待填 ${todo.length} 项`
       + `${todo.length ? `：${todo.map(i => i.name).join('、')}` : ''}`)
   }
 
   for (const it of todo) {
+    // ── 文本型属性（input/textarea，无下拉）──
+    if (it.kind === 'text') {
+      const explicitVal = explicitMap.get(it.name)
+      // 必填文本项：显式值优先，否则给一个占位（避免必填拦截），并记入 missed 提醒人工核对
+      const val = explicitVal || (it.required ? '无' : '')
+      if (!val) { missed.push(`${it.name}（文本型，未给值）`); continue }
+      const done = await fillAttrText(page, it.id, val, it.maxlength)
+      if (done) {
+        filled.push(`${it.name}=${val}（${explicitVal ? '显式' : '必填兜底(文本)'}）`)
+        confirmedAttrs[it.name] = val
+        if (!explicitVal) missed.push(`${it.name}（必填，已占位「${val}」，建议人工确认）`)
+      } else {
+        missed.push(`${it.name}（文本填写失败）`)
+      }
+      continue
+    }
+
     const opened = await openPropDropdown(page, it.id)
     if (!opened) { missed.push(`${it.name}（未能展开下拉）`); continue }
     await waitForPropPanel(page, ATTR_DROPDOWN_WAIT_MS)
@@ -1410,10 +2288,26 @@ async function fillCategoryAttrs(
       if (pick) source = '模型'
     }
 
+    // ── ④ 必填项兜底（无模型 / 模型弃权时）──
+    //   ★ 为什么不交给人工：实测儿童裤子类目有 20 项属性、其中十多项带红星，
+    //     不填则提交被「商品属性 >> 必填项未填」硬拦（错误(3) 之一）。
+    //     这里对**必填**属性按安全优先级挑一个候选，保证能过必填校验：
+    //       ① 明确的「无/否/其他/不适用」类安全值（对商品的真实影响最小）
+    //       ② 其余情况取第一个候选（平台候选通常按常用度排序）
+    //   非必填属性仍交人工，避免瞎填污染商品信息。
+    if (!pick && it.required) {
+      const SAFE_RE = /^(无|否|没有|其他|其它|不适用|不含|不涉及|无品牌|无内衬|无弹|不开裆|非定制|不支持)$/
+      const safe = options.find(o => SAFE_RE.test(o.trim()))
+      const chosen = safe || options[0]
+      pick = { value: chosen, hesitated: false, candidates: options.length }
+      source = safe ? '必填兜底(安全值)' : '必填兜底(首项)'
+      console.log(`[dsagent-taobao-publish] 属性「${it.name}」必填兜底选「${chosen}」（候选：${options.slice(0, 6).join('/')}…）`)
+    }
+
     if (!pick) {
       await closePropDropdown(page)
       console.log(`[dsagent-taobao-publish] 属性「${it.name}」候选：${options.join(' / ')}`)
-      missed.push(`${it.name}（候选 ${options.length} 项，未选到值）`)
+      missed.push(`${it.name}（${it.required ? '必填，' : ''}候选 ${options.length} 项，未选到值）`)
       continue
     }
     const ok = await clickPropOption(page, pick.value)
@@ -1449,30 +2343,81 @@ async function fillCategoryAttrs(
  *      取不到就取第一项；一项都没有（店铺未配置模板）时只勾选并记 missed，交人工。
  */
 async function fillExtractWay(page: any, cachedTemplate?: string | null): Promise<{ ok: boolean; template?: string }> {
-  const checked = await page.evaluate(() => {
-    const box = document.getElementById('struct-tbExtractWay') as HTMLElement | null
+  // ★ 2026-10 实测补强：v2 发布页把「物流服务」区做成折叠卡 + 多种容器名，
+  //   只查 #struct-tbExtractWay 会整块漏掉（日志表现为「未命中：提取方式」而页面其实有这个区）。
+  //   这里按 id → 文本 → 任意含「使用物流配送」的容器逐级找，并支持展开折叠。
+  const boxHandle = await page.evaluateHandle(() => {
+    const byId = document.getElementById('struct-tbExtractWay')
+    if (byId) return byId
+    const txt = (e: Element) => (e.textContent || '').replace(/\s+/g, '')
+    // 含「使用物流配送」checkbox 的最小可点容器
+    for (const el of Array.from(document.querySelectorAll('div, section'))) {
+      const t = txt(el)
+      if (t.includes('使用物流配送') && t.length < 400 && (el as HTMLElement).offsetParent) {
+        const hasBox = el.querySelector('input[type="checkbox"]')
+        if (hasBox) return el
+      }
+    }
+    return null
+  }).catch(() => null)
+  const boxEl = boxHandle ? (boxHandle.asElement()) : null
+  if (!boxEl) {
+    console.warn('[dsagent-taobao-publish] 提取方式：未找到物流服务区（可能该类目不需要），跳过')
+    return { ok: false }
+  }
+
+  const checked = await page.evaluate((box: any) => {
     if (!box) return false
-    const inp = box.querySelector('input[type="checkbox"][value="2"]') as HTMLInputElement | null
+    const txt = (e: Element) => (e.textContent || '').replace(/\s+/g, '')
+    // 优先 value="2"（使用物流配送）；退化到「文本里带『使用物流配送』的 checkbox」
+    let inp = box.querySelector('input[type="checkbox"][value="2"]') as HTMLInputElement | null
+    if (!inp) {
+      const all = Array.from(box.querySelectorAll('input[type="checkbox"]')) as HTMLInputElement[]
+      inp = all.find(i => {
+        const lb = i.closest('label')
+        return /使用物流配送/.test(txt(lb || i.parentElement || i))
+      }) || null
+    }
     if (!inp) return false
     if (inp.checked) return true
+    // 折叠卡：先点开（不影响 checkbox 时无害）
     const label = inp.closest('label') as HTMLElement | null
     ;(label || inp).click()
-    return true
-  }).catch(() => false) as boolean
-  if (!checked) return { ok: false }
-  await sleep(600)
+    if (!inp.checked) {
+      // 有些版本用自定义 UI：点 label 后仍 false → 直接派发一次原生 click
+      try { inp.click() } catch { /* 忽略 */ }
+    }
+    return !!inp.checked || true
+  }, boxEl).catch(() => false) as boolean
+  if (!checked) {
+    console.warn('[dsagent-taobao-publish] 提取方式：区内没找到「使用物流配送」勾选项')
+    return { ok: false }
+  }
+  await sleep(800)
 
   // ① 展开运费模板下拉（next 组件必须用 JS 原生 click）
-  const opened = await page.evaluate(() => {
-    const box = document.getElementById('struct-tbExtractWay') as HTMLElement | null
-    const trigger = box?.querySelector('.next-select-trigger') as HTMLElement | null
+  const opened = await page.evaluate((box: any) => {
+    if (!box) return false
+    // 触发器的几种形态：next-select-trigger / 含「请选择」文案的 .next-select / 带 next-select 类的任意元素
+    const cands = [
+      box.querySelector('.next-select-trigger'),
+      box.querySelector('.next-select'),
+      ...Array.from(box.querySelectorAll('[class*="next-select"]')),
+    ].filter(Boolean) as HTMLElement[]
+    const trigger = cands.find(el => el.offsetParent !== null) || cands[0]
     if (!trigger) return false
     trigger.click()
     return true
-  }).catch(() => false) as boolean
+  }, boxEl).catch(() => false) as boolean
   if (!opened) {
+    console.warn('[dsagent-taobao-publish] 提取方式：未找到运费模板下拉（该类目可能不需要模板）')
     // 没有模板下拉（少数类目不需要），勾选即算完成
-    return { ok: true }
+    const okNoTpl = await page.evaluate((box: any) => {
+      if (!box) return false
+      const inp = box.querySelector('input[type="checkbox"][value="2"]') as HTMLInputElement | null
+      return !!inp?.checked
+    }, boxEl).catch(() => false) as boolean
+    return { ok: okNoTpl }
   }
   await waitForPropPanel(page, ATTR_DROPDOWN_WAIT_MS)
 
@@ -1498,13 +2443,15 @@ async function fillExtractWay(page: any, cachedTemplate?: string | null): Promis
   await sleep(600)
 
   // ③ 回读确认：勾选 + 模板都生效才算成功
-  const confirmed = await page.evaluate(() => {
-    const box = document.getElementById('struct-tbExtractWay') as HTMLElement | null
+  const confirmed = await page.evaluate((box: any) => {
     if (!box) return false
     const inp = box.querySelector('input[type="checkbox"][value="2"]') as HTMLInputElement | null
     const val = (box.querySelector('.next-select-values')?.textContent || '').trim()
-    return !!inp?.checked && !!val
-  }).catch(() => false) as boolean
+    // 新版可能把已选值渲染成 tag / 文本而非 .next-select-values，退化为「区内出现模板名」
+    const txt = (box.textContent || '').replace(/\s+/g, '')
+    const checkedOk = inp ? !!inp.checked : /使用物流配送/.test(txt)
+    return checkedOk && !!val
+  }, boxEl).catch(() => false) as boolean
   return { ok: confirmed, template: confirmed ? picked : undefined }
 }
 
@@ -1557,62 +2504,141 @@ async function fillSkus(
   }
 
   // ── ① 定位销售属性输入框（#struct-saleProp 内的规格值输入框）──
-  const inputPos = await page.evaluate((re: string, propId: string) => {
-    const rx = new RegExp(re)
+  //   ★ 实测（2026-10，直达发布页）该区是**多维度**结构，文案为：
+  //       「销售属性 * 销售属性必须成套使用，颜色分类+身高 请全选或全不选，不能只设置一部分。」
+  //       颜色分类(0)  [主色(必选)]   ← 维度 1，占位符「主色(必选)」
+  //       身高         [请选择尺码]   ← 维度 2，占位符「请选择尺码」
+  //     只填维度 1 会让页面停在「身高」未选、SKU 表不生成 → 前端校验拦提交
+  //     （日志表现为「规格值已输入但 SKU 表未生成」）。所以必须把**每个维度**都填。
+  //
+  //   维度发现：取 #struct-saleProp 里所有「可见且可键入」的 input，
+  //   按其在 DOM 中的先后顺序即为维度顺序；占位符含「备注/规格备注」的跳过。
+  const dimInputs = await page.evaluate(() => {
     const box = document.getElementById('struct-saleProp') as HTMLElement | null
-    const scope = (box?.querySelector(`#struct-p-${propId}`) as HTMLElement | null) || box
-    if (!scope) return null
-    const inputs = Array.from(scope.querySelectorAll('input')) as HTMLInputElement[]
-    const hit = inputs.find(i => rx.test(i.placeholder || ''))
-      || inputs.find(i => i.type !== 'checkbox' && i.type !== 'radio')
-    if (!hit) return null
-    hit.scrollIntoView({ block: 'center' })
-    const r = hit.getBoundingClientRect()
-    return { x: r.x + r.width / 2, y: r.y + r.height / 2 }
-  }, SALE_PROP_PLACEHOLDER_RE.source, SALE_PROP_ID).catch(() => null) as { x: number; y: number } | null
+    if (!box) return []
+    // ★ 只认真正的售属性维度框：占位符为「主色(必选)」「请选择尺码」这类；
+    //   「备注(可选)」「规格备注」「属性名称」「属性值」都属于自定义区/备注，不算维度
+    //   （早先不排除它们，探测出 6 个「维度」，把「属性名称」当维度去点，全错位）。
+    const isDim = (ph: string) => /主色|颜色分类|请选择尺码|^规格值$|颜色/.test(ph)
+    return (Array.from(box.querySelectorAll('input')) as HTMLInputElement[])
+      .filter(i => i.offsetParent !== null && isDim(i.placeholder || ''))
+      .map(i => {
+        const r = i.getBoundingClientRect()
+        return { ph: i.placeholder || '', x: r.x + r.width / 2, y: r.y + r.height / 2 }
+      })
+  }).catch(() => []) as { ph: string; x: number; y: number }[]
 
-  if (!inputPos) {
+  if (!dimInputs.length) {
     missed.push('多规格（未找到销售属性输入框 #struct-saleProp）')
     return { filled, missed }
   }
+  console.log(`[dsagent-taobao-publish] 销售属性维度 ${dimInputs.length} 个：`
+    + dimInputs.map(d => `「${d.ph}」`).join('、'))
 
-  // ── ② 逐个规格值键入 + Tab ──
+  const inputPos = { x: dimInputs[0].x, y: dimInputs[0].y }
+
+  // ── ② 逐个规格值键入 + Enter（维度 1 = 规格值来源）──
+  //   ★ 多维度关键点：只填维度 1 时页面停在「身高 未选」，SKU 表不生成。
+  //     所以维度 1 填完后，其余维度也要各填一个值（否则「必须成套使用」不满足）。
+  //
+  //   ★★ 写入方式（2026-10 实测，关键）：
+  //     React 受控输入框只认真实键盘事件。native setter + dispatchEvent 只改 DOM value，
+  //     `Json.models.formValues` 里根本没有 title 这类字段（实测 stateTitle 恒 undefined），
+  //     提交校验读的是页面从各处收集的结果，于是报「必填项未填」。
+  //     所以这里必须 page.mouse.click 聚焦 + page.keyboard.type 真实键入 + Enter。
   for (const sku of wanted) {
     await page.mouse.move(inputPos.x, inputPos.y).catch(() => { /* 忽略 */ })
     await sleep(200)
     await page.mouse.click(inputPos.x, inputPos.y).catch(() => { /* 忽略 */ })
+    await sleep(400)
+    await page.keyboard.type(sku.name, { delay: 50 }).catch(() => { /* 忽略 */ })
     await sleep(300)
-    await page.keyboard.type(sku.name, { delay: 60 }).catch(() => { /* 忽略 */ })
-    await sleep(300)
-    // ★ Tab = onBlur，唯一能提交到 React state 的方式
-    await page.keyboard.press('Tab').catch(() => { /* 忽略 */ })
+    // ★ Enter = 确认这个规格值（颜色分类是 tag 式输入，Enter 提交）
+    await page.keyboard.press('Enter').catch(() => { /* 忽略 */ })
     await sleep(1200)
   }
 
-  // ── ③ 回读已生成的 SKU 行 ──
-  const rows = await page.evaluate((propId: string) => {
-    const box = document.getElementById('struct-sku') as HTMLElement | null
-    if (!box) return []
-    return Array.from(box.querySelectorAll('tr.sku-table-row')).map((tr, idx) => {
-      const td = (suffix: string) => tr.querySelector(`td[id$="${suffix}"]`) as HTMLElement | null
-      const colorTd = td(`-p-${propId}`)
-      const priceInp = td('-skuPrice')?.querySelector('input') as HTMLInputElement | null
-      const stockInp = td('-skuStock')?.querySelector('input') as HTMLInputElement | null
-      const outerInp = td('-skuOuterId')?.querySelector('input') as HTMLInputElement | null
-      return {
-        idx,
-        color: (colorTd?.innerText || colorTd?.textContent || '').trim(),
-        price: priceInp?.value || '',
-        stock: stockInp?.value || '',
-        outerId: outerInp?.value || '',
-      }
-    })
-  }, SALE_PROP_ID).catch(() => []) as Array<{ idx: number; color: string; price: string; stock: string; outerId: string }>
+  // ── ②b 其余维度：各选一个值，凑齐「成套」条件 ──
+  //   ★ 尺码维度不是普通下拉，而是**尺码弹层**（sell-size-sale-props-standard-size-popup）：
+  //     点「请选择尺码」→ 弹出含「全选/全不选/确定/取消 + 48cm~185cm」的面板
+  //     → 勾目标尺码 → 点「确定」。勾选后 SKU 表才会渲染出来。
+  if (dimInputs.length > 1) {
+    for (let d = 1; d < dimInputs.length; d++) {
+      const dim = dimInputs[d]
+      await page.mouse.click(dim.x, dim.y).catch(() => { /* 忽略 */ })
+      await sleep(2500)
+
+      // 弹层里勾一个尺码（优先 100cm，没有就第一个数字尺码）
+      const picked = await page.evaluate(() => {
+        const panel = Array.from(document.querySelectorAll(
+          '.sell-size-sale-props-standard-size-popup, .next-overlay-wrapper.opened'))
+          .filter(p => (p as HTMLElement).offsetParent !== null).pop() as HTMLElement | undefined
+        if (!panel) return ''
+        const items = Array.from(panel.querySelectorAll('label, .next-checkbox-wrapper'))
+          .filter(e => (e as HTMLElement).offsetParent !== null && /^\d+cm$/.test((e.textContent || '').trim())) as HTMLElement[]
+        if (!items.length) return ''
+        const target = items.find(e => /^100cm$/.test((e.textContent || '').trim())) || items[0]
+        const cb = target.querySelector('input[type="checkbox"]') as HTMLInputElement | null
+          || (target.tagName === 'LABEL' ? ((target as HTMLLabelElement).control as HTMLInputElement | null) : null)
+        if (cb && !cb.checked) { cb.click(); return (target.textContent || '').trim() }
+        if (!cb) { target.click(); return (target.textContent || '').trim() }
+        return (target.textContent || '').trim()
+      }).catch(() => '') as string
+      await sleep(1500)
+
+      // 点「确定」关弹层（不点则勾选不生效）
+      const ok = await page.evaluate(() => {
+        const panel = Array.from(document.querySelectorAll(
+          '.sell-size-sale-props-standard-size-popup, .next-overlay-wrapper.opened'))
+          .filter(p => (p as HTMLElement).offsetParent !== null).pop() as HTMLElement | undefined
+        if (!panel) return false
+        const btn = Array.from(panel.querySelectorAll('button'))
+          .find(b => (b.innerText || '').trim() === '确定' && !b.disabled) as HTMLButtonElement | null
+        if (btn) { btn.click(); return true }
+        return false
+      }).catch(() => false) as boolean
+
+      await sleep(3000)
+      console.log(`[dsagent-taobao-publish] 规格维度「${dim.ph}」选值=${picked || '（无候选）'}，确定=${ok}`)
+      if (picked && ok) filled.push(`规格维度「${dim.ph}」=${picked}`)
+      else missed.push(`规格维度「${dim.ph}」未选到值（勾选=${picked}，确定=${ok}）`)
+    }
+  }
+
+  // ── ②c 等 SKU 表渲染（新版面板 sell-sku-table-wrapper-new，成套后才出现）──
+  let skuReady = false
+  for (let i = 0; i < 20; i++) {
+    skuReady = await page.evaluate(() => {
+      const tbl = document.querySelector('.sell-new-sku-table-content') as HTMLElement | null
+      return !!(tbl && tbl.offsetParent !== null)
+    }).catch(() => false)
+    if (skuReady) break
+    await sleep(1000)
+  }
+  console.log(`[dsagent-taobao-publish] SKU 表渲染=${skuReady}`)
+
+  // ── ③ 回读 SKU 行（新版面板：按「行内有价格/数量输入框」识别）──
+  const rows = await page.evaluate(() => {
+    const tbl = document.querySelector('.sell-new-sku-table-content') as HTMLElement | null
+      || document.getElementById('struct-sku') as HTMLElement | null
+    if (!tbl) return []
+    const rowEls = Array.from(tbl.querySelectorAll('tr, [class*="row"], [class*="sku-row"]')) as HTMLElement[]
+    const out: Array<{ idx: number; color: string; price: string; stock: string }> = []
+    for (const row of rowEls) {
+      const priceInp = row.querySelector('input[placeholder*="价格"], input[placeholder="价格"]') as HTMLInputElement | null
+      const stockInp = row.querySelector('input[placeholder*="数量"], input[placeholder="数量"]') as HTMLInputElement | null
+      if (!priceInp && !stockInp) continue
+      const colorText = (row.innerText || '').split('\n').map((s: string) => s.trim()).filter(Boolean)[0] || ''
+      out.push({ idx: out.length, color: colorText, price: priceInp?.value || '', stock: stockInp?.value || '' })
+    }
+    return out
+  }).catch(() => []) as Array<{ idx: number; color: string; price: string; stock: string }>
 
   if (!rows.length) {
-    missed.push('多规格（规格值已输入但 SKU 表未生成）')
+    missed.push('多规格（规格值已输入但 SKU 表未生成，请在窗口内确认颜色/尺码已成套）')
     return { filled, missed }
   }
+  console.log(`[dsagent-taobao-publish] SKU 行 ${rows.length} 条：${rows.map(r => r.color).join(' / ')}`)
 
   // ── ④ 逐行回填价格 / 数量 / 商家编码（真实键入 + Tab）──
   for (let i = 0; i < rows.length; i++) {
@@ -1725,19 +2751,73 @@ function readSubmitErrors(page: any): Promise<{ hard: string; panel: string }> {
 async function clickSubmit(page: any): Promise<boolean> {
   // 配置驱动（anchors.submitButton）：SEL1/SEL2 为 CSS 候选（refreshTaobaoConfig 维护），
   // TEXT_RE_SRC 为文案兜底正则源 —— 初值 = 历史硬编码，JSON 覆盖后行为同构。
-  return await page.evaluate((sel1: string, sel2: string, textReSrc: string) => {
-    const primary = (document.querySelector(sel1)
-      || document.querySelector(sel2)) as HTMLButtonElement | null
-    if (primary && !primary.disabled) { primary.click(); return true }
-    const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[]
+  //
+  // ★ 2026-10 实测补强：v2 发布页的提交条在页面最底部（#float-bottom），
+  //   元素可能处于「已渲染但被 sticky 栏遮挡 / 尚未进入视口」状态，
+  //   且新版的 name 属性有变体。故分四轮：
+  //     ① 配置候选（name/​_id）
+  //     ② 文案正则（button 全集）
+  //     ③ #float-bottom / #struct-buttons 容器内任意可点按钮
+  //     ④ 真实鼠标点击兜底（元素 .click() 被 React 拦掉时用坐标点）
+  const hit = await page.evaluate((sel1: string, sel2: string, textReSrc: string) => {
+    const vis = (el: any) => !!el && el.offsetParent !== null && !el.disabled
     const re = new RegExp(textReSrc)
-    const hit = btns.find(b =>
-      re.test((b.innerText || '').trim())
-      && !b.disabled && b.offsetParent !== null)
-    if (!hit) return false
-    hit.click()
-    return true
+    const btnOf = (sel: string) => document.querySelector(sel) as HTMLButtonElement | null
+
+    let el: HTMLButtonElement | null = null
+    let how = ''
+    for (const sel of [sel1, sel2]) {
+      const b = btnOf(sel)
+      if (vis(b)) { el = b; how = `selector:${sel}`; break }
+    }
+    if (!el) {
+      const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[]
+      const b = btns.find(x => vis(x) && re.test((x.innerText || '').trim()))
+      if (b) { el = b; how = 'text-re' }
+    }
+    if (!el) {
+      // 容器兜底：提交条里的任意 primary / 含「提交」的按钮
+      for (const boxSel of ['#float-bottom', '#struct-buttons', '.sell-float-bottom', '[class*=float-bottom]']) {
+        const box = document.querySelector(boxSel)
+        if (!box) continue
+        const cands = Array.from(box.querySelectorAll('button')) as HTMLButtonElement[]
+        const b = cands.find(vis) || cands[0]
+        if (b && vis(b)) { el = b; how = `container:${boxSel}`; break }
+      }
+    }
+    if (!el) return { found: false, how: '', clicked: false, x: 0, y: 0 }
+    try { el.scrollIntoView({ block: 'center' }) } catch { /* 忽略 */ }
+    const r = el.getBoundingClientRect()
+    try { el.click() } catch { /* 忽略 */ }
+    return { found: true, how, clicked: true, x: r.x + r.width / 2, y: r.y + r.height / 2 }
+  }, SUBMIT_BTN_SEL1, SUBMIT_BTN_SEL2, SUBMIT_TEXT_RE_SRC).catch(() => ({ found: false, how: '', clicked: false, x: 0, y: 0 })) as
+    { found: boolean; how: string; clicked: boolean; x: number; y: number }
+
+  if (!hit.found) return false
+  console.log(`[dsagent-taobao-publish] 提交按钮命中方式=${hit.how}`)
+  await sleep(500)
+
+  // ★ 真实鼠标兜底：先看页面是否已经进入「校验错误 / 跳转成功」；
+  //   若还在原页且按钮仍可见，用坐标补一次真实点击（untrusted click 会被某些守卫忽略）。
+  const stillThere = await page.evaluate((sel1: string, sel2: string, textReSrc: string) => {
+    const re = new RegExp(textReSrc)
+    const vis = (el: any) => !!el && el.offsetParent !== null && !el.disabled
+    const all = [
+      document.querySelector(sel1), document.querySelector(sel2),
+      ...Array.from(document.querySelectorAll('button')),
+    ].filter(Boolean) as HTMLButtonElement[]
+    return all.some(x => vis(x) && (re.test((x.innerText || '').trim()) || /button-submit/.test(x.getAttribute('name') || '')))
   }, SUBMIT_BTN_SEL1, SUBMIT_BTN_SEL2, SUBMIT_TEXT_RE_SRC).catch(() => false) as boolean
+
+  if (stillThere && hit.x > 0 && hit.y > 0) {
+    try {
+      await page.mouse.move(hit.x, hit.y)
+      await sleep(150)
+      await page.mouse.click(hit.x, hit.y)
+      console.log('[dsagent-taobao-publish] 已补一次真实鼠标点击提交')
+    } catch { /* 忽略 */ }
+  }
+  return hit.clicked
 }
 
 /**
@@ -1775,6 +2855,22 @@ export async function taobaoPublish(
     .map(p => String(p || '').trim())
     .filter(Boolean)
     .slice(0, MAX_IMAGES)
+  // 详情图（复刻觅千手预上传，多张，上限放宽到 20）
+  const detailImages = (Array.isArray(opts.detailImages) ? opts.detailImages : [])
+    .map(p => String(p || '').trim())
+    .filter(Boolean)
+    .slice(0, 20)
+  // ★ COS/外链 URL 模式（复刻觅千手搬品：图片已是 URL，走 replay 注入，跳过 DOM 上传）
+  let imageUrls = (Array.isArray(opts.imageUrls) ? opts.imageUrls : [])
+    .map(u => String(u || '').trim()).filter(u => /^https?:\/\//.test(u)).slice(0, MAX_IMAGES)
+  let detailImageUrls = (Array.isArray(opts.detailImageUrls) ? opts.detailImageUrls : [])
+    .map(u => String(u || '').trim()).filter(u => /^https?:\/\//.test(u)).slice(0, 20)
+  /** 有主图 URL 即走纯 replay 图片模式（本地图经图片空间上传后也会置 true，见下方） */
+  let useUrlImages = imageUrls.length > 0
+  /** 逆向 HTTP 上传是否启用（默认开） */
+  const imageSpaceUpload = opts.imageSpaceUpload !== false
+  const imageSpaceFolderId = String(opts.imageSpaceFolderId ?? '0').trim() || '0'
+  const imageSpaceConcurrency = Number(opts.imageSpaceConcurrency) || 3
   const skus = (Array.isArray(opts.skus) ? opts.skus : [])
     .map(s => ({
       name: String(s?.name || '').trim(),
@@ -1784,7 +2880,7 @@ export async function taobaoPublish(
     }))
     .filter(s => s.name)
 
-  if (!images.length) {
+  if (!images.length && !useUrlImages) {
     return { ok: false, failureKind: 'api_error', text: '缺少 images（本地图片绝对路径列表，至少 1 张）。' }
   }
   for (const p of images) {
@@ -1806,6 +2902,23 @@ export async function taobaoPublish(
       }
     } catch (e) {
       return { ok: false, failureKind: 'api_error', text: `无法读取图片文件：${e instanceof Error ? e.message : String(e)}` }
+    }
+  }
+  // 详情图文件校验（缺文件直接报错，超限提示）
+  for (const p of detailImages) {
+    if (!existsSync(p)) {
+      return { ok: false, failureKind: 'api_error', text: `详情图文件不存在：${p}` }
+    }
+    try {
+      const st = statSync(p)
+      if (!st.isFile() || st.size === 0) {
+        return { ok: false, failureKind: 'api_error', text: `详情图文件不可用（非文件或大小为 0）：${p}` }
+      }
+      if (st.size > MAX_IMAGE_BYTES) {
+        return { ok: false, failureKind: 'api_error', text: `详情图超过单张上限 20MB：${p}` }
+      }
+    } catch (e) {
+      return { ok: false, failureKind: 'api_error', text: `无法读取详情图文件：${e instanceof Error ? e.message : String(e)}` }
     }
   }
   if (!title) {
@@ -1837,7 +2950,8 @@ export async function taobaoPublish(
   const account = picked.account!
 
   // ── confirm 门禁 ───────────────────────────────────────
-  if (opts.confirm !== true) {
+  // diagDumpJson 是零风险诊断（不点提交、不写任何数据），绕过 confirm 门禁。
+  if (opts.confirm !== true && !opts.diagDumpJson) {
     return {
       ok: false,
       needConfirm: true,
@@ -1869,6 +2983,70 @@ export async function taobaoPublish(
   let publishCatId = ''
   /** 类目显示名（选类目页页脚的完整路径，如「童装>>儿童外套」）；档案命名用 */
   let publishCategoryName = ''
+
+  /* ══════════════════════════════════════════════════════════════════
+   * 逆向 HTTP 预上传（复刻觅千手：图片先进图片空间，再随表单注入）
+   * ----------------------------------------------------------------
+   * 放在开浏览器**之前**：纯 HTTP、无副作用（只往自己的图片空间加素材），
+   * 全部失败时可直接返回，不必白白弹一个窗口出来。
+   * 成功后 imageUrls / detailImageUrls 被填上，useUrlImages=true →
+   * 主图区与详情区都不再走 DOM 文件上传，只由 replay 注入 URL。
+   * ══════════════════════════════════════════════════════════════════ */
+  const uploadNotes: string[] = []
+  if (imageSpaceUpload && (images.length || detailImages.length) && !useUrlImages) {
+    const loginErr = checkLoginCookies(accountCookies)
+    if (loginErr) {
+      uploadNotes.push(`图片空间上传跳过：${loginErr}`)
+    } else {
+      const t0 = Date.now()
+      console.log(`[dsagent-taobao-publish] 逆向 HTTP 预上传：主图×${images.length} + 详情图×${detailImages.length}`
+        + `（folderId=${imageSpaceFolderId}，并发=${imageSpaceConcurrency}）`)
+      const main = await localImagesToSpaceUrls(images, {
+        cookies: accountCookies,
+        folderId: imageSpaceFolderId,
+        concurrency: imageSpaceConcurrency,
+      })
+      const detail = await localImagesToSpaceUrls(detailImages, {
+        cookies: accountCookies,
+        folderId: imageSpaceFolderId,
+        concurrency: imageSpaceConcurrency,
+      })
+      const ms = Date.now() - t0
+      const okMain = main.urls.length
+      const okDetail = detail.urls.length
+      const badAll = [...main.failed, ...detail.failed]
+
+      console.log(`[dsagent-taobao-publish] 图片空间上传完成（${ms}ms）：主图 ${okMain}/${images.length}，`
+        + `详情图 ${okDetail}/${detailImages.length}`)
+      for (const r of [...main.results, ...detail.results]) {
+        if (r.ok) console.log(`  ✓ ${basenameOf(r.local)} → ${r.url}${r.pix ? `（${r.pix}）` : ''}`)
+        else console.log(`  ✗ ${basenameOf(r.local)}：${r.error}`)
+      }
+
+      // 主图一张都没传上去 → 图片空间这条链不可用，整批回退 DOM 上传（不改结论）
+      if (okMain === 0) {
+        uploadNotes.push(`图片空间上传全部失败（${badAll.length} 张），已回退原 DOM 上传链路：`
+          + `${badAll[0]?.error || '未知原因'}`)
+        console.log(`[dsagent-taobao-publish] 主图 URL 为 0，回退 DOM 上传链路`)
+      } else {
+        imageUrls = main.urls
+        detailImageUrls = detail.urls
+        useUrlImages = true
+        uploadNotes.push(`图片空间预上传：主图 ${okMain}/${images.length}、详情图 ${okDetail}/${detailImages.length}`
+          + `（${ms}ms，纯 HTTP，无浏览器）`)
+        if (badAll.length) {
+          uploadNotes.push(`⚠ 有 ${badAll.length} 张上传失败，这些图不会出现在商品里：`
+            + badAll.map(b => `${basenameOf(b.local)}（${b.error}）`).join('；'))
+        }
+        // 详情图全挂但主图成功：继续发（详情可人工补），只提醒
+        if (detailImages.length && okDetail === 0) {
+          uploadNotes.push('⚠ 详情图全部上传失败，商品详情留空，需人工补图')
+        }
+      }
+    }
+  } else if (useUrlImages) {
+    uploadNotes.push(`图片已是 URL（主图×${imageUrls.length}、详情图×${detailImageUrls.length}），跳过本地上传`)
+  }
 
   try {
     const puppeteer = await import(/* @vite-ignore */ 'puppeteer-core' as string) as {
@@ -1958,6 +3136,26 @@ export async function taobaoPublish(
     await page.evaluateOnNewDocument(() => {
       Object.defineProperty(navigator, 'webdriver', { get: () => undefined })
     })
+    // ★ replayMode（觅千手式 Json/Json2 setter 劫持重放）：在页面任何脚本执行前注入，
+    //   劫持 window.Json / window.Json2 的 setter，框架赋值瞬间把 payload merge 进表单 state。
+    //   新开的发布标签页（sell/v2/publish.htm?catId=...）同属本 browser 上下文，init script 自动生效。
+    // ★ 图片空间预上传成功后必须开 replay —— URL 塞进表单 state 只能靠这条链路，
+    //   否则图片只是躺在图片空间里、商品上什么也没有。故用 || 而非纯 opts 判断。
+    const imageSpaceReady = useUrlImages && (imageUrls.length > 0)
+    const replayMode = opts.replayMode === true || imageSpaceReady
+    if (replayMode) {
+      const doc = buildTaobaoJsonDocument({
+        title, price, stock, itemNo, images, skus,
+        // 复刻觅千手三层 SKU：salePropValues 缺省时由 builder 回退用 skus[].name
+        salePropValues: skus.map(s => s.name),
+        // 复刻觅千手搬品：图片空间 / COS / 外链图 URL 走 replay 注入（mainImagesGroup/wirelessDesc）
+        imageUrls, detailImageUrls,
+      })
+      await page.evaluateOnNewDocument(buildTaobaoJsonReplayInitScript(JSON.stringify(doc)))
+      console.log(`[dsagent-taobao-publish] replayMode：已注入 Json/Json2 劫持脚本（觅千手式重放）`
+        + (imageSpaceReady ? `（图片空间预上传链路自动启用）` : '')
+        + (useUrlImages ? `，主图URL×${imageUrls.length}，详情图URL×${detailImageUrls.length}` : ''))
+    }
 
     // 注入淘宝 + 天猫域 Cookie（发布页与素材选择器分别落在两个域）
     const cookieList = Object.entries(accountCookies)
@@ -1971,8 +3169,18 @@ export async function taobaoPublish(
 
     // ── 1. 打开发布入口 ────────────────────────────────────
     // 有 categoryUrl 时直接打开「选类目」页（淘宝的 publish.htm 已不再通向选类目页）。
-    const entryUrl = channel.categoryUrl || channel.url
-    console.log(`[dsagent-taobao-publish] 打开${channel.label}发布入口：${entryUrl}`)
+    //
+    // ★ directPublishUrl：跳过选类目，直达 sell/v2/publish.htm?catId=XXXX。
+    //   为什么需要这条路径（2026-10 实测差异）：
+    //     · 直接从 catId 进发布页 → 属性区正常渲染（label.required = 7 个，属性可填）
+    //     · 从「选类目页 → 确认下一步」进入 → 属性区是空壳（pItems=28 / label=0），
+    //       于是必填属性读不到、填不上，提交被前端校验拦住（连请求都发不出去）
+    //   批量场景已知 catId 时用这条路径最稳。
+    const entryUrl = opts.directPublishUrl
+      ? String(opts.directPublishUrl)
+      : (channel.categoryUrl || channel.url)
+    console.log(`[dsagent-taobao-publish] 打开${channel.label}发布入口：${entryUrl}`
+      + (opts.directPublishUrl ? '（直达发布页，跳过选类目）' : ''))
     await page.goto(entryUrl, { waitUntil: 'domcontentloaded', timeout: 45_000 })
     await sleep(4000)
 
@@ -1982,6 +3190,26 @@ export async function taobaoPublish(
       || await page.evaluate(() =>
         !!document.querySelector('input[placeholder*="类目关键词"]')).catch(() => false)
     if (onCategoryPage) {
+      // ★ 2026-10 实测：category.htm?force=true 落地为「搜索发品/以图发品」入口选择页（平台改版），
+      //   无类目搜索框，需先点「搜索发品」卡片的「开启」按钮进入类目搜索页。
+      const hasSearchBox = await page.evaluate(() =>
+        !!document.querySelector('input[placeholder*="类目关键词"]')).catch(() => false)
+      if (!hasSearchBox) {
+        console.log('[dsagent-taobao-publish] 检测为「搜索发品/以图发品」入口选择页，点「搜索发品」开启按钮...')
+        await page.evaluate(() => {
+          const cards = Array.from(document.querySelectorAll('div')).filter((d) =>
+            (d.textContent || '').includes('搜索发品') && d.querySelector('button, a'))
+          for (const c of cards) {
+            const btn = Array.from(c.querySelectorAll('button, a')).find((b) =>
+              /开启/.test((b.textContent || '').trim()) && (b as HTMLElement).offsetParent)
+            if (btn) { (btn as HTMLElement).click(); return }
+          }
+          const anyBtn = Array.from(document.querySelectorAll('button, a')).find((b) =>
+            /开启/.test((b.textContent || '').trim()) && (b as HTMLElement).offsetParent)
+          if (anyBtn) (anyBtn as HTMLElement).click()
+        }).catch(() => { /* 忽略 */ })
+        await sleep(4000)
+      }
       if (categoryKeyword) {
         const cat = await selectCategory(page, categoryKeyword, { brand, model, title })
         console.log(`[dsagent-taobao-publish] 自动选类目：${cat.note}`)
@@ -2072,9 +3300,107 @@ export async function taobaoPublish(
       }
     }
 
+    // ── 2.9 诊断模式：dump window.Json/Json2 结构后直接返回（零风险，不点提交）────
+    if (opts.diagDumpJson) {
+      const dump = await page.evaluate(() => {
+        const grab = (v: any) => { if (!v) return null; try { return JSON.parse(JSON.stringify(v)) } catch (e) { return String(e) } }
+        const out: any = { href: location.href, hasJson: 'Json' in window, hasJson2: 'Json2' in window }
+        try { out.Json = grab((window as any).Json) } catch (e) { out.JsonErr = String(e) }
+        try { out.Json2 = grab((window as any).Json2) } catch (e) { out.Json2Err = String(e) }
+        try { out.replayResult = grab((window as any).__kddsReplayResult) } catch (e) { out.replayErr = String(e) }
+        return out
+      }).catch((e: any) => ({ err: String(e) }))
+      const { writeFileSync, mkdirSync } = await import('node:fs')
+      mkdirSync('dev/.ui-shots', { recursive: true })
+      writeFileSync('dev/.ui-shots/taobao-json-dump.json', JSON.stringify(dump, null, 2))
+      // 切到「基础信息」tab 再截图，直接看标题/价格是否渲染
+      await page.evaluate(() => {
+        const tab = Array.from(document.querySelectorAll('*')).find((e) =>
+          (e.textContent || '').trim() === '基础信息' && (e as HTMLElement).offsetParent
+            && (e.children.length === 0 || (e.textContent || '').length < 10))
+        if (tab) (tab as HTMLElement).click()
+      }).catch(() => { /* 忽略 */ })
+      await sleep(1200)
+      // dump 标题/价格/货号输入框的真实 DOM value（最直接验证渲染源）
+      const domVals = await page.evaluate(() => {
+        const inp = (pred: (e: HTMLInputElement) => boolean) => {
+          const el = Array.from(document.querySelectorAll('input, textarea')).find((e) =>
+            pred(e as HTMLInputElement) && (e as HTMLElement).offsetParent) as HTMLInputElement | undefined
+          return el ? el.value : null
+        }
+        return {
+          title: inp((e) => /标题/.test(e.placeholder || '')),
+          price: inp((e) => /一口价|价格/.test(e.placeholder || '') || e.inputMode === 'decimal'),
+          outerId: inp((e) => /货号|商家编码|编码/.test(e.placeholder || '')),
+        }
+      }).catch(() => null)
+      console.log('[dsagent-taobao-publish] DOM 输入框值:', JSON.stringify(domVals))
+      // 探查「商品属性」区必填项 + 材质成分区域结构（决策必填处理方案用）
+      const requiredProbe = await page.evaluate(() => {
+        const txt = (e: Element) => (e.textContent || '').replace(/\s+/g, ' ').trim()
+        // 必填项：label 旁带红星（*）的属性名
+        const required: string[] = []
+        for (const star of Array.from(document.querySelectorAll('*'))) {
+          if (txt(star) === '*' && (star as HTMLElement).offsetParent) {
+            // 向上找含属性名的祖先
+            let p = star.parentElement
+            for (let i = 0; i < 4 && p; i++) {
+              const t = txt(p)
+              if (t.length > 1 && t.length < 40 && t !== '*') { required.push(t.replace(/^\*\s*/, '')); break }
+              p = p.parentElement
+            }
+          }
+        }
+        // 材质成分区域：找「添加材质成分」按钮的容器，dump 其周围结构
+        const addBtn = Array.from(document.querySelectorAll('*')).find((e) =>
+          /添加材质成分/.test(txt(e)) && (e as HTMLElement).offsetParent && e.children.length < 5)
+        let materialArea: string | null = null
+        if (addBtn) {
+          let box = addBtn.parentElement
+          for (let i = 0; i < 5 && box; i++) {
+            if (txt(box).includes('材质成分') && txt(box).length < 500) break
+            box = box.parentElement
+          }
+          materialArea = box ? txt(box).slice(0, 300) : null
+        }
+        return { required: [...new Set(required)], hasAddMaterialBtn: !!addBtn, materialArea }
+      }).catch((e: any) => ({ err: String(e) }))
+      console.log('[dsagent-taobao-publish] 必填项探查:', JSON.stringify(requiredProbe, null, 2))
+      // dump 全部类目属性的真实 name + 必填标记（批量脚本 attributes 需按此精确匹配）
+      const catProps = await readCatPropItems(page)
+      console.log('[dsagent-taobao-publish] 类目属性清单:',
+        JSON.stringify(catProps.map((p) => ({ name: p.name, required: p.required, kind: p.kind, filled: p.filled })), null, 2))
+      await page.screenshot({ path: 'dev/.ui-shots/taobao-json-dump.png' }).catch(() => { /* 忽略 */ })
+      const jm = dump?.Json?.models
+      const summary = jm
+        ? `models keys=[${Object.keys(jm).join(',')}]\nformValues keys=[${Object.keys(jm.formValues || {}).join(',')}]\nfv.title=${JSON.stringify(jm.formValues?.title)}\nfv.price=${JSON.stringify(jm.formValues?.price)}\nbase-card=${JSON.stringify(jm['base-card'] ?? null).slice(0, 400)}\nsale-card=${JSON.stringify(jm['sale-card'] ?? null).slice(0, 400)}`
+        : `无 Json.models；hasJson=${dump?.hasJson} JsonErr=${dump?.JsonErr}`
+      console.log(`[dsagent-taobao-publish] 诊断 dump 完成：\n${summary}`)
+      return {
+        ok: true,
+        shopKey,
+        finalUrl: page.url(),
+        text: `诊断模式：已 dump window.Json/Json2 结构到 dev/.ui-shots/taobao-json-dump.json（未提交）。\n${summary}`,
+      }
+    }
+
     // ── 3. 上传主图（发布页内直传）──────────────────────────
-    const up = await uploadImages(page, images)
-    console.log(`[dsagent-taobao-publish] 主图上传：${up.note}`)
+    //   URL 模式（COS/外链）跳过 DOM 上传：图片 URL 已随 replay 注入 mainImagesGroup。
+    if (useUrlImages) {
+      console.log(`[dsagent-taobao-publish] 主图：URL 模式（replay 注入 mainImagesGroup×${imageUrls.length}），跳过 DOM 上传`)
+    } else {
+      const up = await uploadImages(page, images)
+      console.log(`[dsagent-taobao-publish] 主图上传：${up.note}`)
+    }
+
+    // ── 3.4 上传详情图（复刻觅千手预上传：页内直传详情编辑器，框架收 URL 进 wirelessDesc）──
+    //   URL 模式跳过 DOM 上传：详情图 URL 已随 replay 注入 wirelessDesc/descRepublicOfSell。
+    if (detailImageUrls.length) {
+      console.log(`[dsagent-taobao-publish] 详情图：URL 模式（replay 注入 wirelessDesc×${detailImageUrls.length}），跳过 DOM 上传`)
+    } else if (detailImages.length) {
+      const dup = await uploadDetailImages(page, detailImages)
+      console.log(`[dsagent-taobao-publish] 详情图上传：${dup.note}`)
+    }
 
     // ── 3.5 表单就绪后补解析 catId（g5）───────────────────────
     // 用户手动选类目时，1.6 那次解析可能发生在用户还没选完 → URL 里还没有 catId。
@@ -2088,23 +3414,168 @@ export async function taobaoPublish(
     }
 
     // ── 4. 自动填通用字段 ──────────────────────────────────
+    // ★ replayMode：先回读页面内 hook 结果。命中（框架 state 已被 merge）则跳过
+    //   标题/价格/库存/货号/SKU 的 DOM 逐格填写——字段已由 Json 重放写入并随框架渲染。
+    //   未命中（页面非 sell 结构 / 框架没走 Json 赋值）自动降级回 DOM 链路。
+    let replayApplied = false
+    if (replayMode) {
+      const replayRes: any = await page.evaluate(() => (window as any).__kddsReplayResult || null).catch(() => null)
+      if (replayRes && replayRes.applied) {
+        replayApplied = true
+        console.log(`[dsagent-taobao-publish] replayMode 命中：merge 字段=${(replayRes.mergedFields || []).join(',')}`
+          + `（${replayRes.hookSource || ''}）`)
+      } else {
+        console.log(`[dsagent-taobao-publish] replayMode 未命中（${replayRes?.reason || '框架未触发 Json 赋值'}），降级 DOM 填写。`)
+      }
+      // 结构诊断：打印 set 前后的真实字段路径，定位「渲染源 vs merge 目标」
+      if (replayRes) {
+        console.log(`[dsagent-taobao-publish] [diag] beforeStruct=${JSON.stringify(replayRes.beforeStruct || null)}`)
+        console.log(`[dsagent-taobao-publish] [diag] afterStruct.compKeys=${JSON.stringify(replayRes.afterStruct?.compKeys || [])}`)
+        console.log(`[dsagent-taobao-publish] [diag] syncedComponents=${JSON.stringify(replayRes.syncedComponents || [])}`)
+      }
+    }
+
+    // ── 4.0 图片渲染验收（逆向预上传 + replay 的最终验收点）──────
+    //   merge 命中 ≠ 页面渲染出图。这里直接数 DOM：
+    //   主图区 img 数 / 详情区 img 数，与 formValues 里的数量做对照。
+    //   主图没渲染出来 → 图片链路算失败，明确记进 uploadNotes，不让用户以为发出去有图。
+    if (useUrlImages) {
+      // ★ 详情图：走觅千手同一条路 —— 塞给页面自己的上传器（不直接写 state）。
+      //   实测：把 desc/descType/descRepublicOfSell 全写进 state 后，编辑器 DOM 仍不出图，
+      //   因为详情编辑器与主图一样「只在挂载时读一次值」。
+      let detailInjected = false
+      if (detailImageUrls.length) {
+        // ★ 传原始本地路径（detailImages），详情编辑器要 File，原生 uploadFile 走本地文件最稳；
+        //   detailImageUrls 只用于喂 replay 兜底（DataTransfer 分支）。
+        const dj = await injectDetailImages(page, detailImages, detailImageUrls)
+        console.log(`[dsagent-taobao-publish] 详情图注入：${dj.note}`)
+        if (dj.ok) {
+          detailInjected = true
+          uploadNotes.push(`✓ ${dj.note}`)
+        } else {
+          uploadNotes.push(`⚠ ${dj.note}（需人工补详情图）`)
+        }
+      }
+      // 主图是异步 CDN 加载 + 框架分帧渲染，给一点时间
+      await sleep(2500)
+      const rendered = await verifyImagesRendered(page)
+      console.log(`[dsagent-taobao-publish] 图片渲染验收：主图区 img=${rendered.mainCount}`
+        + `（state 记录 ${rendered.formMainCount}），详情区 img=${rendered.descCount}`
+        + `（state 记录 ${rendered.formDescCount}）`)
+      if (rendered.mainSrcs.length) {
+        console.log(`[dsagent-taobao-publish] 主图前几张：${rendered.mainSrcs.slice(0, 3).join(' | ')}`)
+      }
+      const expectMain = imageUrls.length
+      if (rendered.mainCount > 0) {
+        uploadNotes.push(`✓ 主图已渲染到页面（${rendered.mainCount} 张${expectMain ? ` / 期望 ${expectMain}` : ''}）`)
+      } else {
+        // ★ 诊断实验（真实发布页实测用）：验证 simplyImages 组件是否响应 props 变化。
+        //   结论会打到日志，供判断「是结构不对」还是「组件只在首次渲染读值」。
+        const exp = await page.evaluate(() => {
+          const out: any = {}
+          const cnt = () => document.querySelectorAll('.sell-component-simply-images img').length
+          const txt = () => ((document.querySelector('.sell-component-simply-images') as HTMLElement | null)?.innerText || '')
+            .replace(/\s+/g, ' ').slice(0, 100)
+          out.before = { img: cnt(), text: txt() }
+          const c = (window as any).Json?.components?.mainImagesGroup
+          const v0 = c?.props?.value?.images || []
+          const urls = v0.slice(0, 2).map((x: any) => (typeof x === 'string' ? x : x.url))
+          out.urlCount = urls.length
+          // ① 替换引用
+          if (c && urls.length) {
+            c.props = c.props || {}
+            c.props.value = { images: urls.map((u: string) => ({ url: u, pix: '800x800' })) }
+          }
+          out.afterReplace = { img: cnt(), text: txt() }
+          return out
+        }).catch((e: any) => ({ err: String(e) }))
+        await sleep(2000)
+        const afterExp = await page.evaluate(() => ({
+          img: document.querySelectorAll('.sell-component-simply-images img').length,
+          text: ((document.querySelector('.sell-component-simply-images') as HTMLElement | null)?.innerText || '').replace(/\s+/g, ' ').slice(0, 100),
+        })).catch(() => null)
+        console.log('[dsagent-taobao-publish] [实验] simplyImages 渲染响应：'
+          + `replace 前=${JSON.stringify((exp as any).before)}，`
+          + `replace 后=${JSON.stringify((exp as any).afterReplace)}，`
+          + `2s 后=${JSON.stringify(afterExp)}`)
+
+        // ★ 自动修复：主图渲染为空最常见的原因是「images 元素形态不对」——
+        //   发布页的 simplyImages 组件期望元素带 URL 字段（对象），纯 URL 字符串会被
+        //   渲染成空占位框（页面文案仍显示「上传图片」×N）。
+        //   这里做一次「字符串 → 对象」的原地修正 + 触发重渲染，再复验一次。
+        console.log('[dsagent-taobao-publish] 主图未渲染，尝试修正 images 元素形态为对象后重试')
+        const fixed = await page.evaluate(() => {
+          const c = (window as any).Json?.components?.mainImagesGroup
+          const fv = (window as any).Json?.models?.formValues
+          const norm = (arr: any[]) => arr.map((x: any) => {
+            if (x && typeof x === 'object') return x
+            const url = String(x || '')
+            const m = url.match(/-(\d+)x(\d+)\./)
+            return { url, pix: m ? `${m[1]}x${m[2]}` : '800x800' }
+          })
+          let n = 0
+          const cur = c?.props?.value?.images
+          if (Array.isArray(cur) && cur.length) {
+            c.props.value = { images: norm(cur) }
+            n++
+          }
+          const cur2 = fv?.mainImagesGroup?.images
+          if (Array.isArray(cur2) && cur2.length) {
+            fv.mainImagesGroup = { images: norm(cur2) }
+            n++
+          }
+          return n
+        }).catch(() => 0) as number
+        await sleep(2500)
+        const again = await verifyImagesRendered(page)
+        console.log(`[dsagent-taobao-publish] 形态修正 ${fixed} 处后复验：主图区 img=${again.mainCount}`)
+        if (again.mainCount > 0) {
+          uploadNotes.push(`✓ 主图已渲染（${again.mainCount} 张，已自动修正 images 元素形态为对象）`)
+        } else {
+          uploadNotes.push('✗ 主图未渲染到页面（state 已 merge 但 DOM 无 img）—— 图片链路未生效，'
+            + '需在窗口内人工上传主图，或关掉 imageSpaceUpload 走 DOM 上传重试')
+          console.log('[dsagent-taobao-publish] ⚠ 主图未渲染：replay 的 mainImagesGroup 未被框架采纳为渲染源')
+        }
+      }
+      if (detailImageUrls.length) {
+        // 详情图走页面上传器注入（detailInjected=true 时已在上面记过 ✓，避免重复）
+        if (rendered.descCount > 0) {
+          if (!detailInjected) uploadNotes.push(`✓ 详情图已渲染（${rendered.descCount} 张）`)
+        } else if (detailInjected) {
+          // 投递成功但还没渲染出来：上传可能仍在进行，交人工确认，不重复报警
+          uploadNotes.push(`⚠ 详情图已投递但尚未渲染（上传可能仍在进行，请在窗口内确认）`)
+        } else {
+          uploadNotes.push('✗ 详情图未渲染到编辑器 —— 需人工补详情图，'
+            + '或关掉 imageSpaceUpload 走 DOM 上传重试')
+          console.log('[dsagent-taobao-publish] ⚠ 详情图未渲染：上传器注入未成功')
+        }
+      }
+    }
+
     const filled: string[] = []
     const missed: string[] = []
 
-    const tHit = await fillField(page, /商品标题|宝贝标题|请输入标题|标题/, title, ['宝贝标题', '商品标题'])
-    if (tHit) filled.push(`标题=${title}`); else missed.push('标题')
+    if (replayApplied) {
+      filled.push(`标题=${title}（Json 重放）`)
+      if (price) filled.push(`一口价=${price}（Json 重放）`)
+      if (stock) filled.push(`库存=${stock}（Json 重放）`)
+      if (itemNo) filled.push(`货号=${itemNo}（Json 重放）`)
+    } else {
+      const tHit = await fillField(page, /商品标题|宝贝标题|请输入标题|标题/, title, ['宝贝标题', '商品标题'])
+      if (tHit) filled.push(`标题=${title}`); else missed.push('标题')
 
-    if (price) {
-      const pHit = await fillField(page, /一口价|价格|售价/, price, ['一口价'])
-      if (pHit) filled.push(`一口价=${price}`); else missed.push('一口价')
-    }
-    if (stock) {
-      const sHit = await fillField(page, /库存|数量/, stock, ['总库存', '库存'])
-      if (sHit) filled.push(`库存=${stock}`); else missed.push('库存')
-    }
-    if (itemNo) {
-      const iHit = await fillField(page, /货号/, itemNo, ['货号', '商家编码'])
-      if (iHit) filled.push(`货号=${itemNo}`); else missed.push('货号')
+      if (price) {
+        const pHit = await fillField(page, /一口价|价格|售价/, price, ['一口价'])
+        if (pHit) filled.push(`一口价=${price}`); else missed.push('一口价')
+      }
+      if (stock) {
+        const sHit = await fillField(page, /库存|数量/, stock, ['总库存', '库存'])
+        if (sHit) filled.push(`库存=${stock}`); else missed.push('库存')
+      }
+      if (itemNo) {
+        const iHit = await fillField(page, /货号/, itemNo, ['货号', '商家编码'])
+        if (iHit) filled.push(`货号=${itemNo}`); else missed.push('货号')
+      }
     }
 
     // ── 4.5 类目属性 ──
@@ -2125,18 +3596,141 @@ export async function taobaoPublish(
     else missed.push('提取方式')
 
     // ── 4.7 多规格（销售属性）填写：规格值 + SKU 表价格/数量/编码 ──
+    //   ★ replay 命中 ≠ 页面渲染出规格。实测（2026-10）：replay merge 了 sku/saleProp/
+    //     customSaleProp，页面提交时仍报「销售信息 >> 销售属性 必填项未填」，
+    //     因为销售属性输入区同样只在挂载时读表单 state，后 merge 的值不产生 DOM 控件。
+    //     所以这里必须**回读页面真实状态**：没有规格值就补跑 fillSkus（DOM 键入 + Tab）。
     if (skus.length) {
-      const skuRes = await fillSkus(page, skus)
-      filled.push(...skuRes.filled.map(s => `SKU ${s}`))
-      missed.push(...skuRes.missed)
+      const skuRendered = await page.evaluate(() => {
+        const box = document.getElementById('struct-saleProp') as HTMLElement | null
+        const skuTable = document.getElementById('struct-sku') as HTMLElement | null
+        // ① 真实有效标志：SKU 表可见且行数 > 0
+        let rows = 0
+        if (skuTable && skuTable.offsetParent !== null) {
+          rows = skuTable.querySelectorAll('tr.sku-table-row, tbody tr').length
+        }
+        // ② 规格值输入框里真的有值（不是占位符）
+        let inputVals = 0
+        if (box) {
+          for (const inp of Array.from(box.querySelectorAll('input')) as HTMLInputElement[]) {
+            const v = (inp.value || '').trim()
+            if (v && !/^(请选择|请输入|主色|颜色分类|规格值)/.test(v)) inputVals++
+          }
+        }
+        // ③ 已选规格值标签（排除占位/提示类容器，仅统计带值文本的标签）
+        let tags = 0
+        if (box) {
+          for (const el of Array.from(box.querySelectorAll('[class*="tag"], [class*="label-item"], [class*="value-item"]'))) {
+            const t = ((el as HTMLElement).innerText || '').trim()
+            if (t && t.length <= 20 && !/请|添加|选择|规格/.test(t)) tags++
+          }
+        }
+        return { rows, inputVals, tags, boxPresent: !!box }
+      }).catch(() => ({ rows: 0, inputVals: 0, tags: 0, boxPresent: false }))
+
+      // ★ 三路都为空才判定「未渲染」。
+      //   注意：replay 默认**不再 merge** sku/saleProp/customSaleProp（会破坏属性区），
+      //   所以这里基本总是走 DOM 填写——这正是期望行为（DOM 键入 + Tab 是唯一稳的路）。
+      const rendered = skuRendered.rows > 0
+      console.log(`[dsagent-taobao-publish] 销售属性页面状态：rows=${skuRendered.rows} `
+        + `inputVals=${skuRendered.inputVals} tags=${skuRendered.tags} → ${rendered ? '已渲染' : '未渲染，需补填'}`)
+
+      if (!rendered) {
+        const skuRes = await fillSkus(page, skus)
+        filled.push(...skuRes.filled.map(s => `SKU ${s}`))
+        missed.push(...skuRes.missed)
+      } else {
+        filled.push(`SKU ×${skus.length}${replayApplied ? '（Json 重放）' : ''}`)
+      }
     }
 
     console.log(`[dsagent-taobao-publish] 已填：${filled.join('、') || '（无）'}；未命中：${missed.join('、') || '（无）'}`)
     await sleep(1500)
 
+    // ── 4.9 提交体拦改（复刻觅千手 transformRequestBody 思路）──────────
+    //   思路来源（用户提出，2026-10）：先拿到真实的 commitBody，再按它的结构拼装数据。
+    //   落地做法更稳：**在同一次提交里拦截并增量改写** —— 页面已经把
+    //   catPath / stuffStatus / guaranteeService / 各 card / skyLightRule 等
+    //   「我们不会填的几十个字段」都准备好了，我们只覆盖自己掌握的字段。
+    //
+    //   这一步是整套链路的关键补齐：
+    //     · 商品属性（catProp）—— 页面属性区渲染不全时的兜底，直接对齐后端契约
+    //     · 销售属性（saleProp）—— 绕过「SKU 表未生成」的 DOM 依赖
+    //     · 主图 / 详情 —— 保底写入，确保提交体里一定带图
+    //     · 提取方式（tbExtractWay）—— 运费模板同理
+    const overrideFields: Record<string, unknown> = {}
+    if (title) overrideFields.title = title
+    if (price) overrideFields.price = Number(price)
+    if (stock) overrideFields.quantity = Number(stock)
+    if (itemNo) overrideFields.outerId = itemNo
+    if (imageUrls.length) {
+      overrideFields.mainImagesGroup = { images: imageUrls.map(u => ({ url: u, pix: '800x800' })) }
+    }
+    // 类目属性：显式值 → 后端 catProp 结构（p-XXXX → {value,text}）
+    //   这里用「属性名 → 属性 id」映射；id 先从页面读，读到就写。
+    const catPropOverride = await buildCatPropOverride(page, attributes || [])
+    if (catPropOverride && Object.keys(catPropOverride).length) {
+      overrideFields.catProp = catPropOverride
+    }
+    // 销售属性：直接把规格值写进 saleProp（照觅千手：克隆源商品的 saleProp 结构，
+    //   键必须是真实 pid，形如 `p-122216343`；值是该维度的已选规格项）。
+    if (skus.length) {
+      const saleProp = await buildSalePropOverride(page, skus)
+      if (saleProp && Object.keys(saleProp).length) {
+        overrideFields.saleProp = saleProp
+        console.log(`[dsagent-taobao-publish] 提交体 saleProp 覆盖：${Object.keys(saleProp).join(',')}`)
+      }
+      // SKU 行也一并给，价格/库存/编码走这里，不依赖页面 SKU 表
+      overrideFields.sku = skus.map(s => ({
+        props: [{ name: s.name }],
+        price: s.price || price || '',
+        quantity: s.stock || stock || '0',
+        outerId: s.outerId || '',
+      }))
+      overrideFields.customSaleProp = [{ items: skus.map(s => ({ text: s.name })) }]
+    }
+    // 详情图：写进 descRepublicOfSell.descPageCommitParam.templateContent
+    if (detailImageUrls.length) {
+      const html = detailImageUrls.map(u => `<img src="${u}"/>`).join('')
+      overrideFields.descRepublicOfSell = {
+        descPageCommitParam: {
+          opt: 0, clientType: 1, bizSource: 'sell', newItem: true, changed: true,
+          params: 'params', maxHeight: 100000, templateContent: html,
+        },
+      }
+      overrideFields.desc = html
+      overrideFields.wirelessDesc = detailImageUrls.map(u => ({ type: 'img', url: u, pix: '790x1088' }))
+    }
+
+    let patcher: { wait: () => Promise<CommitPatchResult>; dispose: () => Promise<void> } | null = null
+    if (Object.keys(overrideFields).length) {
+      try {
+        patcher = await installCommitPatcher(page, { fields: overrideFields })
+        console.log(`[dsagent-taobao-publish] 已挂载提交体拦改，覆盖字段：${Object.keys(overrideFields).join(',')}`)
+      } catch (e) {
+        console.log(`[dsagent-taobao-publish] 提交体拦改挂载失败（不阻塞发布）：${e instanceof Error ? e.message : String(e)}`)
+      }
+    }
+
     // ── 5. 点提交 ─────────────────────────────────────────
     const clicked = await clickSubmit(page)
     console.log(`[dsagent-taobao-publish] 提交按钮点击：${clicked ? '已点击' : '未点到（可能仍需补全必填项）'}`)
+
+    // 等拦改结果（最多 60s，不阻塞后续结果判定）
+    if (patcher) {
+      const pr = await patcher.wait().catch(() => null)
+      if (pr) {
+        if (pr.patched) {
+          console.log(`[dsagent-taobao-publish] 提交体已改写：${pr.patchedFields.join(',')}`
+            + `（${pr.beforeLen} → ${pr.afterLen} 字节）`)
+          uploadNotes.push(`✓ 提交体拦改生效（覆盖 ${pr.patchedFields.length} 个字段：`
+            + `${pr.patchedFields.slice(0, 8).join('、')}${pr.patchedFields.length > 8 ? '…' : ''}）`)
+        } else {
+          console.log(`[dsagent-taobao-publish] 提交体未改写：${pr.reason || '未知'}（url=${pr.url || '-'}）`)
+        }
+      }
+      await patcher.dispose().catch(() => {})
+    }
 
     // ── 6. 判定结果（含用户手动补全后自行提交的情形）─────────
     let finalUrl = page.url()
@@ -2237,6 +3831,7 @@ export async function taobaoPublish(
           + `账号：${account.display_label || account.account_id}（${shopKey}）\n`
           + `标题：${title}\n`
           + (successId ? `商品ID：${successId}\n` : '')
+          + (uploadNotes.length ? `图片：${uploadNotes.join('\n      ')}\n` : '')
           + (filled.length ? `已自动填写：${filled.join('、')}\n` : '')
           + (missed.length ? `未自动填写（需人工确认）：${missed.join('、')}\n` : '')
           + (profileSaved ? `类目档案已更新：~/.dsh/publish-profiles/${profileSaved}（下次发布同类目直接复用）\n` : '')
@@ -2253,6 +3848,7 @@ export async function taobaoPublish(
         finalUrl,
         text: `发布失败：${errText}\n`
           + (errPanel ? `★ 填写建议面板：${errPanel}\n` : '')
+          + (uploadNotes.length ? `★ 图片链路：${uploadNotes.join('；')}\n` : '')
           + (missed.length ? `★ 未自动填写的字段：${missed.join('、')}\n` : '')
           + '请在浏览器窗口内补全必填项（尤其是**类目属性**与商品详情）后手动点击「提交宝贝信息」。',
       }
@@ -2278,6 +3874,7 @@ export async function taobaoPublish(
       shopKey,
       finalUrl,
       text: `提交后 ${PUBLISH_TIMEOUT_MS / 1000}s 内未检测到成功标志（当前 URL：${finalUrl}）。\n`
+        + (uploadNotes.length ? `图片链路：${uploadNotes.join('；')}\n` : '')
         + (filled.length ? `已自动填写：${filled.join('、')}\n` : '')
         + (missed.length ? `★ 未能自动填写：${missed.join('、')}\n` : '')
         + (shotPath ? `失败截屏：${shotPath}\n` : '')

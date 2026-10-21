@@ -1,0 +1,51 @@
+{
+  "schema": "dsagent/skill-contract@1",
+  "id": "bilibili-publish",
+  "entry": {
+    "form": "script",
+    "script": "scripts/publish.py"
+  },
+  "input": {
+    "args": [
+      {
+        "required": true,
+        "name": "videoPath",
+        "description": "本地视频文件绝对路径"
+      },
+      {
+        "required": true,
+        "name": "title",
+        "description": "稿件标题（B站限 80 字）"
+      },
+      {
+        "description": "简介（可选，限 2000 字）",
+        "name": "description"
+      },
+      {
+        "description": "标签（可选，逗号分隔，上限约 10 个）",
+        "name": "tags"
+      },
+      {
+        "description": "分区名（可选，如「科技数码」「知识」）",
+        "name": "partition"
+      },
+      {
+        "description": "创作声明（可选，不传自动选「内容无需标注」）",
+        "name": "statement"
+      },
+      {
+        "description": "确认发布：true 才真正提交；省略/false 只返回发布预览，不产生任何写操作",
+        "name": "confirm"
+      },
+      {
+        "description": "账号 shopKey（可选）；该平台多账号且未绑定时需先向用户确认",
+        "name": "account"
+      }
+    ]
+  },
+  "output": {
+    "protocol": "dsagent-result",
+    "resultPrefix": "__DSAGENT_RESULT__",
+    "filesMarker": "---[OUTPUT_FILES]"
+  }
+}

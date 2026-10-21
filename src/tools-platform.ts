@@ -69,17 +69,27 @@ export function buildPlatformTools(deps: PlatformToolsDeps): import('@deepseek-a
 
     defineTool({
       name: 'dsagent_check_account_health',
-      description: '检查指定平台账号的登录态是否有效。',
+      description: '检查指定平台账号的登录态是否有效（真实探测：本地 Cookie 结构 + 平台远程轻量请求，不只是本地心跳）。',
       parameters: {
         platform: { type: 'string', description: '可选，按平台过滤' },
+        real: { type: 'boolean', description: '默认 true = 真实探测（发一次平台请求确认）；false = 只读本地状态（快但不准）' },
       },
       output: { schema: { type: 'json' }, render: renderToolOutput },
       async execute(args) {
-        const rows = await account.checkHealth(args.platform)
+        // ★ 2026-10-21 修复假阳性：原实现只读本地 status 字段（本地心跳），
+        //   平台侧把会话踢了（风控/异地/过期）后凭证库仍显示 valid，
+        //   导致「连接器说有效、一跑技能就 token_expired」。
+        //   默认改走 checkHealthReal（本地关键 Cookie 检查 + host probe_session 远程探测）。
+        const useReal = args.real !== false
+        const rows = useReal
+          ? await account.checkHealthReal(args.platform)
+          : await account.checkHealth(args.platform)
         const bad = rows.filter(r => r.status !== 'valid')
-        if (!bad.length) return { text: `已检查 ${rows.length} 个账号，全部有效。`, allOk: true } as any
+        if (!bad.length) {
+          return { text: `已检查 ${rows.length} 个账号，全部有效${useReal ? '（真实探测）' : '（本地状态）'}。`, allOk: true } as any
+        }
         return {
-          text: `以下 ${bad.length} 个账号需重新登录：\n` + bad.map(r => `- ${r.platformId} | ${r.nickname} | ${r.status}`).join('\n'),
+          text: `以下 ${bad.length} 个账号需重新登录：\n` + bad.map(r => `- ${r.platformId} | ${r.nickname} | ${r.status}${r.reason ? ` | ${r.reason}` : ''}`).join('\n'),
           allOk: false,
           needRelogin: bad.length,
         } as any
@@ -441,12 +451,14 @@ export function buildPlatformTools(deps: PlatformToolsDeps): import('@deepseek-a
       async execute() {
         const rows = await account.list()
         const platforms: Array<[string, string]> = [
-          ['taobao', '淘宝'], ['douyin', '抖音'], ['xiaohongshu', '小红书'],
+          ['taobao', '淘宝'], ['douyin', '抖音'], ['douyin_shop', '抖音小店（抖店）商家后台'],
+          ['xiaohongshu', '小红书'],
           ['bilibili', 'B站'], ['kuaishou', '快手'], ['wechat_mp', '微信公众号'],
           ['pinduoduo', '拼多多'], ['pdd_mms', '拼多多商家后台'],
           ['xianyu', '闲鱼'], ['wechat_store', '微信小店'],
           ['zhihu', '知乎'],
           ['alibaba', '1688'],
+          ['jd', '京东'],
         ]
         return {
           text: platforms.map(([pid, label]) => {

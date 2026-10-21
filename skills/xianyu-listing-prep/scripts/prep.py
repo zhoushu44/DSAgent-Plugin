@@ -269,6 +269,7 @@ def main():
                     help="支持模型，逗号分隔")
     ap.add_argument("--price", default="1", help="参考价")
     ap.add_argument("--out", default="", help="输出目录；留空=工作区下的 xianyu-out")
+    ap.add_argument("--suffix", default="", help="目录后缀（工作流按轮次传 p1/p2，避免多轮互相覆盖）")
     ap.add_argument("--check-only", action="store_true", help="只跑合规闸门")
     args = ap.parse_args()
 
@@ -320,6 +321,12 @@ def main():
         workspace = os.environ.get("DSAGENT_WORKSPACE") or os.getcwd()
         out_root = Path(workspace) / "xianyu-out"
     slug = slugify(kw)
+    # ★ 轮次后缀：工作流 batch 模式下关键词不变，slug 恒定 → 多轮会写同一目录互相覆盖。
+    #   传 --suffix p1/p2/... 让每轮落到 slug-p1 / slug-p2，物料各自独立。
+    if args.suffix:
+        suffix = re.sub(r"[^\w\u4e00-\u9fa5-]+", "-", str(args.suffix)).strip("-")
+        if suffix:
+            slug = f"{slug}-{suffix}"
     base = out_root / slug
     accent = ACCENTS[abs(hash(kw)) % len(ACCENTS)]
     note = f"{args.discount} · 按量计费"
@@ -334,6 +341,7 @@ def main():
         "title": title,
         "description": desc,
         "price": args.price,
+        "suffix": str(args.suffix or ""),
         "images": imgs,
         "compliance": {"passed": not blocked, "blocked": blocked, "warnings": warnings},
         "note": "网页版选不到正确的服务类目，建议用闲鱼 APP 发布并选「软件/程序/网站开发」或「其他服务」",

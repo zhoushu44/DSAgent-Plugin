@@ -35,7 +35,23 @@ metadata:
 
 ## 执行流程
 
-本技能**没有脚本入口**，执行方式是**直接调用 host 工具** `dsagent_xiaohongshu_publish`。
+## 两种执行方式
+
+| 场景 | 入口 | 说明 |
+|------|------|------|
+| 对话里单次发布 | host 工具 `dsagent_xiaohongshu_publish` | 主路径，交互式，两步确认 |
+| **工作流步骤 / 批量编排** | 脚本 `{baseDir}/scripts/publish.py` | 脚本型外壳，让发布能作为工作流步骤被执行 |
+
+```bash
+python3 {baseDir}/scripts/publish.py --title "标题" --imagePaths "D:/i/1.jpg,D:/i/2.jpg" --confirm true
+```
+
+脚本不自己实现发布，只把请求转给 host 的 `publish_platform` action（真实实现仍是
+puppeteer 驱动浏览器，分发逻辑见 `src/platform-publish.ts`）。**L2 门禁完全保留**：
+不带 `--confirm true` 只返回预览、不启动浏览器、不产生任何写操作。
+
+> 为什么需要这个外壳：本技能原本是纯指令型（无脚本入口），工作流引擎六项校验的
+> 第二项会拒绝它当步骤（「是纯指令型（无可执行入口），不能作为步骤」）。
 
 ### 1. 收集参数
 

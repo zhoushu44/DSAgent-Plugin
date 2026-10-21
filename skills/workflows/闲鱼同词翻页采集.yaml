@@ -1,0 +1,95 @@
+name: 闲鱼同词翻页采集
+category: 店铺经营
+mode: batch
+count_input: count
+description: |
+  **关键词不变，每轮翻一页，采到的是不同商品；物料也按页分开落盘，互不覆盖。**
+  第 1 轮 page=1 → kimi-k3-p1/，第 2 轮 page=2 → kimi-k3-p2/ ……
+
+  ★ 两条都靠 loop.index 驱动（2026-10-20 实测）：
+    · 采集翻页：xianyu-crawl 的 --page 走真实分页，page=1/2/3/4/8 各页 item_id 零重复，
+      page=8 仍有数据；所以「同词不同商品」不用换词，用页码即可。
+    · 物料分目录：prep.py --suffix 把目录切成 <slug>-p<N>，
+      否则同词多轮会写同一目录互相覆盖（静默，不报错）。
+
+  ★ 每一轮产出两条互不相同的数据：
+    rivals  = 当页全部商品（item_id / 标题 / 价格 / 想要数 / 卖家 / 主图）
+    listing = 该页对应的合规物料（3 张主图 + 标题 + 描述 + listing.json）
+
+  ★ 需要知道的边界：
+    · 页数上限 8 —— 实测 page=8 仍有数据，更深未验证，别盲设大数
+    · 每轮 5~11 秒，页数多时总时长线性增长
+    · 物料文案仍按关键词生成（同词同文案），只有主图目录与 listing.json 的 suffix 不同；
+      真要页面间文案差异化，得再给 prep.py 加轮次变量
+
+  ★ 发布仍然不在本工作流里：xianyu-publish 是纯指令型技能（无脚本入口），
+    引擎六项校验会拒绝；硬塞只会得到「任务绿了但闲鱼零商品」的假成功。
+    发布由 Agent 调 dsagent_xianyu_publish，走「预览 → 确认 → 提交」。
+
+  ★ 合规闸门硬拦截（命中即失败退出）：
+    冒充官方（官方N折/官方直营/官方授权/官方渠道/官方正品）、
+    贬损同业（不掺量/不共享/不做套路/套路/别家的坑/为什么选我们）、
+    极限词（最低最便宜/第一/100%/唯一/绝对）、虚假稀缺（仅剩/最后一天）。
+    「非官方直营」是否定式披露，会被放行。
+
+  ★ 选词（2026-10-20 实测想要数）：
+    Kimi K3 最优（5097/3293/2957）、DeepSeek API 次热、GLM API 竞争最小；
+    API中转 / 中转token / GPT API 搜索 0 条；Claude API 前排全是纸质书，别用。
+inputs:
+  - key: keyword
+    label: 关键词（全程不变）
+    type: text
+    default: Kimi K3
+    required: true
+  - key: count
+    label: 采集页数（轮次）
+    type: number
+    default: "3"
+    required: true
+    min: 1
+    max: 8
+  - key: size
+    label: 每页条数
+    type: number
+    default: "30"
+    required: false
+    min: 1
+    max: 50
+  - key: discount
+    label: 折扣口径（勿写「官方N折」）
+    type: text
+    default: 官网价 2 折起
+    required: false
+  - key: price
+    label: 参考价（元）
+    type: text
+    default: "1"
+    required: false
+  - key: models
+    label: 支持模型（逗号分隔）
+    type: text
+    default: DeepSeek V4,Claude,GPT,Gemini,GLM,Kimi,Qwen,MiniMax
+    required: false
+  - key: out
+    label: 物料输出目录（留空=工作区 xianyu-out）
+    type: text
+    default: ""
+    required: false
+steps:
+  - name: 翻页采集同行
+    skill: xianyu-crawl
+    args:
+      keyword: "{{keyword}}"
+      page: "{{loop.index}}"
+      size: "{{size}}"
+    output: rivals
+  - name: 生成合规物料
+    skill: xianyu-listing-prep
+    args:
+      keyword: "{{keyword}}"
+      discount: "{{discount}}"
+      price: "{{price}}"
+      models: "{{models}}"
+      out: "{{out}}"
+      suffix: p{{loop.index}}
+    output: listing

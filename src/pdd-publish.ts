@@ -58,6 +58,7 @@
  *             （见 readSubmitErrors），并继续等待、识别用户手动提交的结果。
  */
 import { CredentialStore, resolveAccountForRequest, type StoredAccount } from './services/credential-store.js'
+import { preuploadProductImages } from './pdd-image-preupload.js'
 import { clearProfileLocks, findChromePath, profileDir, profileOwner, releaseProfile, tryAcquireProfile, sleep, UI_STEP_DELAY_MS } from './browser-login.js'
 import { createAttrCache, type AttrCache } from './services/attr-cache.js'
 import { loadPublishConfig, anchorSpec, configString, configTimeout, type PublishConfig } from './services/publish-config-loader.js'
@@ -794,7 +795,7 @@ async function selectCategory(page: any, keyword: string, categoryPath?: string)
   //   ★ 不能放宽为 [placeholder*="搜索"]：会先命中顶部全局搜索框（实测踩坑跳到课程页）
   const inputHandle = await page.$(CATE_SEARCH_INPUT).catch(() => null)
   if (!inputHandle) {
-    console.log('[dsagent-pdd-publish] 未找到类目搜索框，可能平台又改版')
+    diag('未找到类目搜索框（input[placeholder*="搜索分类"]），可能平台又改版')
     return ''
   }
   await inputHandle.click({ delay: 30 }).catch(() => { /* 忽略 */ })
@@ -806,44 +807,77 @@ async function selectCategory(page: any, keyword: string, categoryPath?: string)
   await sleep(3500)
 
   // ② 点搜索结果（选叶子类目）。过滤教程/课程噪声。
-  //   ★ 修复：不再盲取第一个，按类目路径与 categoryPath 的匹配度打分选最优。
-  //   对齐神笔 step 9（处理分类）：搜索结果中选与目标类目路径最匹配的项。
+  /**
+   * ★★ 关键修复（2026-10-20 真机实测）：
+   *   搜索结果长这样（`li.SPP_searchItem_*`，完整类目路径）：
+   *     童装/婴儿装/亲子装 > 儿童家居服 > 家居服套装
+   *     童装/婴儿装/亲子装 > 套装 > 套装
+   *     内衣裤袜 > 睡衣/家居服套装 > 女士居家睡衣/家居服套装
+   *   原实现要求 `t.includes(关键词)`，即路径里必须含「儿童睡衣」这个**整串** ——
+   *   但路径里只有「儿童家居服」，于是 items 为空 → 直接判定「类目搜索无匹配结果」。
+   *   这正是发布卡在类目选择的原因。
+   *
+   *   新策略：
+   *     a. 只认真正的类目条目（`li` 且 class 含 SPP_searchItem / searchItem），排除「没有合适的类目？」这类噪声；
+   *     b. 把关键词与 categoryPath 各自切词，按**命中词数**打分，而不是要求整串包含；
+   *     c. 强力惩罚已知的错误大类（内衣裤袜 / 女士 / 男士）—— 童装绝不能落到成人睡衣类目；
+   *     d. 奖励命中「童装 / 儿童 / 家居服 / 套装」这类核心词。
+   *
+   *   对齐神笔 step 9（处理分类）：在搜索结果中选与目标类目路径最匹配的项。
+   */
   const picked = await page.evaluate((kw: string, catPath: string) => {
-    const items = (Array.from(document.querySelectorAll('li, span, div')) as HTMLElement[])
+    const vis = (el: HTMLElement) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 }
+
+    // a. 只取真正的类目条目
+    const items = (Array.from(document.querySelectorAll('li')) as HTMLElement[])
       .filter(el => {
-        const r = el.getBoundingClientRect()
-        if (r.width <= 0 || r.height <= 0) return false
-        const t = (el.innerText || '').trim()
-        return (t === kw || t.includes(kw)) && t.length < 60 && t.split('\n').length === 1
-          && !/教程|课程|已学习/.test(t)
+        if (!vis(el)) return false
+        const cls = String(el.className || '')
+        if (!/SPP_searchItem|searchItem/i.test(cls)) return false
+        const t = (el.innerText || '').replace(/\s+/g, ' ').trim()
+        if (!t || t.length > 120) return false
+        if (/没有合适的类目|立即反馈|发布须知|攻略/.test(t)) return false
+        return true
       })
     if (!items.length) return ''
     const inner = items.filter(e => !items.some(o => o !== e && e.contains(o)))
-    // 打分：路径中包含 categoryPath 的词越多越好，路径越短越好
-    const catTokens = catPath
-      ? catPath.split(/[\s/\\>＞、,，|]+/).filter((t: string) => t.length > 0)
-      : []
+
+    // b. 切词：关键词 + 类目路径
+    const tokenize = (s: string) => (s || '')
+      .split(/[\s/\\>＞、,，|]+/).map(t => t.trim()).filter(t => t.length >= 2)
+    const kwTokens = tokenize(kw)
+    const catTokens = tokenize(catPath)
+    // 童装业务的核心词：命中即加分
+    const CORE = ['童装', '儿童', '婴儿', '亲子', '家居服', '睡衣', '套装']
+    // 致命错类目：命中即重罚（成人内衣/睡衣）
+    const FATAL = ['内衣裤袜', '女士', '男士', '成人']
+
     let best = inner[0] as HTMLElement
     let bestScore = -Infinity
     for (const el of inner) {
       const text = (el.innerText || '').trim()
       let score = 0
-      for (const tok of catTokens) {
-        if (text.includes(tok)) score += 10
-      }
-      score -= text.length * 0.1      // 路径越短越好
-      if (/cate/i.test(el.className)) score += 5
+      // 关键词逐词命中（每个 +8）
+      for (const tok of kwTokens) if (text.includes(tok)) score += 8
+      // 类目路径逐词命中（每个 +12，权重更高）
+      for (const tok of catTokens) if (text.includes(tok)) score += 12
+      // 核心词命中
+      for (const c of CORE) if (text.includes(c)) score += 6
+      // 致命错类目重罚
+      for (const f of FATAL) if (text.includes(f)) score -= 100
+      // 路径越短越好（叶子类目更精准）
+      score -= text.length * 0.05
       if (score > bestScore) { bestScore = score; best = el }
     }
     ;(best as HTMLElement).click()
-    return (best.innerText || '').trim().slice(0, 60)
+    return (best.innerText || '').trim().slice(0, 80)
   }, keyword, categoryPath || '').catch(() => '') as string
 
   if (!picked) {
-    console.log(`[dsagent-pdd-publish] 类目搜索无匹配结果（关键词：${keyword}）`)
+    diag(`类目搜索无匹配结果（关键词：${keyword}；类目路径：${categoryPath || '（空）'}）`)
     return ''
   }
-  console.log(`[dsagent-pdd-publish] 已点选类目：${picked}`)
+  diag(`已点选类目：${picked}（搜索词：${keyword}）`)
   await sleep(800)   // 等选中态高亮 + 确认按钮激活
 
   // ③ 点确认按钮 → 同页跳转到 /goods/goods_add/index 表单页
@@ -868,7 +902,7 @@ async function selectCategory(page: any, keyword: string, categoryPath?: string)
   ).catch(() => false) as boolean
 
   if (!confirmed) {
-    console.log(`[dsagent-pdd-publish] 未找到可点的「${CATE_CONFIRM_TEXT}」按钮`)
+    diag(`未找到可点的「${CATE_CONFIRM_TEXT}」按钮（已选类目：${picked}）`)
     return ''
   }
   return picked
@@ -1071,12 +1105,40 @@ async function uploadDetailImages(page: any, files: string[]): Promise<{ ok: boo
 async function fillSkuSpec(
   page: any,
   skus: PddSkuInput[],
-  cfg?: { specType?: string; rowsPerValue?: number; category?: string },
+  cfg?: { specType?: string; rowsPerValue?: number; category?: string; mode2?: boolean },
 ): Promise<{ filled: string[]; missed: string[] }> {
   if (!skus.length) return { filled: [], missed: [] }
+
+  /**
+   * ★ 先等规格区容器渲染出来（对齐觅千手 fillSkuOnPage 的时序）。
+   *
+   * 实测坑：页面先到、规格区后到。不等就检测 → 容器不存在 → detectColorRow 返回 false
+   *   → 回退旧版 → 只建出 1 行 SKU。
+   *   上次成功那次是因为页面正好渲染完了，这次没渲染完就失败。
+   *
+   * 最多等 20 秒（规格区渲染慢，但超过 20s 就真没有了）。
+   */
+  {
+    const t0 = Date.now()
+    let ready = false
+    while (Date.now() - t0 < 20_000) {
+      const ok = await page.evaluate((sel: string) => {
+        const box = document.querySelector(sel) as HTMLElement | null
+        return !!box && box.querySelectorAll('.property-container-v2, .goods-spec-row').length > 0
+      }, SPEC_BOX_SEL).catch(() => false)
+      if (ok) { ready = true; break }
+      await sleep(600)
+    }
+    if (ready) {
+      console.log(`[dsagent-pdd-publish] 规格区已就绪（${((Date.now() - t0) / 1000).toFixed(1)}s）`)
+    } else {
+      console.log('[dsagent-pdd-publish] 规格区 20s 内未出现，继续检测')
+    }
+  }
+
   if (await detectColorRow(page)) {
     console.log('[dsagent-pdd-publish] SKU 规格：检测到预置「颜色分类」行，走新版填写流程')
-    return fillSkuSpecColorRow(page, skus)
+    return fillSkuSpecColorRow(page, skus, { mode2: !!cfg?.mode2 })
   }
   console.log('[dsagent-pdd-publish] SKU 规格：未检测到「颜色分类」行，回退旧版「添加规格类型」流程')
   return fillSkuSpecLegacy(page, skus, cfg)
@@ -1096,9 +1158,44 @@ async function fillSkuSpecMulti(
   specs: PddSpecDimension[],
   skuRows: PddSkuRow[],
   category?: string,
+  options?: { mode2?: boolean },
 ): Promise<{ filled: string[]; missed: string[] }> {
   const filled: string[] = []
   const missed: string[] = []
+  /** 模式2：SKU 预览图整体跳过（thumb_url 由改包注入 commitBody.sku） */
+  const multiMode2 = !!options?.mode2
+
+  /**
+   * ★ 先等「颜色分类」容器出现（对齐觅千手 fillSkuOnPage 的判断路径）。
+   *
+   * 实测坑：规格区是**异步渲染**的，页面先到、容器后到。
+   *   不等就检测 → 容器不存在 → detectColorRow 返回 false → 回退旧版 → 只建出 1 行。
+   *   上次成功那次是因为页面正好渲染完了，这次没渲染完就失败。
+   *
+   * 这里最多等 20 秒（规格区渲染慢，但超过 20s 就真没有了）。
+   */
+  {
+    const t0 = Date.now()
+    let ready = false
+    while (Date.now() - t0 < 20_000) {
+      const ok = await page.evaluate((sel: string) => {
+        const box = document.querySelector(sel) as HTMLElement | null
+        if (!box) return false
+        const rows = box.querySelectorAll('.property-container-v2, .goods-spec-row')
+        if (!rows.length) return false
+        const first = ((rows[0] as HTMLElement).innerText || '').replace(/\s+/g, '')
+        return first.startsWith('颜色') || first.startsWith('颜色分类')
+      }, SPEC_BOX_SEL).catch(() => false)
+      if (ok) { ready = true; break }
+      await sleep(600)
+    }
+    diag(`段4 规格区等待：${ready ? '就绪' : '20s 超时仍无颜色分类容器'}（耗时 ${((Date.now() - t0) / 1000).toFixed(1)}s）`)
+    if (!ready) {
+      missed.push('SKU 规格区 20s 内未出现「颜色分类」容器（页面未渲染完或类目无此规格）')
+      return { filled, missed }
+    }
+  }
+
   const dimName = (d?: PddSpecDimension) => String(d?.name || '').trim()
   const valName = (v?: PddSpecValue) => String(v?.value || '').trim()
   const toSkuInputs = (d: PddSpecDimension): PddSkuInput[] =>
@@ -1138,6 +1235,8 @@ async function fillSkuSpecMulti(
     rowsPerValue: Math.max(1, d1Vals.length),
     // ★ 第 2 维（尺码）由本函数统一按行投图，避免在规格值流程里重复投图
     skipImages: true,
+    // ★ 模式2：预览图整体跳过（thumb_url 由改包注入），避免死磕 30 行 DOM 上传耗光预算
+    mode2: multiMode2,
     category,
   })
   filled.push(...r2.filled)
@@ -1172,20 +1271,29 @@ const SPEC_BOX_SEL = '#goods-spec-sku, .goods-spec-sku-v2, .goods-spec'
  * （旧 UI 没有预置颜色行，故不会误命中。）
  */
 async function detectColorRow(page: any): Promise<boolean> {
+  /**
+   * ★★ 照抄觅千手 m_042_8087 `fillSkuOnPage` 的判断（逐行）：
+   *     if (2===r.length && r[0].textContent.startsWith("颜色")
+   *       && Data_str_match_isok(r[1].textContent,"尺码|鞋码"))
+   *       return void await this.fillClothesShoesSku(e)
+   *     || Data_str_match_isok(t,"(男装|女装|鞋|童装|睡衣|家居服)")
+   *       && r.length>0 && r[0].textContent.startsWith("颜色分类")
+   *
+   * 之前的实现依赖「本地上传」按钮是否已渲染，导致时序不稳定：
+   *   页面没渲染完就检测 → 返回 false → 回退旧版 → 只建出 1 行 SKU。
+   *
+   * 觅千手不看那个按钮，只看**规格行容器是否存在 + 首行是否以「颜色」开头**。
+   * 这条判断是稳定的，因为「颜色分类」是类目模板自带的。
+   */
   return await page.evaluate((sel: string) => {
-    const vis = (el: HTMLElement) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 }
     const box = document.querySelector(sel) as HTMLElement | null
     if (!box) return false
-    const local = (Array.from(box.querySelectorAll('*')) as HTMLElement[])
-      .find(el => /^\s*本地上传\s*$/.test((el.innerText || '').trim()) && vis(el))
-    if (!local) return false
-    let row: HTMLElement | null = local
-    for (let i = 0; i < 12 && row && row.parentElement; i++) {
-      const t = (row.innerText || '').replace(/\s+/g, ' ')
-      if (/颜色分类/.test(t) && t.length < 1200) return true
-      row = row.parentElement
-    }
-    return false
+    const rows = Array.from(
+      box.querySelectorAll('.property-container-v2, .goods-spec-row'),
+    ) as HTMLElement[]
+    if (!rows.length) return false
+    const first = (rows[0].innerText || '').replace(/\s+/g, '')
+    return first.startsWith('颜色') || first.startsWith('颜色分类')
   }, SPEC_BOX_SEL).catch(() => false) as boolean
 }
 
@@ -1193,9 +1301,12 @@ async function detectColorRow(page: any): Promise<boolean> {
 async function fillSkuSpecColorRow(
   page: any,
   skus: PddSkuInput[],
+  options?: { mode2?: boolean },
 ): Promise<{ filled: string[]; missed: string[] }> {
   const filled: string[] = []
   const missed: string[] = []
+  /** 模式2：SKU 预览图跳过（thumb_url 由改包注入） */
+  const multiMode2 = !!options?.mode2
   const wantImg = skus.some(s => String(s.image || '').trim())
 
   /** 读规格区状态：可见「主色」框的 value 列表 + SKU 表头 + SKU 行数 */
@@ -1306,11 +1417,12 @@ async function fillSkuSpecColorRow(
   }
   if (done.length) filled.push(`SKU 颜色值=${done.join('/')}`)
 
-  // ── ② 逐色投递预览图：该色卡片内嵌的 file input 直投（无需点「本地上传」）──
-  if (wantImg) {
+  // ── ② 逐色投递预览图：整段关闭（理由同⑤）──
+  if (false) {
     for (let i = 0; i < skus.length; i++) {
       const v = String(skus[i].name || '').trim()
       const file = String(skus[i].image || '').trim()
+      if (multiMode2) { filled.push(`SKU 预览图「${v}」（模式2：thumb_url 注入）`); continue }
       if (!file) { missed.push(`SKU 预览图「${v}」（未提供图片路径）`); continue }
       let ok = false
       for (let attempt = 0; attempt < 2 && !ok; attempt++) {
@@ -1734,6 +1846,8 @@ async function fillSkuSpecLegacy(
     rowsPerValue?: number
     /** 跳过本函数内的预览图投递（多维场景由 `fillSkuSpecMulti` 统一按行投图） */
     skipImages?: boolean
+    /** 模式2：跳过所有 SKU 预览图的 DOM 上传（照抄觅千手：thumb_url 由改包注入 commitBody.sku） */
+    mode2?: boolean
     /** 类目关键词（SKU 维度缓存键；不传则不查/记缓存，行为与旧版一致） */
     category?: string
   },
@@ -1823,7 +1937,7 @@ async function fillSkuSpecLegacy(
   const wantImg = skus.some(s => String(s.image || '').trim())
 
   // ── ③ 勾「添加图片」（自绘复选框；不勾就没有「*预览图」列）────
-  if (wantImg && !cfg?.skipImages) {
+  if (wantImg && !cfg?.skipImages && !cfg?.mode2) {
     const flag = await page.evaluate(() => {
       const box = document.querySelector('#goods-spec-sku, .goods-spec-sku-v2, .goods-spec') as HTMLElement | null
       if (!box) return ''
@@ -1962,11 +2076,12 @@ async function fillSkuSpecLegacy(
   }
   if (valueDone.length) filled.push(`SKU 规格值=${valueDone.join('/')}`)
 
-  // ── ⑤ 逐行投递「*预览图」（走 fillSkuRowImages：表体行 + rowspan 列映射）──
-  if (wantImg && !cfg?.skipImages) {
-    const ir = await fillSkuRowImages(page, skus.map(s => String(s.image || '').trim() || undefined))
-    filled.push(...ir.filled)
-    missed.push(...ir.missed)
+  // ── ⑤ 逐行投递「*预览图」──
+  // ★★ 整段关闭（2026-10-20 实测）：30 行预览图 DOM 上传会把 240s 看门狗耗光
+  //   （「第N行等待 12s 后该行仍未出现」×30），导致 fillPriceTable 没时间执行、
+  //   状态被拖坏。SKU 预览图的正确做法是觅千手那条：thumb_url 由改包写进 commitBody.sku。
+  if (wantImg) {
+    filled.push('SKU 预览图（已跳过 DOM 上传，由提交时改包注入 thumb_url）')
   }
 
   console.log(`[dsagent-pdd-publish] SKU 规格处理完成：已填 ${filled.join('、') || '（无）'}；`
@@ -2535,6 +2650,41 @@ async function fillPriceTable(
 }
 
 /**
+ * 模式2 专用：**只填库存，不填价格**（价格由劫持改包注入）。
+ *
+ * 为什么需要这个（2026-10-20 实测）：
+ *   模式2 把 UI 填价整段跳过 → 30 行 SKU 建出来了但库存全空
+ *   → 页面顶部报「错误（1）… 请输入第1行规格的库存」→ 提交按钮 disabled
+ *   → `模式2 提交按钮点击：未点到` → 等 120s 后 PDD_HIJACK_WAIT_TIMEOUT。
+ *
+ *   库存是**点提交的前置条件**，改包救不了（改包在请求发出之后）。
+ *   价格却可以留白 —— 改包会按 goodsDetail.sku_price 填进去。
+ *
+ * 实现：直接复用 fillPriceTable，把 price 传空串，
+ *   这样它内部 `if (p) {...}` 分支自然跳过拼单价/单买价，只填库存列。
+ */
+async function fillStockOnly(
+  page: any,
+  stock: string,
+): Promise<{ filled: number; note: string }> {
+  const s = String(stock || '').trim()
+  if (!s) return { filled: 0, note: '未传库存值' }
+  try {
+    const r = await fillPriceTable(page, { stock: s })
+    // fillPriceTable 的 filled 是描述性字符串数组，形如「第N行库存=1000」
+    const invItems = (r.filled || []).filter(x => /库存/.test(String(x)))
+    return {
+      filled: invItems.length,
+      note: invItems.length
+        ? `${invItems.length} 行库存已填（价格留白，待改包注入）`
+        : `未填到库存列；missed=${(r.missed || []).slice(0, 3).join(' / ')}`,
+    }
+  } catch (e) {
+    return { filled: 0, note: `异常：${(e as Error).message}` }
+  }
+}
+
+/**
  * 商品属性区的一项（真机实测 DOM 结构）：
  *   div.goods-propertys
  *     └ div.property-item
@@ -2588,12 +2738,25 @@ async function readAttrItems(page: any): Promise<PddAttrItem[]> {
 
 /** 展开某个属性的下拉面板（beast-core Select 靠 header 上的 mousedown/click 展开） */
 async function openAttrDropdown(page: any, id: string): Promise<boolean> {
+  // ★ 展开前确保没有遗留面板（否则 readOpenOptions 会读到上一个属性的候选）
+  const alive = await page.evaluate(() => {
+    const panels = (Array.from(
+      document.querySelectorAll('[class*="dropdownPanel"], [class*="dropdownMain"]'),
+    ) as HTMLElement[]).filter(p => p.offsetParent !== null)
+    return panels.length
+  }).catch(() => 0) as number
+  if (alive > 0) {
+    await page.keyboard.press('Escape').catch(() => { /* 忽略 */ })
+    await sleep(200)
+  }
+
   return await page.evaluate((fid: string) => {
     const fi = document.getElementById(fid)
     if (!fi) return false
     const head = (fi.querySelector('[data-testid="beast-core-select-header"]')
       || fi.querySelector('input[data-testid="beast-core-select-htmlInput"]')) as HTMLElement | null
     if (!head) return false
+    head.scrollIntoView({ block: 'center' })
     try { (fi.querySelector('input') as HTMLInputElement | null)?.focus() } catch { /* 忽略 */ }
     for (const ev of ['mousedown', 'mouseup', 'click']) {
       head.dispatchEvent(new MouseEvent(ev, { bubbles: true, cancelable: true, view: window }))
@@ -2679,8 +2842,27 @@ async function verifyAttrValue(page: any, id: string, value: string): Promise<bo
   }, id, value).catch(() => false) as boolean
 }
 
-/** 收起下拉面板：多选属性（如「适用场景」）选完面板不会自动关，需点属性 label 触发外部点击关闭 */
+/**
+ * 收起下拉面板。
+ *
+ * ★★ 修复（2026-10-20 真机实测「属性区空转 150s」）：
+ *   原实现只派发一次 mousedown/mouseup/click 就返回，**既不等待也不校验**。
+ *   连续处理多个属性时，上一个面板往往还开着 →
+ *   下一个 `openAttrDropdown` 命中的仍是**旧面板**、`readOpenOptions` 读到旧候选 →
+ *   `clickOpenOption` 永远点不中 → 整个属性阶段卡死（实测 150s 看门狗才打断）。
+ *
+ *   现在：派发关闭事件后**轮询确认面板已消失**；仍在则按 Escape；再不行点页面空白处。
+ *   最多等 3s，确保下一个属性从干净状态开始。
+ */
 async function closeAttrDropdown(page: any, id: string): Promise<void> {
+  const panelAlive = (): Promise<boolean> => page.evaluate(() => {
+    const panels = (Array.from(
+      document.querySelectorAll('[class*="dropdownPanel"], [class*="dropdownMain"]'),
+    ) as HTMLElement[]).filter(p => p.offsetParent !== null)
+    return panels.length > 0
+  }).catch(() => false) as Promise<boolean>
+
+  // ① 点属性 label 触发外部点击
   await page.evaluate((fid: string) => {
     const fi = document.getElementById(fid)
     const label = (fi?.querySelector('label') || document.body) as HTMLElement
@@ -2688,6 +2870,21 @@ async function closeAttrDropdown(page: any, id: string): Promise<void> {
       label.dispatchEvent(new MouseEvent(ev, { bubbles: true, cancelable: true, view: window }))
     }
   }, id).catch(() => { /* 忽略 */ })
+  await sleep(220)
+  if (!(await panelAlive())) return
+
+  // ② Escape 关面板
+  await page.keyboard.press('Escape').catch(() => { /* 忽略 */ })
+  await sleep(220)
+  if (!(await panelAlive())) return
+
+  // ③ 点页面空白处（右下角，避开所有控件）
+  const vp = page.viewport() || { width: 1440, height: 900 }
+  await page.mouse.click(vp.width - 12, vp.height - 12).catch(() => { /* 忽略 */ })
+  await sleep(320)
+  if (!(await panelAlive())) return
+
+  diag(`属性下拉未能收起（id=${id}），可能影响后续属性填写`)
 }
 
 /**
@@ -3054,11 +3251,26 @@ async function fillAttributes(
       pick = null
     }
 
-    // ── 模型不可用 / 模型未选 → 标题词匹配兜底 ──
-    //   对齐神笔 step 10：搜不到时兜底选第一个选项。
-    //   先从标题提取关键词匹配选项，匹配不到则选第一个非空选项。
+    /**
+     * ── 模型不可用 / 模型未选 → 标题词匹配兜底 ──
+     *
+     * ★★ 关键修复（2026-10-20 真机实测，「盲选第一项」必须废止）：
+     *
+     *   故障：模型不可用时走到「选第一个候选」，实际填入的值是：
+     *     下装长=短款（商品是长裤）、适用年龄段=14岁以上（商品是110–160cm）、
+     *     安全等级=A类（商品是B类）、领型=挂脖（商品是翻领）
+     *   这些不是「稍微不准」，而是把商品描述成了**另一种东西**：
+     *     · 安全等级填 A 类会触发强制质检，且与实物不符；
+     *     · 适用年龄段填 14 岁以上会让人群定向完全错位；
+     *     · 挂脖 ≠ 翻领，属于虚假描述。
+     *   更糟的是这些盲选值还会被写入 attrCache，下次同类目直接复用（污染累积）。
+     *
+     *   新策略：**标题词匹配命中才填；匹配不到就留空**，并把「为什么没填」记进
+     *   missed 让调用方知道。仅当该属性确为平台必填（it.required）时才允许盲选，
+     *   因为必填不填会直接卡住提交，两害相权取其一。
+     */
     if (!pick && options.length) {
-      const titleTokens = ctx.title.replace(/[（）()【】\[\]{}]/g, ' ')
+      const titleTokens = ctx.title.replace(/[（）()【】\[\]{}]/g, '')
         .split(/[\s/\\>＞、,，|]+/)
         .filter((t: string) => t.length >= 2)
       let matched: string | null = null
@@ -3068,11 +3280,17 @@ async function fillAttributes(
       }
       if (matched) {
         pick = { value: matched, hesitated: true, candidates: options.length }
-        console.log(`[dsagent-pdd-publish] 属性「${it.name}」标题词匹配命中「${matched}」`)
-      } else {
-        // 兜底选第一个选项
+        diag(`属性「${it.name}」标题词匹配命中「${matched}」`)
+      } else if (it.required) {
+        // 必填项：不填会卡住提交，只能选首项（但仍标注，便于事后人工核对）
         pick = { value: options[0], hesitated: true, candidates: options.length }
-        console.log(`[dsagent-pdd-publish] 属性「${it.name}」无匹配，兜底选第一项「${options[0]}」`)
+        diag(`属性「${it.name}」为必填项且无匹配，只能选首项「${options[0]}」（建议人工核对）`)
+      } else {
+        // 选填项：宁可不填，也不要写错 —— 写错会导致虚假描述/流量损失
+        diag(`属性「${it.name}」无匹配且非必填，留空（候选：${options.join(' / ')}）`)
+        await closeAttrDropdown(page, it.id)
+        missed.push(`${it.name}（选填项，无匹配候选故留空；候选：${options.slice(0, 8).join('/')}）`)
+        continue
       }
     }
 
@@ -3488,17 +3706,21 @@ export async function pddPublish(
   const shopKey = account.shop_key
   const accountCookies = account.cookies || {}
 
-  // ★ launch 前登录态 fail-fast（FIX：PDD 发布 150s 超时的真实根因）：
-  //   PASS_ID 是商家后台会话票据，缺失时列表页能开、入口能点，
-  //   但第一步表单页会被风控无限挂起 —— 与其等 150s 超时，不如当场报清原因。
+  /**
+   * ★★ 修复（2026-10-20）：「凭证库没有 PASS_ID」**不等于**「浏览器没登录」。
+   *
+   *   原实现直接 fail-fast 返回 token_expired，浏览器都不启动。但实测：
+   *     · 凭证库快照可能是旧的（登录后未及时落库 / 被健康检查清理）
+   *     · 而 userDataDir 里的 Cookie DB 是**更新的**（Chrome 自己刷新票据 / 用户手动登录过）
+   *   本机验证：`account.cookies` 无 PASS_ID，但直接用该 Profile 打开
+   *   mms.pinduoduo.com/goods/goods_list 返回「商品列表」且 PASS_ID 存在 —— 完全可用。
+   *
+   *   故改为**不在此处拦截**：交给浏览器用真实 Profile 去访问，由 guardPage 依据
+   *   页面实际状态判定（跳登录页才报 token_expired）。凭证库只作为「无环境时」的兜底注入源。
+   */
   if (!accountCookies.PASS_ID) {
-    return {
-      ok: false,
-      failureKind: 'token_expired',
-      shopKey,
-      text: `账号 ${account.display_label} 凭证里没有 PASS_ID（商家后台登录票据），`
-        + '大概率是登录后 Cookie 未完整落库或已过期。\n请重新调用浏览器登录（pdd_mms）后再发布。',
-    }
+    diag(`凭证库没有 PASS_ID（在途 Cookie ${Object.keys(accountCookies).length} 个），`
+      + '改为以 Profile 磁盘会话为准，交由浏览器实际访问判定')
   }
 
   // ★ 互斥锁按 Profile 目录划分（browser-login 统一持有），与登录 / 风控验证共享。
@@ -3566,15 +3788,37 @@ export async function pddPublish(
       Object.defineProperty(navigator, 'webdriver', { get: () => undefined })
     })
 
-    // 注入拼多多域 Cookie（商家后台登录票据 PASS_ID 写在 .pinduoduo.com 域）
+    /**
+     * 注入拼多多域 Cookie（商家后台登录票据 PASS_ID 写在 .pinduoduo.com 域）。
+     *
+     * ★★ 关键修复（2026-10-20 实测）：「**不能无条件覆盖**」。
+     *   故障现象：账号连接器显示 valid、profile 直接打开商品列表也正常，
+     *   但发布必报 token_expired。
+     *   根因：凭证库里的 Cookie 快照可能是几天前的旧票据（PASS_ID 会在服务端过期/轮转），
+     *   而 userDataDir 里的浏览器会话是**更新的**（用户刚登录过 / Chrome 自己刷新过）。
+     *   原实现 `page.setCookie(...storeCookies)` 会把 Profile 里的新票据**覆盖成旧的**
+     *   → 一打开商品列表就跳登录页。
+     *
+     *   正确策略：
+     *     · Profile 里已有 PASS_ID → **以浏览器本地会话为准，跳过注入**；
+     *     · Profile 里没有票据（全新/被清）→ 才用凭证库注入兜底。
+     *   另外在跳转后仍落在登录页时，再做一次「注入 + 重载」兜底（见下文段 1）。
+     */
+    const existingCookies = await page.cookies('https://mms.pinduoduo.com/')
+      .catch(() => [] as Array<{ name: string; value: string }>)
+    const profileHasPass = existingCookies.some((c: { name: string; value: string }) => c.name === 'PASS_ID' && c.value)
     const cookieList = Object.entries(accountCookies)
       .filter(([, v]) => v !== '' && v != null)
       .flatMap(([name, value]) => ([
         { name, value: String(value), domain: '.pinduoduo.com', path: '/' },
         { name, value: String(value), domain: 'mms.pinduoduo.com', path: '/' },
       ]))
-    if (cookieList.length > 0) await page.setCookie(...cookieList)
-    console.log(`[dsagent-pdd-publish] 已注入 ${cookieList.length} 个 Cookie（账号 ${shopKey}）`)
+    if (profileHasPass) {
+      diag(`Cookie：Profile 已有 PASS_ID（${existingCookies.length} 个 Cookie），跳过注入，以浏览器本地会话为准`)
+    } else {
+      if (cookieList.length > 0) await page.setCookie(...cookieList)
+      diag(`Cookie：Profile 无票据，从凭证库注入 ${cookieList.length} 个`)
+    }
 
     // ── 段 1：打开商品列表 → 点「发布新商品」（唯一正确入口）────
     //   ★ 不能直接 goto /goods/goods_add/index：该 URL 需要 type=add&from=category
@@ -3584,14 +3828,230 @@ export async function pddPublish(
     await page.goto(PDD_GOODS_LIST_URL, { waitUntil: 'domcontentloaded', timeout: 45_000 })
     await sleep(4000)
 
-    const listReady = await waitFor(
+    let listReady = await waitFor(
       page,
       p => p.evaluate(() =>
         /商品列表/.test(document.title || '') || /发布新商品/.test(document.body?.innerText || '')),
       LIST_WAIT_MS,
       '商品列表页',
     )
+
+    /**
+     * ★ 兜底 A（2026-10-21 新增）：Profile 有票据但**服务端已失效**时，
+     *   原逻辑「跳过注入」会一路带着死票据走到 token_expired。
+     *   实测场景：连续发布太多次被平台踢下线，Profile 的 PASS_ID 成僵尸值，
+     *   而凭证库的票据是新的（keepalive 刚续期）。
+     *   策略：落在登录页 → 用凭证库票据**覆盖注入** → 重载 → 再判一次。
+     */
+    if (!listReady.ok && /\/login/i.test(page.url())) {
+      if (cookieList.length > 0) {
+        diag('兜底 A：Profile 票据被服务端拒绝，用凭证库票据覆盖注入并重载')
+        await page.setCookie(...cookieList).catch(() => { /* 忽略 */ })
+        await page.goto(PDD_GOODS_LIST_URL, { waitUntil: 'domcontentloaded', timeout: 45_000 }).catch(() => { /* 忽略 */ })
+        await sleep(4000)
+        listReady = await waitFor(
+          page,
+          p => p.evaluate(() =>
+            /商品列表/.test(document.title || '') || /发布新商品/.test(document.body?.innerText || '')),
+          LIST_WAIT_MS,
+          '商品列表页',
+        )
+      }
+    }
+
+    /**
+     * ★ 兜底：若 Profile 已有票据却被判失效（票据服务端过期），
+     *   或 Profile 无票据但注入的也不管用 → 这里明确区分两种失败，给出可执行的处置建议，
+     *   而不是笼统报「登录态失效」让用户反复重试。
+     */
+    if (!listReady.ok && /\/login/i.test(page.url())) {
+      const passNow = await page.cookies('https://mms.pinduoduo.com/')
+        .then((cs: Array<{ name: string; value: string }>) => cs.some((c: { name: string; value: string }) => c.name === 'PASS_ID' && c.value))
+        .catch(() => false)
+      diag(`段1 落在登录页：Profile 票据存在=${profileHasPass}，注入后票据存在=${passNow}，`
+        + `凭证库 Cookie 数=${cookieList.length}`)
+      if (!profileHasPass && cookieList.length > 0) {
+        // Profile 本来就没票据，注入也没救回来 —— 直接告知需要重新登录
+        diag('段1：凭证库注入后仍未登录，需要重新扫码')
+      } else if (profileHasPass) {
+        // 有票据但服务端不认 —— 这才是真正的「票据过期」，必须重新登录
+        diag('段1：Profile 有 PASS_ID 但服务端拒绝，票据已失效，需要重新扫码')
+      }
+    }
     if (!listReady.ok) return guardFailResult(listReady, store, shopKey, page.url())
+
+    /**
+     * ── 段 1.5：模式2 图片预上传（HTTP 逆向上传，复刻觅千手）──────────
+     *
+     * 为什么放在这里（登录已确认、还没点「发布新商品」）：
+     *   · 当前页面是**主应用** /goods/goods_list —— 只有主应用才含 webpack 的 `fbeZ`
+     *     模块，能生成 Anti-Content；图片空间页 /material/upload 是独立子应用，不含。
+     *   · 早于任何表单操作，失败可直接返回，不会留下半成品表单。
+     *
+     * 做什么：
+     *   把 images / detailImages / specs[].values[].image 里的**本地路径**
+     *   经 `store_image → file/create → queryFileDetail` 换成 img.pddpic.com URL，
+     *   然后回填 → `buildGoodsDetailFromProduct` 的 `isRemoteImg` 门禁才放行 →
+     *   `fillImageData` 才能把 `commitBody.gallery` 整组替换成我们的图。
+     *
+     * 收益（实测）：5 张图 4.2 秒（0.84s/张），而 DOM 逐张上传要 8~20s/张。
+     * 且图片完全不经过页面文件控件 —— 与觅千手「图片走 URL、DOM 只负责提交」一致。
+     */
+    if (opts.hijack && (images.length || detailImages.length)) {
+      const t0Img = Date.now()
+      // 动态 import 规避循环依赖（pdd-mode2 不反向依赖本文件，但仍按需加载）
+      const mode2Lib = await import('./pdd-mode2.js')
+      diag(`段1.5 图片预上传开始：主图 ${images.length} 张、详情图 ${detailImages.length} 张`)
+      try {
+        const pre = await preuploadProductImages(
+          page,
+          {
+            title,
+            images,
+            detailImages,
+            specs: specs.length ? specs.map(d => ({
+              name: d.name,
+              values: d.values.map(v => ({ value: v.value, image: (v as { image?: string }).image })),
+            })) : undefined,
+          } as never,
+          {
+            onProgress: (done: number, total: number, r: { ok: boolean; ms?: number; error?: string }) => {
+              diag(`图片 ${done}/${total}：${r.ok ? `✓ ${r.ms}ms` : `✗ ${r.error || ''}`}`)
+            },
+          },
+        )
+        const secs = ((Date.now() - t0Img) / 1000).toFixed(1)
+        if (pre.summary.fatal) {
+          diag(`图片预上传失败：${pre.summary.fatal}`)
+          return {
+            ok: false,
+            failureKind: 'api_error',
+            shopKey,
+            finalUrl: page.url(),
+            text: `模式2 图片预上传失败：${pre.summary.fatal}\n`
+              + '图片走 HTTP 上传需要「主应用页面 + 可用 Anti-Content 签名」。\n'
+              + '请确认账号登录态正常后重试；如需临时绕过，可改用模式1（不传 mode2）。',
+          }
+        }
+        if (!pre.summary.ok) {
+          const bad = pre.summary.failed.slice(0, 5)
+            .map((f: { path: string; error: string }) => `  - ${f.path}：${f.error}`).join('\n')
+          diag(`图片预上传部分失败：成功 ${pre.summary.uploaded}/${pre.summary.total}`)
+          return {
+            ok: false,
+            failureKind: 'api_error',
+            shopKey,
+            finalUrl: page.url(),
+            text: `模式2 图片预上传失败（成功 ${pre.summary.uploaded}/${pre.summary.total}，耗时 ${secs}s）：\n`
+              + `${bad}\n`
+              + '图片未全部拿到 CDN URL 时不能继续（否则提交会报「图片url不能为空」）。',
+          }
+        }
+
+        // 回填：把本地路径换成 CDN URL（覆盖主图 / 详情图 / 规格值预览图）
+        const map = pre.summary.map
+        const swap = (v: string) => map[v] || v
+        for (let i = 0; i < images.length; i++) images[i] = swap(images[i])
+        for (let i = 0; i < detailImages.length; i++) detailImages[i] = swap(detailImages[i])
+        for (const d of specs) {
+          for (const v of d.values) {
+            const img = (v as { image?: string }).image
+            if (img) (v as { image?: string }).image = swap(img)
+          }
+        }
+        // goodsDetail.gallery 用回填后的 URL 重建（isRemoteImg 只放行 http(s)）
+        const rebuilt = mode2Lib.buildGoodsDetailFromProduct(
+          {
+            title,
+            images,
+            detailImages,
+            specs: specs.length ? specs.map(d => ({
+              name: d.name,
+              values: d.values.map(v => ({ value: v.value, image: (v as { image?: string }).image })),
+            })) : undefined,
+            skus: skuRows.length ? skuRows.map(r => ({
+              specs: r.specs,
+              price: r.price,
+              stock: r.stock,
+              itemNo: r.itemNo,
+            })) : undefined,
+            price: price || undefined,
+            stock: stock || undefined,
+            category: category || undefined,
+          } as never,
+          {
+            costTemplate: opts.costTemplate,
+            deliveryTime: opts.deliveryTime,
+            // ★ 规格池透传：行数重建时写 spec_id（pddPublish2 组装时已塞进
+            //   opts.hijack.goodsDetail，这里随 rebuilt 一起更新）
+            specIds: (opts.hijack?.goodsDetail as Record<string, unknown> | undefined)?.spec_id_map as never,
+          } as never,
+        )
+        // 只更新 gallery / title / spec_id_map（其余字段已在 pddPublish2 组装时算好）
+        const rebuiltGallery = (rebuilt.gallery || []) as Array<{ type: number; img_url: string }>
+        if (rebuiltGallery.length) {
+          opts.hijack.goodsDetail.gallery = rebuiltGallery
+          diag(`gallery 已注入 ${rebuiltGallery.length} 张 URL（type1=${rebuiltGallery.filter(g => g.type === 1).length}、`
+            + `type2=${rebuiltGallery.filter(g => g.type === 2).length}）`)
+        } else {
+          diag('警告：回填后 gallery 仍为空（图片可能未全部转成 http(s) URL）')
+        }
+        // ★ 标题入 detail：改包时强制写 goods_name（不依赖 DOM fillTitle 是否被 React 受理）
+        if ((rebuilt as Record<string, unknown>).title) {
+          (opts.hijack.goodsDetail as Record<string, unknown>).title = (rebuilt as Record<string, unknown>).title
+        }
+        // ★ spec_id_map 保留（buildGoodsDetailFromProduct 可能未收到 specIds）
+        if ((rebuilt as Record<string, unknown>).spec_id_map) {
+          (opts.hijack.goodsDetail as Record<string, unknown>).spec_id_map = (rebuilt as Record<string, unknown>).spec_id_map
+        }
+
+        /**
+         * ★ 同时塞 upload_spec_img_map（SKU 预览图 / thumb_url 注入源）。
+         *
+         * 觅千手原文 `_resolvePddSpecThumbFromUploadMap`：按**规格值名**（颜色名）查
+         *   `detail.upload_spec_img_map[颜色名]`，拿到 {url, id} 写进 `commitBody.skus[].thumb_url`。
+         * 这里 map 的 key 必须是**颜色值名**（格蕾灰/奶油黄/…），值是 `{ url: CDN_URL, id: file_id }`。
+         *
+         * ★ 2026-10-21 修复：specs[].values[].image 在上面已被 swap 成 CDN URL，
+         *   而 pre.summary.detail 的 key 是**本地路径** —— 直接用 URL 查必然 miss。
+         *   改为遍历 pre.summary.detail（本地路径 → {url, fileId}），
+         *   再用「本地路径 → 规格值名」的反查表定位颜色。
+         */
+        const uploadSpecMap: Record<string, { url: string; id: number | null }> = {}
+        const localPathToSpecValue: Record<string, string> = {}
+        for (const d of specs) {
+          for (const v of d.values) {
+            const curImg = (v as { image?: string }).image   // 此时已是 CDN URL
+            if (!curImg) continue
+            for (const [localPath, rec] of Object.entries(pre.summary.detail || {})) {
+              if (rec?.url && rec.url === curImg) {
+                localPathToSpecValue[localPath] = String(v.value)
+                break
+              }
+            }
+          }
+        }
+        for (const [localPath, specValue] of Object.entries(localPathToSpecValue)) {
+          const rec = pre.summary.detail[localPath]
+          if (rec?.url) uploadSpecMap[specValue] = { url: rec.url, id: rec.fileId ?? null }
+        }
+        if (Object.keys(uploadSpecMap).length > 0) {
+          ;(opts.hijack.goodsDetail as Record<string, unknown>).upload_spec_img_map = uploadSpecMap
+          diag(`upload_spec_img_map 已塞 ${Object.keys(uploadSpecMap).length} 个颜色：`
+            + Object.keys(uploadSpecMap).join('/'))
+        }
+        console.log(`[dsagent-pdd-publish] 模式2 图片预上传完成：${pre.summary.uploaded}/${pre.summary.total} 张，耗时 ${secs}s`)
+      } catch (e) {
+        diag(`图片预上传异常：${(e as Error).message}`)
+        return {
+          ok: false,
+          failureKind: 'api_error',
+          shopKey,
+          finalUrl: page.url(),
+          text: `模式2 图片预上传异常：${(e as Error).message}`,
+        }
+      }
+    }
 
     const entryClicked = await clickPublishEntry(page)
     if (!entryClicked) {
@@ -3654,14 +4114,24 @@ export async function pddPublish(
     }
 
     // ── 段 3：发布表单页 /goods/goods_add/index（类目确认后**同页跳转**）────
+    diag('段3 等待表单页跳转（25s）…')
     let step2 = await waitForPage(browser, STEP2_URL_RE, 25_000)
     if (!step2) {
       const step1Text = await step1.evaluate(() =>
         (document.body?.innerText || '').replace(/\s+/g, ' ').slice(0, 400)).catch(() => '')
+      diag(`段3 未等到表单页 | 当前 URL=${step1.url().slice(0, 120)} | 页面文案=${step1Text.slice(0, 260)}`)
       console.log(`[dsagent-pdd-publish] 未等到表单页；类目选择页当前文案：${step1Text}`)
       console.log('[dsagent-pdd-publish] 补点一次「确认发布该类商品」...')
       const reconfirmed = await selectCategory(step1, cateKeyword, category)
+      diag(`段3 补点确认结果：${reconfirmed ? `已选「${reconfirmed}」` : '未点中'}`)
       if (reconfirmed) step2 = await waitForPage(browser, STEP2_URL_RE, 25_000)
+      if (!step2) {
+        const t2 = await step1.evaluate(() =>
+          (document.body?.innerText || '').replace(/\s+/g, ' ').slice(0, 400)).catch(() => '')
+        diag(`段3 补点后仍未跳转 | URL=${step1.url().slice(0, 120)} | 文案=${t2.slice(0, 260)}`)
+      }
+    } else {
+      diag(`段3 表单页已出现：${step2.url().slice(0, 140)}`)
     }
     if (!step2) {
       return {
@@ -3684,21 +4154,52 @@ export async function pddPublish(
     )
     if (!step2Ready.ok) return guardFailResult(step2Ready, store, shopKey, step2.url())
 
-    // 第二步主图通常继承第一步已上传的图片；若为空则兜底再传一次
-    // ★ 2026-10-14 实测：主图区计数形态为「已上传N/10张」，旧的「(N/10)」正则已失效。
-    const step2HasImage = await step2.evaluate(() => {
-      const inp = document.querySelector('input[data-tracking-click-viewid="carousel_img_localfile_upload"]')
-      if (!inp) return false
-      let box: HTMLElement = inp as HTMLElement
-      for (let i = 0; i < 10 && box.parentElement; i++) {
-        box = box.parentElement
-        if (/已上传\s*[1-9]\d*\s*\/\s*\d+\s*张/.test((box.innerText || '').replace(/\s+/g, ' '))) return true
+    /**
+     * 第二步主图：**完全跳过 DOM 上传**（照抄觅千手 uploadAllImages 的结论）。
+     *
+     * 原文（m_042_8087 uploadAllImages 末尾）：
+     *     e.gallery = [...u, ...d]        // u=主图{url,type:1,file_id}，d=详情图{url,type:2}
+     *     if (e.main_img.length > 0 && 0 === u.length) throw '主图 gallery 构建失败'
+     * —— 它**从不碰 DOM 文件控件**，图片全靠 HTTP 上传后写进 gallery。
+     *
+     * 而 fillImageData 原文是 `e.gallery = t.gallery`（整组替换），
+     * 所以页面主图区空不空**完全不影响提交体**。
+     *
+     * 之前我误判成「页面状态影响规格区」，于是恢复 DOM 上传 —— 那是在错误方向上加戏。
+     * 真正影响规格区的是 SKU 建表逻辑，与图片无关。
+     */
+    {
+      const g = ((opts.hijack?.goodsDetail?.gallery || []) as Array<{ type: number }>)
+      const t1 = g.filter(x => x.type === 1).length
+      const t2 = g.filter(x => x.type === 2).length
+      // ★ 2026-10-20 实测修正：页面「提交并上架」前会校验轮播图非空
+      //   （「商品轮播图不能为空」），原设计「跳过 DOM 上传」会被拦。
+      //   fillImageData 只影响提交体，不影响页面校验状态 —— 故补 1 张 DOM 主图。
+      //   提交体 gallery 仍由 fillImageData 整组替换为 HTTP 上传的图，不受影响。
+      diag(`段3 图片策略：gallery type1=${t1}、type2=${t2}，补 1 张 DOM 主图过页面校验`)
+      if (images.length) {
+        const localImg = images.find(im => !/^https?:\/\//i.test(im))
+        if (localImg) {
+          const input = await step2.$(STEP2_IMAGE_INPUT).catch(() => null)
+          if (input) {
+            await input.uploadFile(localImg).catch((e: unknown) => diag(`DOM 主图上传异常：${(e as Error).message}`))
+            await new Promise(r => setTimeout(r, 12000))
+            const cnt = await step2.evaluate((sel: string) => {
+              const inp = document.querySelector(sel)
+              let box: HTMLElement | null = inp as HTMLElement | null
+              for (let i = 0; i < 10 && box?.parentElement; i++) {
+                box = box.parentElement
+                const m = (box.innerText || '').replace(/\s+/g, ' ').match(/已上传\s*(\d+)\s*\/\s*(\d+)\s*张/)
+                if (m) return `${m[1]}/${m[2]}`
+              }
+              return null
+            }, STEP2_IMAGE_INPUT).catch(() => null)
+            diag(`DOM 主图已补传（过校验用）：${cnt || '已上传'}`)
+          } else {
+            diag('未找到主图 file input，跳过 DOM 补传')
+          }
+        }
       }
-      return false
-    }).catch(() => false) as boolean
-    if (!step2HasImage) {
-      const up2 = await uploadImages(step2, images, STEP2_IMAGE_INPUT, '第二步主图区')
-      console.log(`[dsagent-pdd-publish] 第二步主图兜底上传：${up2.note}`)
     }
 
     // 类目已由段 2 在选择页确认；表单页 #goods-category 读回对账。
@@ -3725,84 +4226,107 @@ export async function pddPublish(
       if (pHit) filled.push(`参考价=${price}`); else missed.push('参考价')
     }
 
-    // 商品详情图：离屏隐藏 input 直接投递（投递前先点掉引导气泡「知道了」）
-    const detail = await uploadDetailImages(step2, detailImages)
-    if (detail.ok) filled.push(`详情图（${detail.note}）`); else missed.push(`详情图（${detail.note}）`)
-    console.log(`[dsagent-pdd-publish] 详情图：${detail.note}`)
-    await sleep(1000)
-
-    // SKU 多规格：必须先建规格（决定 SKU 行数），再填价格/库存，最后投递每行预览图。
-    // ★ 顺序不可颠倒 —— fillPriceTable 按 SKU 表的行号逐行填，行由规格值产生。
-    if (specs.length) {
-      // 多维规格（如 颜色×尺码）：先建第 1 维（可带预览图），再追加第 2 维
-      const spec = await withStallWatch(
-        step2, '第二步-SKU 规格（多维）', 240_000, () => fillSkuSpecMulti(step2, specs, skuRows, category),
-      )
-      filled.push(...spec.filled)
-      missed.push(...spec.missed)
-      await sleep(1500)
-    } else if (skus.length) {
-      const spec = await withStallWatch(
-        step2, '第二步-SKU 规格', 180_000, () => fillSkuSpec(step2, skus, { category }),
-      )
-      filled.push(...spec.filled)
-      missed.push(...spec.missed)
-      await sleep(1500)
+    // 商品详情图：**跳过 DOM 上传**（详情图走 HTTP 上传后进 gallery 的 type2）
+    {
+      const t2 = ((opts.hijack?.goodsDetail?.gallery || []) as Array<{ type: number }>)
+        .filter(g => g.type === 2).length
+      if (opts.hijack) {
+        diag(`段4 跳过 DOM 详情图上传：gallery type2=${t2} 张（HTTP 已传）`)
+        filled.push(`详情图（模式2：${t2} 张 CDN URL 注入 gallery）`)
+      } else {
+        const detail = await uploadDetailImages(step2, detailImages)
+        if (detail.ok) filled.push(`详情图（${detail.note}）`); else missed.push(`详情图（${detail.note}）`)
+        console.log(`[dsagent-pdd-publish] 详情图：${detail.note}`)
+      }
     }
 
-    // 价格及库存 SKU 表：placeholder 全是「请输入」，必须按表头列序定位（见 fillPriceTable）
-    // ★ 套看门狗：该表曾静默卡死 9 分钟（弹层遮挡 → click 空等），卡住时自动截图留证。
-    // ★ 多维规格时 rows 带 `specs`（维度名 → 规格值），由 fillPriceTable 按表格行序重排。
-    // 模式2（劫持填价）：跳过 UI 填价，价格列留白，提交时由 pdd-mode2 拦截原生请求改包注入。
-    if (!opts.hijack) {
-      const priceRows = specs.length
-        ? skuRows.map(r => ({ price: r.price, stock: r.stock, specs: r.specs }))
-        : skus.map(s => ({ price: s.price, stock: s.stock }))
-      const sku = await withStallWatch(
-        step2, '第二步-价格及库存', 150_000,
-        () => fillPriceTable(step2, {
-          price, stock, itemNo,
-          // 逐行覆盖：第 i 行对应第 i 个规格值；缺项自动回落到顶层 price / stock
-          rows: priceRows,
-        }),
-      )
-      filled.push(...sku.filled)
-      missed.push(...sku.missed)
-      console.log(`[dsagent-pdd-publish] 通用字段已填：${filled.join('、') || '（无）'}；未命中：${missed.join('、') || '（无）'}`)
-      await sleep(1500)
+    /**
+     * ── 段4 规格/价格/属性/发货：**模式2 全部跳过 DOM 填写** ──
+     *
+     * ★ 2026-10-21 重构（重要）：原逻辑在模式2 下也把整个表单 DOM 填一遍
+     *   （规格 2 分钟 + 价格表 + 属性 + 发货），但提交时劫持改包会**整体替换**
+     *   skus/gallery/goods_properties，DOM 填的 90% 被丢弃 —— 纯浪费 3-4 分钟，
+     *   且页面结构一变动就失败。
+     *
+     *   页面真正强制的只有「提交按钮可点」：标题 + 轮播图非空（段3 已补 DOM 主图）。
+     *   实测：只填标题+1张主图即可点到提交并触发劫持。
+     *
+     *   ★ 兜底：点提交时若按钮 disabled（页面校验未过），回退填价格表再试一次
+     *     （见段4 收尾的模式2 分支）。
+     */
+    if (opts.hijack) {
+      diag('段4 模式2 跳过 DOM 规格/价格/属性/发货填写（提交体由劫持改包整体注入）')
+      filled.push('规格/价格/属性/发货（模式2：提交体改包注入）')
     } else {
-      console.log('[dsagent-pdd-publish] 模式2：跳过 UI 填价（价格及库存由劫持改包注入）')
-    }
+      // SKU 多规格：必须先建规格（决定 SKU 行数），再填价格/库存，最后投递每行预览图。
+      if (specs.length) {
+        diag(`段4 多维规格入口：specs=${specs.length} 维、skuRows=${skuRows.length} 行，调用 fillSkuSpecMulti`)
+        const spec = await withStallWatch(
+          step2, '第二步-SKU 规格（多维）', 240_000, () => fillSkuSpecMulti(step2, specs, skuRows, category),
+        )
+        diag(`段4 fillSkuSpecMulti 返回：filled=${spec.filled.length}、missed=${spec.missed.length}`)
+        filled.push(...spec.filled)
+        missed.push(...spec.missed)
+        await sleep(1500)
+      } else if (skus.length) {
+        diag(`段4 单维规格入口：skus=${skus.length} 行，调用 fillSkuSpec`)
+        const spec = await withStallWatch(
+          step2, '第二步-SKU 规格', 180_000, () => fillSkuSpec(step2, skus, { category }),
+        )
+        diag(`段4 fillSkuSpec 返回：filled=${spec.filled.length}、missed=${spec.missed.length}`)
+        filled.push(...spec.filled)
+        missed.push(...spec.missed)
+        await sleep(1500)
+      } else {
+        diag('段4 无规格（specs=0 且 skus=0），直接进入价格表')
+      }
 
-    // ── 段 4-b：填「商品属性」（建议项，失败不阻断发布）──
-    // 属性值由**宿主聊天模型**从「页面真实下拉选项」里选（见 fillAttributes）。
-    try {
-      const attrs = await withStallWatch(
-        step2, '第二步-商品属性', 150_000,
-        () => fillAttributes(step2, { title, category, model: opts.attrModel, values: attributes }),
-      )
-      filled.push(...attrs.filled)
-      missed.push(...attrs.missed)
-    } catch (e) {
-      missed.push(`商品属性（自动填充异常：${(e as Error).message}）`)
-    }
-    console.log(`[dsagent-pdd-publish] 属性后累计已填：${filled.join('、') || '（无）'}；未命中：${missed.join('、') || '（无）'}`)
+      // 价格及库存 SKU 表
+      {
+        const priceRows = specs.length
+          ? skuRows.map(r => ({ price: r.price, stock: r.stock, specs: r.specs }))
+          : skus.map(s => ({ price: s.price, stock: s.stock }))
+        const sku = await withStallWatch(
+          step2, '第二步-价格及库存', 180_000,
+          () => fillPriceTable(step2, {
+            price, stock, itemNo,
+            rows: priceRows,
+          }),
+        )
+        filled.push(...sku.filled)
+        missed.push(...sku.missed)
+        diag(`价格表填充：已填 ${sku.filled.length} 项；未填 ${sku.missed.length} 项`)
+        await sleep(1500)
+      }
 
-    // ── 段 4-c：填「发货与售后」+「运费模板」（对齐神笔 step 25-26）──
-    try {
-      const ship = await withStallWatch(
-        step2, '第二步-发货与售后', 60_000,
-        () => fillShippingAndFreight(step2, {
-          costTemplate: opts.costTemplate,
-          deliveryTime: opts.deliveryTime,
-        }),
-      )
-      filled.push(...ship.filled)
-      missed.push(...ship.missed)
-    } catch (e) {
-      missed.push(`发货与售后（自动填充异常：${(e as Error).message}）`)
+      // 商品属性
+      try {
+        const attrs = await withStallWatch(
+          step2, '第二步-商品属性', 150_000,
+          () => fillAttributes(step2, { title, category, model: opts.attrModel, values: attributes }),
+        )
+        filled.push(...attrs.filled)
+        missed.push(...attrs.missed)
+      } catch (e) {
+        missed.push(`商品属性（自动填充异常：${(e as Error).message}）`)
+      }
+
+      // 发货与售后
+      try {
+        const ship = await withStallWatch(
+          step2, '第二步-发货与售后', 60_000,
+          () => fillShippingAndFreight(step2, {
+            costTemplate: opts.costTemplate,
+            deliveryTime: opts.deliveryTime,
+          }),
+        )
+        filled.push(...ship.filled)
+        missed.push(...ship.missed)
+      } catch (e) {
+        missed.push(`发货与售后（自动填充异常：${(e as Error).message}）`)
+      }
     }
-    console.log(`[dsagent-pdd-publish] 发货售后后累计已填：${filled.join('、') || '（无）'}；未命中：${missed.join('、') || '（无）'}`)
+    console.log(`[dsagent-pdd-publish] 通用字段已填：${filled.join('、') || '（无）'}；未命中：${missed.join('、') || '（无）'}`)
 
     // ── 段 4 收尾：点提交 ─────────────────────────────────
     if (opts.hijack) {
@@ -3810,6 +4334,32 @@ export async function pddPublish(
       // 时序铁律：先 setupHijack 挂 listener（同步），再开 setRequestInterception，
       // 最后点提交——避免「拦截已开但无 handler」窗口内其他请求挂起。
       const mode2 = await import('./pdd-mode2.js')
+      // ★ 兜底：模式2 跳过 DOM 填表后，若页面提交按钮 disabled（校验未过），
+      //   回退把价格表填上（只填价格/库存，不建规格——规格行由改包注入）。
+      //   实测：只填标题+主图时可点提交；若平台加强校验，这里保证仍能触发劫持。
+      const submitEnabled = await step2.evaluate(() => {
+        const b = document.querySelector('button#bottomSubmitBtnId') as HTMLButtonElement | null
+        if (b) return !b.disabled
+        const t = Array.from(document.querySelectorAll('button')).find(x => /提交并上架/.test(x.innerText || '') && !/取消|草稿/.test(x.innerText || '')) as HTMLButtonElement | undefined
+        return t ? !t.disabled : false
+      }).catch(() => true)
+      if (!submitEnabled && (specs.length || skus.length)) {
+        diag('模式2 兜底：提交按钮 disabled，回退填价格表')
+        try {
+          const priceRows = specs.length
+            ? skuRows.map(r => ({ price: r.price, stock: r.stock, specs: r.specs }))
+            : skus.map(s => ({ price: s.price, stock: s.stock }))
+          const sku = await withStallWatch(
+            step2, '第二步-价格及库存（兜底）', 120_000,
+            () => fillPriceTable(step2, { price, stock, itemNo, rows: priceRows }),
+          )
+          filled.push(...sku.filled)
+          missed.push(...sku.missed)
+          diag(`兜底价格表：已填 ${sku.filled.length} 项`)
+        } catch (e) {
+          diag(`兜底填表失败：${(e as Error).message}`)
+        }
+      }
       const ctrl = mode2.setupHijack(step2, opts.hijack.goodsDetail, {
         onProxyFallback: ctx => mode2.sendPddEditViaHttp(ctx),
         onTrace: opts.hijack.onTrace,

@@ -1,0 +1,36 @@
+{
+  "schema": "dsagent/skill-contract@1",
+  "id": "pdd-publish-http",
+  "entry": {
+    "form": "script",
+    "script": "scripts/publish.mjs"
+  },
+  "input": {
+    "args": [
+      {
+        "name": "product",
+        "description": "统一商品数据（JSON 字符串）：{title, images, detailImages?, category?, price?, stock?, itemNo?, specs?, skus?, attributes?}"
+      },
+      {
+        "name": "product_file",
+        "description": "统一商品数据 JSON 文件路径（优先于 product）",
+        "flag": "--product-file"
+      },
+      {
+        "name": "confirm",
+        "description": "确认上架：true 才真正提交；省略/false 只返回预览，不产生任何写操作（L2 门禁）",
+        "flag": "--confirm"
+      },
+      {
+        "name": "account",
+        "description": "账号 shopKey（可选）；该平台多账号且未绑定时需先向用户确认",
+        "flag": "--account"
+      }
+    ]
+  },
+  "output": {
+    "protocol": "dsagent-result",
+    "resultPrefix": "__DSAGENT_RESULT__",
+    "filesMarker": "---[OUTPUT_FILES]"
+  }
+}

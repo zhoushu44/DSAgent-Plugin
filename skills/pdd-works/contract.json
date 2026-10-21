@@ -1,0 +1,45 @@
+{
+  "schema": "dsagent/skill-contract@1",
+  "id": "pdd-works",
+  "entry": {
+    "form": "script",
+    "script": "scripts/query.mjs"
+  },
+  "input": {
+    "args": [
+      {
+        "name": "mode",
+        "description": "overview=商品总览(默认)；list=商品列表；detail/sku=单商品SKU全量；commit=单商品提交体快照(170字段)；spec-pool=全店规格池采集；offsale/onsale/delete=下架/上架/删除(L2写操作，需--confirm)"
+      },
+      {
+        "name": "goods_id",
+        "description": "商品 ID（detail / sku / commit / offsale / onsale / delete 模式必填）",
+        "flag": "--goods-id"
+      },
+      {
+        "name": "limit",
+        "description": "返回条数上限，默认 20，上限 100"
+      },
+      {
+        "name": "confirm",
+        "description": "写操作确认：offsale/onsale/delete 必须带 true 才真正执行；省略只返回预览（L2 门禁）",
+        "flag": "--confirm"
+      },
+      {
+        "name": "csv",
+        "description": "true 时同时导出 CSV 到 workspace/artifacts/pdd-works",
+        "flag": "--csv"
+      },
+      {
+        "name": "account",
+        "description": "账号 shopKey（可选）；该平台多账号且未绑定时需先向用户确认",
+        "flag": "--account"
+      }
+    ]
+  },
+  "output": {
+    "protocol": "dsagent-result",
+    "resultPrefix": "__DSAGENT_RESULT__",
+    "filesMarker": "---[OUTPUT_FILES]"
+  }
+}

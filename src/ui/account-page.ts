@@ -27,6 +27,12 @@ const PLATFORM_META: Record<string, { label: string; color: string; glyph: strin
   wechat_store: { label: '微信小店', color: '#fa9d3b', glyph: '店', via: '官方开放 API' },
   zhihu: { label: '知乎', color: '#0084ff', glyph: '知', via: 'Cookie 托管' },
   alibaba: { label: '1688', color: '#ff7300', glyph: '阿', via: 'Cookie 托管' },
+  // ★ 京东：独立登录态（pt_key），是 mqs 三平台（京东/抖店/1688）里唯一与阿里系无关的
+  jd: { label: '京东', color: '#e1251b', glyph: '京', via: 'Cookie 托管' },
+  // ★ 闲鱼（FIX-LOG #74 反转）：凭证层仍复用淘宝（credentialPlatform→taobao），
+  //   但账号页必须能列出与管理它 —— 闲鱼发布被处罚、或要登另一个闲鱼号时，
+  //   走淘宝 SSO 自动派生那条通路满足不了。登录入口用 goofish.com/login 独立扫码。
+  xianyu: { label: '闲鱼', color: '#ffd000', glyph: '闲', via: '闲鱼 App 扫码' },
 }
 
 const STATUS_META: Record<AccountStatus, { label: string; cls: string }> = {
@@ -49,8 +55,8 @@ const LOGIN_METHODS: Record<string, Array<{ key: string; label: string; hint: st
   // ★ 不提供「生意参谋」独立登录入口：生意参谋/万相台/达摩盘/天猫洞察在凭证层都复用
   //   淘宝登录态（CREDENTIAL_PLATFORM → taobao），**登录淘宝后生意参谋即可用**。
   //   原有入口会让用户以为要单独登一次生意参谋，且它拿不到 `unb` 时会被误判为登录失败。
-  // ★ 同样不提供「闲鱼」独立登录入口（FIX-LOG #70）：闲鱼也复用淘宝 SSO，其凭证行由
-  //   淘宝登录成功后自动派生（见 browser-login.ts::ensureXianyuFromTaobao），且列表里隐藏。
+  // ★ 闲鱼**有**独立登录入口（FIX-LOG #74 反转）：见下方 LOGIN_METHODS.xianyu，
+  //   走 goofish.com/login 用闲鱼 App 扫码，与淘宝 SSO 那条自动派生通路并存。
   douyin: [
     { key: 'qrcode', label: '扫码登录', hint: '打开抖音 App 扫码' },
     { key: 'cdp', label: '复用本机 Chrome', hint: '读取本机已登录的 Chrome' },
@@ -94,13 +100,36 @@ const LOGIN_METHODS: Record<string, Array<{ key: string; label: string; hint: st
     { key: 'qrcode', label: '扫码登录', hint: '打开 1688 App 扫码' },
     { key: 'manual_cookie', label: '导入 Cookie', hint: '从浏览器复制粘贴' },
   ],
+  // ★ 京东（独立登录态）：商家后台发品需商家/供应商账号
+  jd: [
+    { key: 'qrcode', label: '扫码登录', hint: '打开京东 App 扫码（商家账号）' },
+    { key: 'manual_cookie', label: '导入 Cookie', hint: '从浏览器复制粘贴' },
+  ],
+  // ★ 闲鱼（FIX-LOG #74）：有独立登录入口了。必须是 goofish.com/login 的二维码页，
+  //   **用闲鱼 App 扫**（淘宝 App 扫出来的是淘宝登录态，在 goofish 域不被接纳）。
+  //   登录成功后 browser-login 会再补跑一次 goofish 域 Cookie 刷新。
+  xianyu: [
+    { key: 'qrcode', label: '扫码登录', hint: '打开闲鱼 App 扫码' },
+    { key: 'manual_cookie', label: '导入 Cookie', hint: '从浏览器复制粘贴' },
+  ],
+  // ★ 抖店（抖音小店商家后台）：与抖音同一套 SSO，登录走抖音主页弹窗；
+  //   登录后访问 fxg.jinritemai.com 会自动补发该域 Cookie（发品必需）。
+  douyin_shop: [
+    { key: 'qrcode', label: '扫码登录', hint: '打开抖音 App 扫码（需有抖店商家权限）' },
+    { key: 'manual_cookie', label: '导入 Cookie', hint: '从浏览器复制粘贴' },
+  ],
 }
 
 /** 平台专属风控/前置提示 */
 const PLATFORM_NOTES: Record<string, string> = {
-  taobao: '淘宝风控强度 L3，建议使用专用小号登录，避免与日常购物号混用。闲鱼 / 生意参谋 / 万相台 / 达摩盘技能共用此登录态，无需单独登录。',
+  taobao: '淘宝风控强度 L3，建议使用专用小号登录，避免与日常购物号混用。生意参谋 / 万相台 / 达摩盘 / 天猫洞察技能共用此登录态，无需单独登录。',
+  // ★ 闲鱼（FIX-LOG #74）：账号被处罚时 preget 会返回 violationInfo、
+  //   prepublish.check 返回 limited=true，发布会被硬拦截。这不是登录态问题，
+  //   重登无效 —— 必须去闲鱼 App「我的-安全中心-违规记录」处理后才发得了货。
+  //   另外 preget 的 supportSkuOrInventory=false 表示该号没有多 SKU 发布权限。
+  xianyu: '必须用**闲鱼 App** 扫描 https://www.goofish.com/login 的二维码（淘宝 App 扫出来的登录态在 goofish 域无效）。账号若被平台处罚，发布会被 prepublish.check 拦截（提示「你已被限制发布」），此时需去闲鱼 App「我的-安全中心-违规记录」处理，重登无效。',
   xiaohongshu: '小红书登录态有效期较短，建议登录后立刻到技能页启用所需技能。',
-  douyin: '抖音开放平台需要企业开发者资质，个人号请使用扫码登录。',
+  douyin: '抖音开放平台需要企业开发者资质，个人号请使用扫码登录。**抖店发品**复用此登录态（登录后访问 fxg.jinritemai.com 会补发 .jinritemai.com 域 Cookie），需有抖店商家权限。',
   wechat_mp: '公众号需管理员本人扫码，且须为已认证的服务号或订阅号。',
   wechat_store: '微信小店需在后台开通「自定义应用」并授权本工具。',
   bilibili: 'B站登录态有效期约 30 天，过期后需在此重新登录。',
@@ -108,7 +137,9 @@ const PLATFORM_NOTES: Record<string, string> = {
   pinduoduo: '拼多多开放平台需先申请应用并审核通过。',
   pdd_mms: '需用**商家账号**登录 mms.pinduoduo.com（商品发布/上架用）。它与「拼多多」买家账号是两套独立登录态，互不通用。拼多多滑块风控为页内内联，发布时需在弹出的可见窗口内手动拖动完成。',
   zhihu: '知乎登录态有效期约 30 天，过期后需在此重新登录。频繁请求可能触发风控，建议使用小号。',
-  alibaba: '1688（阿里巴巴 B2B）独立登录态，Cookie 在 .1688.com 域。与淘宝同属阿里 SSO 体系但须独立登录 1688。',
+  alibaba: '1688（阿里巴巴 B2B）独立登录态，Cookie 在 .1688.com 域。与淘宝同属阿里 SSO 体系但须独立登录 1688。**发品需 1688 卖家（诚信通/实力商家）资质**，纯买家号会在选类目阶段被挡。',
+  jd: '京东**独立登录态**（pt_key，与淘宝/抖店完全不通用）。发品需京东商家（POP 或自营供应商）账号；买号无发品权限。',
+  douyin_shop: '抖店（抖音小店商家后台）与抖音共用登录态，但**必须有抖店商家权限**才有发品入口。登录后访问 fxg.jinritemai.com 会自动补发 .jinritemai.com 域 Cookie。',
 }
 
 const PAGE_SIZE = 20
@@ -138,13 +169,16 @@ function esc(s: string): string {
 }
 
 /**
- * ★ 复用淘宝登录态、无独立登录入口的平台，其凭证行在账号页隐藏（FIX-LOG #70）。
+ * ★ 复用淘宝登录态、无独立登录入口的平台，其凭证行在账号页隐藏（FIX-LOG #67/#70）。
  *
- * 目前只有闲鱼：它的 `xianyu_{unb}` 凭证行由 `ensureXianyuFromTaobao()` 在淘宝登录成功后
- * 自动派生并刷新 goofish 域 Cookie，用户不需要（也无法）单独登录闲鱼。
- * 该行仍存在于凭证库（闲鱼技能要用它自己的 goofish 域 Cookie），只是不在 UI 暴露。
+ * 生意参谋系（sycm/万相台/达摩盘/天猫洞察）与天猫都走这条：它们在凭证层「借用」淘宝的
+ * Cookie，没有自己的凭证行，列出只会造成「同一个号出现两次」的困惑。
+ *
+ * ★ 闲鱼**不在**此集合（FIX-LOG #74 反转）：闲鱼保留独立凭证行（goofish 域 Cookie
+ *   必须落在自己条目上，与淘宝的 .taobao.com 域票据互不通用），且已有独立登录入口
+ *   （goofish.com/login 扫码），因此必须露出让用户能重新登录 / 删除 / 绑定会话。
  */
-const HIDDEN_ROW_PLATFORMS = new Set(['xianyu'])
+const HIDDEN_ROW_PLATFORMS = new Set<string>([])
 
 function hideSharedLoginRows(rows: AccountRow[]): AccountRow[] {
   return rows.filter(r => !HIDDEN_ROW_PLATFORMS.has(r.platformId))
@@ -660,10 +694,13 @@ export function accountPage(deps: AccountPageDeps) {
             const plat = tr?.dataset.platform ?? ''
             // ★ 不可独立登录的平台（生意参谋系 / 天猫）：凭证层复用淘宝登录态，账号页无入口。
             //   存量这类账号（修复前写入）仍可能出现在列表里，直接放行会重新拉生意参谋登录窗（FIX-LOG #67）。
+            //   闲鱼已不在其列（FIX-LOG #74）：loginOwnerPlatform('xianyu') 返回空串，正常放行。
             const owner = loginOwnerPlatform(plat)
             if (owner) {
+              // 用中文平台名（PLATFORM_META.label），不要把平台 ID 裸给用户看
+              const platLabel = PLATFORM_META[metaKey(plat)]?.label ?? plat
               const ownerLabel = PLATFORM_META[owner]?.label ?? owner
-              say(`「${plat}」复用${ownerLabel}登录态，无独立登录入口。请对${ownerLabel}账号执行「重新登录」。`)
+              say(`「${platLabel}」复用${ownerLabel}登录态，无独立登录入口。请对${ownerLabel}账号执行「重新登录」。`)
               break
             }
             pickedPlatform = plat

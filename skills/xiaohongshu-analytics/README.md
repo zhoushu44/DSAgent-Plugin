@@ -1,39 +1,38 @@
 # 小红书·数据分析（xiaohongshu-analytics）
 
-> 一句话定位：计划用于统计自己小红书账号与笔记的表现数据，输出分析报告，辅助经营复盘。
+RE HTTP 链路采集当前小红书账号下全部笔记的发布状态、时间与互动数据，输出可执行结论。
 
-## 能力
-- ⚠️ **当前不可用/受限**：本技能目前**尚未实现**。目录内只有一个占位 Python 包（`xiaohongshu_analytics`，含签名工具 `sign.py` 与 stdout 输出约定），**没有 SKILL.md 定义，也没有对应的 host 工具入口**。
-- 若后续补齐，预期能力为：账号/笔记表现数据统计与报告（账号概况、笔记排行、互动数据等），只读、无平台副作用。
+| 文件 | 说明 |
+|---|---|
+| [contract.json](contract.json) | 参数契约（mode / note_id / limit / port / csv） |
+| [SKILL.md](SKILL.md) | 技能全文：触发词、边界、前置条件、分析口径、错误处理 |
+| [scripts/fetch_data.py](scripts/fetch_data.py) | 执行脚本 |
 
-## 触发方式（自然语言示例）
-- 「分析一下我的小红书数据」
-- 「哪篇笔记表现好」
+## 模式
 
-## 输入
-| 参数 | 必需 | 说明 |
-|------|:----:|------|
-| — | — | 技能未实现，暂无可用的入参约定 |
+| mode | 用途 |
+|------|------|
+| `overview` | 笔记列表 + 指标汇总（默认） |
+| `list` | 仅笔记列表（标题/状态/日期/互动数） |
+| `detail` | 单篇详情（预留） |
+| `trend` | 单篇日趋势（预留） |
 
-## 限制与边界
-- **当前不可用**：尚无可执行的采集/分析能力与 host 工具绑定，属于待开发状态。
-- 在可用之前，小红书相关内容请使用已实现的技能：
-  - 关键词搜索笔记：`xiaohongshu-crawl`
-  - 发布笔记：`xiaohongshu-publish`
-- 平台侧：小红书风控严格、接口需 `x-s`/`x-t`/`x-s-common` 签名且登录态有效期短（1~3 天），实现后采集/统计仍需注意节流与重新登录。
+## 用法
 
-## 账号绑定
-- 预期绑定**小红书（xhs）**平台账号（扫码登录）。当前未实现，暂无账号绑定流程。
+```bash
+python3 scripts/fetch_data.py --mode overview --limit 50 [--csv]
+python3 scripts/fetch_data.py --mode list --limit 100
+```
 
-## 输出
-- 未实现，暂无稳定输出结构。若实现，将遵循技能统一的 `__DSAGENT_RESULT__` stdout JSON 约定输出报告/数据。
+`--csv` 额外导出 CSV 到 `workspace/artifacts/xhs-analytics/`。
 
-## 错误处理速查
-| 常见失败 | 处理动作 |
-|---------|---------|
-| 技能尚未实现 / 无 host 工具 | 暂不可用，引导使用 `xiaohongshu-crawl` 与 `xiaohongshu-publish` 的既有能力 |
+## 依赖
+
+- Node.js + Chrome（`sign_service.js` 走 puppeteer-core）
+- sign_service 会自动拉起；日志见技能目录 `sign_service.log`
+- 登录态失效时引导用户到「账号连接」重新登录 xhs，不要重试原请求
 
 ## 相关技能
-- 采集笔记：`xiaohongshu-crawl`
-- 发布笔记：`xiaohongshu-publish`
-- 同平台类技能参考：`xianyu-analytics`
+
+- 发布笔记：`xhs-publish-re` / `xiaohongshu-publish`
+- 关键词采集：`xiaohongshu-crawl`

@@ -50,8 +50,33 @@ metadata:
 | `category` | 否 | 类目关键词或类目路径；不传则从标题推断 |
 | `skus` | 否 | SKU 行 JSON 数组，每行给全维度规格值 + 价格 + 库存 + 可选 outerId |
 | `attributes` | 否 | 显式属性 name→value（命中页面下拉选项才生效，品牌除外） |
+| `replayMode` | 否 | **觅千手式「Json/Json2 劫持重放」模式**（默认 false）。`true` 时进入发布页前注入劫持脚本：框架把表单 state 赋给 `window.Json/Json2` 的瞬间，把本地组装的商品数据原地 merge 进表单（一次门禁），命中则跳过 DOM 逐格填写，未命中自动降级回 DOM 填写。机制溯源见 `SOURCE.md`。★ 传了 `imageSpaceUpload`（默认开）并上传成功时会**自动启用**，无需手动传 |
+| `imageSpaceUpload` | 否 | **逆向 HTTP 图片空间预上传**（默认 **true**）。本地主图/详情图先用图片空间接口（`stream-upload.taobao.com/api/upload.api`，纯 HTTP multipart，无 mtop 签名、无浏览器）传成 `img.alicdn.com` URL，再随 Json 劫持重放注入表单 —— 与觅千手 v5.61「预上传」同链路，主图与详情图都不再走页面文件控件。任一批整体失败自动回退原 DOM 上传。传 `false` 走旧的 DOM 文件上传 |
+| `imageSpaceFolderId` | 否 | 图片空间目录 id（默认 `0` = 全部图片根目录）。想把素材归进自定义目录时传该目录 id |
+| `imageSpaceConcurrency` | 否 | 图片空间上传并发（字符串数字，默认 3，上限 6）。并发过高易触发账号级限流 |
 | `confirm` | 否 | **省略或 false → 只返回预览，不产生任何写操作**；`true` → 才真正打开浏览器提交 |
 | `account` | 否 | 指定账号 shopKey；仅在返回 need_account_choice 时回传用户选定的值 |
+
+
+## 两种执行方式
+
+| 场景 | 入口 | 说明 |
+|------|------|------|
+| 对话里单次上架 | host 工具 `dsagent_taobao_publish_mqs` | 主路径，交互式，两步确认 |
+| **工作流步骤 / 批量编排** | 脚本 `{baseDir}/scripts/publish.py` | 脚本型外壳，让上架能作为工作流步骤被执行 |
+
+```bash
+python3 {baseDir}/scripts/publish.py --product-file ./product.json                  # 只出预览
+python3 {baseDir}/scripts/publish.py --product-file ./product.json --confirm true   # 真正提交
+```
+
+入参是「一个 product JSON」（标题 / 主图 / 详情图 / 规格维度 / SKU 行 / 类目属性），
+与本技能 host 工具同构。脚本只把请求转给 host 的 `publish_platform` action，
+真实实现仍是 puppeteer 引擎（分发逻辑见 `src/platform-publish.ts`）。
+**L2 门禁完全保留**：不带 `--confirm true` 只返回预览、不启动浏览器、不产生任何写操作。
+
+> 为什么需要这个外壳：本技能原本是纯指令型（无脚本入口），工作流引擎六项校验的
+> 第二项会拒绝它当步骤（「是纯指令型（无可执行入口），不能作为步骤」）。
 
 ## 工作流
 
@@ -73,6 +98,16 @@ metadata:
 
 工具会弹出可见浏览器窗口，按 `publish-config/taobao.json` 的 flow 依次执行：
 openEntry（类目搜索页）→ selectCategory → waitFor 表单就绪 → fillTitle → uploadMainImages → fillSku → fillAttributes → uploadDetailImages → submit。
+
+### 4.5（可选）replayMode：觅千手式 Json/Json2 劫持重放
+
+默认链路是 DOM 逐格填写（上节）。传 `replayMode=true` 则启用**觅千手 v5.61 同款**「Json/Json2 setter 劫持重放」：
+
+- **机制**：进入发布页前注入劫持脚本，`Object.defineProperty(window,"Json"/"Json2",{get,set})` 劫持 setter；框架把表单 state 赋给 `window.Json` 的瞬间，把本地组装的商品数据（`{models:{formValues},components}` 文档结构）**原地 merge 进框架自己的 state**——框架随后渲染出的就是已填好的表单。
+- **门禁**：只在 `item.upload.taobao.com/sell` 发布页生效；单次 merge 后置 `kdds_taobao_sku_hook_done=true` 防重复。
+- **merge 字段**：title/price/quantity/outerId/sku/saleProp/customSaleProp/mainImagesGroup/images/desc 等 20 项；保护字段（auctionPoint/stuffStatus/sevenDaySupport 等）官方已有值不覆盖。
+- **降级**：命中后跳过 DOM 逐格填写（仅保留类目属性/运费模板兜底）；未命中（框架没走 Json 赋值）自动降级回 DOM 填写链路，两种模式可无缝切换。
+- **溯源**：完整机制 / 门禁链 / 字段集见同目录 `SOURCE.md`。
 
 ### 5. 报告结果
 

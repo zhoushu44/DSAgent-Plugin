@@ -1,0 +1,63 @@
+{
+  "schema": "dsagent/skill-contract@1",
+  "id": "zhihu-analytics",
+  "entry": {
+    "form": "script",
+    "script": "scripts/fetch_data.py"
+  },
+  "input": {
+    "args": [
+      {
+        "name": "mode",
+        "choices": [
+          "overview",
+          "list",
+          "article",
+          "trend"
+        ],
+        "default": "overview",
+        "description": "overview=全部内容指标汇总(默认)；list=仅创作列表；article=单篇汇总；trend=单篇日趋势"
+      },
+      {
+        "name": "content_id",
+        "flag": "--content-id",
+        "description": "内容 ID（article / trend 模式必填，可从 list 模式的 data[].id 取）"
+      },
+      {
+        "name": "type",
+        "flag": "--type",
+        "choices": [
+          "article",
+          "answer",
+          "pin"
+        ],
+        "default": "article",
+        "description": "内容类型（默认 article；禁止 all，会返回 error type）"
+      },
+      {
+        "name": "days",
+        "flag": "--days",
+        "type": "integer",
+        "default": 30,
+        "description": "统计窗口天数（默认 30）"
+      },
+      {
+        "name": "limit",
+        "flag": "--limit",
+        "type": "integer",
+        "default": 20,
+        "description": "内容条数上限（默认 20）"
+      },
+      {
+        "name": "csv",
+        "type": "boolean",
+        "description": "同时导出 CSV 到 workspace/artifacts"
+      }
+    ]
+  },
+  "output": {
+    "protocol": "dsagent-result",
+    "resultPrefix": "__DSAGENT_RESULT__",
+    "filesMarker": "---[OUTPUT_FILES]"
+  }
+}

@@ -1,0 +1,47 @@
+{
+  "schema": "dsagent/skill-contract@1",
+  "id": "xiaohongshu-analytics",
+  "entry": {
+    "form": "script",
+    "script": "scripts/fetch_data.py"
+  },
+  "input": {
+    "args": [
+      {
+        "name": "mode",
+        "choices": ["overview", "list", "detail", "trend"],
+        "default": "overview",
+        "description": "overview=笔记列表+指标汇总(默认)；list=仅笔记列表；detail=单篇详情；trend=单篇趋势"
+      },
+      {
+        "name": "note_id",
+        "flag": "--note-id",
+        "description": "笔记 ID（detail / trend 模式必填，可从 list 模式的 notes[].raw 或页面链接取）"
+      },
+      {
+        "name": "limit",
+        "flag": "--limit",
+        "type": "integer",
+        "default": 50,
+        "description": "笔记条数上限（默认 50）"
+      },
+      {
+        "name": "port",
+        "flag": "--port",
+        "type": "integer",
+        "default": 8787,
+        "description": "sign_service 端口（默认 8787）"
+      },
+      {
+        "name": "csv",
+        "type": "boolean",
+        "description": "同时导出 CSV 到 workspace/artifacts/xhs-analytics"
+      }
+    ]
+  },
+  "output": {
+    "protocol": "dsagent-result",
+    "resultPrefix": "__DSAGENT_RESULT__",
+    "filesMarker": "---[OUTPUT_FILES]"
+  }
+}

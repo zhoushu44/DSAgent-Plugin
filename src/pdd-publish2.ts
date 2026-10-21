@@ -39,6 +39,12 @@ export interface PddPublish2Options {
    * 拦截原生 edit 请求改包注入价格/库存（见 pdd-publish.ts 的 hijack 分支）。
    */
   mode2?: boolean
+  /**
+   * 外部规格池（选填）：规格值 → {spec_id, parent_id}。
+   * 供改包「行数重建」写 spec_id（不依赖页面 DOM 建规格）。
+   * 来源：collect_spec_pool.mjs 采集的 spec-pool.json。
+   */
+  specIds?: Record<string, { spec_id: number; parent_id: number }>
 }
 
 /**
@@ -109,6 +115,9 @@ export async function pddPublish2(
       goodsDetail: mode2.buildGoodsDetailFromProduct(parsed.product, {
         costTemplate: opts.costTemplate,
         deliveryTime: opts.deliveryTime,
+        // ★ 2026-10-21：外部规格池（规格值→spec_id），供改包行数重建写 spec_id。
+        //   来源：店铺历史商品采集（collect_spec_pool.mjs → spec-pool.json）。
+        specIds: opts.specIds,
       }),
     }
     // PDD_MODE2_TRACE=1 时把拦截链路 trace 打到 console（排查 via=page 失败原因用）

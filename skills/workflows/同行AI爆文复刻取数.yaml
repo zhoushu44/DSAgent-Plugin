@@ -1,0 +1,80 @@
+name: 同行AI爆文复刻取数
+category: 数据采集
+mode: single
+description: |
+  同行 AI 高流量文章复刻的取数工作流。两个输入：
+    · 关键词 —— 要采集的 AI 要点，如「AI Agent」「大模型微调」
+    · 数量 —— **要复刻几篇**（1~10）
+
+  一次跑完，备齐足够 N 篇互不重复的母本素材（约 20 条候选）：
+    ① 全站实时热榜 30 条 —— 给每篇找最新时间锚点与可挂靠的热点
+    ② 关键词内容检索第 1 页（offset=0，10 条）
+    ③ 关键词内容检索第 2 页（offset=10，约 9~10 条）
+
+  为什么不按「数量」循环：工作流引擎的变量渲染只做字符串替换，不支持算术，
+  无法把轮次换算成 offset（0/10/20）。与其让 N 轮反复取同一页、产出同质稿，
+  不如一次备齐 2 页候选池（≥18 条），由 Agent 在其中为每一篇挑不同母本。
+  这样「数量=复刻篇数」是真实生效的，且篇与篇之间素材不撞车。
+
+  取回后按这三条做取舍（复刻的关键在这一步）：
+    · voteup_count 降序 —— 这就是"流量大"的客观依据
+    · comment_count 看争议强度 —— 评论区吵得凶的题，共鸣点更明确
+    · created_time 剔旧 —— AI 领域 3~6 个月前的观点容易失效
+    · answer 适合小切口高共鸣稿，article 适合深度长文稿
+
+  ★ 内置的实测定型（已写进脚本，不用你操心）：
+    · 已补齐 search_v3 必需的页面上下文参数（gk_version / lc_idx / show_all_topics /
+      search_source / vertical 等）。只发 t/q/limit 会稳定返回空数组，极易误判成
+      "没内容"或"配额耗尽"——这个坑对照开源项目 MediaCrawler 才定位到。
+    · 单页 limit<10 会返回空，故每页固定取 10。
+    · 热榜 ID 在 JSON 里被 JS 精度截断（...790→...800），脚本已从 target.url 反解真实 ID。
+    · 平台 sort=upvoted_count 直接返回空页，故不依赖平台排序，改为本地按 voteup_count 排。
+    · 每步 on_failure: continue —— 单步失败不中断。
+
+  ★ 引擎边界（已用探针实测，非推断）：
+    工作流只能编排 **脚本型/包型** 技能。写作（smart-compose）与发布（zhihu-publish）
+    都是纯指令型，存入模板时引擎六项校验会直接拒绝：
+      「第 1 个步骤的技能「zhihu-publish」是纯指令型（无可执行入口），不能作为步骤」
+    因此本工作流只负责「取数备料」。成文与发布由 Agent 在对话中逐篇完成，
+    发布仍走 L2 预览 → 你确认 → 提交 的两步门禁（不可跳过、不可自动放行）。
+
+  产物：JSON（含 content 全文）+ artifacts/ 下 CSV。
+inputs:
+  - key: keyword
+    label: 关键词（AI 要点）
+    type: text
+    default: AI Agent
+    required: true
+  - key: count
+    label: 数量（复刻几篇，1~10）
+    type: number
+    default: 3
+    required: true
+    min: 1
+    max: 10
+steps:
+  - name: 采集全站实时热榜
+    skill: zhihu-crawl
+    args:
+      mode: hot
+      count: "30"
+    output: hot
+  - name: 检索同行候选第一页
+    skill: zhihu-crawl
+    args:
+      mode: search
+      search_type: content
+      keyword: "{{keyword}}"
+      count: "10"
+      offset: "0"
+      csv: "true"
+    output: pool_p1
+  - name: 检索同行候选第二页
+    skill: zhihu-crawl
+    args:
+      mode: search
+      search_type: content
+      keyword: "{{keyword}}"
+      count: "10"
+      offset: "10"
+    output: pool_p2

@@ -1,0 +1,82 @@
+[
+  {
+    "title": "创建 skills/taobao-publish-mqs/SKILL.md",
+    "description": "创建淘宝上架 skill 的 SKILL.md 说明文档。内容基于觅千手 pageHooks.js 的 Json/Json2 setter 劫持 + localStorage kdds_taobao_* 体系。参考格式：skills/pdd-publish-2/SKILL.md。输出文件：skills/taobao-publish-mqs/SKILL.md",
+    "priority": 10
+  },
+  {
+    "title": "创建 skills/taobao-publish-mqs/SOURCE.md",
+    "description": "创建淘宝上架 skill 的 SOURCE.md 溯源文档。内容记录觅千手 pageHooks.js 的 Json/Json2 setter 劫持 + localStorage kdds_taobao_* 体系来源。参考格式：docs/pdd-publish-mode2/SOURCE.md。输出文件：skills/taobao-publish-mqs/SOURCE.md",
+    "priority": 10
+  },
+  {
+    "title": "创建 skills/taobao-publish-mqs/inject.js",
+    "description": "创建淘宝上架 skill 的页面注入脚本。内容复刻觅千手 pageHooks.js 的 Json/Json2 setter 劫持逻辑。输出文件：skills/taobao-publish-mqs/inject.js",
+    "priority": 10
+  },
+  {
+    "title": "创建 skills/tmall-publish-mqs/SKILL.md",
+    "description": "创建天猫上架 skill 的 SKILL.md 说明文档。内容基于觅千手 pageHooks.js 的 fetch/XHR 拦截 exportSkuTemplate + importSkuTemplate。输出文件：skills/tmall-publish-mqs/SKILL.md",
+    "priority": 10
+  },
+  {
+    "title": "创建 skills/tmall-publish-mqs/SOURCE.md",
+    "description": "创建天猫上架 skill 的 SOURCE.md 溯源文档。输出文件：skills/tmall-publish-mqs/SOURCE.md",
+    "priority": 10
+  },
+  {
+    "title": "创建 skills/tmall-publish-mqs/inject.js",
+    "description": "创建天猫上架 skill 的页面注入脚本。输出文件：skills/tmall-publish-mqs/inject.js",
+    "priority": 10
+  },
+  {
+    "title": "创建 skills/douyin-publish-mqs/SKILL.md",
+    "description": "创建抖音上架 skill 的 SKILL.md 说明文档。内容基于觅千手 pageHooks.js 的 fxg.jinritemai.com 页面注入。输出文件：skills/douyin-publish-mqs/SKILL.md",
+    "priority": 10
+  },
+  {
+    "title": "创建 skills/douyin-publish-mqs/SOURCE.md",
+    "description": "创建抖音上架 skill 的 SOURCE.md 溯源文档。输出文件：skills/douyin-publish-mqs/SOURCE.md",
+    "priority": 10
+  },
+  {
+    "title": "创建 skills/douyin-publish-mqs/inject.js",
+    "description": "创建抖音上架 skill 的页面注入脚本。输出文件：skills/douyin-publish-mqs/inject.js",
+    "priority": 10
+  },
+  {
+    "title": "创建 skills/jd-publish-mqs/SKILL.md",
+    "description": "创建京东上架 skill 的 SKILL.md 说明文档。内容基于觅千手 pageHooks.js 的 wares-jdm.jd.com/newPublish 注入。输出文件：skills/jd-publish-mqs/SKILL.md",
+    "priority": 10
+  },
+  {
+    "title": "创建 skills/jd-publish-mqs/SOURCE.md",
+    "description": "创建京东上架 skill 的 SOURCE.md 溯源文档。输出文件：skills/jd-publish-mqs/SOURCE.md",
+    "priority": 10
+  },
+  {
+    "title": "创建 skills/jd-publish-mqs/inject.js",
+    "description": "创建京东上架 skill 的页面注入脚本。输出文件：skills/jd-publish-mqs/inject.js",
+    "priority": 10
+  },
+  {
+    "title": "创建 skills/1688-publish-mqs/SKILL.md",
+    "description": "创建 1688 上架 skill 的 SKILL.md 说明文档。内容基于觅千手 iframeHandler 注入 offer-new.1688.com。输出文件：skills/1688-publish-mqs/SKILL.md",
+    "priority": 10
+  },
+  {
+    "title": "创建 skills/1688-publish-mqs/SOURCE.md",
+    "description": "创建 1688 上架 skill 的 SOURCE.md 溯源文档。输出文件：skills/1688-publish-mqs/SOURCE.md",
+    "priority": 10
+  },
+  {
+    "title": "创建 skills/1688-publish-mqs/inject.js",
+    "description": "创建 1688 上架 skill 的页面注入脚本。输出文件：skills/1688-publish-mqs/inject.js",
+    "priority": 10
+  },
+  {
+    "title": "更新 src/client.ts SuggestDock 词表",
+    "description": "在 src/client.ts 的 PLATFORM_WORDS 中补充京东、1688、天猫词条；SUGGESTIONS 补这 3 个平台的 collect/analyze/publish 链路项。跑 node dev/suggest-rules.test.mjs 回归。输出文件：src/client.ts",
+    "priority": 9
+  }
+]

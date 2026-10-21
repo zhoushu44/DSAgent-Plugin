@@ -4,6 +4,7 @@
  * 用法：
  *   node dev/publish-pdd2.mjs                     # dry-run（只解析 + 打印映射，不执行）
  *   node dev/publish-pdd2.mjs --confirm           # 真实提交（弹出 Chrome、实际发布商品）
+ *   node dev/publish-pdd2.mjs --confirm --mode2   # 模式2：图片 HTTP 预上传 + 提交体改包重放
  *   node dev/publish-pdd2.mjs --product <file>    # 用统一 product JSON 文件替代内置示例
  *   node dev/publish-pdd2.mjs --account <shopKey> # 显式指定账号（否则走账号选择链）
  *
@@ -12,12 +13,13 @@
  */
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { readFileSync } from 'node:fs'
+import { readFileSync, existsSync } from 'node:fs'
 
 const CONFIRM = process.argv.includes('--confirm')
+const MODE2 = process.argv.includes('--mode2')
 const argOf = (name) => {
   const i = process.argv.indexOf(name)
-  return i >= 0 ? process.argv[i + 1] : undefined
+  return i >= 0 ? i + 1 < process.argv.length ? process.argv[i + 1] : undefined : undefined
 }
 
 const { CredentialStore } = await import('../lib/services/credential-store.js')
@@ -71,6 +73,34 @@ console.log(JSON.stringify(parsed.product, null, 2))
 const account = argOf('--account')
 const extra = { product: raw, confirm: CONFIRM }
 if (account) extra.account = account
+if (MODE2) {
+    extra.mode2 = true
+    // ★ 规格池（规格值→spec_id）：从 workspace 的 spec-pool.json 读，供改包行数重建用。
+    //   采集脚本：artifacts/collect_spec_pool.mjs
+    const poolPaths = [
+        'artifacts/pdd-re/spec-pool.json',
+        join('e:', '360MoveData', 'Users', 'Administrator', 'Desktop', '童装', 'artifacts', 'pdd-re', 'spec-pool.json'),
+    ]
+    for (const pp of poolPaths) {
+        if (!existsSync(pp))
+            continue
+        try {
+            const poolJson = JSON.parse(readFileSync(pp, 'utf8'))
+            const specIds = {}
+            for (const vals of Object.values(poolJson.pool || {})) {
+                for (const [v, rec] of Object.entries(vals)) {
+                    specIds[v] = { spec_id: rec.spec_id, parent_id: rec.parent_spec_id }
+                }
+            }
+            extra.specIds = specIds
+            console.log(`规格池已加载：${Object.keys(specIds).length} 个规格值（${pp}）`)
+        }
+        catch (e) {
+            console.log(`规格池读取失败（${pp}）：${e.message}`)
+        }
+        break
+    }
+}
 console.log('\n===== 映射为拼多多发布选项 =====')
 console.log(JSON.stringify(toPddOptions(parsed.product, extra), null, 2))
 

@@ -1,0 +1,77 @@
+name: 闲鱼上架-关键词与数量
+category: 店铺经营
+mode: batch
+count_input: count
+description: |
+  填两个数就出物料：① 关键词 ② 数量。跑完拿到 3 张主图 + 标题 + 描述 + listing.json，
+  再由 Agent 调 dsagent_xianyu_publish 走「预览 → 确认 → 提交」完成上架。
+
+  ★ 数量 = 轮次。每轮跑「采集同行 → 出合规物料」。
+    注意：每轮用的是同一个关键词，物料会落到同一目录并覆盖，
+    所以多轮不等于多条不同商品 —— 想要多条不同链接，请换关键词改跑一次。
+
+  ★ 为什么发布这一段不在工作流里：
+    xianyu-publish 是纯指令型技能（无脚本入口），引擎六项校验的第二项会拒绝它，
+    存模板时报「是纯指令型（无可执行入口），不能作为步骤」。
+    它作为步骤被执行时只会把 SKILL.md 正文原样返回并标成成功，实际零发布 ——
+    那会造成「任务绿了但闲鱼上没有商品」的假成功。
+
+  ★ 合规闸门硬拦截（命中即失败退出，不是提醒）：
+    · 冒充官方：官方N折 / 官方直营 / 官方授权 / 官方渠道 / 官方正品
+    · 贬损同业：不掺量 / 不共享 / 不做套路 / 套路 / 别家的坑 / 为什么选我们
+    · 极限词：最低最便宜 / 第一 / 100% / 唯一 / 绝对
+    · 虚假稀缺：仅剩 / 最后一天
+    「非官方直营」是否定式披露，会被放行。
+
+  ★ 选词（2026-10-20 实测）：主战场是模型名本身。
+    Kimi K3 / DeepSeek API / GLM API 有需求；
+    API中转 / 中转token / GPT API 搜索 0 条结果；Claude API 前排全是纸质书。
+inputs:
+  - key: keyword
+    label: 关键词
+    type: text
+    default: Kimi K3
+    required: true
+  - key: count
+    label: 数量
+    type: number
+    default: "1"
+    required: true
+    min: 1
+    max: 10
+  - key: discount
+    label: 折扣口径（勿写「官方N折」）
+    type: text
+    default: 官网价 2 折起
+    required: false
+  - key: price
+    label: 参考价（元）
+    type: text
+    default: "1"
+    required: false
+  - key: models
+    label: 支持模型（逗号分隔）
+    type: text
+    default: Kimi K3,Kimi K2.7,DeepSeek V4,GLM,Claude,Gemini
+    required: false
+  - key: out
+    label: 物料输出目录（留空=工作区 xianyu-out）
+    type: text
+    default: ""
+    required: false
+steps:
+  - name: 采集同行
+    skill: xianyu-crawl
+    args:
+      keyword: "{{keyword}}"
+      size: "30"
+    output: rivals
+  - name: 生成合规物料
+    skill: xianyu-listing-prep
+    args:
+      keyword: "{{keyword}}"
+      discount: "{{discount}}"
+      price: "{{price}}"
+      models: "{{models}}"
+      out: "{{out}}"
+    output: listing

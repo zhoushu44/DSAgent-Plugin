@@ -32,8 +32,13 @@ const PLUGIN_ROOT = (() => {
 
 const CONFIG_DIR = join(PLUGIN_ROOT, 'publish-config')
 
-/** 已支持的平台键（= publish-config/ 下的文件名去 .json） */
-const SUPPORTED_PLATFORMS = ['pdd', 'taobao', 'xianyu'] as const
+/**
+ * 已支持的平台键（= publish-config/ 下的文件名去 .json）
+ *
+ * ★ jd / douyin_shop / 1688 是 mqs 同引擎三平台（src/mqs-publish.ts）：
+ *   与 taobao/pdd 共用同一套「锚点集驱动」的流程骨架，只是各写一份 JSON。
+ */
+const SUPPORTED_PLATFORMS = ['pdd', 'taobao', 'xianyu', 'jd', 'douyin_shop', '1688'] as const
 
 export type PublishPlatform = (typeof SUPPORTED_PLATFORMS)[number]
 

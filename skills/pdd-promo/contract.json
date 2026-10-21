@@ -1,0 +1,71 @@
+{
+  "schema": "dsagent/skill-contract@1",
+  "id": "pdd-promo",
+  "entry": {
+    "form": "script",
+    "script": "scripts/promo.mjs"
+  },
+  "input": {
+    "args": [
+      {
+        "name": "mode",
+        "description": "overview=总览(默认)；groups=广告组；cost=日消耗；goods=商品维度报表；units=推广单元列表；pause/resume=暂停/开启单元(L2)；delete=删除商品推广(L2)；create=创建商品推广(L2)；maxcost=改日限额(L2)；roi=改投产比/出价(L2)"
+      },
+      {
+        "name": "goods_id",
+        "description": "商品 ID（goods / delete / create 模式必填）",
+        "flag": "--goods-id"
+      },
+      {
+        "name": "unit_id",
+        "description": "推广单元 ID（pause / resume / maxcost / roi 模式必填，从 units 模式的 adId 取）",
+        "flag": "--unit-id"
+      },
+      {
+        "name": "unit_ids",
+        "description": "批量推广单元 ID，逗号分隔（pause/resume 一次操作多个单元）",
+        "flag": "--unit-ids"
+      },
+      {
+        "name": "all",
+        "description": "全部推广单元：自动从 units 列表取所有 adId（pause/resume 批量用）",
+        "flag": "--all"
+      },
+      {
+        "name": "plan_id",
+        "description": "推广计划 ID（delete 模式必填，从 units 或 detail 的 planId 取）",
+        "flag": "--plan-id"
+      },
+      {
+        "name": "max_cost",
+        "description": "日限额（元），或 unlimited / 0 = 不限（maxcost 模式必填）",
+        "flag": "--max-cost"
+      },
+      {
+        "name": "roi",
+        "description": "投产比，如 3 = 投1元赚3元（roi 模式必填）",
+        "flag": "--roi"
+      },
+      {
+        "name": "days",
+        "description": "统计窗口天数，默认 7，上限 90"
+      },
+      {
+        "name": "confirm",
+        "description": "写操作确认：pause/resume/delete/create/maxcost/roi 必须带 true 才真正执行；省略只返回预览（L2 门禁）",
+        "flag": "--confirm"
+      },
+      {
+        "name": "account",
+        "description": "账号 shopKey（可选）；该平台多账号且未绑定时需先向用户确认",
+        "flag": "--account"
+      }
+    ]
+  },
+  "output": {
+    "protocol": "dsagent-result",
+    "resultPrefix": "__DSAGENT_RESULT__",
+    "filesMarker": "---[OUTPUT_FILES]"
+  }
+}
+

@@ -31,9 +31,28 @@ metadata:
 - 发布过程会**弹出可见浏览器窗口**（真实操作，用户可见）；若出现滑块/安全验证需人工完成
 - 同一时间只能有一个抖音发布窗口；已有窗口进行中时需等待其结束
 
+> **要发图文、或想更快（不等转码跳转）？** 用 `douyin-publish-http` —— 同一套 `a_bogus`
+> 处理方式，但上传三步走 Node 原生 fetch，视频 ~10s / 图文 ~15s（本技能约 60s）。
+
 ## 执行流程
 
-本技能**没有脚本入口**，执行方式是**直接调用 host 工具** `dsagent_douyin_publish`。
+## 两种执行方式
+
+| 场景 | 入口 | 说明 |
+|------|------|------|
+| 对话里单次发布 | host 工具 `dsagent_douyin_publish` | 主路径，交互式，两步确认 |
+| **工作流步骤 / 批量编排** | 脚本 `{baseDir}/scripts/publish.py` | 脚本型外壳，让发布能作为工作流步骤被执行 |
+
+```bash
+python3 {baseDir}/scripts/publish.py --videoPath "D:/v/1.mp4" --title "标题" --description "文案" --confirm true
+```
+
+脚本不自己实现发布，只把请求转给 host 的 `publish_platform` action（真实实现仍是
+puppeteer 驱动浏览器，分发逻辑见 `src/platform-publish.ts`）。**L2 门禁完全保留**：
+不带 `--confirm true` 只返回预览、不启动浏览器、不产生任何写操作。
+
+> 为什么需要这个外壳：本技能原本是纯指令型（无脚本入口），工作流引擎六项校验的
+> 第二项会拒绝它当步骤（「是纯指令型（无可执行入口），不能作为步骤」）。
 
 ### 1. 收集参数
 

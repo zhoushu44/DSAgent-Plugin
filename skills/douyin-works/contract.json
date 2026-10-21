@@ -1,0 +1,37 @@
+{
+  "schema": "dsagent/skill-contract@1",
+  "id": "douyin-works",
+  "entry": {
+    "form": "script",
+    "script": "scripts/run.py"
+  },
+  "input": {
+    "args": [
+      {
+        "description": "返回条数上限，默认 20",
+        "name": "count"
+      },
+      {
+        "description": "video_id（形如 v0300fg10000dbbpgefog65m7t0n3jb0），查该视频的播放直链",
+        "name": "video"
+      },
+      {
+        "description": "按六条口径输出分析结论（头马篇/互动匹配/涨粉效率/限流/流量来源/下一步）",
+        "name": "analyze"
+      },
+      {
+        "description": "输出原始 JSON 全字段",
+        "name": "json"
+      },
+      {
+        "description": "账号 shopKey（可选）；该平台多账号时必须指定",
+        "name": "account"
+      }
+    ]
+  },
+  "output": {
+    "protocol": "dsagent-result",
+    "resultPrefix": "__DSAGENT_RESULT__",
+    "filesMarker": "---[OUTPUT_FILES]"
+  }
+}

@@ -1,0 +1,48 @@
+{
+  "schema": "dsagent/skill-contract@1",
+  "id": "xianyu-publish",
+  "entry": {
+    "form": "script",
+    "script": "scripts/publish.py"
+  },
+  "input": {
+    "args": [
+      {
+        "required": true,
+        "name": "images",
+        "description": "本地图片绝对路径，1~9 张，单张 ≤10MB；逗号分隔或 JSON 数组"
+      },
+      {
+        "required": true,
+        "name": "description",
+        "description": "宝贝描述（必填，不能含 emoji）"
+      },
+      {
+        "required": true,
+        "name": "price",
+        "description": "价格（元，0~1 亿元）"
+      },
+      {
+        "description": "宝贝标题（可选）",
+        "name": "title"
+      },
+      {
+        "description": "原价/入手价（元，可选）",
+        "name": "originalPrice"
+      },
+      {
+        "description": "确认发布：true 才真正提交；省略/false 只返回发布预览，不产生任何写操作",
+        "name": "confirm"
+      },
+      {
+        "description": "账号 shopKey（可选）；该平台多账号且未绑定时需先向用户确认",
+        "name": "account"
+      }
+    ]
+  },
+  "output": {
+    "protocol": "dsagent-result",
+    "resultPrefix": "__DSAGENT_RESULT__",
+    "filesMarker": "---[OUTPUT_FILES]"
+  }
+}

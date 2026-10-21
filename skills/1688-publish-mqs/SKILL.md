@@ -50,26 +50,48 @@ metadata:
 
 | 参数 | 必需 | 说明 |
 |------|------|------|
-| `product` | 是 | 统一商品 JSON 字符串：`title` / `images` / `price`（批发单价）/ `stock` / `itemNo`（商家编码/货号）/ `channel`（**本技能固定 `1688`**）/ `category` / `specs` / `skus` / `attributes` |
+| `product` | 是 | 统一商品 JSON 字符串：`title` / `images` / `price`（批发单价）/ `stock` / `itemNo`（商家编码/货号）/ `category` / `specs` / `skus` / `attributes` / `detailImages` |
 | `confirm` | 否 | **省略或 false → 只返回预览，不产生任何写操作**；`true` → 才真正打开浏览器提交 |
 | `account` | 否 | 指定账号 shopKey；仅在返回 need_account_choice 时回传用户选定的值 |
+| `diagDom` | 否 | DOM 诊断模式（默认 false）。只打开发布页 dump 可见 input/button/file 清单 + 截图后返回，不上传不填表不提交（零风险，绕过 confirm 门禁）。**首次接 1688 时先跑它**，把 `publish-config/1688.json` 里的语义锚点替换成真实选择器 |
 
 product 关键字段规则：
 
-- `channel` **必须显式传 `1688`**；省略会落到默认渠道（淘宝域），把商品发到错误后台。
+- **不需要传 `channel`**：1688 是独立工具（`dsagent_1688_publish_mqs`），渠道由工具本身决定，不会误发到淘宝。
 - `title` 必填；`images` 必填，1~5 张，单张 ≤ 3MB，本机绝对路径且真实存在。
-- `price` 为**批发单价**（正数，元）；`stock` 为非负整数。
+- `price` 为**批发单价**（正数，元）；`stock` 为非负整数。**阶梯价/起订量是批发专属必填**，工具只填一档。
 - `specs` ≤ 2 维；`skus` 每行必须覆盖全部维度，缺价格/库存时回落顶层 `price` / `stock`。
+
+
+## 两种执行方式
+
+| 场景 | 入口 | 说明 |
+|------|------|------|
+| 对话里单次上架 | host 工具 `dsagent_1688_publish_mqs` | 主路径，交互式，两步确认 |
+| **工作流步骤 / 批量编排** | 脚本 `{baseDir}/scripts/publish.py` | 脚本型外壳，让上架能作为工作流步骤被执行 |
+
+```bash
+python3 {baseDir}/scripts/publish.py --product-file ./product.json                  # 只出预览
+python3 {baseDir}/scripts/publish.py --product-file ./product.json --confirm true   # 真正提交
+```
+
+入参是「一个 product JSON」（标题 / 主图 / 详情图 / 规格维度 / SKU 行 / 类目属性），
+与本技能 host 工具同构。脚本只把请求转给 host 的 `publish_platform` action，
+真实实现仍是 puppeteer 引擎（分发逻辑见 `src/platform-publish.ts`）。
+**L2 门禁完全保留**：不带 `--confirm true` 只返回预览、不启动浏览器、不产生任何写操作。
+
+> 为什么需要这个外壳：本技能原本是纯指令型（无脚本入口），工作流引擎六项校验的
+> 第二项会拒绝它当步骤（「是纯指令型（无可执行入口），不能作为步骤」）。
 
 ## 工作流
 
 ### 1. 组装统一商品 JSON
 
-从用户话里提取字段；`title` 与 `images` 是必需项，缺了就主动问。规格最多 2 维（如「颜色 × 规格」），SKU 行必须覆盖全部维度。**必须把 `channel` 写成 `1688`**。
+从用户话里提取字段；`title` 与 `images` 是必需项，缺了就主动问。规格最多 2 维（如「颜色 × 规格」），SKU 行必须覆盖全部维度。
 
 ### 2. 先取「发布预览」（不带 confirm）
 
-调用 `dsagent_1688_publish_mqs`，**只传 product（含 channel=1688），不要传 confirm**。工具此时**不会启动浏览器、不产生任何写操作**，只返回预览：ok=false + needConfirm=true，以及账号、标题、批发单价、库存、货号、主图清单、规格维度、SKU 组合、显式属性。
+调用 `dsagent_1688_publish_mqs`，**只传 product，不要传 confirm**。工具此时**不会启动浏览器、不产生任何写操作**，只返回预览：ok=false + needConfirm=true，以及账号、标题、批发单价、库存、货号、主图清单、规格维度、SKU 组合、显式属性。
 
 ### 3. 把预览完整展示给用户并征求明确同意
 
@@ -79,7 +101,10 @@ product 关键字段规则：
 
 ### 4. 用户同意后带 confirm=true 重新调用
 
-工具会弹出可见浏览器窗口，依次执行：注入 1688 登录态 → openEntry（1688 商品发布页 work.1688.com）→ selectCategory（关键词搜类目 → 选叶子候选）→ waitFor 表单就绪 → fillTitle → uploadMainImages → fillSku（销售属性值逐值键入 + **Tab 提交** → SKU 表回填价格/库存/编码）→ fillAttributes（品牌跳过、类目档案回放优先）→ selectFreightTemplate（运费模板是隐藏必填）→ submit → readSubmitErrors（三路回读：toast + 字段红字 + 填写建议面板）。
+工具会弹出可见浏览器窗口，按 `publish-config/1688.json` 的 flow 依次执行：注入 1688 登录态（`.1688.com` + `.taobao.com` 双域）→ openEntry（1688 商品发布页 offer-new.1688.com/&lt;unit&gt;/publish.htm）→ selectCategory（类目搜索框 → 回车 → 按与标题相关性挑候选 → 点「确认，下一步」）→ waitFor 表单就绪 → fillTitle/price/stock/itemNo（maxlength 从 DOM 现读）→ uploadMainImages（直投 file input，落空则真实点上传区等 fileChooser）→ fillSku（销售属性值逐值键入 + **Tab 提交** → SKU 表回填价格/库存/编码）→ fillAttributes（品牌跳过）→ fillFreight（运费模板是隐藏必填）→ submit → readSubmitErrors（toast + 字段红字两路回读）。
+
+**任一步锚点没命中都不会假成功**：该步记入 `missed`，窗口留给用户人工补全，最后如实报告「哪些字段没自动填」。
+
 
 ### 5. 报告结果
 
@@ -110,7 +135,7 @@ product 关键字段规则：
 | 价格模型 | **批发阶梯价**（起订量 + 单价） | 淘宝/京东是一口价；拼多多是拼单价 + 单买价（自动 +1） |
 | 起订量 | 批发专属必填 | 工具只填一档，其余交人工 |
 
-> 上表依据共享规范 `PUBLISH-MATRIX.md`（7 函数链 / 三路错误回读 / 各平台现状；第八节把「1688 商家后台」列为待接的有类目树平台）与 `PUBLISH-SPEC.md`（JSON 驱动、XPath 四级锚点、能力块六步协议）。
+> 上表依据共享规范 `PUBLISH-MATRIX.md`（7 函数链 / 三路错误回读 / 各平台现状）与 `PUBLISH-SPEC.md`（JSON 驱动、XPath 四级锚点、能力块六步协议）。
 
 ## 错误处理
 
@@ -136,10 +161,10 @@ product 关键字段规则：
 ## 证据与参考
 
 - 共享接入规范：`PUBLISH-MATRIX.md`（7 函数链 / 三路错误回读 / 各平台现状）与 `PUBLISH-SPEC.md`（JSON 驱动、XPath 四级锚点、能力块六步协议）。
-- 同引擎实现对照：`src/taobao-publish.ts`（类目档案回放 / 7 函数链 / 三路错误诊断，按 channel 切域）。
+- 同引擎实现对照：`src/mqs-publish.ts`（锚点集驱动的通用 mqs 链路：选类目 / 主图 / SKU / 属性 / 运费模板 / 两路回读 / DOM 自诊）、`src/taobao-publish.ts`（淘宝天猫专用实测链路，1800+ 行真机补丁）。
 - 同族技能对照：`skills/taobao-publish-mqs/SKILL.md`（渠道默认 taobao）、`skills/tmall-publish-mqs/SKILL.md`（渠道 tmall）、`skills/jd-publish-mqs/SKILL.md`（渠道 jd）。
 - 选品 / 找货对照（★ 别混用）：`skills/ali1688-pick/SKILL.md`、`skills/alibaba-source-suppliers/SKILL.md`。
-- 锚点集 schema 参照：`publish-config/taobao.json`（分级 selector、timeouts、regexes，发布时现读）。
+- 锚点集：`publish-config/1688.json`（分级 selector、timeouts、regexes，发布时现读；改锚点不需重启宿主）。
 - 验收门禁：`dev/verify-mqs-skills.mjs`（frontmatter / 章节槽位 / L2 门禁 / 悬空路径一次校验）。
 - 1688 主图与素材规范（尺寸、单图体积、禁用语）：`skills/image-prompt-guide/references/platform-specs-china.md`。
 

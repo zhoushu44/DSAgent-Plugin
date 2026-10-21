@@ -1754,6 +1754,15 @@ export async function probeRemoteSession(account: {
     //   用 alimama 探测必然未登录 → 会误标 expanded。
     return probeTaobaoSession(account)
   }
+  // ★ 2026-10-21：拼多多商家后台探测。
+  //   之前只支持 taobao/xhs，pdd 一律返回 unknown → 状态恒为 valid，
+  //   造成「连接器显示有效、一跑技能就 token_expired」的假阳性。
+  //   credentialPlatform('pdd_mms') 归一时别名表无此项 → 原样返回 'pdd_mms'（带下划线）。
+  //   探测点选 `earth/api/mallInfo/commonMallInfo`（GET，轻量，无需签名）：
+  //   已登录返回店铺信息；未登录/会话失效返回错误或跳登录。
+  if (cred === 'pdd_mms') {
+    return probePddMmsSession(account)
+  }
   if (cred !== 'xhs') return { result: 'unknown' }
 
   const headers: Record<string, string> = {
@@ -1794,6 +1803,67 @@ export async function probeRemoteSession(account: {
       return { result: 'expired', reason: '远端判定为游客态，登录态已失效' }
     }
     return { result: 'unknown', reason: '远端未返回明确登录态' }
+  } catch (e: any) {
+    return { result: 'unknown', reason: e?.message || String(e) }
+  }
+}
+
+/**
+ * 拼多多商家后台（mms.pinduoduo.com）登录态探测。
+ *
+ * 探测点：`GET /earth/api/mallInfo/commonMallInfo`（页面加载时必发，轻量无签名）。
+ * 判定：
+ *   - 200 且 body 含 mallId/mall_id/mallName → valid
+ *   - 401/403 → expired
+ *   - 429 / 风控头 → risk_control（≠ 失效）
+ *   - 其它（含跳登录的 HTML）→ expired（PDD 的登录跳转是 302 到 /login，
+ *     httpRequest 不跟随重定向时取到 3xx + location: /login）
+ */
+async function probePddMmsSession(account: {
+  platform: string
+  shop_key: string
+  cookie_str: string
+  account_meta?: Record<string, any>
+}): Promise<{ result: SessionProbeResult; reason?: string }> {
+  const headers: Record<string, string> = {
+    'Cookie': account.cookie_str,
+    'User-Agent': account.account_meta?.env?.ua || desktopUserAgent(),
+    'Accept': 'application/json, text/plain, */*',
+    'Accept-Language': 'zh-CN,zh;q=0.9',
+    'Referer': 'https://mms.pinduoduo.com/goods/goods_list',
+  }
+  try {
+    const res = await httpRequest(
+      'GET',
+      'https://mms.pinduoduo.com/earth/api/mallInfo/commonMallInfo',
+      headers,
+      undefined,
+      20,
+    )
+    // 风控优先（P1-1 语义）：限流/拦截 ≠ 登录失效
+    const risk = riskSignalFrom(res.status, res.responseHeaders, res.body)
+    if (risk) return { result: 'risk_control', reason: risk }
+    // 跳登录页（PDD 用 302 + location: /login）；httpRequest 把 location 提到顶层
+    const loc = String(res.location || res.responseHeaders?.location || res.responseHeaders?.Location || '')
+    if (/\/login/i.test(loc)) {
+      return { result: 'expired', reason: '被重定向到登录页，登录态已失效' }
+    }
+    if (res.status === 401 || res.status === 403) {
+      return { result: 'expired', reason: `HTTP ${res.status}，登录态已失效` }
+    }
+    if (res.status >= 400) {
+      return { result: 'unknown', reason: `HTTP ${res.status}` }
+    }
+    // 成功响应含店铺标识
+    const body = res.body || ''
+    if (/mallId|mall_id|mallName|mall_name/.test(body) && body.length > 20) {
+      return { result: 'valid' }
+    }
+    // 空/异常 JSON：PDD 未登录时该接口返回 {success:false} 或跳登录 HTML
+    if (/^\{?"?\s*(success\s*:\s*false|error_code)/i.test(body) || /登录/.test(body.slice(0, 200))) {
+      return { result: 'expired', reason: '远端返回未登录/错误响应' }
+    }
+    return { result: 'unknown', reason: '远端未返回明确的店铺标识' }
   } catch (e: any) {
     return { result: 'unknown', reason: e?.message || String(e) }
   }

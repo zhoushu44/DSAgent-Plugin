@@ -31,6 +31,8 @@ const LOGIN_URLS: Record<string, string> = {
   pdd: 'https://mobile.yangkeduo.com/login.html',
   // ★ 拼多多商家后台登录页（与买家 H5 不同）：有「扫码登录 / 账号密码登录 / 立即注册」三个入口
   pdd_mms: 'https://mms.pinduoduo.com/login',
+  // ★ 抖音：主页 + 页内登录弹窗（doBrowserLogin 有 douyin 专用分支点「登录」按钮）
+  //   抖店（mqs_douyin_shop）复用同一套登录态：登录后访问 fxg.jinritemai.com 会补发该域 Cookie
   douyin: 'https://www.douyin.com/',
   xhs: 'https://www.xiaohongshu.com/',
   xiaohongshu: 'https://www.xiaohongshu.com/',
@@ -42,6 +44,8 @@ const LOGIN_URLS: Record<string, string> = {
   pinduoduo: 'https://mobile.yangkeduo.com/login.html',
   wechat_store: 'https://channels.weixin.qq.com/shop',
   zhihu: 'https://www.zhihu.com/signin',
+  // ★ 抖店（抖音小店商家后台）：与抖音同属一套 SSO，但独立平台键；登录走抖音主页弹窗
+  douyin_shop: 'https://www.douyin.com/',
   // ★ 1688（阿里巴巴 B2B）独立登录页
   alibaba: 'https://login.1688.com/member/signin.htm',
 }
@@ -313,10 +317,9 @@ export function createAccountService(storePath: string) {
       freshLogin?: boolean
       shopKey?: string
     }): Promise<{ ok: boolean; error?: string }> {
-      // ★ 闲鱼 / 生意参谋系 / 天猫均**不可独立登录**（FIX-LOG #67 / #70）：
-      //   它们复用淘宝 SSO，凭证层已直接复用淘宝登录态，不应派生独立账号。
-      //   闲鱼的 goofish 域 Cookie 由淘宝登录成功后自动同步（见 browser-login.ts::ensureXianyuFromTaobao），
-      //   因此这里不再有 sso 分支，统一走 browser_login。
+      // ★ 闲鱼**可**独立登录（FIX-LOG #74 反转）：LOGIN_URLS.xianyu = goofish.com/login，
+      //   用闲鱼 App 扫码。只有生意参谋系 / 天猫仍不可独立登录（复用淘宝登录态）。
+      //   注意 LOGIN_URLS 的 `|| toCredentialPlatform(...)` 兜底只对无自身入口的平台生效。
       const loginUrl = LOGIN_URLS[platform] || LOGIN_URLS[toCredentialPlatform(platform)]
       if (!loginUrl) return { ok: false, error: `不支持的平台：${platform}` }
 
@@ -528,13 +531,29 @@ export function createAccountService(storePath: string) {
         // 账号页仍显示「有效」，用户被误导。由 host 半区发起探测（browser 半区无法跨域）。
         // 落库由 host 侧 recordSessionProbe 按连续失败计数决定（规范 §5.0），
         // 此处只读回结果，避免两端各写一次状态。
-        const probe = await callHostTool<{
+        let probe = await callHostTool<{
           ok: boolean
           result: string
           reason?: string
           status?: string
           failCount?: number
         }>('probe_session', { shopKey: stored.shop_key })
+        // ★ 2026-10-21 降级：host HTTP 路由不可用时（node 直调 / host 半区本进程），
+        //   本地直接探测 —— 否则 callHostTool 返回 null 会被当成「无法判定」，
+        //   状态恒为本地心跳的 valid，假阳性依旧。
+        if (!probe) {
+          try {
+            const { probeRemoteSession } = await import('../gateway-proxy.js')
+            const local = await probeRemoteSession({
+              platform: stored.platform,
+              shop_key: stored.shop_key,
+              cookie_str: stored.cookie_str || '',
+              account_meta: stored.account_meta,
+            })
+            const rec = await store.recordSessionProbe(stored.shop_key, local.result as any)
+            probe = { ok: true, result: local.result, reason: local.reason, status: rec.status, failCount: rec.failCount }
+          } catch { /* 探测模块不可用则保持原状态 */ }
+        }
         // ★ P1-1：风控/限流 ≠ 凭证失效 —— 状态保持原样（host 侧未落库），
         //   仅在 reason 里透出风控提示，避免账号页把限流误读为掉登录。
         if (probe?.ok && probe.result === 'risk_control') {
@@ -547,14 +566,15 @@ export function createAccountService(storePath: string) {
           continue
         }
         if (probe?.ok && probe.result === 'expired') {
-          // 未达阈值时 host 侧不落库，页面保持原状态，只在 reason 里提示进度
+          // ★ 2026-10-21：远端**明确**判定未登录（如 PDD 探测到跳登录/错误响应）时，
+          //   不再等 3 次阈值 —— 本地 status 是心跳假象，用户看到"有效"跑去跑技能，
+          //   立刻 token_expired，体验更差。仅在 reason 注明计数进度供参考。
           //
-          // ★ 达阈值后 host 侧落的是 `reauth_required`（不是 `expired`），故这里
-          //   必须按 probe.status 原样透出 —— 写死 'expired' 会把「必须重登」降级成
-          //   「疑似过期」，用户又回到反复重试的老路。
-          const reached = probe.status === 'reauth_required' || probe.status === 'expired'
-          if (reached) {
-            const finalStatus: AccountStatus = probe.status === 'reauth_required' ? 'reauth_required' : 'expired'
+          //   区分口径：probe.reason 含「明确失效」语义（远端判定/被重定向/401/403）
+          //   即透出；网络异常类（unknown）仍走 host 侧连续失败计数。
+          const explicit = /失效|未登录|重定向到登录|401|403|错误响应/i.test(probe.reason || '')
+          if (explicit || probe.status === 'reauth_required' || probe.status === 'expired') {
+            const finalStatus: AccountStatus = probe.status === 'reauth_required' ? 'reauth_required' : (explicit ? 'expired' : probe.status as AccountStatus)
             results.push({
               platformId: row.platformId,
               nickname: row.nickname,

@@ -1,0 +1,47 @@
+{
+  "schema": "dsagent/skill-contract@1",
+  "id": "zhihu-publish-http",
+  "entry": {
+    "form": "script",
+    "script": "scripts/run.py"
+  },
+  "input": {
+    "args": [
+      {
+        "required": false,
+        "name": "file",
+        "description": "Markdown 文章文件绝对路径。第一行 `# ` 后是标题，第一个 `## ` 起是正文"
+      },
+      {
+        "required": false,
+        "name": "title",
+        "description": "标题（知乎限 100 字）。传 file 时可省略，自动从文件首行提取"
+      },
+      {
+        "required": false,
+        "name": "content",
+        "description": "正文（Markdown）。与 file 二选一；同时传时 file 优先"
+      },
+      {
+        "required": false,
+        "name": "account",
+        "description": "账号 shopKey（可选）；该平台多账号时必须指定"
+      },
+      {
+        "required": false,
+        "name": "dry",
+        "description": "true 时只建草稿并写正文，不发布；默认 false"
+      },
+      {
+        "required": false,
+        "name": "confirm",
+        "description": "确认发布：true 才真正提交（PUT publish）；省略/false 只返回发布预览"
+      }
+    ]
+  },
+  "output": {
+    "protocol": "dsagent-result",
+    "resultPrefix": "__DSAGENT_RESULT__",
+    "filesMarker": "---[OUTPUT_FILES]"
+  }
+}

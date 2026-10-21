@@ -1,0 +1,30 @@
+{
+  "schema": "dsagent/skill-contract@1",
+  "id": "pdd-shop",
+  "entry": {
+    "form": "script",
+    "script": "scripts/shop.mjs"
+  },
+  "input": {
+    "args": [
+      {
+        "name": "mode",
+        "description": "overview=店铺经营总览(默认)；flow=店铺流量(访客/浏览量/粉丝/搜索指数)；score=店铺评分(服务数据)；goods=商品数据明细(每商品访客/支付/转化率)"
+      },
+      {
+        "name": "limit",
+        "description": "goods 模式返回条数上限，默认 20，上限 100"
+      },
+      {
+        "name": "account",
+        "description": "账号 shopKey（可选）；该平台多账号且未绑定时需先向用户确认",
+        "flag": "--account"
+      }
+    ]
+  },
+  "output": {
+    "protocol": "dsagent-result",
+    "resultPrefix": "__DSAGENT_RESULT__",
+    "filesMarker": "---[OUTPUT_FILES]"
+  }
+}

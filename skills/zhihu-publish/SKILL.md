@@ -33,7 +33,25 @@ metadata:
 
 ## 执行流程
 
-本技能**没有脚本入口**，执行方式是**直接调用 host 工具** `dsagent_zhihu_publish`。
+## 两种执行方式
+
+| 场景 | 入口 | 说明 |
+|------|------|------|
+| 对话里单篇发布 | host 工具 `dsagent_zhihu_publish` | 主路径，交互式，两步确认 |
+| **工作流步骤 / 批量编排** | 脚本 `{baseDir}/scripts/publish.py` | 脚本型外壳，让发布能作为工作流步骤被执行 |
+
+```bash
+python3 {baseDir}/scripts/publish.py --title "标题" --content "正文"            # 只出预览
+python3 {baseDir}/scripts/publish.py --title "标题" --content "正文" --confirm true  # 真正发布
+python3 {baseDir}/scripts/publish.py --title "标题" --content-file ./article.txt --confirm true
+```
+
+脚本自己不实现发布，而是把请求转给 host 的 `publish_zhihu` action（真实实现仍是
+puppeteer 驱动浏览器）。**L2 门禁完全保留**：不带 `--confirm true` 只返回预览。
+
+> 为什么需要这个外壳：`zhihu-publish` 原本是纯指令型（无脚本入口），工作流引擎六项
+> 校验的第二项会拒绝它当步骤（「是纯指令型（无可执行入口），不能作为步骤」）。
+> 加了脚本入口后，`取数 → 成文 → 发布` 才能整条跑在工作流里。
 
 ### 1. 收集参数
 
