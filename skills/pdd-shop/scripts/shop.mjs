@@ -98,19 +98,74 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
   const gList = byApi.goodsList?.goodsDetailList || []
   const mallLevel = byApi.mallLevel || null
 
-  const goodsItems = gList.slice(0, limit).map(g => ({
-    goodsId: g.goodsId,
-    name: g.goodsName || '',
-    date: g.statDate,
-    uv: g.goodsUv,           // 访客
-    pv: g.goodsPv,           // 浏览量
-    payAmt: g.payOrdrAmt,    // 支付金额
-    payCnt: g.payOrdrCnt,    // 支付订单
-    payQty: g.payOrdrGoodsQty,
-    payUsers: g.payOrdrUsrCnt,
-    vcr: g.goodsVcr,         // 转化率
-    fav: g.goodsFavCnt,      // 收藏
-  }))
+  // ── PUA 数字混淆解码器 ──────────────────────────────────────────
+  // 拼多多 sycm 对数字字段用 PUA 私用区字符（U+E000~U+F8FF）混淆反采集，
+  // 且码点每次动态变化。但同一响应里 `*Ppr` 字段是明文的「较上周期差值」，
+  // 与被混淆字段等长同构 —— 用 12 组 (字段, 字段Ppr) 逐字符对齐反推映射。
+  const PUASET_RE = /[\uE000-\uF8FF]/
+  const PAIRS = [
+    ['goodsUv', 'goodsUvPpr'], ['goodsPv', 'goodsPvPpr'], ['payOrdrCnt', 'payOrdrCntPpr'],
+    ['goodsFavCnt', 'goodsFavCntPpr'], ['payOrdrAmt', 'payOrdrAmtPpr'], ['cfmOrdrCnt', 'cfmOrdrCntPpr'],
+    ['imprUsrCnt', 'imprUsrCntPpr'], ['ordrCrtUsrCnt', 'ordrCrtUsrCntPpr'], ['cnsltUsrQty', 'cnsltUsrQtyPpr'],
+    ['payOrdrGoodsQty', 'payOrdrGoodsQtyPpr'], ['payOrdrUsrCnt', 'payOrdrUsrCntPpr'], ['cfmOrdrGoodsQty', 'cfmOrdrGoodsQtyPpr'],
+  ]
+  const buildPuaMap = (list) => {
+    const map = {}
+    for (const g of list) {
+      for (const [f, pf] of PAIRS) {
+        const pua = String(g[f] ?? ''), plain = String(g[pf] ?? '')
+        if (!pua || pua.length !== plain.length) continue
+        for (let i = 0; i < pua.length; i++) {
+          const pc = pua.codePointAt(i), nc = plain[i]
+          if (pc >= 0xE000 && pc <= 0xF8FF && !map[pc]) map[pc] = nc
+        }
+      }
+    }
+    return map
+  }
+  const decodePua = (val, map) => {
+    if (val == null) return val
+    const s = String(val)
+    if (!PUASET_RE.test(s)) return s            // 明文，原样返回
+    let out = ''
+    for (const c of s) {
+      const p = c.codePointAt(0)
+      out += (p >= 0xE000 && p <= 0xF8FF) ? (map[p] ?? c) : c
+    }
+    return out
+  }
+
+  const goodsItems = gList.slice(0, limit).map(g => {
+    // 先用整表推映射，再逐字段解码（映射对该响应全局有效）
+    const map = buildPuaMap(gList)
+    const d = (v) => decodePua(v, map)
+    return {
+      goodsId: g.goodsId,
+      name: g.goodsName || '',
+      date: g.statDate,
+      uv: d(g.goodsUv),           // 访客
+      pv: d(g.goodsPv),           // 浏览量
+      payAmt: d(g.payOrdrAmt),    // 支付金额
+      payCnt: d(g.payOrdrCnt),    // 支付订单
+      payQty: d(g.payOrdrGoodsQty),
+      payUsers: d(g.payOrdrUsrCnt),
+      vcr: d(g.goodsVcr),         // 转化率
+      fav: d(g.goodsFavCnt),      // 收藏
+      // 较上周期参考值（Ppr 明文字段；部分账号返回的是当前值而非差值，仅作参考不用于算环比）
+      uvRef: g.goodsUvPpr, pvRef: g.goodsPvPpr, payAmtRef: g.payOrdrAmtPpr,
+      vcrRef: g.goodsVcrPpr, favRef: g.goodsFavCntPpr,
+      // 类目对比 + 指标
+      cate3Vcr: d(g.cate3PctGoodsVcr),      // 本店三级类目转化率
+      cate3AvgVcr: d(g.cate3AvgGoodsVcr),   // 三级类目均值
+      payOrdrRto: d(g.payOrdrRto),          // 支付率
+      imprUsrCnt: d(g.imprUsrCnt),          // 曝光人数
+      ordrCrtUsrCnt: d(g.ordrCrtUsrCnt),    // 下单人数
+      ordrVstrRto: d(g.ordrVstrRto),        // 下单访客率
+      cnsltUsrQty: d(g.cnsltUsrQty),        // 咨询人数
+      goodsStatus: g.goodsStatus,
+      cate1Id: g.cate1Id, cate2Id: g.cate2Id, cate3Id: g.cate3Id,
+    }
+  })
 
   const out = { ok: true, mode, shopKey: SHOP, items: [] }
   const lines = []
@@ -153,8 +208,14 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
     out.items = goodsItems
     if (mode === 'goods') {
       out.text = goodsItems.length
-        ? `商品数据明细（${goodsItems.length} 个商品）：\n` + goodsItems.map((g, i) =>
-            `  ${i + 1}. [${g.goodsId}] ${String(g.name).slice(0, 26)} | 访客=${g.uv ?? '—'} 支付=${g.payAmt ?? '—'}元 订单=${g.payCnt ?? '—'} 转化率=${g.vcr ?? '—'}`).join('\n')
+        ? `商品数据明细（${goodsItems.length} 个商品，${goodsItems[0]?.date || '今日'}）：\n` + goodsItems.map((g, i) =>
+            `  ${i + 1}. [${g.goodsId}] ${String(g.name).slice(0, 24)}`
+            + `\n     访客=${g.uv ?? '—'} 浏览=${g.pv ?? '—'} 收藏=${g.fav ?? '—'}`
+            + `\n     支付=${g.payAmt ?? '—'}元 订单=${g.payCnt ?? '—'} 件数=${g.payQty ?? '—'} 人数=${g.payUsers ?? '—'}`
+            + `\n     转化率=${g.vcr ?? '—'}（类目 ${g.cate3Vcr ?? '—'} / 类目均值 ${g.cate3AvgVcr ?? '—'}）`
+            + (g.payOrdrRto ? ` 支付率=${g.payOrdrRto}` : '')
+            + (g.ordrVstrRto ? ` 下单访客率=${g.ordrVstrRto}` : '')
+          ).join('\n')
         : '商品数据：暂无明细（接口未返回或页面未加载完）'
     }
   }

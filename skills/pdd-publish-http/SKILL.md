@@ -2,7 +2,7 @@
 name: pdd-publish-http
 description: "拼多多商品上架（HTTP 逆向模式）：统一 JSON 描述商品，图片全部 HTTP 上传到 CDN，提交体在浏览器层拦截改包后以页面身份（带 Anti-Content 签名）HTTP 重放，并调 commit/submit 确认上架。数据传输 100% HTTP，浏览器只做「签名生成+会话注册+最小石填」。支持颜色×尺码矩阵、SKU 预览图、属性显式指定。触发：拼多多上架、拼多多发布、拼多多HTTP上架、改包上架、拼多多批量上架准备。排除：采集比价（pdd-crawl）、订单/库存/客服/分析、淘宝/闲鱼发布。需绑定拼多多商家后台账号；上架为 L2，须先给预览并获同意。"
 metadata:
-  builtin_skill_version: "1.0"
+  builtin_skill_version: "1.1"
   dsagent:
     display_name: "拼多多·HTTP上架"
     emoji: "🚀"
@@ -125,6 +125,38 @@ metadata:
 | `shopKey` / `finalUrl` | string? | 实际账号 / 当时页面 URL |
 
 三种典型返回：**① 预览**（无 `--confirm`）→ `ok=false` + `needConfirm=true`；**② 成功** → `ok=true` + text 含「已确认上架」；**③ 失败** → `ok=false` + `failureKind`。
+
+## 工作流
+
+### W1：上架一个新商品（标准链路）
+
+```
+① 从用户话提取商品信息，组装 product JSON
+   （title + images 必需；缺 title 或 images 要主动问，不要猜）
+② 先取预览：不带 --confirm
+   → 返回 ok=false + needConfirm=true + 预览文案（不启浏览器、零写操作）
+③ 把预览完整展示给用户，征求明确同意（L2 门禁，不可跳过、不可自行假设同意）
+   同时提醒：品牌和商品资质不会被自动填写，需在弹出窗口内人工补全
+④ 用户明确同意后，带 --confirm true 重新调用
+⑤ 报告结果：ok=true → 告知已上架 + 商品 ID + 平台仍会审核；
+   failureKind → 按「错误处理」表走
+```
+
+### W2：批量上架同款多链接
+
+```
+① 为每个链接准备独立 product JSON（标题/主图差异化，避免被判重复铺货）
+② 逐个走 W1（每次都要单独拿用户同意，不要一次同意批量执行）
+③ 或改用 pdd-link-matrix 技能（一图多发主图变体）
+```
+
+### W3：规格/价格与历史商品对齐（省事路径）
+
+```
+① 有同类历史商品 → 走「三层查一复用」L2：拉 on_shop/detail 拿规格池，改 values 后提交
+② 没有历史商品 → 走 L3：draco-ms 属性树 + cabernet 尺码树
+③ 类目已知 → L1 直接命中 cat-memory.json
+```
 
 ## 执行流程
 

@@ -52,6 +52,14 @@ const wantCsv = process.argv.includes('--csv')
     args: ['--no-sandbox', '--disable-blink-features=AutomationControlled'],
   })
   const page = (await browser.pages())[0] || await browser.newPage()
+  // safeEval：页面跳转会导致 frame detached，重试遍历所有 frame
+  const safeEval = async (fn, arg) => {
+    for (let i = 0; i < 12; i++) {
+      for (const f of page.frames()) { try { return await f.evaluate(fn, arg) } catch { /* 换下一个 frame */ } }
+      await new Promise(r => setTimeout(r, 1500))
+    }
+    return null
+  }
   await page.goto('https://mms.pinduoduo.com/goods/goods_list', { waitUntil: 'domcontentloaded', timeout: 60000 })
   await new Promise(r => setTimeout(r, 9000))
   if (/\/login/i.test(page.url())) {
@@ -62,7 +70,7 @@ const wantCsv = process.argv.includes('--csv')
   await ensureAntiContent(page)
   const call = async (url, body) => {
     const a = await getAntiContent(page, { force: true })
-    return await page.evaluate(async (u, bd, av) => {
+    return await safeEval(async (u, bd, av) => {
       const resp = await fetch(u, { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', 'Anti-Content': av }, body: JSON.stringify(bd) })
       return await resp.json().catch(() => null)
     }, url, body, a.data)
@@ -137,7 +145,7 @@ const wantCsv = process.argv.includes('--csv')
       await call('https://mms.pinduoduo.com/vodka/v2/mms/pc/resourceValidate', { goodsIdList: [gid], checkItem: ['if_in_bidding_check', 'if_in_goods_decoration', 'if_in_combine_buy'] }).catch(() => null)
       // ② 下架
       const a = await getAntiContent(page, { force: true })
-      const r = await page.evaluate(async (u, bd, av) => {
+      const r = await safeEval(async (u, bd, av) => {
         const resp = await fetch(u, { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', 'Anti-Content': av }, body: JSON.stringify(bd) })
         return await resp.json().catch(() => null)
       }, 'https://mms.pinduoduo.com/vodka/v2/mms/pc/offSale', { goodsId: gid }, a.data)
@@ -150,7 +158,7 @@ const wantCsv = process.argv.includes('--csv')
       })
     } else if (mode === 'onsale') {
       const a = await getAntiContent(page, { force: true })
-      const r = await page.evaluate(async (u, bd, av) => {
+      const r = await safeEval(async (u, bd, av) => {
         const resp = await fetch(u, { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', 'Anti-Content': av }, body: JSON.stringify(bd) })
         return await resp.json().catch(() => null)
       }, 'https://mms.pinduoduo.com/vodka/v2/mms/pc/onSale', { goodsId: gid }, a.data)

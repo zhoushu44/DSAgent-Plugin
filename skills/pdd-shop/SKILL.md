@@ -2,7 +2,7 @@
 name: pdd-shop
 description: "拼多多店铺经营数据（只读）：店铺经营总览（等级/访客/浏览量/粉丝/今日昨日商品数据）、店铺流量（uv/pv/搜索指数/交易指数/粉丝）、店铺评分（服务数据：退款率/平台介入率/退款处理时长）、商品数据明细（每商品 访客/浏览量/支付金额/支付订单/转化率/收藏）。数据源：生意参谋 sycm。全部 HTTP，无平台副作用。触发：拼多多店铺数据、经营总览、店铺流量、访客数、拼多多评分、商品数据、哪个商品卖得好、生意参谋、pdd shop。排除：拼多多商品上架（用 pdd-publish-http）、商品查询/下架（用 pdd-works）、推广数据（用 pdd-promo）、公开采集（用 pdd-crawl）。需绑定「拼多多商家后台」账号。"
 metadata:
-  builtin_skill_version: "1.0"
+  builtin_skill_version: "1.1"
   dsagent:
     display_name: "拼多多·店铺经营数据"
     emoji: "🏪"
@@ -28,7 +28,7 @@ metadata:
 | `overview` | 店铺经营总览：等级 + 流量 + 今日/昨日商品数据 + 支付金额最高商品（默认） |
 | `flow` | 店铺流量：访客 uv / 浏览量 pv / 搜索指数 / 交易指数 / 粉丝数 |
 | `score` | 店铺评分（服务数据）：退款率 / 平台介入率 / 成功退款金额 / 退款处理时长 |
-| `goods` | 商品数据明细：每商品 访客/浏览量/支付金额/支付订单/转化率/收藏 |
+| `goods` | 商品数据明细：每商品 访客/浏览量/收藏/支付金额/订单/件数/人数/转化率/支付率/下单访客率/类目转化率对比 |
 
 ## 前置条件
 
@@ -51,7 +51,7 @@ metadata:
 | `flow` | `{uv, pv, uvPct, pvPct, srchIndex, orderIndex, totalFans, weekFans}` |
 | `score` | 店铺评分原始结构（`serviceDataVO`） |
 | `goodsOverview` | `{today, yesterday}` 今日/昨日商品数据 |
-| `goods` / `items` | 商品明细数组（goodsId/name/uv/pv/payAmt/payCnt/vcr/fav） |
+| `goods` / `items` | 商品明细数组（goodsId/name/date/uv/pv/fav/payAmt/payCnt/payQty/payUsers/vcr/payOrdrRto/ordrVstrRto/cate3Vcr/cate3AvgVcr + uvRef/pvRef/payAmtRef 等参考值） |
 | `mallLevel` | `{level, gmv, restGmv}` 店铺等级 |
 | `text` | 面向用户的中文文案，原样转述 |
 
@@ -109,6 +109,52 @@ node {baseDir}/scripts/shop.mjs --mode goods --limit 30
 | 返回空数据 | — | 新店无流量属正常（不是故障） |
 
 ## 技术说明
+
+### sycm PUA 数字混淆破解（重要）
+
+拼多多生意参谋对**商品明细接口**（`queryGoodsDetailVOListForMMS`）的数字字段用
+**PUA 私用区字符**（U+E000~U+F8FF）做混淆反采集：
+
+```text
+goodsUv = "\uE447\uEC31"      ← 混淆（两个 PUA 字符 = 两位数）
+goodsUvPpr = "53"             ← 明文（同一响应里）
+```
+
+**破解方法**（已实装，52/52 字段验证通过）：
+
+1. 同一响应里 `*Ppr` 字段是**明文**，与被混淆字段**等长同构**
+2. 用 12 组 `(字段, 字段Ppr)` 逐字符对齐，反推 PUA → 数字映射
+3. 全表统一用该映射解码
+
+**码点每次动态变化**（不能硬编码），所以每次都要现场解。
+
+```js
+// 覆盖字段对
+['goodsUv','goodsUvPpr'], ['goodsPv','goodsPvPpr'], ['payOrdrCnt','payOrdrCntPpr'],
+['goodsFavCnt','goodsFavCntPpr'], ['payOrdrAmt','payOrdrAmtPpr'], ['cfmOrdrCnt','cfmOrdrCntPpr'],
+['imprUsrCnt','imprUsrCntPpr'], ['ordrCrtUsrCnt','ordrCrtUsrCntPpr'], ['cnsltUsrQty','cnsltUsrQtyPpr'],
+['payOrdrGoodsQty','payOrdrGoodsQtyPpr'], ['payOrdrUsrCnt','payOrdrUsrCntPpr'], ['cfmOrdrGoodsQty','cfmOrdrGoodsQtyPpr']
+```
+
+### `*Ppr` 字段语义
+
+`*Ppr`（明文）在不同账号返回的可能是「较上周期差值」也可能是「当前值」——
+**不要用它算环比**，只作参考值输出（`uvRef`/`pvRef`/`payAmtRef`）。
+
+### 接口分工
+
+| 接口 | 数字形态 |
+|------|---------|
+| `queryGoodsPageOverviewForMms` | 明文（店铺商品总览，今日/昨日/逐时） |
+| `queryGoodsDetailVOListForMMS` | **PUA 混淆**（商品明细，需解码） |
+| `queryGoodsPageOverView` | PUA 混淆（旧版总览） |
+| `mallScore/queryMallFlowData` | 明文（店铺流量） |
+| `mallScore/queryMallScoreOverView` | 明文（店铺评分） |
+
+### 数据源
+
+取数用「打开 sycm 页面 → hook 页面自己发的响应」（`Network.responseReceived` +
+`Network.getResponseBody`），规避该子应用风控。
 
 数据源是**生意参谋**（`mms.pinduoduo.com/sycm/*`），接口统一 `/sydney/api/*` 前缀：
 

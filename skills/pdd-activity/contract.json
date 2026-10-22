@@ -1,0 +1,46 @@
+{
+  "schema": "dsagent/skill-contract@1",
+  "id": "pdd-activity",
+  "entry": {
+    "form": "script",
+    "script": "scripts/activity.mjs"
+  },
+  "input": {
+    "args": [
+      {
+        "name": "mode",
+        "description": "overview=活动总览(默认)；list=活动列表；types=活动类型清单；forbid=禁止报名原因；stats=活动商品统计；effect=活动效果看板(资源位商品数/支付金额/访客/订单/收藏 + 24h趋势 + 昨日环比)；records=报名记录列表；advice=活动分析与建议(按预估转化率排序)；enroll=报名(L2)；quit=取消报名(L2)"
+      },
+      {
+        "name": "activity_id",
+        "description": "活动 ID（enroll 模式必填）",
+        "flag": "--activity-id"
+      },
+      {
+        "name": "activity_goods_id",
+        "description": "报名记录 ID（quit 模式必填，从 records 模式的 activityGoodsId 取）",
+        "flag": "--activity-goods-id"
+      },
+      {
+        "name": "goods_id",
+        "description": "商品 ID（enroll / quit 模式用）",
+        "flag": "--goods-id"
+      },
+      {
+        "name": "confirm",
+        "description": "写操作确认：enroll/quit 必须带 true 才真正执行；省略只返回预览（L2 门禁）",
+        "flag": "--confirm"
+      },
+      {
+        "name": "account",
+        "description": "账号 shopKey（可选）；该平台多账号且未绑定时需先向用户确认",
+        "flag": "--account"
+      }
+    ]
+  },
+  "output": {
+    "protocol": "dsagent-result",
+    "resultPrefix": "__DSAGENT_RESULT__",
+    "filesMarker": "---[OUTPUT_FILES]"
+  }
+}

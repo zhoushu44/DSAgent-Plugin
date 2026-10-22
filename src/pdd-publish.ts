@@ -714,9 +714,19 @@ async function clickPublishEntry(listPage: any): Promise<boolean> {
         return !el.closest(NAV_SEL)   // ★ 排除左侧导航栏里的同名项
       })
     if (!all.length) return false
-    // 优先用真正的 button（工具栏按钮就是 BUTTON）；否则取最内层元素
+    /**
+     * ★ 2026-10-22 真机复测修复：原逻辑先取 innermost 再找 BUTTON，
+     *   但工具栏按钮结构是 `DIV > MmsUiMmsTag > BUTTON.BTN_primary > SPAN`——
+     *   SPAN 也在 all 里且被 BUTTON 包含，于是 innermost 只剩 SPAN，
+     *   `find(BUTTON)` 落空 → 回退点 SPAN → React 忽略 untrusted click → 页面不跳转。
+     *   这正是「点击发布新商品后 60s 内未出现类目选择页」的根因。
+     *
+     *   新策略：**先在全集里找 BUTTON**（优先级最高，工具栏按钮就是 BUTTON），
+     *   找不到再退回 innermost，最后退回全集最后一个。
+     */
+    const btn = all.find(e => e.tagName === 'BUTTON')
     const innermost = all.filter(e => !all.some(o => o !== e && e.contains(o)))
-    const el = innermost.find(e => e.tagName === 'BUTTON') || innermost[innermost.length - 1]
+    const el = btn || innermost[innermost.length - 1] || all[all.length - 1]
     if (!el) return false
     el.click()
     return true
@@ -4062,6 +4072,28 @@ export async function pddPublish(
         finalUrl: page.url(),
         text: '未能在商品列表页找到「发布新商品」入口（页面结构可能已变更）。\n'
           + '请打开浏览器窗口手动点击「发布新商品」，或稍后重试本工具。',
+      }
+    }
+    // ★ 2026-10-22：DOM el.click() 派发的是 untrusted 事件，拼多多 React 会忽略
+    //   （复现：点完 URL 不变、零业务请求）。补一次 CDP 真实鼠标点击兜底。
+    if (/goods_list/.test(page.url())) {
+      const rect = await page.evaluate(() => {
+        const NAV_SEL = 'nav, aside, [class*="sidenav"], [class*="sideNav"], [class*="menu"]'
+        const all = (Array.from(document.querySelectorAll('button, a, div, span')) as HTMLElement[])
+          .filter(el => {
+            const r = el.getBoundingClientRect()
+            if (r.width <= 0 || r.height <= 0) return false
+            if ((el.innerText || '').trim() !== '发布新商品') return false
+            return !el.closest(NAV_SEL)
+          })
+        const el = all.find(e => e.tagName === 'BUTTON') || all[all.length - 1]
+        if (!el) return null
+        const r = el.getBoundingClientRect()
+        return { x: r.x + r.width / 2, y: r.y + r.height / 2 }
+      }).catch(() => null) as { x: number; y: number } | null
+      if (rect) {
+        await page.mouse.click(rect.x, rect.y).catch(() => { /* 忽略 */ })
+        diag(`入口 CDP 真实鼠标补点：(${Math.round(rect.x)}, ${Math.round(rect.y)})`)
       }
     }
     console.log('[dsagent-pdd-publish] 已点击「发布新商品」，等待类目选择页...')

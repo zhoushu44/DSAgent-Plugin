@@ -1116,11 +1116,14 @@ function buildCommand(skill: SkillRow, request: string, explicitArgs?: string[],
   const body = skill.body
   const py = resolvePython()
   const entry = detectEntry(skill.dir, skill.id, body)
+  // Node 系脚本（.mjs/.cjs）必须用 node 跑，不能用 python
+  const isNodeScript = (p?: string) => !!p && /\.(?:mjs|cjs)$/.test(p)
+  const runner = (p?: string) => (isNodeScript(p) ? process.execPath : py)
 
   if (fromContract) {
     const args = explicitArgs ?? []
     if (entry.form === 'package' && entry.pkg) return [py, '-m', entry.pkg, ...args]
-    if (entry.form === 'script' && entry.script) return [py, join(skill.dir, entry.script), ...args]
+    if (entry.form === 'script' && entry.script) return [runner(entry.script), join(skill.dir, entry.script), ...args]
     return null
   }
 
@@ -1149,7 +1152,7 @@ function buildCommand(skill: SkillRow, request: string, explicitArgs?: string[],
 
   // 形态二：脚本入口
   if (entry.form === 'script' && entry.script) {
-    return [py, join(skill.dir, entry.script), ...args]
+    return [runner(entry.script), join(skill.dir, entry.script), ...args]
   }
 
   // 形态三：纯指令型
@@ -1157,23 +1160,25 @@ function buildCommand(skill: SkillRow, request: string, explicitArgs?: string[],
 }
 
 /**
- * 脚本调用点：同一行内先出现显式占位符，再出现 scripts/xxx.py。
+ * 脚本调用点：同一行内先出现显式占位符，再出现 scripts/xxx.py 或 scripts/xxx.mjs。
  *
  * 覆盖两种真实写法：
  *   - `python3 {baseDir}/scripts/fetch_data.py --keyword x`（xianyu-crawl 等）
  *   - `cd "{this_skill_dir}" && python scripts/search_notes.py "关键词"`（xiaohongshu-crawl）
+ *   - `node {baseDir}/scripts/publish.mjs --mode x`（pdd-* / zhihu-publish-http 等 Node 技能）
  *
  * 刻意不匹配裸 `python scripts/xxx.py`（docx/pptx/xlsx/skill-creator 用的是这种），
  * 也与原项目「只认 {baseDir}/」的判定保持一致。
  */
-const SCRIPT_CALL_RE = /\{(?:baseDir|this_skill_dir)\}[^\n]{0,120}?(scripts\/[\w./-]+\.py)/
+const SCRIPT_CALL_RE = /\{(?:baseDir|this_skill_dir)\}[^\n]{0,120}?(scripts\/[\w./-]+\.(?:py|mjs|cjs))/
 /**
- * 用法行：正文里的 `python -m xxx ...` 或 `python .../xxx.py ...`（含 `{baseDir}` 占位符与裸路径）。
+ * 用法行：正文里的 `python -m xxx ...` / `python .../xxx.py ...` / `node .../xxx.mjs ...`
+ * （含 `{baseDir}` 占位符与裸路径）。
  *
  * 只认这两类可执行入口，具体是不是**本技能**的入口由 extractUsage 按 entry 过滤，
  * 因此这里放宽到裸 `python scripts/xxx.py`（xiaohongshu-crawl 的正文就是这种写法）。
  */
-const USAGE_CMD_RE = /(?:python3?|uv\s+run)\s+(?:-m\s+[\w.]+|\S*\.py)([^\n`|]*)/
+const USAGE_CMD_RE = /(?:(?:python3?|uv\s+run)\s+(?:-m\s+[\w.]+|\S*\.py)|node\s+\S*\.(?:mjs|cjs))([^\n`|]*)/
 
 const pkgCache = new Map<string, string | null>()
 
@@ -1354,7 +1359,7 @@ export function extractUsage(body: string, entry: SkillEntry): string | null {
  */
 function normalizeArgs(usage: string | null, args: string[]): string[] {
   if (!usage) return args
-  const tail = usage.replace(/^.*?(?:-m\s+[\w.]+|\S*\.py)\s*/, '')
+  const tail = usage.replace(/^.*?(?:-m\s+[\w.]+|\S*\.(?:py|mjs|cjs))\s*/, '')
   const sub = tail.match(/^([a-z][a-z0-9-]*)(?![\w-])/)
   if (sub) {
     // 模型已自行给出子命令（如 args="categories"）时不重复补
