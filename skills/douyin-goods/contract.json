@@ -1,0 +1,35 @@
+{
+  "schema": "dsagent/skill-contract@1",
+  "id": "douyin-goods",
+  "entry": {
+    "form": "script",
+    "script": "scripts/goods.mjs"
+  },
+  "input": {
+    "args": [
+      {
+        "name": "mode",
+        "description": "overview=商品总览(默认)；list=商品列表；detail=单商品详情；sku=单商品SKU全量；spec-pool=全店规格池采集"
+      },
+      {
+        "name": "product_id",
+        "description": "商品 ID（detail / sku 模式必填）",
+        "flag": "--product-id"
+      },
+      {
+        "name": "limit",
+        "description": "返回条数上限，默认 20，上限 100"
+      },
+      {
+        "name": "account",
+        "description": "账号 shopKey（可选）；该平台多账号且未绑定时需先向用户确认",
+        "flag": "--account"
+      }
+    ]
+  },
+  "output": {
+    "protocol": "dsagent-result",
+    "resultPrefix": "__DSAGENT_RESULT__",
+    "filesMarker": "---[OUTPUT_FILES]"
+  }
+}
