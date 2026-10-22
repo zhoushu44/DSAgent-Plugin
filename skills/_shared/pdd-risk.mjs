@@ -284,12 +284,19 @@ export async function autoSolveSlider(shopKey, page = null, opts = {}) {
     try {
       const mod = await import('./pdd-slider-solver.mjs').catch((e) => { console.error('[pdd-risk] import solver 失败:', e.message); return null })
       if (typeof mod?.solveSliderInPage === 'function') {
+        // ★ 内联模式绝不落子进程：子进程会开同 profile 的 Chrome，
+        //   把父进程的 Target 挤掉（Target closed → 后续 goto 全 detached）。
+        //   内联失败就直接返回失败，让调用方决定重试或人工介入。
         return await mod.solveSliderInPage(page, shopKey, opts)
       }
-      console.error('[pdd-risk] solver 无 solveSliderInPage 导出，落到子进程')
-    } catch (e) { console.error('[pdd-risk] 内联求解异常:', e.message) }
+      console.error('[pdd-risk] solver 无 solveSliderInPage 导出')
+      return { ok: false, text: '滑块求解器缺少 solveSliderInPage 导出' }
+    } catch (e) {
+      console.error('[pdd-risk] 内联求解异常:', e.message)
+      return { ok: false, text: `内联求解异常：${e.message}` }
+    }
   }
-  // ② 子进程
+  // ② 无 page 才起子进程（独立 CLI 场景）
   const { execSync } = await import('node:child_process')
   const solver = path.join(HERE, 'pdd-slider-solver.mjs')
   if (!fs.existsSync(solver)) return { ok: false, text: '滑块求解器不存在（pdd-slider-solver.mjs）' }

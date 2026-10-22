@@ -142,7 +142,11 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
   // ── PUA 数字混淆解码器 ──────────────────────────────────────────
   // 拼多多 sycm 对数字字段用 PUA 私用区字符（U+E000~U+F8FF）混淆反采集，
   // 且码点每次动态变化。但同一响应里 `*Ppr` 字段是明文的「较上周期差值」，
-  // 与被混淆字段等长同构 —— 用 12 组 (字段, 字段Ppr) 逐字符对齐反推映射。
+  // 与被混淆字段等长同构 —— 用 (字段, 字段Ppr) 逐字符对齐反推映射。
+  //
+  // ★ 2026-10-23：保留原 12 组 PAIRS 为主（实测该批字段覆盖最可靠），
+  //   额外加「同名前缀扫描」补漏：凡 <X>Ppr 明文字段存在且与 <X> 等长，
+  //   都参与对齐（不限 12 组）。不做跨语义交叉（Ytd↔base 会引入错票）。
   const PUASET_RE = /[\uE000-\uF8FF]/
   const PAIRS = [
     ['goodsUv', 'goodsUvPpr'], ['goodsPv', 'goodsPvPpr'], ['payOrdrCnt', 'payOrdrCntPpr'],
@@ -150,19 +154,39 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
     ['imprUsrCnt', 'imprUsrCntPpr'], ['ordrCrtUsrCnt', 'ordrCrtUsrCntPpr'], ['cnsltUsrQty', 'cnsltUsrQtyPpr'],
     ['payOrdrGoodsQty', 'payOrdrGoodsQtyPpr'], ['payOrdrUsrCnt', 'payOrdrUsrCntPpr'], ['cfmOrdrGoodsQty', 'cfmOrdrGoodsQtyPpr'],
   ]
+  /**
+   * 构建 PUA 映射。
+   * @param list goodsDetailList
+   * @returns { map, coverage }
+   */
   const buildPuaMap = (list) => {
     const map = {}
-    for (const g of list) {
-      for (const [f, pf] of PAIRS) {
-        const pua = String(g[f] ?? ''), plain = String(g[pf] ?? '')
-        if (!pua || pua.length !== plain.length) continue
-        for (let i = 0; i < pua.length; i++) {
-          const pc = pua.codePointAt(i), nc = plain[i]
-          if (pc >= 0xE000 && pc <= 0xF8FF && !map[pc]) map[pc] = nc
-        }
+    const bump = (pc, ch) => {
+      if (pc < 0xE000 || pc > 0xF8FF) return
+      if (!ch || !/\S/.test(ch)) return          // ★ 挡空格/空串
+      if (!(pc in map)) map[pc] = ch
+    }
+    const addPair = (pua, plain) => {
+      if (!pua || !plain || pua.length !== plain.length) return
+      for (let i = 0; i < pua.length; i++) {
+        const pc = pua.codePointAt(i)
+        if (pc >= 0xE000 && pc <= 0xF8FF) bump(pc, plain[i])
       }
     }
-    return map
+    // ① 12 组核心 PAIRS（先建立最可靠的映射）
+    for (const g of list) {
+      for (const [f, pf] of PAIRS) addPair(String(g[f] ?? ''), String(g[pf] ?? ''))
+    }
+    // ② 补漏：同名前缀 <X> ↔ <X>Ppr 等长对齐（如 goodsPtHelpRate、ordrVstrRto）
+    for (const g of list) {
+      for (const k of Object.keys(g)) {
+        if (!k.endsWith('Ppr')) continue
+        const base = k.slice(0, -3)
+        const bv = g[base]
+        if (typeof bv === 'string' && PUASET_RE.test(bv)) addPair(bv, String(g[k] ?? ''))
+      }
+    }
+    return { map, coverage: { total: Object.keys(map).length } }
   }
   const decodePua = (val, map) => {
     if (val == null) return val
@@ -176,33 +200,45 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
     return out
   }
 
+  const pua = buildPuaMap(gList)
+  const map = pua.map
   const goodsItems = gList.slice(0, limit).map(g => {
     // 先用整表推映射，再逐字段解码（映射对该响应全局有效）
-    const map = buildPuaMap(gList)
     const d = (v) => decodePua(v, map)
     return {
       goodsId: g.goodsId,
       name: g.goodsName || '',
       date: g.statDate,
+      // ── 曝光（隐藏数据，sycm 商品效果页核心指标）──
+      imprUsrCnt: d(g.imprUsrCnt),        // 曝光访客数（今日）
+      imprUsrCntYtd: d(g.imprUsrCntYtd),  // 曝光访客数（昨日）
+      // ── 流量 ──
       uv: d(g.goodsUv),           // 访客
       pv: d(g.goodsPv),           // 浏览量
+      uvYtd: d(g.goodsUvYtd),
+      pvYtd: d(g.goodsPvYtd),
+      // ── 成交 ──
       payAmt: d(g.payOrdrAmt),    // 支付金额
       payCnt: d(g.payOrdrCnt),    // 支付订单
       payQty: d(g.payOrdrGoodsQty),
       payUsers: d(g.payOrdrUsrCnt),
+      cfmOrdrCnt: d(g.cfmOrdrCnt),        // 确认订单
+      ordrCrtUsrCnt: d(g.ordrCrtUsrCnt),  // 下单人数
+      // ── 转化 ──
       vcr: d(g.goodsVcr),         // 转化率
+      ordrVstrRto: d(g.ordrVstrRto),      // 下单访客率
+      payOrdrRto: d(g.payOrdrRto),        // 支付访客率
+      goodsPtHelpRate: d(g.goodsPtHelpRate),  // 商品帮扶率
+      // ── 互动 ──
       fav: d(g.goodsFavCnt),      // 收藏
+      cnsltUsrQty: d(g.cnsltUsrQty),      // 咨询人数
       // 较上周期参考值（Ppr 明文字段；部分账号返回的是当前值而非差值，仅作参考不用于算环比）
       uvRef: g.goodsUvPpr, pvRef: g.goodsPvPpr, payAmtRef: g.payOrdrAmtPpr,
       vcrRef: g.goodsVcrPpr, favRef: g.goodsFavCntPpr,
+      imprRef: g.imprUsrCntPpr,
       // 类目对比 + 指标
       cate3Vcr: d(g.cate3PctGoodsVcr),      // 本店三级类目转化率
       cate3AvgVcr: d(g.cate3AvgGoodsVcr),   // 三级类目均值
-      payOrdrRto: d(g.payOrdrRto),          // 支付率
-      imprUsrCnt: d(g.imprUsrCnt),          // 曝光人数
-      ordrCrtUsrCnt: d(g.ordrCrtUsrCnt),    // 下单人数
-      ordrVstrRto: d(g.ordrVstrRto),        // 下单访客率
-      cnsltUsrQty: d(g.cnsltUsrQty),        // 咨询人数
       goodsStatus: g.goodsStatus,
       cate1Id: g.cate1Id, cate2Id: g.cate2Id, cate3Id: g.cate3Id,
     }
@@ -248,10 +284,12 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
     out.goods = goodsItems
     out.items = goodsItems
     if (mode === 'goods') {
+      out.puaCoverage = pua.coverage
       out.text = goodsItems.length
-        ? `商品数据明细（${goodsItems.length} 个商品，${goodsItems[0]?.date || '今日'}）：\n` + goodsItems.map((g, i) =>
+        ? `商品数据明细（${goodsItems.length} 个商品，${goodsItems[0]?.date || '今日'}；PUA 解码覆盖 ${pua.coverage.agreed}/${pua.coverage.total} 码点）：\n` + goodsItems.map((g, i) =>
             `  ${i + 1}. [${g.goodsId}] ${String(g.name).slice(0, 24)}`
-            + `\n     访客=${g.uv ?? '—'} 浏览=${g.pv ?? '—'} 收藏=${g.fav ?? '—'}`
+            + `\n     ★曝光访客=${g.imprUsrCnt ?? '—'}（昨日 ${g.imprUsrCntYtd ?? '—'}）`
+            + `\n     访客=${g.uv ?? '—'} 浏览=${g.pv ?? '—'} 收藏=${g.fav ?? '—'} 咨询=${g.cnsltUsrQty ?? '—'}`
             + `\n     支付=${g.payAmt ?? '—'}元 订单=${g.payCnt ?? '—'} 件数=${g.payQty ?? '—'} 人数=${g.payUsers ?? '—'}`
             + `\n     转化率=${g.vcr ?? '—'}（类目 ${g.cate3Vcr ?? '—'} / 类目均值 ${g.cate3AvgVcr ?? '—'}）`
             + (g.payOrdrRto ? ` 支付率=${g.payOrdrRto}` : '')

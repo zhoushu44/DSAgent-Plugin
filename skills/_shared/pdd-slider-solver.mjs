@@ -147,12 +147,17 @@ export async function solveSliderInPage(page, shopKey, opts = {}) {
   const cdp = await page.target().createCDPSession()
   const traj = humanTrajectory(handle.x, targetX, handle.y)
   console.error(`[slider-inpage] 拖动 ${handle.x} → ${Math.round(targetX)}（${traj.length} 步）`)
-  await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: handle.x, y: handle.y, button: 'left', clickCount: 1 })
-  for (const p of traj) {
-    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: p.x, y: p.y, button: 'left' })
-    await new Promise(r => setTimeout(r, 12 + Math.random() * 22))
+  try {
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: handle.x, y: handle.y, button: 'left', clickCount: 1 })
+    for (const p of traj) {
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: p.x, y: p.y, button: 'left' })
+      await new Promise(r => setTimeout(r, 12 + Math.random() * 22))
+    }
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: targetX, y: handle.y, button: 'left', clickCount: 1 })
+  } catch (e) {
+    // Target closed / session 失效 → 返回失败（不重试，避免恶化）
+    return { ok: false, gapX: solved.x, targetX: Math.round(targetX), text: `拖动失败（CDP 会话失效）：${e.message?.slice(0, 80) || e}` }
   }
-  await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: targetX, y: handle.y, button: 'left', clickCount: 1 })
 
   // 等遮罩消失
   let passed = false
