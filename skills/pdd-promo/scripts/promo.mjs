@@ -38,7 +38,7 @@ const mode = argOf('mode') || 'overview'
 ;(async () => {
   const puppeteer = require('puppeteer-core')
   const { CredentialStore } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/lib/services/credential-store.js`)
-  const { checkCooldown, detectSlider, autoSolveSlider, fmtRemain } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-risk.mjs`)
+  const { checkCooldown, detectSlider, autoSolveSlider, fmtRemain, tryAcquireAccountLock, releaseAccountLock, heartbeatAccountLock, throttleRequest } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-risk.mjs`)
   const store = new CredentialStore(path.join(homedir(), '.dsh', 'dsagent-accounts.json'))
   const SHOP = argOf('account') || store.findByPlatform('pdd_mms')?.shop_key
   if (!SHOP) { emit({ ok: false, failureKind: 'not_bound', text: '未绑定拼多多商家后台账号，请到「账号连接」添加。' }); process.exit(2) }
@@ -52,6 +52,19 @@ const mode = argOf('mode') || 'overview'
     })
     process.exit(2)
   }
+
+  // 账号级并发锁：同一时刻只允许一个技能打这个号（等最多 5 分钟）
+  const lock = await tryAcquireAccountLock(SHOP, 'pdd-promo', 300000)
+  if (!lock.ok) {
+    emit({ ok: false, failureKind: 'rate_limit', text: '账号 ' + SHOP + ' 正被其他任务占用' + (lock.holder ? '（' + lock.holder + '）' : '') + '，请稍后再试。' })
+    process.exit(2)
+  }
+  const releaseLock = () => { try { releaseAccountLock(SHOP) } catch (e) {} }
+  process.on('exit', releaseLock)
+  process.on('SIGINT', () => { releaseLock(); process.exit(130) })
+  process.on('SIGTERM', () => { releaseLock(); process.exit(143) })
+  const hb = setInterval(() => heartbeatAccountLock(SHOP, 'pdd-promo'), 180000)
+
 
   let profile = path.join(homedir(), '.dsh', 'browser-profiles', 'accounts', SHOP)
   if (!fs.existsSync(profile)) {
@@ -363,6 +376,7 @@ const mode = argOf('mode') || 'overview'
   }
 
   emit(out)
+  clearInterval(hb)
   await browser.close()
 })().catch(async (e) => {
   // ★ 风控异常 → 友好提示

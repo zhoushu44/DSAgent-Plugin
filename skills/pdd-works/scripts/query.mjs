@@ -33,7 +33,7 @@ const wantCsv = process.argv.includes('--csv')
 ;(async () => {
   const puppeteer = require('puppeteer-core')
   const { ensureAntiContent, getAntiContent } = await import(`file:///${PLUGIN_ROOT}/lib/pdd-mode2.js`)
-  const { checkCooldown, markCooldown, detectRiskCode, fmtRemain } = await import(`file:///${PLUGIN_ROOT}/skills/_shared/pdd-risk.mjs`)
+  const { checkCooldown, detectSlider, autoSolveSlider, fmtRemain, tryAcquireAccountLock, releaseAccountLock, heartbeatAccountLock, throttleRequest } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-risk.mjs`)
 
   // 账号选择：优先 --account，否则按平台自动找
   const { CredentialStore } = await import(`file:///${PLUGIN_ROOT}/lib/services/credential-store.js`)
@@ -51,6 +51,19 @@ const wantCsv = process.argv.includes('--csv')
     })
     process.exit(2)
   }
+
+  // 账号级并发锁：同一时刻只允许一个技能打这个号（等最多 5 分钟）
+  const lock = await tryAcquireAccountLock(SHOP, 'pdd-works', 300000)
+  if (!lock.ok) {
+    emit({ ok: false, failureKind: 'rate_limit', text: '账号 ' + SHOP + ' 正被其他任务占用' + (lock.holder ? '（' + lock.holder + '）' : '') + '，请稍后再试。' })
+    process.exit(2)
+  }
+  const releaseLock = () => { try { releaseAccountLock(SHOP) } catch (e) {} }
+  process.on('exit', releaseLock)
+  process.on('SIGINT', () => { releaseLock(); process.exit(130) })
+  process.on('SIGTERM', () => { releaseLock(); process.exit(143) })
+  const hb = setInterval(() => heartbeatAccountLock(SHOP, 'pdd-works'), 180000)
+
 
   // profile：新 shopKey 目录优先，旧目录兜底（票据已注入）
   let profile = path.join(homedir(), '.dsh', 'browser-profiles', 'accounts', SHOP)
@@ -95,8 +108,7 @@ const wantCsv = process.argv.includes('--csv')
     })
     process.exit(2)
   }
-  // ★ 风控 L3：滑块遮罩检测 + 自动过
-  const { detectSlider, autoSolveSlider } = await import(`file:///${PLUGIN_ROOT}/skills/_shared/pdd-risk.mjs`)
+  // ★ 风控 L3：滑块遮罩检测 + 自动过（detectSlider/autoSolveSlider 已在顶部 import）
   if (await detectSlider(page)) {
     console.warn('[pdd-works] 检测到滑块遮罩，尝试自动过滑块...')
     const solved = await autoSolveSlider(SHOP, page)
@@ -114,6 +126,7 @@ const wantCsv = process.argv.includes('--csv')
   const lastHit = new Map()
   const MIN_GAP = 3000
   const call = async (url, body) => {
+    await throttleRequest(SHOP, /vodka|glide/.test(url) ? 'strict' : 'loose')
     const now = Date.now()
     const gap = now - (lastHit.get(url) || 0)
     if (gap < MIN_GAP) await new Promise(r => setTimeout(r, MIN_GAP - gap))
@@ -348,6 +361,7 @@ const wantCsv = process.argv.includes('--csv')
   } else {
     emit({ ok: false, failureKind: 'api_error', text: `未知 mode：${mode}。可用：overview / list / detail / sku / commit / edit / spec-pool` })
   }
+  clearInterval(hb)
   await browser.close()
 })().catch(async (e) => {
   // ★ 风控异常 → 友好提示（而不是裸的 RISK_54001）

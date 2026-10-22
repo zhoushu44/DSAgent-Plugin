@@ -24,12 +24,26 @@ import { fileURLToPath } from 'node:url'
 const COOL_FILE = path.join(homedir(), '.dsh', 'pdd-risk-cooldown.json')
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 
-/** 频控错误码 → 冷却时长（ms） */
+/** 频控错误码 → 基础冷却时长（ms） */
 const RISK_CODES = {
   54001: 60 * 60 * 1000,        // 操作太过频繁 → 1 小时
   100001: 2 * 60 * 60 * 1000,   // 当前请求频繁，请2小时后重试 → 2 小时
   2000000: 30 * 60 * 1000,      // 网络繁忙，请不要频繁操作 → 30 分钟
   600001: 5 * 60 * 1000,        // 编辑不存在 → 短冷却（可能是参数问题）
+}
+
+/**
+ * ★ 自适应退避倍数（2026-10-22 新增）。
+ * 按账号「24 小时内累计命中次数」动态延长冷却：
+ *   第 1 次 → ×1（基础时长）
+ *   第 2 次 → ×2
+ *   第 3 次 → ×4
+ *   第 4 次+ → ×8（封顶）
+ * 原理：拼多多按「累计行为分数」限流，固定时长冷却会导致「刚解又打、打了又封」。
+ */
+function backoffMultiplier(hitCount) {
+  if (hitCount <= 1) return 1
+  return Math.min(8, Math.pow(2, hitCount - 1))
 }
 
 /** 读冷却记录 */
@@ -60,17 +74,39 @@ export function checkCooldown(shopKey) {
     writeCooldown(cd)
     return { cooling: false, remainMs: 0, reason: '' }
   }
-  return { cooling: true, remainMs: rec.until - now, reason: rec.reason || '' }
+  return {
+    cooling: true,
+    remainMs: rec.until - now,
+    reason: rec.reason || '',
+    code: rec.code,
+    multiplier: rec.multiplier || 1,
+    hits: (rec.hits || []).length,
+  }
 }
 
-/** 记录冷却（按错误码决定时长） */
+/** 记录冷却（按错误码 + 累计命中次数自适应延长） */
 export function markCooldown(shopKey, code, extraReason) {
-  const ms = RISK_CODES[code]
-  if (!ms) return
+  const base = RISK_CODES[code]
+  if (!base) return
   const cd = readCooldown()
-  cd[shopKey] = { until: Date.now() + ms, code, reason: extraReason || `命中频控 code=${code}` }
+  const now = Date.now()
+  const prev = cd[shopKey]
+  // 统计 24h 内累计命中次数（hitCount + 历史 hits）
+  const hits = (prev?.hits || []).filter(t => now - t < 24 * 3600 * 1000)
+  hits.push(now)
+  const mult = backoffMultiplier(hits.length)
+  const ms = Math.min(base * mult, 24 * 3600 * 1000)   // 封顶 24 小时
+  cd[shopKey] = {
+    until: now + ms,
+    code,
+    reason: extraReason || `命中频控 code=${code}`,
+    hits,
+    baseMs: base,
+    multiplier: mult,
+  }
   writeCooldown(cd)
-  console.warn(`[pdd-risk] ${shopKey} 进入冷却 ${Math.round(ms / 60000)} 分钟（code=${code}）`)
+  console.warn(`[pdd-risk] ${shopKey} 进入冷却 ${Math.round(ms / 60000)} 分钟`
+    + `（code=${code}，基础 ${Math.round(base / 60000)} 分钟 × ${mult} 倍，24h 内第 ${hits.length} 次命中）`)
 }
 
 /** 清除冷却（用户手动过滑块后调用） */
@@ -100,6 +136,123 @@ export function fmtRemain(ms) {
   const m = Math.ceil(ms / 60000)
   if (m < 60) return `${m} 分钟`
   return `${Math.floor(m / 60)} 小时 ${m % 60} 分钟`
+}
+
+/* ─────────────────────────────────────────────────────────────
+ * ★ 全局请求节流器（2026-10-22 新增）
+ *
+ * 问题：pdd-shop/promo/activity 靠 hook 页面响应，一次导航触发几十个请求，
+ *       全速打 → 必被 54001。之前只有 pdd-works 的 call() 有节流。
+ *
+ * 方案：账号级「滑动窗口」——记录最近请求时间戳，超密度就 sleep（跨进程共享）。
+ *   商品域（/vodka /glide）：严格 20 次/分钟
+ *   其他域（/sydney /act yingxiao）：宽松 60 次/分钟
+ * ───────────────────────────────────────────────────────────── */
+const THROTTLE = {
+  strict: { windowMs: 60_000, maxReq: 20 },
+  loose:  { windowMs: 60_000, maxReq: 60 },
+}
+const THROTTLE_FILE = path.join(homedir(), '.dsh', 'pdd-throttle.json')
+
+const readThrottle = () => { try { return JSON.parse(fs.readFileSync(THROTTLE_FILE, 'utf8')) } catch { return {} } }
+const writeThrottle = (o) => {
+  try {
+    fs.mkdirSync(path.dirname(THROTTLE_FILE), { recursive: true })
+    fs.writeFileSync(THROTTLE_FILE, JSON.stringify(o))
+  } catch { /* 忽略 */ }
+}
+
+/**
+ * 请求前节流（跨进程共享，会 sleep 到允许为止）。
+ * @param shopKey 账号 shopKey
+ * @param kind 'strict'（商品域，默认）| 'loose'（其他域）
+ */
+export async function throttleRequest(shopKey, kind = 'strict') {
+  const cfg = THROTTLE[kind] || THROTTLE.strict
+  const key = `${shopKey}:${kind}`
+  for (;;) {
+    const all = readThrottle()
+    const now = Date.now()
+    const hits = (all[key] || []).filter(t => now - t < cfg.windowMs)
+    if (hits.length < cfg.maxReq) {
+      hits.push(now)
+      all[key] = hits
+      writeThrottle(all)
+      return
+    }
+    const wait = cfg.windowMs - (now - hits[0]) + 200
+    console.warn(`[pdd-risk] ${shopKey} ${kind} 节流：${hits.length}/${cfg.maxReq} 次每分钟，等 ${Math.round(wait / 1000)}s`)
+    await new Promise(r => setTimeout(r, Math.min(wait, 30_000)))
+  }
+}
+
+/* ─────────────────────────────────────────────────────────────
+ * 账号级并发锁（2026-10-22 新增）
+ *
+ * 问题：5 个 pdd 技能同时跑 = 5 个 Chrome + 5 套请求同时打同一个号，
+ *       必然触发 54001。之前没有跨进程协调。
+ *
+ * 方案：文件锁（~/.dsh/pdd-account-locks/<shopKey>.lock）
+ *   - 内容：{ pid, at, label }
+ *   - 获取：tryAcquireAccountLock(shopKey, label, waitMs)
+ *   - 释放：releaseAccountLock(shopKey)
+ *   - 兜底：锁超过 STALE_MS（10 分钟）视为僵尸，可强夺
+ * ───────────────────────────────────────────────────────────── */
+const LOCK_DIR = path.join(homedir(), '.dsh', 'pdd-account-locks')
+const LOCK_STALE_MS = 10 * 60 * 1000     // 10 分钟无心跳视为僵尸
+
+const lockPath = (shopKey) => path.join(LOCK_DIR, `${shopKey.replace(/[^\w-]/g, '_')}.lock`)
+
+/** 尝试获取账号锁。@returns { ok, holder?, waitedMs? } */
+export async function tryAcquireAccountLock(shopKey, label = '', waitMs = 0) {
+  const p = lockPath(shopKey)
+  const start = Date.now()
+  for (;;) {
+    try {
+      fs.mkdirSync(LOCK_DIR, { recursive: true })
+      // O_EXCL 语义：已存在则抛错
+      fs.writeFileSync(p, JSON.stringify({ pid: process.pid, at: Date.now(), label }), { flag: 'wx' })
+      return { ok: true }
+    } catch {
+      // 锁已存在 → 看是否僵尸
+      try {
+        const st = JSON.parse(fs.readFileSync(p, 'utf8'))
+        if (Date.now() - st.at > LOCK_STALE_MS) {
+          console.warn(`[pdd-risk] 账号锁僵尸（${st.pid} @ ${new Date(st.at).toISOString()}），强夺`)
+          fs.unlinkSync(p)
+          continue   // 立刻重试
+        }
+      } catch { /* 锁文件损坏，强夺 */ fs.unlinkSync(p); continue }
+
+      // 等待
+      if (Date.now() - start >= waitMs) {
+        let holder = ''
+        try { holder = JSON.parse(fs.readFileSync(p, 'utf8')).label || '' } catch { /* ignore */ }
+        return { ok: false, holder }
+      }
+      await new Promise(r => setTimeout(r, 2000))
+    }
+  }
+}
+
+/** 释放账号锁 */
+export function releaseAccountLock(shopKey) {
+  try {
+    const p = lockPath(shopKey)
+    const st = JSON.parse(fs.readFileSync(p, 'utf8'))
+    if (st.pid === process.pid) fs.unlinkSync(p)
+  } catch { /* 已被别人清 */ }
+}
+
+/** 心跳续锁（长时间任务用，防被判僵尸） */
+export function heartbeatAccountLock(shopKey, label = '') {
+  try {
+    const p = lockPath(shopKey)
+    const st = JSON.parse(fs.readFileSync(p, 'utf8'))
+    if (st.pid === process.pid) {
+      fs.writeFileSync(p, JSON.stringify({ pid: process.pid, at: Date.now(), label: label || st.label }))
+    }
+  } catch { /* 锁没了就算了 */ }
 }
 
 /**
