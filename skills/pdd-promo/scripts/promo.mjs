@@ -38,9 +38,20 @@ const mode = argOf('mode') || 'overview'
 ;(async () => {
   const puppeteer = require('puppeteer-core')
   const { CredentialStore } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/lib/services/credential-store.js`)
+  const { checkCooldown, detectSlider, autoSolveSlider, fmtRemain } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-risk.mjs`)
   const store = new CredentialStore(path.join(homedir(), '.dsh', 'dsagent-accounts.json'))
   const SHOP = argOf('account') || store.findByPlatform('pdd_mms')?.shop_key
   if (!SHOP) { emit({ ok: false, failureKind: 'not_bound', text: '未绑定拼多多商家后台账号，请到「账号连接」添加。' }); process.exit(2) }
+
+  // ★ 风控 L4：冷却期内直接拒绝
+  const cd = checkCooldown(SHOP)
+  if (cd.cooling) {
+    emit({
+      ok: false, failureKind: 'rate_limit',
+      text: `账号 ${SHOP} 命中平台频控，冷却剩余 ${fmtRemain(cd.remainMs)}（${cd.reason}）。期间请勿重复调用。`,
+    })
+    process.exit(2)
+  }
 
   let profile = path.join(homedir(), '.dsh', 'browser-profiles', 'accounts', SHOP)
   if (!fs.existsSync(profile)) {
@@ -55,6 +66,21 @@ const mode = argOf('mode') || 'overview'
   const page = (await browser.pages())[0] || await browser.newPage()
   const cdp = await page.target().createCDPSession()
   await cdp.send('Network.enable')
+
+  // ★ 风控 L3：滑块遮罩自动过
+  const ensureNoSlider = async (label) => {
+    if (await detectSlider(page)) {
+      console.warn(`[pdd-promo] ${label}：检测到滑块遮罩，尝试自动过滑块...`)
+      const solved = await autoSolveSlider(SHOP, page)
+      if (!solved.ok) {
+        await browser.close()
+        emit({ ok: false, failureKind: 'risk_control', text: `滑块自动过失败：${solved.text}\n请手动过验证后重试。` })
+        process.exit(2)
+      }
+      console.warn(`[pdd-promo] 滑块已过：${solved.text}`)
+      await new Promise(r => setTimeout(r, 2000))
+    }
+  }
 
   // 收集页面自己发的推广数据响应（按接口分类存最新一条）
   const byApi = {}
@@ -110,6 +136,7 @@ const mode = argOf('mode') || 'overview'
     try {
       await page.goto(u, { waitUntil: 'domcontentloaded', timeout: 45000 })
       await new Promise(r => setTimeout(r, 13000))
+      await ensureNoSlider(u)   // ★ 风控 L3
       if (/\/login/i.test(page.url())) {
         await browser.close()
         emit({ ok: false, failureKind: 'token_expired', text: '推广域登录态失效，请到「账号连接」重新登录拼多多商家后台。' })
@@ -337,7 +364,18 @@ const mode = argOf('mode') || 'overview'
 
   emit(out)
   await browser.close()
-})().catch(e => {
+})().catch(async (e) => {
+  // ★ 风控异常 → 友好提示
+  const { checkCooldown, fmtRemain } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-risk.mjs`).catch(() => ({}))
+  if (e?.riskCode && checkCooldown) {
+    const cd = checkCooldown(SHOP)
+    emit({
+      ok: false, failureKind: 'rate_limit',
+      text: `命中平台频控（code=${e.riskCode}${e.riskMsg ? `：${e.riskMsg}` : ''}），已记冷却 ${fmtRemain(cd.remainMs)}。\n期间请勿重复调用（会延长封禁）。\n若急需使用，可在浏览器窗口手动过滑块验证，然后重试。`,
+    })
+    process.exit(2)
+  }
   emit({ ok: false, failureKind: 'api_error', text: `执行异常：${e?.message || String(e)}` })
   process.exit(1)
 })
+

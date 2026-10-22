@@ -33,12 +33,24 @@ const wantCsv = process.argv.includes('--csv')
 ;(async () => {
   const puppeteer = require('puppeteer-core')
   const { ensureAntiContent, getAntiContent } = await import(`file:///${PLUGIN_ROOT}/lib/pdd-mode2.js`)
+  const { checkCooldown, markCooldown, detectRiskCode, fmtRemain } = await import(`file:///${PLUGIN_ROOT}/skills/_shared/pdd-risk.mjs`)
 
   // 账号选择：优先 --account，否则按平台自动找
   const { CredentialStore } = await import(`file:///${PLUGIN_ROOT}/lib/services/credential-store.js`)
   const store = new CredentialStore(path.join(homedir(), '.dsh', 'dsagent-accounts.json'))
   const SHOP = argOf('account') || store.findByPlatform('pdd_mms')?.shop_key
   if (!SHOP) { emit({ ok: false, failureKind: 'not_bound', text: '未绑定拼多多商家后台账号，请到「账号连接」添加。' }); process.exit(2) }
+
+  // ★ 风控 L4：冷却期内直接拒绝，不再打接口（避免加重封禁）
+  const cd = checkCooldown(SHOP)
+  if (cd.cooling) {
+    emit({
+      ok: false, failureKind: 'rate_limit',
+      text: `账号 ${SHOP} 命中平台频控，冷却剩余 ${fmtRemain(cd.remainMs)}（${cd.reason}）。\n`
+        + '期间请勿重复调用。若已在浏览器窗口手动过完滑块验证，可等待冷却结束或稍后重试。',
+    })
+    process.exit(2)
+  }
 
   // profile：新 shopKey 目录优先，旧目录兜底（票据已注入）
   let profile = path.join(homedir(), '.dsh', 'browser-profiles', 'accounts', SHOP)
@@ -67,13 +79,60 @@ const wantCsv = process.argv.includes('--csv')
     emit({ ok: false, failureKind: 'token_expired', text: '拼多多商家后台登录态失效，请到「账号连接」重新登录。' })
     process.exit(2)
   }
+  // ★ 风控 L3：滑块遮罩检测（有则中止，避免无效点击加重风控）
+  const hasSlider = async () => await safeEval(() => {
+    const ms = Array.from(document.querySelectorAll('[class*="Modal"], [class*="modal"], [class*="MDL"], [class*="Dialog"], [class*="mask"]'))
+      .filter(m => { const r = m.getBoundingClientRect(); return r.width > 200 && r.height > 150 })
+      .map(m => (m.innerText || '').replace(/\n/g, ' ').slice(0, 40))
+    return ms.some(t => /滑块|拼图|安全验证/.test(t))
+  })
+  if (await hasSlider()) {
+    await browser.close()
+    emit({
+      ok: false, failureKind: 'risk_control',
+      text: '页面出现滑块验证（拼图），账号已被平台风控。\n'
+        + '请打开浏览器窗口手动完成验证后重试；期间请勿重复调用（会延长封禁）。',
+    })
+    process.exit(2)
+  }
+  // ★ 风控 L3：滑块遮罩检测 + 自动过
+  const { detectSlider, autoSolveSlider } = await import(`file:///${PLUGIN_ROOT}/skills/_shared/pdd-risk.mjs`)
+  if (await detectSlider(page)) {
+    console.warn('[pdd-works] 检测到滑块遮罩，尝试自动过滑块...')
+    const solved = await autoSolveSlider(SHOP, page)
+    if (!solved.ok) {
+      await browser.close()
+      emit({ ok: false, failureKind: 'risk_control', text: `滑块自动过失败：${solved.text}\n请手动过验证后重试。` })
+      process.exit(2)
+    }
+    console.warn(`[pdd-works] 滑块已过：${solved.text}`)
+    await new Promise(r => setTimeout(r, 2000))
+  }
   await ensureAntiContent(page)
+
+  // ★ 风控 L1：接口级节流（同一 URL 最小间隔）+ L2：遇控即停
+  const lastHit = new Map()
+  const MIN_GAP = 3000
   const call = async (url, body) => {
+    const now = Date.now()
+    const gap = now - (lastHit.get(url) || 0)
+    if (gap < MIN_GAP) await new Promise(r => setTimeout(r, MIN_GAP - gap))
+    lastHit.set(url, Date.now())
     const a = await getAntiContent(page, { force: true })
-    return await safeEval(async (u, bd, av) => {
+    const r = await safeEval(async (u, bd, av) => {
       const resp = await fetch(u, { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', 'Anti-Content': av }, body: JSON.stringify(bd) })
       return await resp.json().catch(() => null)
     }, url, body, a.data)
+    // L2：识别频控码 → 记冷却 + 抛错中断当前批次
+    const code = detectRiskCode(r)
+    if (code) {
+      markCooldown(SHOP, code)
+      const err = new Error(`RISK_${code}`)
+      err.riskCode = code
+      err.riskMsg = r?.error_msg || r?.errorMsg || ''
+      throw err
+    }
+    return r
   }
 
   const LIST_URL = 'https://mms.pinduoduo.com/vodka/v2/mms/query/display/mall/goodsList'
@@ -201,6 +260,67 @@ const wantCsv = process.argv.includes('--csv')
       cat_id: res.cat_id, cat_path: (res.cats || []).filter(Boolean).join('>'),
       text: `商品 ${goodsId} 提交体快照：${Object.keys(res).length} 字段 | ${(res.skus || []).length} SKU | ${(res.gallery || []).length} 图 | ${(res.goods_properties || []).length} 属性\n类目：${(res.cats || []).filter(Boolean).join('>')}\n已存 artifacts/pdd-works/commit-${goodsId}.json`,
     })
+  } else if (mode === 'edit') {
+    // ── 编辑商品（复用发布引擎，入口改为编辑页）──
+    // 链路：读现有提交体（on_shop/detail）→ 合并用户改动 → 编辑页 hijack 改包 → commit/submit
+    if (!goodsId) { emit({ ok: false, failureKind: 'api_error', text: 'edit 模式必须带 --goods-id' }); await browser.close(); process.exit(2) }
+    const productFile = argOf('product-file')
+    const productStr = argOf('product')
+    if (!productFile && !productStr) {
+      emit({ ok: false, failureKind: 'api_error', text: 'edit 模式必须带 --product-file 或 --product（要改成的商品数据）' })
+      await browser.close(); process.exit(2)
+    }
+    // 读商品数据
+    let prodRaw = ''
+    try { prodRaw = productFile ? fs.readFileSync(productFile, 'utf8') : productStr } catch (e) {
+      emit({ ok: false, failureKind: 'api_error', text: `读取商品文件失败：${e.message}` }); await browser.close(); process.exit(2)
+    }
+    // 读现有提交体（合并基准）
+    const cur = await call('https://mms.pinduoduo.com/glide/v2/mms/query/commit/on_shop/detail', { goods_id: Number(goodsId) })
+    const curRes = cur?.result || {}
+    fs.mkdirSync(path.join(process.cwd(), 'artifacts', 'pdd-works'), { recursive: true })
+    fs.writeFileSync(path.join(process.cwd(), 'artifacts', 'pdd-works', `edit-before-${goodsId}.json`), JSON.stringify(cur, null, 2), 'utf8')
+    if (!Object.keys(curRes).length) {
+      emit({ ok: false, failureKind: 'api_error', text: `读不到商品 ${goodsId} 的提交体（可能已下架/删除/接口频控）` })
+      await browser.close(); process.exit(2)
+    }
+    await browser.close()
+
+    // 调发布引擎（hijack 模式），入口传 goodsId 走编辑页
+    const { pddPublish2 } = await import(`file:///${PLUGIN_ROOT}/lib/pdd-publish2.js`)
+    const { CredentialStore } = await import(`file:///${PLUGIN_ROOT}/lib/services/credential-store.js`)
+    const store = new CredentialStore(path.join(homedir(), '.dsh', 'dsagent-accounts.json'))
+    const extra = { product: prodRaw, confirm: true, mode2: true, editGoodsId: goodsId }
+    if (account) extra.account = account
+    // 规格池注入（复用发布的能力）
+    const poolCandidates = [
+      path.join(process.cwd(), 'artifacts', 'pdd-re', 'spec-pool.json'),
+      path.join(process.cwd(), 'spec-pool.json'),
+      path.join(PLUGIN_ROOT, 'skills', 'pdd-publish-http', 'assets', 'spec-pool.json'),
+    ]
+    for (const c of poolCandidates) {
+      if (fs.existsSync(c)) {
+        try {
+          const pool = JSON.parse(fs.readFileSync(c, 'utf8'))
+          const specIds = {}
+          for (const vals of Object.values(pool.pool || {})) {
+            for (const [v, rec] of Object.entries(vals)) specIds[v] = { spec_id: rec.spec_id, parent_id: rec.parent_spec_id }
+          }
+          extra.specIds = specIds
+          break
+        } catch { /* 下一个 */ }
+      }
+    }
+    const result = await pddPublish2(store, extra)
+    emit({
+      ok: !!result?.ok,
+      failureKind: result?.failureKind,
+      mode: 'edit', goodsId, shopKey: result?.shopKey,
+      before: { fields: Object.keys(curRes).length, skus: (curRes.skus || []).length, gallery: (curRes.gallery || []).length, properties: (curRes.goods_properties || []).length },
+      finalUrl: result?.finalUrl,
+      text: result?.text || (result?.ok ? '编辑成功' : '编辑失败（无详细信息）'),
+    })
+    process.exit(result?.ok ? 0 : 1)
   } else if (mode === 'spec-pool') {
     const r = await call(LIST_URL, listBody)
     const goods = r?.result?.goods_list || []
@@ -226,10 +346,23 @@ const wantCsv = process.argv.includes('--csv')
       text: `规格池采集完成：扫描 ${goods.length} 个商品 → ${dims}\n已存 artifacts/pdd-re/spec-pool.json`,
     })
   } else {
-    emit({ ok: false, failureKind: 'api_error', text: `未知 mode：${mode}。可用：overview / list / detail / sku / commit / spec-pool` })
+    emit({ ok: false, failureKind: 'api_error', text: `未知 mode：${mode}。可用：overview / list / detail / sku / commit / edit / spec-pool` })
   }
   await browser.close()
-})().catch(e => {
+})().catch(async (e) => {
+  // ★ 风控异常 → 友好提示（而不是裸的 RISK_54001）
+  const { checkCooldown, fmtRemain } = await import(`file:///${PLUGIN_ROOT}/skills/_shared/pdd-risk.mjs`).catch(() => ({}))
+  if (e?.riskCode && checkCooldown) {
+    const cd = checkCooldown(SHOP)
+    emit({
+      ok: false, failureKind: 'rate_limit',
+      text: `命中平台频控（code=${e.riskCode}${e.riskMsg ? `：${e.riskMsg}` : ''}），已记冷却 ${fmtRemain(cd.remainMs)}。\n`
+        + '期间请勿重复调用（会延长封禁）。\n'
+        + '若急需使用，可在浏览器窗口手动过滑块验证，然后重试。',
+    })
+    process.exit(2)
+  }
   emit({ ok: false, failureKind: 'api_error', text: `执行异常：${e?.message || String(e)}` })
   process.exit(1)
 })
+

@@ -29,9 +29,20 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
 ;(async () => {
   const puppeteer = require('puppeteer-core')
   const { CredentialStore } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/lib/services/credential-store.js`)
+  const { checkCooldown, detectSlider, autoSolveSlider, fmtRemain } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-risk.mjs`)
   const store = new CredentialStore(path.join(homedir(), '.dsh', 'dsagent-accounts.json'))
   const SHOP = argOf('account') || store.findByPlatform('pdd_mms')?.shop_key
   if (!SHOP) { emit({ ok: false, failureKind: 'not_bound', text: '未绑定拼多多商家后台账号，请到「账号连接」添加。' }); process.exit(2) }
+
+  // ★ 风控 L4：冷却期内直接拒绝
+  const cd = checkCooldown(SHOP)
+  if (cd.cooling) {
+    emit({
+      ok: false, failureKind: 'rate_limit',
+      text: `账号 ${SHOP} 命中平台频控，冷却剩余 ${fmtRemain(cd.remainMs)}（${cd.reason}）。期间请勿重复调用。`,
+    })
+    process.exit(2)
+  }
 
   let profile = path.join(homedir(), '.dsh', 'browser-profiles', 'accounts', SHOP)
   if (!fs.existsSync(profile)) {
@@ -46,6 +57,21 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
   const page = (await browser.pages())[0] || await browser.newPage()
   const cdp = await page.target().createCDPSession()
   await cdp.send('Network.enable')
+
+  // ★ 风控 L3：检测到滑块遮罩 → 自动过滑块（yydsocr 识别 + 人类化轨迹）
+  const ensureNoSlider = async (label) => {
+    if (await detectSlider(page)) {
+      console.warn(`[pdd-shop] ${label}：检测到滑块遮罩，尝试自动过滑块...`)
+      const solved = await autoSolveSlider(SHOP, page)
+      if (!solved.ok) {
+        await browser.close()
+        emit({ ok: false, failureKind: 'risk_control', text: `滑块自动过失败：${solved.text}\n请手动过验证后重试。` })
+        process.exit(2)
+      }
+      console.warn(`[pdd-shop] 滑块已过：${solved.text}`)
+      await new Promise(r => setTimeout(r, 2000))
+    }
+  }
 
   // hook 经营数据响应（/sydney/api/* + 等级）
   const byApi = {}
@@ -78,6 +104,7 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
     try {
       await page.goto(u, { waitUntil: 'domcontentloaded', timeout: 45000 })
       await new Promise(r => setTimeout(r, u.includes('sycm') ? 13000 : 9000))
+      await ensureNoSlider(u)   // ★ 风控 L3：每次导航后检测滑块
       if (/\/login/i.test(page.url())) {
         // 主应用跳登录 = 真失效；sycm 跳登录 = 会话未建立，重试一次
         if (!u.includes('sycm')) {
@@ -87,6 +114,7 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
         }
         await page.goto(u, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {})
         await new Promise(r => setTimeout(r, 12000))
+        await ensureNoSlider(u + ' (retry)')
       }
     } catch { /* 单页失败不阻断 */ }
   }
@@ -244,7 +272,18 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
   }
   emit(out)
   await browser.close()
-})().catch(e => {
+})().catch(async (e) => {
+  // ★ 风控异常 → 友好提示
+  const { checkCooldown, fmtRemain } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-risk.mjs`).catch(() => ({}))
+  if (e?.riskCode && checkCooldown) {
+    const cd = checkCooldown(SHOP)
+    emit({
+      ok: false, failureKind: 'rate_limit',
+      text: `命中平台频控（code=${e.riskCode}${e.riskMsg ? `：${e.riskMsg}` : ''}），已记冷却 ${fmtRemain(cd.remainMs)}。\n期间请勿重复调用（会延长封禁）。\n若急需使用，可在浏览器窗口手动过滑块验证，然后重试。`,
+    })
+    process.exit(2)
+  }
   emit({ ok: false, failureKind: 'api_error', text: `执行异常：${e?.message || String(e)}` })
   process.exit(1)
 })
+

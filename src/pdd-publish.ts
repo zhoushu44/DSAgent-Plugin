@@ -63,12 +63,15 @@ import { clearProfileLocks, findChromePath, profileDir, profileOwner, releasePro
 import { createAttrCache, type AttrCache } from './services/attr-cache.js'
 import { loadPublishConfig, anchorSpec, configString, configTimeout, type PublishConfig } from './services/publish-config-loader.js'
 import { existsSync, statSync, writeFileSync } from 'node:fs'
-import { basename, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { homedir } from 'node:os'
+import { fileURLToPath } from 'node:url'
 
 /** 商品列表入口 —— 发布的**唯一正确起点**（从列表点「发布新商品」才会带上完整上下文参数）。
  *  配置来源：publish-config/pdd.json → urls.goodsList（refreshPddConfig 热加载） */
 let PDD_GOODS_LIST_URL = 'https://mms.pinduoduo.com/goods/goods_list'
+/** 风控模块（skills/_shared/pdd-risk.mjs）所在插件根 —— 由 lib 位置向上推 */
+const PLUGIN_ROOT_FOR_RISK = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 
 /**
  * 诊断日志（写文件）。
@@ -347,6 +350,13 @@ export interface PddPublishOptions {
   skuRows?: PddSkuRow[]
   /** 显式商品属性（选填）：命中页面下拉选项时优先使用，未命中记入未填（不走模型兜底） */
   attributes?: { name: string; value: string }[]
+  /**
+   * 编辑已有商品的商品 ID（选填）。传入后走「编辑页」入口
+   * （/goods/goods_add/index?id=<editGoodsId>）而非「发布新商品」→ 类目选择页。
+   * ★ 编辑页不需要选类目（商品已有类目），hijack 目标仍是同一个
+   *   goodsCommit/action/edit 接口；提交体由调用方通过 hijack.goodsDetail 提供。
+   */
+  editGoodsId?: string
   /** 指定账号 shopKey（多账号待选时由模型回传用户选择） */
   account?: string
   /** 当前会话（智能体）ID，用于账号选择链 */
@@ -857,10 +867,23 @@ async function selectCategory(page: any, keyword: string, categoryPath?: string)
       .split(/[\s/\\>＞、,，|]+/).map(t => t.trim()).filter(t => t.length >= 2)
     const kwTokens = tokenize(kw)
     const catTokens = tokenize(catPath)
-    // 童装业务的核心词：命中即加分
-    const CORE = ['童装', '儿童', '婴儿', '亲子', '家居服', '睡衣', '套装']
-    // 致命错类目：命中即重罚（成人内衣/睡衣）
-    const FATAL = ['内衣裤袜', '女士', '男士', '成人']
+    /**
+     * ★ 2026-10-22 修复：原 CORE 词表是童装业务硬编码
+     *   （['童装','儿童','婴儿','亲子','家居服','睡衣','套装']），
+     *   对非童装商品（纸杯/餐具/食品…）完全失效，打分退化成「路径越短越好」——
+     *   实测搜「餐饮具」两次分别选中「一次性餐桌用品>纸杯」和「餐具>盘」，
+     *   后者是错类目。
+     *
+     *   新策略：CORE 词**动态生成** = catTokens 去重（用户给的类目路径分词
+     *   就是最准确的核心词），再加少量通用商品词兜底。
+     *   FATAL 也保留（防成人内衣类目），但仅在与目标类目无关时才重罚。
+     */
+    const CORE = [...new Set([...catTokens, ...kwTokens])]
+    // 通用兜底核心词（各行业都可能命中，权重低于用户给的路径词）
+    const GENERIC = ['一次性', '定制', '批发', '商用', '家用', '套装', '杯', '餐具']
+    // 致命错类目：命中且目标类目完全没提及时重罚
+    const FATAL = ['内衣裤袜', '成人', '情趣']
+    const fatalHit = (text: string) => FATAL.some(f => text.includes(f) && !catTokens.some(t => t.includes(f)))
 
     let best = inner[0] as HTMLElement
     let bestScore = -Infinity
@@ -871,10 +894,12 @@ async function selectCategory(page: any, keyword: string, categoryPath?: string)
       for (const tok of kwTokens) if (text.includes(tok)) score += 8
       // 类目路径逐词命中（每个 +12，权重更高）
       for (const tok of catTokens) if (text.includes(tok)) score += 12
-      // 核心词命中
+      // 核心词命中（用户给的路径词 + 关键词，+6）
       for (const c of CORE) if (text.includes(c)) score += 6
-      // 致命错类目重罚
-      for (const f of FATAL) if (text.includes(f)) score -= 100
+      // 通用商品词命中（+3，权重低）
+      for (const g of GENERIC) if (text.includes(g)) score += 3
+      // 致命错类目重罚（仅当目标类目完全没提及时）
+      if (fatalHit(text)) score -= 100
       // 路径越短越好（叶子类目更精准）
       score -= text.length * 0.05
       if (score > bestScore) { bestScore = score; best = el }
@@ -3385,17 +3410,44 @@ async function readSubmitErrors(page: any): Promise<{ hard: string; panel: strin
  * 点「提交并上架」。
  * 真机实测：第二步表单页底部的按钮 innerText 恰为「提交并上架」。
  * ★ 影刀记录的 button#submit_button 已不存在，不再作为优先锚点。
+ *
+ * ★ 2026-10-22 修复：原实现用 `hit.click()`（DOM untrusted 事件），拼多多 React
+ *   会忽略（与「发布新商品」入口同一个坑）。改为：
+ *   1. 先 DOM click 试一次
+ *   2. URL 没变化 / 无劫持触发 → 调用方回退 CDP 真实鼠标（见段4 收尾）
+ *   同时 disabled 时返回诊断信息（哪个必填项未过），不再简单 false。
  */
 async function clickSubmit(page: any): Promise<boolean> {
   return await page.evaluate(() => {
     const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[]
     const hit = btns.find(b =>
       /^(提交并上架|提交|确认提交|发布)$/.test((b.innerText || '').trim())
-      && !b.disabled && b.offsetParent !== null)
+      && !/取消|草稿/.test((b.innerText || '').trim())
+      && b.offsetParent !== null)
     if (!hit) return false
     hit.click()
     return true
   }).catch(() => false) as boolean
+}
+
+/** 诊断提交按钮为何 disabled（必填项未过），返回可读文案 */
+async function diagSubmitDisabled(page: any): Promise<string> {
+  return await page.evaluate(() => {
+    const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[]
+    const hit = btns.find(b =>
+      /^(提交并上架|提交|确认提交|发布)$/.test((b.innerText || '').trim())
+      && !/取消|草稿/.test((b.innerText || '').trim())
+      && b.offsetParent !== null)
+    if (!hit) return '未找到提交按钮（页面可能未加载完）'
+    if (!hit.disabled) return '按钮可点（无需诊断）'
+    // 找页面上的错误提示/必填未填标记
+    const errs = Array.from(document.querySelectorAll('[class*="error"], [class*="Error"], [class*="required"], [class*="warn"]'))
+      .filter(e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0 })
+      .map(e => ((e as HTMLElement).innerText || '').replace(/\s+/g, ' ').trim())
+      .filter(t => t && t.length < 80)
+      .slice(0, 6)
+    return `提交按钮 disabled${errs.length ? '；页面提示：' + errs.join(' / ') : '（未读到具体提示）'}`
+  }).catch(() => '诊断异常') as string
 }
 
 /**
@@ -3838,6 +3890,35 @@ export async function pddPublish(
     await page.goto(PDD_GOODS_LIST_URL, { waitUntil: 'domcontentloaded', timeout: 45_000 })
     await sleep(4000)
 
+    /**
+     * ★ 风控 L3（2026-10-22）：滑块遮罩自动过。
+     *   检测到「请向右滑块完成拼图」→ 动态 import 风控模块 → 调 yydsocr 识别 + 人类化轨迹。
+     *   模块是 .mjs（TS 侧动态 import）；失败不阻断主流程，只打印告警
+     *   （后续点入口/提交会因遮罩失败，那时再由调用方处置）。
+     */
+    try {
+      const riskPath = join(PLUGIN_ROOT_FOR_RISK, 'skills/_shared/pdd-risk.mjs')
+      const risk = existsSync(riskPath)
+        ? await import(/* @vite-ignore */ riskPath).catch(() => null)
+        : null
+      if (risk?.detectSlider && await risk.detectSlider(page)) {
+        console.warn('[dsagent-pdd-publish] 段1 检测到滑块遮罩，尝试自动过滑块...')
+        // ★ 传 page 走内联求解（不新起浏览器，避免 profile 锁冲突）
+        const solved = await risk.autoSolveSlider(shopKey, page).catch((e: unknown) => ({ ok: false, text: String(e) }))
+        if (solved?.ok) {
+          console.warn(`[dsagent-pdd-publish] 滑块已过：${solved.text}`)
+          await sleep(2000)
+          // 重载列表页（验证通过后页面可能还在遮罩态）
+          await page.goto(PDD_GOODS_LIST_URL, { waitUntil: 'domcontentloaded', timeout: 45_000 }).catch(() => { /* 忽略 */ })
+          await sleep(4000)
+        } else {
+          console.warn(`[dsagent-pdd-publish] 滑块自动过失败：${solved?.text || '未知'}`)
+        }
+      }
+    } catch (e) {
+      console.warn(`[dsagent-pdd-publish] 风控模块加载失败（不影响主流程）：${(e as Error).message}`)
+    }
+
     let listReady = await waitFor(
       page,
       p => p.evaluate(() =>
@@ -3845,6 +3926,92 @@ export async function pddPublish(
       LIST_WAIT_MS,
       '商品列表页',
     )
+
+    /**
+     * ★ 编辑商品入口（2026-10-22）：传了 editGoodsId 时走「编辑页」而非「发布新商品」。
+     *   编辑页 URL：/goods/goods_add/index?id=<goodsId>
+     *   页面自己会发 /glide/v2/mms/query/commit/detail 读现有提交体。
+     *   ★ 前置：商品列表页必须就绪（建立 mms 会话 + 过风控）。
+     *   ★ 若编辑页拿不到数据（600001「该编辑不存在」）→ 报错并提示从列表页点「编辑」。
+     */
+    if (opts.editGoodsId) {
+      const editUrl = `https://mms.pinduoduo.com/goods/goods_add/index?id=${encodeURIComponent(opts.editGoodsId)}`
+      console.log(`[dsagent-pdd-publish] 段 1E 编辑模式：打开编辑页 ${editUrl}`)
+      await page.goto(editUrl, { waitUntil: 'domcontentloaded', timeout: 45_000 })
+      await sleep(5000)
+      // ★ 风控 L3：编辑页也可能弹滑块 → 内联自动过
+      try {
+        const riskPath2 = join(PLUGIN_ROOT_FOR_RISK, 'skills/_shared/pdd-risk.mjs')
+        const risk2 = existsSync(riskPath2) ? await import(/* @vite-ignore */ riskPath2).catch(() => null) : null
+        if (risk2?.detectSlider && await risk2.detectSlider(page)) {
+          console.warn('[dsagent-pdd-publish] 段1E 检测到滑块遮罩，尝试自动过滑块...')
+          const solved2 = await risk2.autoSolveSlider(shopKey, page).catch((e: unknown) => ({ ok: false, text: String(e) }))
+          if (solved2?.ok) {
+            console.warn(`[dsagent-pdd-publish] 编辑页滑块已过：${solved2.text}`)
+            await sleep(2000)
+            await page.goto(editUrl, { waitUntil: 'domcontentloaded', timeout: 45_000 }).catch(() => { /* 忽略 */ })
+            await sleep(5000)
+          } else {
+            console.warn(`[dsagent-pdd-publish] 编辑页滑块自动过失败：${solved2?.text || '未知'}`)
+          }
+        }
+      } catch (e) {
+        console.warn(`[dsagent-pdd-publish] 编辑页风控模块异常（不影响主流程）：${(e as Error).message}`)
+      }
+      // 等表单页就绪（标题输入框 / 提交按钮出现）
+      const editReady = await waitFor(
+        page,
+        p => p.evaluate(() => {
+          const hasBtn = Array.from(document.querySelectorAll('button')).some(b => /提交并上架/.test(b.innerText || ''))
+          const hasInput = document.querySelectorAll('input,textarea').length > 3
+          return hasBtn || hasInput
+        }),
+        30_000,
+        '编辑表单页',
+      )
+      if (!editReady.ok) {
+        return {
+          ok: false, failureKind: 'api_error', shopKey,
+          text: `编辑页未就绪（goods_id=${opts.editGoodsId}）。可能原因：①该商品不在「出售中」；②子账号无编辑权限；③接口频控。`,
+          finalUrl: page.url(),
+        }
+      }
+      // 提交按钮渲染等待（复用模式2 的逻辑）
+      for (let i = 0; i < 20; i++) {
+        const has = await page.evaluate(() => Array.from(document.querySelectorAll('button'))
+          .some(b => /^提交并上架/.test((b.innerText || '').trim()) && b.offsetParent !== null)).catch(() => false)
+        if (has) break
+        await sleep(2000)
+      }
+      // 直接进入模式2 hijack 提交（跳过类目选择/图片预上传等新发发布流程）
+      const mode2 = await import('./pdd-mode2.js')
+      const ctrl = mode2.setupHijack(page, (opts as any).hijack?.goodsDetail ?? {}, {
+        onProxyFallback: ctx => mode2.sendPddEditViaHttp(ctx),
+        onTrace: (opts as any).hijack?.onTrace,
+      })
+      let hijackOutcome: import('./pdd-mode2.js').HijackOutcome | null = null
+      try {
+        await page.setRequestInterception(true)
+        const clicked = await clickSubmit(page)
+        console.log(`[dsagent-pdd-publish] 编辑模式提交按钮点击：${clicked ? '已点击' : '未点到'}`)
+        hijackOutcome = await mode2.waitHijackOutcome(ctrl, mode2.PDD_HIJACK_WAIT_MS)
+      } finally {
+        await mode2.teardownHijack(page, ctrl).catch(() => { /* 页面可能已关闭 */ })
+      }
+      if (hijackOutcome?.success) {
+        try { await store.setStatus(shopKey, 'valid') } catch { /* 忽略 */ }
+        return {
+          ok: true, shopKey,
+          finalUrl: page.url(),
+          text: `商品 ${opts.editGoodsId} 编辑已提交成功。\n注意：平台仍会审核，最终状态请在「商品管理 → 出售中」确认。`,
+        }
+      }
+      return {
+        ok: false, failureKind: 'api_error', shopKey,
+        finalUrl: page.url(),
+        text: `编辑提交失败：${hijackOutcome?.detailMessage || '未捕获提交响应'}`,
+      }
+    }
 
     /**
      * ★ 兜底 A（2026-10-21 新增）：Profile 有票据但**服务端已失效**时，
@@ -4399,8 +4566,49 @@ export async function pddPublish(
       let hijackOutcome: import('./pdd-mode2.js').HijackOutcome | null = null
       try {
         await step2.setRequestInterception(true)
-        const clicked = await clickSubmit(step2)
+        // ★ 2026-10-22：先等提交按钮真正渲染出来（表单页加载慢时 evaluate 会找不到）
+        //   之前直接点 → 「未找到提交按钮」→ 白等 120s 超时。
+        let btnReady = false
+        for (let i = 0; i < 30; i++) {
+          const has = await step2.evaluate(() => {
+            const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[]
+            return btns.some(b =>
+              /^(提交并上架|提交|确认提交|发布)$/.test((b.innerText || '').trim())
+              && !/取消|草稿/.test((b.innerText || '').trim())
+              && b.offsetParent !== null)
+          }).catch(() => false)
+          if (has) { btnReady = true; break }
+          await new Promise(r => setTimeout(r, 2000))
+        }
+        diag(`提交按钮渲染等待：${btnReady ? '已出现' : '30 次重试后仍未出现'}`)
+        let clicked = btnReady && await clickSubmit(step2)
+        // ★ DOM click 是 untrusted，React 可能忽略 → CDP 真实鼠标兜底
+        if (clicked) {
+          await new Promise(r => setTimeout(r, 2500))
+          const stillOnForm = /goods_add/.test(step2.url())
+          if (stillOnForm) {
+            const rect = await step2.evaluate(() => {
+              const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[]
+              const b = btns.find(x =>
+                /^(提交并上架|提交|确认提交|发布)$/.test((x.innerText || '').trim())
+                && !/取消|草稿/.test((x.innerText || '').trim())
+                && x.offsetParent !== null)
+              if (!b) return null
+              const r = b.getBoundingClientRect()
+              return { x: r.x + r.width / 2, y: r.y + r.height / 2 }
+            }).catch(() => null) as { x: number; y: number } | null
+            if (rect) {
+              await step2.mouse.click(rect.x, rect.y).catch(() => { /* 忽略 */ })
+              diag(`提交按钮 CDP 真实鼠标补点：(${Math.round(rect.x)}, ${Math.round(rect.y)})`)
+              clicked = true
+            }
+          }
+        }
         console.log(`[dsagent-pdd-publish] 模式2 提交按钮点击：${clicked ? '已点击（等待劫持改包）' : '未点到（可能仍需补全必填项）'}`)
+        if (!clicked) {
+          const why = await diagSubmitDisabled(step2)
+          console.log(`[dsagent-pdd-publish] 提交按钮状态诊断：${why}`)
+        }
         hijackOutcome = await mode2.waitHijackOutcome(ctrl, mode2.PDD_HIJACK_WAIT_MS)
       } finally {
         await mode2.teardownHijack(step2, ctrl).catch(() => { /* 页面可能已关闭 */ })

@@ -40,6 +40,12 @@ export interface PddPublish2Options {
    */
   mode2?: boolean
   /**
+   * 编辑已有商品（选填）：传入商品 ID 时走「编辑页」入口而非「发布新商品」。
+   * 编辑页 URL 为 /goods/goods_add/index?id=<goodsId>，页面自己会发
+   * commit/detail 读现有提交体；hijack 的仍是同一个 goodsCommit/action/edit 接口。
+   */
+  editGoodsId?: string | number
+  /**
    * 外部规格池（选填）：规格值 → {spec_id, parent_id}。
    * 供改包「行数重建」写 spec_id（不依赖页面 DOM 建规格）。
    * 来源：collect_spec_pool.mjs 采集的 spec-pool.json。
@@ -85,6 +91,7 @@ export function toPddOptions(p: ProductData, extra: PddPublish2Options): PddPubl
   if (extra.costTemplate) opts.costTemplate = extra.costTemplate
   if (extra.deliveryTime != null) opts.deliveryTime = extra.deliveryTime
   if (extra.confirm === true) opts.confirm = true
+  if (extra.editGoodsId != null && String(extra.editGoodsId).trim()) opts.editGoodsId = String(extra.editGoodsId).trim()
   return opts
 }
 
