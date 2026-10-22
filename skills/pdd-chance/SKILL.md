@@ -23,17 +23,21 @@
 | `mine` | 我的机会商品（已跟款） | 同上 |
 | `collection` | 收藏的机会商品 | 同上 |
 | `mission` | 机会商品任务 | 礼物/考试/图片任务进度与奖励 |
-| `filters` | 筛选项 | 页面所有可筛维度 |
-| `cates` | 机会类目树 | 一级类目 + 机会商品数 |
+| `filters` | 筛选项 + **51 个站内热搜/缺货词** | `mall_chance_words` 是选品金矿 |
+| `cates` | 机会类目树 | 看哪些一级类目开了机会池（当前 19 个） |
 
 ## 用法
 
 ```bash
-# 机会商品主列表（默认 35 条/页）
+# 机会商品主列表（默认 = 店铺主营类目，35 条/页）
 node scripts/chance.mjs --mode list
+
+# ★ 按一级类目跨类目查（如书籍类目 15543）
+node scripts/chance.mjs --mode list --cat-id 15543
 
 # 翻页 / 改每页条数
 node scripts/chance.mjs --mode list --page 2 --size 50
+node scripts/chance.mjs --mode list --cat-id 15543 --page 3
 
 # 我的机会商品 / 收藏
 node scripts/chance.mjs --mode mine
@@ -42,13 +46,29 @@ node scripts/chance.mjs --mode collection
 # 任务进度
 node scripts/chance.mjs --mode mission
 
-# 筛选项 / 类目树
+# 站内热搜/缺货词（选品金矿）
 node scripts/chance.mjs --mode filters
+
+# 机会类目树（看哪些类目开了机会池）
 node scripts/chance.mjs --mode cates
 
 # 多账号指定
 node scripts/chance.mjs --mode list --account pdd_mms_xxxx
 ```
+
+## `--cat-id` 跨类目查询
+
+| 项 | 说明 |
+|---|---|
+| 参数名 | **`cat_id_1`**（一级类目 ID） |
+| 空值 | 返回店铺主营类目的机会商品（平台推荐，如餐饮具店 total=455） |
+| 传值 | 返回该类目的机会商品（如书籍 total=1500） |
+| **未开放类目** | 返回 `total=0` + 提示「该类目未开放机会池」 |
+
+**实测**：拼多多机会商品池**当前只开放 19 个一级类目**（餐饮具/厨房/收纳/清洁/居家/节庆/饰品/珠宝/园艺/乐器/书籍/宠物/农资/古董/烟品/洗护/音乐/农用/畜牧），
+**童装/母婴/女装/男装等服饰类目未开放**——传这些类目的 `cat-id` 会返回 `total=0`。
+
+> ⚠️ **只有 `cat_id_1` 参数生效**。实测 `cate_id_1` / `category_id` / `opt_id` 都被忽略，会返回默认池（455 条）。
 
 ## 数据字段（list/mine/collection）
 

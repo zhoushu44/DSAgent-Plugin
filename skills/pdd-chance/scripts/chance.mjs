@@ -19,12 +19,16 @@
  *   POST /opportunity-goods/chance-goods/oversea         跨境
  *
  * 用法：
- *   node scripts/chance.mjs --mode list [--page 1] [--size 35] [--keyword 纸杯]
+ *   node scripts/chance.mjs --mode list [--page 1] [--size 35] [--cat-id 16548]
  *   node scripts/chance.mjs --mode mine       我的机会商品
  *   node scripts/chance.mjs --mode collection 收藏列表
  *   node scripts/chance.mjs --mode mission    任务信息
- *   node scripts/chance.mjs --mode filters    筛选项
- *   node scripts/chance.mjs --mode cates      机会类目树
+ *   node scripts/chance.mjs --mode filters    筛选项（含 51 个站内热搜/缺货词）
+ *   node scripts/chance.mjs --mode cates      机会类目树（259 个，看哪些类目开了机会池）
+ *
+ * ★ --cat-id：按一级类目查机会商品（默认 = 店铺主营类目）。
+ *   实测：只有 `cat_id_1` 参数生效（cate_id_1/category_id/opt_id 都无效，会返回默认池）。
+ *   已开放机会池的一级类目共 19 个（用 --mode cates 看），未开放的返回 total=0。
  */
 import { createRequire } from 'node:module'
 import * as fs from 'node:fs'
@@ -38,6 +42,8 @@ const emit = (obj) => { process.stdout.write('__DSAGENT_RESULT__' + JSON.stringi
 const mode = argOf('mode') || 'list'
 const pageNo = Math.max(1, parseInt(argOf('page') || '1', 10) || 1)
 const size = Math.min(100, Math.max(1, parseInt(argOf('size') || '35', 10) || 35))
+// ★ --cat-id：按一级类目查机会商品。空 = 店铺主营类目（平台推荐）
+const catId = argOf('cat-id') ? Number(argOf('cat-id')) : null
 
 ;(async () => {
   const puppeteer = require('puppeteer-core')
@@ -156,7 +162,10 @@ const size = Math.min(100, Math.max(1, parseInt(argOf('size') || '35', 10) || 35
 
   if (mode === 'list' || mode === 'mine' || mode === 'collection') {
     const api = mode === 'list' ? `${BASE}/home_list` : mode === 'mine' ? `${BASE}/my_list` : `${BASE}/collection/list`
-    const body = mode === 'list' ? { size, page: pageNo, banner_type: 0 } : { size, page: pageNo }
+    // ★ cat_id_1 才会筛选类目；cate_id_1/category_id/opt_id 都无效（实测）
+    const body = mode === 'list'
+      ? { size, page: pageNo, banner_type: 0, ...(catId ? { cat_id_1: catId } : {}) }
+      : { size, page: pageNo, ...(catId ? { cat_id_1: catId } : {}) }
     const r = await call(api, body)
     const res = r?.result || {}
     const list = res.list || []
@@ -180,15 +189,17 @@ const size = Math.min(100, Math.max(1, parseInt(argOf('size') || '35', 10) || 35
     }))
     emit({
       ok: true, mode, shopKey: SHOP,
-      total: res.total ?? items.length, page: pageNo, count: items.length,
+      catId, total: res.total ?? items.length, page: pageNo, count: items.length,
       items,
       text: items.length
-        ? `机会商品（第 ${pageNo} 页，共 ${res.total ?? '?'} 条，本页 ${items.length}）：\n` + items.slice(0, 15).map((g, i) =>
+        ? `机会商品（${catId ? `类目 ${catId} · ` : ''}第 ${pageNo} 页，共 ${res.total ?? '?'} 条，本页 ${items.length}）：\n` + items.slice(0, 15).map((g, i) =>
             `  ${i + 1}. [${g.chanceId.slice(0, 12)}] ${g.keywords}\n`
             + `     参考价 ${g.referPrice}${g.priceLabel ? '（' + g.priceLabel + '）' : ''} | 热度 ${g.hotIndex} | 潜力 ${g.potentialIndex} | ${g.pics} 图\n`
             + `     标签：${g.labels.join(' / ') || '—'} | 类目 ${g.cats.join('>')}${g.collected ? ' | 已收藏' : ''}`
           ).join('\n') + (items.length > 15 ? `\n  ...（其余 ${items.length - 15} 条见 JSON）` : '')
-        : '机会商品：本页无数据',
+        : catId
+          ? `类目 ${catId} 暂无机会商品（total=${res.total ?? 0}）。\n可能：①该类目未开放机会池（当前仅 19 个一级类目开放，用 --mode cates 查看）\n②平台正在补录。建议隔天再试。`
+          : '机会商品：本页无数据',
     })
   } else if (mode === 'mission') {
     const r = await call(`${BASE}/mission_info`, {})
