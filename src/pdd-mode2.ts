@@ -1875,7 +1875,13 @@ const ANTI_INJECT_SRC = `(function() {
         if (!anti) throw new Error('sj("fbeZ") 没有返回构造函数，特征重定位也失败')
       }
       const res = new anti()
-      res.updateServerTime(new Date().getTime())
+      // ★ 2026-10-22：用校准后的服务器时间，不用本地时间。
+      //   依据：拼多多官方风控 SDK（觅千手 source/safe/AesApp.js）的 mmsCMT.timeBaseline
+      //   机制——本地 Date.now() 与服务端有偏差（实测 168ms），Anti-Content 的
+      //   updateServerTime 必须传校准值，否则服务端校验时间戳会判异常。
+      //   window.__PDD_SERVER_TIME_OFFSET__ 由 ensureServerTimeOffset() 预先算好。
+      const offset = window.__PDD_SERVER_TIME_OFFSET__ || 0
+      res.updateServerTime(new Date().getTime() + offset)
       return res.messagePack()
     }
     window.getAntiContent = getAntiContent
@@ -1887,6 +1893,48 @@ const ANTI_INJECT_SRC = `(function() {
     injected: !!window.getAntiContent,
     hasWebpackJsonp: !!(window.webpackJsonp && window.webpackJsonp.length),
   }
+})()`
+
+/**
+ * ★ 2026-10-22 服务器时间校准（对齐拼多多官方 SDK 的 mmsCMT.timeBaseline）。
+ *
+ * 官方 SDK 行为：
+ *   1. GET https://api.pinduoduo.com/api/server/_stm → { server_time }
+ *   2. window.mmsCMT.timeBaseline = { serverTime, localTime }
+ *   3. 之后「服务器时间」= Date.now() - localTime + serverTime
+ *
+ * 我们用「偏移量」更简单：offset = serverTime - localTime，
+ * 之后校准时间 = Date.now() + offset。
+ *
+ * @returns 注入页面的脚本（把 offset 写到 window.__PDD_SERVER_TIME_OFFSET__）
+ */
+export const PDD_SERVER_TIME_OFFSET_SRC = `(async function() {
+  if (typeof window.__PDD_SERVER_TIME_OFFSET__ === 'number') return window.__PDD_SERVER_TIME_OFFSET__
+  window.__PDD_SERVER_TIME_OFFSET__ = 0
+  try {
+    var localBefore = Date.now()
+    var resp = await fetch('https://api.pinduoduo.com/api/server/_stm', { credentials: 'include' })
+    var j = await resp.json()
+    var localAfter = Date.now()
+    var st = j && j.server_time
+    if (typeof st === 'number' && st > 0) {
+      // 取请求中点时刻，抵消网络延迟
+      var localMid = Math.floor((localBefore + localAfter) / 2)
+      window.__PDD_SERVER_TIME_OFFSET__ = st - localMid
+      window.__PDD_TIME_BASELINE__ = { serverTime: st, localTime: localMid }
+    }
+  } catch (e) {
+    // 兜底 1：iOS Safari 场景（官方 SDK 的做法）——用响应头 Date
+    try {
+      var r2 = await fetch(location.href, { method: 'HEAD', credentials: 'include' })
+      var d = r2.headers.get('Date')
+      if (d) {
+        var st2 = new Date(d).getTime()
+        if (st2 > 0) window.__PDD_SERVER_TIME_OFFSET__ = st2 - Date.now()
+      }
+    } catch (e2) { /* 保持 0 */ }
+  }
+  return window.__PDD_SERVER_TIME_OFFSET__
 })()`
 
 /** 等 webpackJsonp 就绪再注入（waitForWebpack 50ms × 100） */
@@ -1919,6 +1967,8 @@ const ANTI_GET_SRC = `(function() {
  * 幂等：已注入（__PDD_ANTICONTENT_INJECTED__）时跳过注入直接取。
  */
 export async function ensureAntiContent(page: Page): Promise<{ ok: boolean; error?: string }> {
+  // ★ 2026-10-22：先校准服务器时间（对齐官方 SDK 的 mmsCMT.timeBaseline）
+  await page.evaluate(PDD_SERVER_TIME_OFFSET_SRC).catch(() => 0)
   const has = await page.evaluate(() =>
     (typeof (window as { getAntiContent?: unknown }).getAntiContent === 'function')).catch(() => false)
   if (has) return { ok: true }
