@@ -191,70 +191,79 @@ export async function smartFillAttrs(page, hints = {}, candTable = null) {
   const table = candTable || await dumpAttrCandidates(page, pending.map(a => a.label))
   const filled = [], failed = []
 
-  for (const attr of pending) {
-    const label = attr.label
-    const cands = table[label] || []
-    if (!cands.length) { failed.push({ label, why: '无候选值' }); continue }
+  // ★ 两轮填充：第一轮可能有几项因页面重渲染失败，第二轮补
+  //   （实测：只跑一轮时容量/数量/款式 常漏填）
+  for (let round = 1; round <= 2; round++) {
+    const pendingNow = round === 1
+      ? pending
+      : (await readAttrState(page, true)).filter(a => !a.filled && !SKIP_ATTRS.includes(a.label))
+    if (!pendingNow.length) break
+    if (round > 1) console.error(`[attr-fill] 第 ${round} 轮补填 ${pendingNow.length} 项`)
 
-    // ── 匹配策略 ──
-    const hint = hints[label] ?? hints[label.replace(/\s/g, '')] ?? ''
-    let pickIdx = -1
-    if (hint) {
-      const h = String(hint).trim()
-      // 1) 完整名精确匹配
-      pickIdx = cands.findIndex(c => c === h)
-      // 2) 候选包含关键词
-      if (pickIdx < 0) pickIdx = cands.findIndex(c => c.includes(h))
-      // 3) 关键词包含候选（hint 更长时）
-      if (pickIdx < 0) pickIdx = cands.findIndex(c => h.includes(c))
-      // 4) 数字/单位模糊匹配（hint='300' → 命中含 300 的候选）
-      if (pickIdx < 0) {
-        const nums = h.match(/\d+/g)
-        if (nums) pickIdx = cands.findIndex(c => nums.some(n => c.includes(n)))
+    for (const attr of pendingNow) {
+      const label = attr.label
+      const cands = (table[label] && table[label].length)
+        ? table[label]
+        : (await dumpAttrCandidates(page, [label]))[label] || []
+      if (!cands.length) { if (round === 2) failed.push({ label, why: '无候选值' }); continue }
+
+      // ── 匹配策略 ──
+      const hint = hints[label] ?? hints[label.replace(/\s/g, '')] ?? ''
+      let pickIdx = -1
+      if (hint) {
+        const h = String(hint).trim()
+        pickIdx = cands.findIndex(c => c === h)
+        if (pickIdx < 0) pickIdx = cands.findIndex(c => c.includes(h))
+        if (pickIdx < 0) pickIdx = cands.findIndex(c => h.includes(c))
+        if (pickIdx < 0) {
+          const nums = h.match(/\d+/g)
+          if (nums) pickIdx = cands.findIndex(c => nums.some(n => c.includes(n)))
+        }
       }
-    }
-    // 5) 无 hint 或无匹配 → 第一个（保底）
-    if (pickIdx < 0) pickIdx = 0
+      if (pickIdx < 0) pickIdx = 0
 
-    // ── 点开该属性下拉（带重试：连续开合会让页面丢状态）──
-    let opened = false
-    for (let attempt = 0; attempt < 3 && !opened; attempt++) {
+      // ── 点开该属性下拉（带重试）──
+      let opened = false
+      for (let attempt = 0; attempt < 3 && !opened; attempt++) {
+        await closePanels(ev)
+        await sleep(900)
+        opened = await ev((nm) => {
+          const labels = [...document.querySelectorAll('*')]
+            .filter(e => e.children.length === 0 && (e.textContent || '').trim().replace(/^\*/, '') === nm)
+          if (!labels.length) return false
+          let row = labels[0].parentElement
+          for (let i = 0; i < 8 && row; i++) { if (row.querySelector && row.querySelector('.ecom-g-select')) break; row = row.parentElement }
+          const ctrl = row?.querySelector('.ecom-g-select-selector') || row?.querySelector('.ecom-g-select')
+          if (!ctrl) return false
+          const r = ctrl.getBoundingClientRect()
+          if (r.width <= 0) return false
+          ctrl.scrollIntoView({ block: 'center' })
+          const r2 = ctrl.getBoundingClientRect()
+          const o = { bubbles: true, cancelable: true, view: window, clientX: r2.x + r2.width / 2, clientY: r2.y + r2.height / 2 }
+          for (const t of ['mouseenter', 'mouseover', 'mousedown', 'mouseup', 'click']) ctrl.dispatchEvent(new MouseEvent(t, o))
+          return true
+        }, label)
+        if (opened) {
+          await sleep(2500)
+          const cnt = await ev(() => [...document.querySelectorAll('.ecom-g-select-item')]
+            .filter(e => { const r = e.getBoundingClientRect(); return r.width > 0 && /item-option/.test(e.className || '') }).length)
+          if (!cnt) opened = false
+        }
+      }
+      if (!opened) {
+        if (round === 2) failed.push({ label, why: '打不开下拉' })
+        continue
+      }
+
+      const picked = await clickOption(ev, pickIdx)
       await closePanels(ev)
-      await sleep(900)
-      opened = await ev((nm) => {
-        const labels = [...document.querySelectorAll('*')]
-          .filter(e => e.children.length === 0 && (e.textContent || '').trim().replace(/^\*/, '') === nm)
-        if (!labels.length) return false
-        let row = labels[0].parentElement
-        for (let i = 0; i < 8 && row; i++) { if (row.querySelector && row.querySelector('.ecom-g-select')) break; row = row.parentElement }
-        const ctrl = row?.querySelector('.ecom-g-select-selector') || row?.querySelector('.ecom-g-select')
-        if (!ctrl) return false
-        const r = ctrl.getBoundingClientRect()
-        if (r.width <= 0) return false
-        ctrl.scrollIntoView({ block: 'center' })
-        const r2 = ctrl.getBoundingClientRect()
-        const o = { bubbles: true, cancelable: true, view: window, clientX: r2.x + r2.width / 2, clientY: r2.y + r2.height / 2 }
-        for (const t of ['mouseenter', 'mouseover', 'mousedown', 'mouseup', 'click']) ctrl.dispatchEvent(new MouseEvent(t, o))
-        return true
-      }, label)
-      if (opened) {
-        // 确认面板真的出了选项
-        await sleep(2500)
-        const cnt = await ev(() => [...document.querySelectorAll('.ecom-g-select-item')]
-          .filter(e => { const r = e.getBoundingClientRect(); return r.width > 0 && /item-option/.test(e.className || '') }).length)
-        if (!cnt) opened = false   // 面板没真开，重试
+      if (picked) {
+        filled.push({ label, value: picked, matched: hint ? `hint=${hint}` : '默认第一个' })
+      } else if (round === 2) {
+        failed.push({ label, why: '选项点击失败' })
       }
+      await sleep(1500)
     }
-    if (!opened) { failed.push({ label, why: '打不开下拉' }); continue }
-
-    const picked = await clickOption(ev, pickIdx)
-    await closePanels(ev)
-    if (picked) {
-      filled.push({ label, value: picked, matched: hint ? `hint=${hint}` : '默认第一个' })
-    } else {
-      failed.push({ label, why: '选项点击失败' })
-    }
-    await sleep(1500)
   }
 
   return { filled, failed, table }

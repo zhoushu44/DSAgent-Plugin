@@ -144,15 +144,19 @@ node {baseDir}/scripts/ai-publish.mjs --mode submit --images D:\main.jpg --excel
 | 主图必须 **1:1 且 ≥600×600** | 否则页面出「长宽比需为1:1」，AI 流程**静默卡死**。技能上传前本地拦截 |
 | **`industry_status` 不可信** | 接口说 `status=2` 也可能弹「当前类目未开通」。实测 16 个候选全废。唯一判据是「点了确认按钮是否亮」，所以逐个试 |
 | 属性控件是 `ecom-g-select` | Ant Design Select，**不是 semi-select**。点 `.ecom-g-select-selector` 才展开 |
-| 规格值控件是 `ecom-g-cascader-picker` | Ant Design Cascader，**不是 input**。`style_skuValueBox` 里多个 cascader，**最后一个空的是新增入口** |
-| 规格值是 153 个标准色 | 输入「红茶」匹配不到 → 返回「暂无相似选项」。要选标准色（红/白/黑…）或研究自定义输入 |
+| 规格值控件是 `ecom-g-cascader-picker` | Ant Design Cascader。`style_skuValueBox` 里多个 cascader，**最后一个空的是新增入口**。★ 点 **picker 本体**，因为 `.ecom-g-cascader-picker-arrow` 的 `onClick` 是 **null**（React props 实证） |
+| 规格值是 153 个标准色 | 输入「红茶」匹配不到 → 返回「暂无相似选项」。要选标准色（红/白/黑…），且要排除空态项 |
+| 改规格后要 `refetchSchema` | schema 的 `spec_detail.actions` 声明：`POST /product/tproduct/refetchSchema?action=spec_detail_refresh`。**规格改动后必须调它让服务端重算 sku 结构**，否则前端 state 不生成 SKU 行 |
+| 规格有多个维度 | 「餐饮厨具/水具/玻璃杯」有 2 个：`cp_id=2752` 颜色分类（选项）+ `cp_id=3163` 总容量（measure 数值+单位） |
 | 必填属性自动填 | 适用温度/材质/容量/数量/款式各选第一个选项。品牌跳过（授权） |
-| **SKU 表格行生成未通** | cascader 能选中（「红色系/红色」）但 React state 不更新、表格不生成行。**发布会被「价格必填」拦下** → 需人工在窗口补 SKU，或走 `getSchema`+`addWithSchema` 路线 |
+| **addWithSchema 已封禁** | 直调 `POST /product/tproduct/addWithSchema` 会返回「疑似通过非官方途径操作」，**平台风控会降速发布页到 10 分钟级**。不要走这条路 |
+| **SKU 表格行生成未验证完** | cascader 能选中（「红色系/红色」）但 React state 不更新、表格不生成行。已加 `refetchSchema` 猜测修复，因风控降速未实测 |
 | 图片去重 | 同一张图重复上传，平台复用 CDN URL 且**不重跑 AI**。测试要换新图 |
 | 新旧类目 ID | 商品列表是旧体系（`2/33/233`），发布页是新体系（`1000010148`），不通用 |
 | Excel 只能填 SKU 不能填属性 | 实测带「属性」sheet 的 Excel，5 个必填属性仍「请选择」 |
 | Excel 必须先传 | 图先 Excel 后 → Excel 的 DOM 上传触发整页 reload → 连环 detached |
 | 登录态两层 | 本技能走 profile 真实会话，不吃脚本 Cookie 注入；账号显示有效也可能跳登录页，重登一次修好 |
+| 页面 10 分钟载不完 | 说明店铺已被风控标记（因之前的直调尝试）。**停手 1-2 天冷却**，期间不碰 `/ffa/g/create` |
 
 ## 错误处理
 

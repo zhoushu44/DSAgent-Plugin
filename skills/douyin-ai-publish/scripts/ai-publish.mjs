@@ -36,6 +36,8 @@ const { smartFillAttrs, dumpAttrCandidates, readAttrState } =
   await import(PURL(join(HERE, 'attr-fill.mjs')))
 // SKU 表填充（规格值 + 价格库存）
 const { fillSkuTable, readSkuState } = await import(PURL(join(HERE, 'sku-fill.mjs')))
+// 独立 Chrome + CDP 外挂连接（照抄 sku_build.py 的架构）
+const { launchChromeCDP } = await import(PURL(join(HERE, 'chrome-cdp.mjs')))
 
 // ── 参数解析 ──────────────────────────────────────────────
 // ★ JSON 值含空格（如 {"颜色分类":["红茶","白茶"]}），简单 split 会截断。
@@ -93,7 +95,17 @@ const TITLE_OVERRIDE = (ARGS.title || '').trim()
 const CATEGORY = (ARGS.category || '').trim()
 // SKU 规格：JSON，形如 {"specs":{"颜色分类":["红茶","白茶"]},"price":"12","stock":"500","itemNo":"SKU001"}
 //   或 {"rows":[{"颜色分类":"红茶","价格":"12","库存":"500"}, ...]}
+//   ★ 也支持 --skus-file <path> 读 JSON 文件
+//     （PowerShell 的 Start-Process -ArgumentList 会把含空格的 JSON 拆开，
+//      传文件最稳）
 const SKU_SPEC = (() => {
+  const file = (ARGS['skus-file'] || '').trim()
+  if (file) {
+    try {
+      const txt = readFileSync(file, 'utf8')
+      return JSON.parse(txt)
+    } catch { return null }
+  }
   const raw = (ARGS.skus || '').trim()
   if (!raw) return null
   try { return JSON.parse(raw) } catch { return null }
@@ -199,35 +211,46 @@ mkdirSync(OUT_DIR, { recursive: true })
 
 let browser = null
 try {
-  const puppeteer = await import(PURL(join(PLUGIN_ROOT, 'node_modules', 'puppeteer-core',
-    'lib', 'esm', 'puppeteer', 'puppeteer-core.js')))
   const chromePath = findChromePath()
   if (!chromePath) fail('api_error', '未找到 Chrome 或 Edge 浏览器')
 
-  // ★ launch 重试 3 次（Chrome 间歇性启动失败/崩溃，实测时好时坏）
-  let browser = null
-  for (let attempt = 1; attempt <= 3 && !browser; attempt++) {
+  // ★★★ 照抄 sku_build.py 的浏览器架构：独立 Chrome + CDP 外挂连接
+  //   puppeteer.launch 是托管模式，SPA 整页重渲染会让 page/target 崩溃 → 连接断
+  //   connectOverCDP 是外挂模式，Chrome 独立存活，页面崩了也能重连
+  log('① 启动独立 Chrome（CDP 外挂连接）')
+  let cdpConn = null
+  for (let attempt = 1; attempt <= 3 && !cdpConn; attempt++) {
     try {
-      browser = await puppeteer.default.launch({
-        headless: false, executablePath: chromePath, userDataDir: dir,
-        defaultViewport: { width: 1600, height: 1000 },
-        args: ['--no-sandbox', '--disable-blink-features=AutomationControlled', '--window-size=1600,1000'],
+      cdpConn = await launchChromeCDP({
+        profileDir: dir,
+        chromePath,
+        cookies: account.cookies || {},
       })
-      log(`① Chrome 启动成功${attempt > 1 ? `（第 ${attempt} 次）` : ''}`)
+      cdpConn.log.forEach((l) => log('   ① ' + l))
     } catch (e) {
-      log(`① Chrome 启动失败（第 ${attempt} 次）：${String(e?.message).slice(0, 80)}`)
+      log(`① CDP 连接失败（第 ${attempt} 次）：${String(e?.message).slice(0, 100)}`)
       if (attempt < 3) await sleep(8000)
     }
   }
-  if (!browser) fail('api_error', 'Chrome 3 次启动失败。请关闭所有 Chrome 窗口后重试。')
+  if (!cdpConn) fail('api_error', 'Chrome CDP 连接 3 次失败。请关闭所有 Chrome 窗口后重试。')
 
-  const page = (await browser.pages())[0] || await browser.newPage()
-  // ★ risk bypass 单独 try：它只是增强（拦风控检测请求），失败不该阻断发布
-  try {
-    await injectRiskBypass(page)
-    log('① 风控绕过已注入')
-  } catch (e) {
-    log(`① 风控绕过注入失败（继续）：${String(e?.message).slice(0, 60)}`)
+  browser = cdpConn.browser
+  const page = cdpConn.page
+  log('① CDP 已就绪')
+  // ★ 风控绕过（照抄抖上货逆向方案）
+  //   核心：hook XHR/fetch 让风控检测请求不发出去，就不过滑块
+  //   规则已收紧到只拦 4 条确证的（之前 /risk/ /verify/ /captcha/ 太宽会拦坏业务）
+  //   用 evaluateOnNewDocument 注入 = 每次导航自动生效（方案里的 add_init_script）
+  //   可用 DSAGENT_DOUYIN_BYPASS=0 关闭以便排障
+  if (String(process.env.DSAGENT_DOUYIN_BYPASS || '1') !== '0') {
+    try {
+      await injectRiskBypass(page)
+      log('① 风控绕过已注入（4 条规则）')
+    } catch (e) {
+      log(`① 风控绕过注入失败（继续）：${String(e?.message).slice(0, 60)}`)
+    }
+  } else {
+    log('① 风控绕过已关闭（DSAGENT_DOUYIN_BYPASS=0）')
   }
   await page.setCookie(...Object.entries(account.cookies || {})
     .filter(([, v]) => v !== '' && v != null)
@@ -303,9 +326,35 @@ try {
     return false
   }
   let evalCdp = await curPage.target().createCDPSession()
-  /** 重建 CDP session（Session closed 后必须重建，旧的重试也没用） */
+  /**
+   * 重建 CDP session
+   * ★ 关键：Session closed 通常意味着 page/target 已经换了（SPA 整页重渲染），
+   *   在旧 target 上重建一定失败 → 必须先换 page 对象，再建 session
+   */
   const rebuildCdp = async () => {
-    try { await evalCdp.detach().catch(() => {}) } catch { /* ignore */ }
+    // ① 先在当前 page 上试
+    try {
+      await evalCdp.detach().catch(() => {})
+    } catch { /* ignore */ }
+    try {
+      evalCdp = await curPage.target().createCDPSession()
+      await evalCdp.send('Runtime.enable')
+      return true
+    } catch { /* 换 page */ }
+
+    // ② 换 page（取最新打开的、非 about:blank 的）
+    try {
+      const pages = await browser.pages()
+      const alive = pages.filter(p => { try { return !p.isClosed() } catch { return false } })
+      // 优先选 url 是 fxg.jinritemai.com 的
+      const target = alive.find(p => /fxg\.jinritemai\.com/.test(p.url())) || alive[alive.length - 1]
+      if (target && target !== curPage) {
+        curPage = target
+        log('↻ 换到新 page：' + (curPage.url() || '').slice(0, 60))
+      }
+    } catch { /* ignore */ }
+
+    // ③ 在新 page 上建 session
     for (let i = 0; i < 3; i++) {
       try {
         evalCdp = await curPage.target().createCDPSession()
@@ -318,15 +367,23 @@ try {
   const safeEval = async (fn, ...args) => {
     const expr = `(${fn.toString()})(${args.map((a) => JSON.stringify(a)).join(',')})`
     let lastErr = null
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < 6; i++) {
       try {
-        await evalCdp.send('Runtime.enable')
+        // Session closed 后 Runtime.enable 会一直失败 → 先探测，失败就重建
+        try {
+          await evalCdp.send('Runtime.enable')
+        } catch (e0) {
+          if (/Session closed|Target closed|Protocol error/i.test(String(e0?.message || ''))) {
+            await rebuildCdp()
+            await sleep(2000)
+          }
+        }
         const r = await evalCdp.send('Runtime.evaluate', { expression: expr, returnByValue: true, awaitPromise: true })
         if (r.exceptionDetails) {
           const msg = r.exceptionDetails.text || r.exceptionDetails.exception?.description || ''
           if (/detached|Cannot find|Target closed|Execution context/i.test(msg)) {
-            await refreshPage(); await rebuildCdp()
-            await sleep(3000); continue
+            await rebuildCdp()
+            await sleep(2500); continue
           }
           log(`⚠️ evaluate 异常：${msg.slice(0, 100)}`)
           return null
@@ -336,14 +393,13 @@ try {
         lastErr = e
         const m = String(e?.message || '')
         if (/detached|Execution context|Cannot find context|Target closed|Protocol error|Session closed/i.test(m)) {
-          await refreshPage()
           await rebuildCdp()
-          await sleep(3000); continue
+          await sleep(2500); continue
         }
         throw e
       }
     }
-    log(`⚠️ safeEval 5 次失败：${String(lastErr?.message).slice(0, 100)}`)
+    log(`⚠️ safeEval 6 次失败：${String(lastErr?.message).slice(0, 100)}`)
     return null
   }
   const gotoUrl = async (url, opts) => {
@@ -499,35 +555,70 @@ try {
   log(`② 主图 CDN：${imgUrl ? imgUrl.slice(0, 70) + '…' : '（未拿到）'}`)
   await sleep(6000)
 
-  // ②c 补拿 publish_id（HTTP 上传后页面可能自发 notify）
+  // ②c 补拿 publish_id
+  //    ★ 不要再做「DOM 再传一次图」的兜底 —— 实测那会触发整页 reload，
+  //      reload 瞬间 curPage.$ / uploadFile 抛 detached Frame，之后连环 Session closed。
+  //    publish_id 的来源优先级：
+  //      ① 抓包到的 notify_material_change 请求体（最可靠）
+  //      ② 页面 DOM / window 里搜
+  //      ③ 主动调一次 notify（用已知的 publish_id 格式兜底：时间戳序列）
   if (!publishId) {
-    for (let wait = 0; wait < 4 && !publishId; wait++) {
+    for (let wait = 0; wait < 6 && !publishId; wait++) {
       publishId = grabPublishId()
       if (!publishId) await sleep(2500)
     }
-    if (!publishId) {
-      log('②c 页面未自发 notify，DOM 传一次兜底')
-      try {
-        const fi2 = await curPage.$('input[type=file]')
-        if (fi2) { await fi2.uploadFile(IMAGES[0]); await sleep(12000) }
-      } catch (e) { log('②c DOM 兜底失败: ' + String(e?.message).slice(0, 60)) }
-      publishId = grabPublishId()
-    }
-    log(`②c publish_id：${publishId || '（未拿到）'}`)
   }
+  if (!publishId) {
+    // 从页面上下文里搜（不发上传、不 reload）
+    const found = await safeEval(() => {
+      // ① 搜 window 上可能的挂载点
+      for (const k of ['__PUBLISH_ID__', 'publishId', '__publish_id']) {
+        try { if (window[k] && /^\d{15,}$/.test(String(window[k]))) return String(window[k]) } catch { /* ignore */ }
+      }
+      // ② 搜页面 HTML 里的 publish_id
+      try {
+        const m = (document.documentElement.innerHTML || '').match(/publish[_-]?id["'\s:=]+(\d{15,})/i)
+        if (m) return m[1]
+      } catch { /* ignore */ }
+      // ③ 搜 React fiber 里的 state
+      try {
+        const root = document.getElementById('createGoodsFormContainer') || document.getElementById('root')
+        if (root) {
+          const fk = Object.keys(root).find(x => x.startsWith('__reactFiber'))
+          let f = fk ? root[fk] : null
+          let depth = 0
+          while (f && depth < 40) {
+            const mp = f.memoizedProps
+            if (mp && typeof mp === 'object') {
+              for (const k of Object.keys(mp)) {
+                const v = mp[k]
+                if (typeof v === 'string' && /publish_?id/i.test(k) && /^\d{15,}$/.test(v)) return v
+                if (v && typeof v === 'object' && typeof v.publish_id === 'string' && /^\d{15,}$/.test(v.publish_id)) return v.publish_id
+              }
+            }
+            f = f.return
+            depth++
+          }
+        }
+      } catch { /* ignore */ }
+      return null
+    })
+    if (found) { publishId = found; log('②c 从页面 state 拿到 publish_id') }
+  }
+  log(`②c publish_id：${publishId || '（未拿到，notify 将跳过）'}`)
 
   // ═══ ③ 点「下一步」触发 AI 预测 ═════════════════════════
   //    ★ 点「下一步」会触发整页跳转（新版入口 → 材料页），frame 必 detached。
   //      带 Excel 时页面更重，跳转更久 → 必须等页面重新就绪再继续
   //      （实测：不等待会连环 detached）
   if (publishId && uploadedUrls.length) {
-    const nr = await apiFetch('/product/tproduct/ai_publish/notify_material_change', {
+    const nr = (await apiFetch('/product/tproduct/ai_publish/notify_material_change', {
       submit_type: 1,
       publish_id: publishId,
       materials: uploadedUrls.map((u) => ({ material_type: 1, url: u })),
       classify_source: 1,
-    })
-    log(`③ notify_material_change：${nr.json?.st === 0 ? '✅' : '⚠️ ' + JSON.stringify(nr.json || nr.err || nr.raw).slice(0, 100)}`)
+    })) || {}
+    log(`③ notify_material_change：${nr.json?.st === 0 ? '✅' : '⚠️ ' + JSON.stringify(nr.json || nr.err || nr.raw || nr).slice(0, 100)}`)
   }
   log('③ 点「下一步，生成商品」触发 AI 预测')
   {
@@ -542,11 +633,18 @@ try {
     }
     log(`③ 点击：${clicked ? '✅' : '❌ 未找到按钮'}`)
     // 等跳转完成 + 材料页渲染（标题框出现即算就绪）
+    let matReady = false
     for (let i = 0; i < 40; i++) {
       await sleep(2000)
       const ready = await safeEval(() => !!document.querySelector('input[placeholder*="请输入2-60个字符"], input[placeholder*="标题"]'))
-      if (ready) { log('③ 材料页就绪'); break }
+      if (ready) { matReady = true; log('③ 材料页就绪'); break }
       if (i === 39) log('③ ⚠️ 材料页 80s 未就绪')
+    }
+    // ★ 点「下一步」是整页跳转，CDP session 必失效 → 主动刷新一次
+    if (matReady) {
+      await rebuildCdp()
+      const ok2 = await safeEval(() => ({ hasTitle: !!document.querySelector('input[placeholder*="请输入2-60个字符"], input[placeholder*="标题"]') }))
+      log(`③ session 已刷新：${ok2 ? '✅' : '⚠️'} ${JSON.stringify(ok2)}`)
     }
   }
   let predictResult = null
@@ -698,6 +796,14 @@ try {
       + '或页面状态异常。\n建议：换 --category 关键词重试；或到抖店「资质中心」确认该类目已开通。',
       { stage: 'material', cateQuery })
   }
+  // ★ 进第二级也是整页重渲染 → 主动刷新 session
+  await rebuildCdp()
+  const l2Ready = await safeEval(() => ({
+    hasTable: !![...document.querySelectorAll('table')].find(x => /价格/.test([...x.querySelectorAll('th')].map(h => h.textContent || '').join(''))),
+    hasCascader: document.querySelectorAll('.ecom-g-cascader-picker').length,
+    btns: document.querySelectorAll('button').length,
+  }))
+  log(`⑥ 第二级 session 刷新：${JSON.stringify(l2Ready)}`)
 
   // ═══ ⑦b 智能填属性（dump 候选表 → 按 hint 匹配 → 选中）═════════
   //  hint 来源：--attrs 参数（用户指定）> Excel 属性 sheet > 空（默认第一个保底）
