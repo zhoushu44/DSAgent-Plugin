@@ -9,7 +9,7 @@
     "args": [
       {
         "name": "mode",
-        "description": "overview=店铺经营总览(默认)；flow=店铺流量(访客/浏览量/成交)；score=店铺体验分(服务数据)；goods=商品数据明细(每商品访客/成交金额/转化率)"
+        "description": "overview=店铺经营总览(默认)；score=店铺体验分(服务数据)；goods=商品数据明细(每商品销量/价格带/状态)"
       },
       {
         "name": "limit",

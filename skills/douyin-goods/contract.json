@@ -9,12 +9,12 @@
     "args": [
       {
         "name": "mode",
-        "description": "overview=商品总览(默认)；list=商品列表；detail=单商品详情；sku=单商品SKU全量；spec-pool=全店规格池采集"
+        "description": "overview=商品总览(默认)；list=商品列表。detail/sku/spec-pool 尚未实现（接口未确认）"
       },
       {
-        "name": "product_id",
-        "description": "商品 ID（detail / sku 模式必填）",
-        "flag": "--product-id"
+        "name": "status",
+        "description": "商品状态 tab：onSale=在售(默认) / offSale=已下架 / draft=草稿 / audit=审核中 / soldOut=已售罄",
+        "flag": "--status"
       },
       {
         "name": "limit",

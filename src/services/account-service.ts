@@ -32,7 +32,6 @@ const LOGIN_URLS: Record<string, string> = {
   // ★ 拼多多商家后台登录页（与买家 H5 不同）：有「扫码登录 / 账号密码登录 / 立即注册」三个入口
   pdd_mms: 'https://mms.pinduoduo.com/login',
   // ★ 抖音：主页 + 页内登录弹窗（doBrowserLogin 有 douyin 专用分支点「登录」按钮）
-  //   抖店（mqs_douyin_shop）复用同一套登录态：登录后访问 fxg.jinritemai.com 会补发该域 Cookie
   douyin: 'https://www.douyin.com/',
   xhs: 'https://www.xiaohongshu.com/',
   xiaohongshu: 'https://www.xiaohongshu.com/',
@@ -44,8 +43,12 @@ const LOGIN_URLS: Record<string, string> = {
   pinduoduo: 'https://mobile.yangkeduo.com/login.html',
   wechat_store: 'https://channels.weixin.qq.com/shop',
   zhihu: 'https://www.zhihu.com/signin',
-  // ★ 抖店（抖音小店商家后台）：与抖音同属一套 SSO，但独立平台键；登录走抖音主页弹窗
-  douyin_shop: 'https://www.douyin.com/',
+  // ★ 抖店（抖音小店商家后台）：**必须直接落在抖店登录页**，不能图省事用抖音主页。
+  //   实测（2026-10）：抖音账号的 Cookie 双域注入 fxg.jinritemai.com 后仍被跳
+  //   /login/common —— 抖店有自己的会话校验，「登录抖音后访问抖店会自动补发
+  //   该域 Cookie」这个旧假设不成立。走抖店自己的扫码页，扫码后 domain 判定
+  //   才能同时覆盖 .douyin.com 与 .jinritemai.com。
+  douyin_shop: 'https://fxg.jinritemai.com/login/common',
   // ★ 1688（阿里巴巴 B2B）独立登录页
   alibaba: 'https://login.1688.com/member/signin.htm',
 }

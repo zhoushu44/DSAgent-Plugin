@@ -1,5 +1,5 @@
 {
-  "$comment": "抖音小店（抖店）发布锚点集（fxg.jinritemai.com/ffa/g/create）。★ 状态：语义锚点层（L2/L3）先行，尚未真机逐格实测 —— 首次发布会输出 DOM 诊断（可见 input / button / file 清单 + 截图），按诊断把 L2 锚点替换成 L1 埋点即可，无需改代码（改本文件热生效）。分级规范见 PUBLISH-SPEC.md §3.3。",
+  "$comment": "抖音小店（抖店）发布锚点集（fxg.jinritemai.com/ffa/g/create）。★ 2026-10-22 真机探测：发布页已改版为「AI 识别发品」两级流程——第一级「商品材料」页（主图/辅助图/详情图/标题，按钮「确认信息，继续生成」），第二级才进类目/SKU/属性。必须先在入口点「返回旧版」切到表单流程（新版页 0 个 input，锚点全落空）。入口/材料页锚点已按真实 DOM 回填；第二级（类目/SKU/属性/提交）锚点仍为语义层，待真机逐格实测。改锚点热生效，无需改代码。",
   "platform": "douyin_shop",
   "version": 1,
   "limits": {
@@ -18,7 +18,9 @@
   "riskSelector": "[class*=\"captcha\"], [class*=\"verify\"], [class*=\"slide\"]",
   "flow": [
     { "step": "openEntry", "url": "https://fxg.jinritemai.com/ffa/g/create" },
-    { "step": "selectCategory" },
+    { "step": "backToOldVersion", "comment": "★ 必做：2026-10 起发布页默认是「AI 识别发品」新版（先上传资料→系统提取），锚点全部针对旧版表单；不点「返回旧版」则后续锚点全部落空（实测新版页 0 个 input）" },
+    { "step": "fillMaterial", "comment": "第一级：商品材料页（主图/辅助图/详情图/标题）→ 点「确认信息，继续生成」" },
+    { "step": "selectCategory", "comment": "第二级：类目选择" },
     { "step": "waitFor", "match": "input[placeholder*=\"商品标题\"], input[placeholder*=\"标题\"], text:商品信息" },
     { "step": "fillTitle" },
     { "step": "uploadMainImages" },
@@ -27,6 +29,57 @@
     { "step": "submit", "args": { "buttonTextRe": "^(发布商品|提交并上架|提交|保存并发布|发布)$" } }
   ],
   "anchors": {
+    "backToOldVersion": {
+      "candidates": [
+        { "level": 1, "selector": "text:返回旧版" },
+        { "level": 2, "selector": "text:返回旧版发布" }
+      ],
+      "comment": "新版 AI 发品页 → 旧版表单页 的切换按钮。命中后必须点，否则整条 flow 断掉"
+    },
+    "materialReady": {
+      "candidates": [
+        { "level": 1, "selector": "text:商品材料" },
+        { "level": 1, "selector": "text:确认信息，继续生成" },
+        { "level": 2, "selector": "text:商品主图" }
+      ],
+      "comment": "第一级（商品材料页）就绪判据"
+    },
+    "materialTitleInput": {
+      "candidates": [
+        { "level": 1, "selector": "input[placeholder*=\"请输入2-60个字符\"]" },
+        { "level": 2, "selector": "input[placeholder*=\"标题\"]" }
+      ],
+      "comment": "材料页标题框（实测 placeholder=请输入2-60个字符（1-30个汉字），与 maxTitleLen=60 吻合）"
+    },
+    "materialConfirmButton": {
+      "candidates": [
+        { "level": 1, "selector": "text:确认信息，继续生成" },
+        { "level": 2, "selector": "text:确认信息" },
+        { "level": 2, "selector": "text:继续生成" }
+      ],
+      "comment": "材料页提交 → 进入类目/SKU/属性页"
+    },
+    "mainImageZoneText": {
+      "candidates": [
+        { "level": 1, "selector": "text:商品主图" },
+        { "level": 1, "selector": "text:上传主图" },
+        { "level": 2, "selector": "text:商品正面图" }
+      ],
+      "comment": "材料页主图区文案锚（上传控件是隐藏 file input，需真实点击上传区）"
+    },
+    "detailZoneText": {
+      "candidates": [
+        { "level": 1, "selector": "text:商品详情" },
+        { "level": 2, "selector": "text:详情图" }
+      ]
+    },
+    "newVersionDetect": {
+      "candidates": [
+        { "level": 1, "selector": "text:下一步，生成商品" },
+        { "level": 1, "selector": "text:请上传以下资料" }
+      ],
+      "comment": "新版 AI 发品页特征；命中即说明还没切旧版"
+    },
     "formReady": {
       "candidates": [
         { "level": 1, "selector": "input[placeholder*=\"商品标题\"]" },
@@ -66,11 +119,55 @@
     },
     "titleInput": {
       "candidates": [
+        { "level": 1, "selector": "input[placeholder*=\"15-60个字符\"]" },
+        { "level": 1, "selector": "input[placeholder*=\"请输入2-60个字符\"]" },
         { "level": 1, "selector": "input[placeholder*=\"商品标题\"]" },
         { "level": 2, "selector": "input[placeholder*=\"请输入标题\"]" },
         { "level": 3, "selector": "input[name=\"title\"]" }
       ],
+      "comment": "★ 第二级标题框 placeholder 实测为「请输入15-60个字符（8-30个汉字）」——材料页才是「2-60个字符」，两级不同！",
       "fillFieldFallbackRe": "商品标题|标题"
+    },
+    "stockInput": {
+      "candidates": [
+        { "level": 1, "selector": "input[placeholder*=\"请输入库存\"]" },
+        { "level": 1, "selector": "input[placeholder*=\"库存\"]" },
+        { "level": 3, "selector": "input[name=\"stock\"]" }
+      ],
+      "comment": "第二级实测 placeholder=请输入库存",
+      "fillFieldFallbackRe": "库存|可售库存"
+    },
+    "itemNoInput": {
+      "candidates": [
+        { "level": 1, "selector": "input[placeholder*=\"erp编码\"]" },
+        { "level": 1, "selector": "input[placeholder*=\"货号\"]" },
+        { "level": 3, "selector": "input[placeholder*=\"商家编码\"]" }
+      ],
+      "comment": "第二级实测 placeholder=请输入erp编码（不是「货号」）",
+      "fillFieldFallbackRe": "货号|商家编码|erp编码"
+    },
+    "limitBuyInput": {
+      "candidates": [
+        { "level": 1, "selector": "input[placeholder*=\"限购\"]" },
+        { "level": 2, "selector": "input[placeholder*=\"未填默认\"]" }
+      ],
+      "comment": "第二级实测：未填默认限购30"
+    },
+    "specValueInput": {
+      "candidates": [
+        { "level": 1, "selector": "input[placeholder*=\"填写并新增规格值\"]" },
+        { "level": 1, "selector": "input[placeholder*=\"规格值\"]" },
+        { "level": 2, "selector": "input[placeholder*=\"颜色\"]" },
+        { "level": 2, "selector": "input[placeholder*=\"尺码\"]" }
+      ],
+      "comment": "第二级实测 placeholder=填写并新增规格值"
+    },
+    "addSpecTypeButton": {
+      "candidates": [
+        { "level": 1, "selector": "text:添加规格类型（2/3）" },
+        { "level": 2, "selector": "text:添加规格" }
+      ],
+      "comment": "第二级实测按钮文案「添加规格类型（2/3）」"
     },
     "priceInput": {
       "candidates": [
@@ -178,12 +275,34 @@
     },
     "submitButton": {
       "candidates": [
-        { "level": 2, "selector": "text:发布商品" },
+        { "level": 1, "selector": "text:发布商品" },
         { "level": 2, "selector": "text:提交并上架" },
         { "level": 3, "selector": "text:保存并发布" },
         { "level": 3, "selector": "text:提交" }
       ],
+      "comment": "★ 第二级实测提交按钮就叫「发布商品」（另有「保存草稿」「填写检查」）",
       "matchTextRe": "^(发布商品|提交并上架|提交|保存并发布|发布)$"
+    },
+    "draftButton": {
+      "candidates": [
+        { "level": 1, "selector": "text:保存草稿" },
+        { "level": 2, "selector": "text:存草稿" }
+      ],
+      "comment": "第二级实测：保存草稿"
+    },
+    "checkButton": {
+      "candidates": [
+        { "level": 1, "selector": "text:填写检查" },
+        { "level": 2, "selector": "text:检查" }
+      ],
+      "comment": "第二级实测：填写检查（提交前自检）"
+    },
+    "aiCreateButton": {
+      "candidates": [
+        { "level": 1, "selector": "text:AI智能创作" },
+        { "level": 2, "selector": "text:智能创作" }
+      ],
+      "comment": "第二级实测：AI智能创作（可生成卖点/详情）"
     },
     "errorToast": {
       "candidates": [

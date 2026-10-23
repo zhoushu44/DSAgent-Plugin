@@ -17,6 +17,10 @@ import type { Config } from '../index.ts'
 const PLATFORM_META: Record<string, { label: string; color: string; glyph: string; via: string }> = {
   taobao: { label: '淘宝', color: '#ff5000', glyph: '淘', via: '阿里 SSO' },
   douyin: { label: '抖音', color: '#161823', glyph: '抖', via: '官方开放 API' },
+  // ★ 抖店（抖音小店商家后台）：与「抖音」共用一套 SSO，但**登录态相互独立**——
+  //   实测抖音账号的 Cookie 注入 fxg.jinritemai.com 仍被跳登录页，抖店有自己的会话校验。
+  //   故在账号页单列一行，走独立扫码（登录后访问 fxg.jinritemai.com 会补发该域 Cookie）。
+  douyin_shop: { label: '抖音小店（抖店）', color: '#161823', glyph: '店', via: 'Cookie 托管' },
   xiaohongshu: { label: '小红书', color: '#ff2442', glyph: '红', via: 'Cookie 托管' },
   bilibili: { label: 'B站', color: '#00a1d6', glyph: 'B', via: 'Cookie 托管' },
   kuaishou: { label: '快手', color: '#ff4906', glyph: '快', via: 'Cookie 托管' },

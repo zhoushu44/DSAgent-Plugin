@@ -33,8 +33,26 @@ import {
 
 /** 保活周期：48h 无轻访问即到期（报告建议 2~6h 上限，此处取宽周期，
  *  因每轮巡检 2h 扫一次，实际生效周期在 48~50h；对滑动过期 2~4 周的平台足够，
- *  且不会过于频繁地在用户机器上拉起 headless 浏览器） */
+ *  且不会过于频繁地在用户机器上拉起 headless 浏览器）
+ *
+ *  ★ 按平台细分（FIX：抖店几小时就过期）：实测 `douyin_shop` 的登录态在
+ *    **数小时**内就会失效（远短于淘宝/拼多多的 2~4 周滑动窗口），
+ *    48h 周期等于没保活。对这类「短 TTL」平台单独给 4h。
+ *    判据来源：2026-10 实测，抖店账号当天登录、当天读技能即报 token_expired。 */
 const KEEPALIVE_INTERVAL_MS = 48 * 60 * 60 * 1000
+
+/** 短 TTL 平台的保活周期（4h）：抖店后台会话衰减极快，必须高频续 */
+const KEEPALIVE_INTERVAL_MS_SHORT_TTL = 4 * 60 * 60 * 1000
+
+/** 需要短周期保活的平台（滑动过期窗口 < 1 天的） */
+const SHORT_TTL_PLATFORMS = new Set(['douyin_shop'])
+
+/** 取该平台的保活周期 */
+function keepaliveIntervalFor(platform: string): number {
+  return SHORT_TTL_PLATFORMS.has(platform)
+    ? KEEPALIVE_INTERVAL_MS_SHORT_TTL
+    : KEEPALIVE_INTERVAL_MS
+}
 
 /** 保活失败后的冷却时长（P1-2：环境性失败立刻重试无意义） */
 const KEEPALIVE_FAIL_COOLDOWN_MS = 60 * 1000
@@ -61,6 +79,10 @@ const KEEPALIVE_URLS: Record<string, string> = {
   pdd: 'https://mobile.yangkeduo.com/',
   pdd_mms: 'https://mms.pinduoduo.com/',
   douyin: 'https://www.douyin.com/',
+  // ★ 抖店（douyin_shop）必须**单独保活**：它与 douyin 是两套独立登录态
+  //   （实测抖音 Cookie 进不了 fxg.jinritemai.com），只保活 douyin 对抖店无效。
+  //   目标用后台首页而非登录页——登录页不会校验/滑动续期会话。
+  douyin_shop: 'https://fxg.jinritemai.com/ffa/mshop/homepage/index',
   xhs: 'https://www.xiaohongshu.com/',
   bilibili: 'https://www.bilibili.com/',
   kuaishou: 'https://www.kuaishou.com/',
@@ -78,6 +100,9 @@ const COOKIE_DOMAINS: Record<string, string[]> = {
   sycm_insight: ['taobao.com', 'sycm.taobao.com'],
   tmall: ['taobao.com', 'tmall.com'],
   pdd_mms: ['pinduoduo.com'],
+  // 抖店票据写在 .jinritemai.com 域；同时列 .douyin.com（SSO 来源域，
+  // 保活时抖音侧可能轮换 sessionid，漏拿会导致下次登录态不完整）
+  douyin_shop: ['jinritemai.com', 'douyin.com'],
 }
 
 /** 单飞表：shopKey → 进行中的保活 Promise（并发调用共享同一实例） */
@@ -120,9 +145,10 @@ export function keepaliveAccount(store: CredentialStore, shopKey: string): Promi
     if (account.auth_type === 'apikey') return { ok: false, skipped: 'API Key 账号无会话可保活' }
 
     // 到期检查：account_meta.last_keepalive_at 距今不足周期则跳过
+    const interval = keepaliveIntervalFor(account.platform)
     const lastRaw = account.account_meta?.last_keepalive_at
     const lastMs = lastRaw ? Date.parse(String(lastRaw)) : NaN
-    if (Number.isFinite(lastMs) && Date.now() - lastMs < KEEPALIVE_INTERVAL_MS) {
+    if (Number.isFinite(lastMs) && Date.now() - lastMs < interval) {
       return { ok: false, skipped: '未到期' }
     }
 
@@ -213,14 +239,16 @@ async function keepaliveVisit(
 
     // 1) 注入库内登录态（Profile 中可能没有最新票据；缺失会导致服务端视为匿名访问）。
     //    每项至少带 domain 或 url，否则 puppeteer 报 "At least one of the url and domain needs to be specified"。
-    const fallbackDomain = cookieDomainFor(platform) ?? cookieDomainFromUrl(url)
+    //    ★ 多域平台（如抖店：票据在 .jinritemai.com、SSO 来源在 .douyin.com）必须**全部域都注入**，
+    //      只注一个域会让服务端认为另一半会话缺失（FIX：douyin_shop 保活后仍失效）。
+    const injectDomains = COOKIE_DOMAINS[platform]?.length
+      ? COOKIE_DOMAINS[platform].map(d => `.${d}`)
+      : [cookieDomainFor(platform) ?? cookieDomainFromUrl(url)].filter(Boolean)
     const cookieList = Object.entries(jar)
       .filter(([, v]) => v != null && v !== '')
-      .map(([name, value]) => {
-        const item: Record<string, string> = { name, value: String(value), path: '/' }
-        if (fallbackDomain) item.domain = fallbackDomain
-        return item
-      })
+      .flatMap(([name, value]) =>
+        injectDomains.map(domain => ({ name, value: String(value), domain, path: '/' }))
+      )
     if (cookieList.length > 0) {
       await page.setCookie(...cookieList)
     }
@@ -245,17 +273,34 @@ async function keepaliveVisit(
     if (Object.keys(fresh).length > 0) {
       await store.setCookies(shopKey, fresh)
     }
+
+    // 6) 登录态实效校验（FIX：旧判据用 jar 兜底，页面跳登录页也误判「存活」）
+    //    两个证据任一不过即判失效：
+    //      a) 访问后被踢到登录页（URL 含 login/passport）—— 最硬的失效信号
+    //      b) 提取不到关键 Cookie —— 服务端清掉了会话票据
+    //    抖店实测踩坑：Cookie 都在（51 个 .jinritemai.com）但服务端不认，
+    //    「Cookie 存在 ≠ 会话有效」，所以必须看 URL 而不只看 Cookie。
+    const landedUrl = page.url() || ''
+    const redirectedToLogin = /login|passport/i.test(landedUrl)
+    const keyCookieAlive = neededCookiesPresent(fresh, platform)
+    const stillLoggedIn = !redirectedToLogin && keyCookieAlive
+
+    if (!stillLoggedIn) {
+      // 不写 markKeepaliveAt：让下次巡检立刻重试，而不是等一个周期
+      console.log(
+        `[dsagent-keepalive] ${shopKey} 保活失败：登录态已失效`
+        + `（跳登录页=${redirectedToLogin}，关键Cookie存活=${keyCookieAlive}，landed=${landedUrl.slice(0, 80)}）`,
+      )
+      return { ok: false, error: '登录态已失效（访问后被踢到登录页或关键 Cookie 丢失），需重新登录' }
+    }
+
     await store.markKeepaliveAt(shopKey)
     // P1-3：保活时顺便观测出口 IP（进程级节流，不会每轮都打外网）
     await observeEgressIp(store, shopKey)
 
-    // 关键 Cookie 仍在 = 登录态活着（被平台踢下线则关键 Cookie 会被清掉/轮换失败）
-    const stillLoggedIn = neededCookiesPresent(fresh, platform) || neededCookiesPresent(jar, platform)
     console.log(
-      `[dsagent-keepalive] ${shopKey} 轻访问完成：提取 ${Object.keys(fresh).length} 个 Cookie，` +
-      `登录态=${stillLoggedIn ? '存活' : '疑似失效'}`,
+      `[dsagent-keepalive] ${shopKey} 轻访问完成：提取 ${Object.keys(fresh).length} 个 Cookie，登录态存活`,
     )
-
     return { ok: true }
   } finally {
     // close 也限时：Chrome 卡死（弹系统对话框 / 崩溃半截）时 close() 可能永不 resolve，

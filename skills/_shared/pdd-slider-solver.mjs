@@ -43,35 +43,154 @@ const OCR_ENDPOINT = 'https://www.yydsocr.com/api/verify_api'
 const OCR_KEY = 'RyDEDUcO3VDBPOrCMiN4aas7CHdIGZAaBrvPFC0gByJrs5IV'
 
 /** yydsocr 识别滑块缺口（多类型降级重试） */
-async function solveSlider(bgB64, slideB64) {
-  // 候选方案：按优先级试（拼多多滑块是双图型，但不同风控等级可能只给单图）
-  const candidates = []
-  if (slideB64) {
-    candidates.push({ name: '2002双图', body: { secret_key: OCR_KEY, type_id: '2002', background_image: bgB64, slide_image: slideB64 } })
-    candidates.push({ name: '2005双图', body: { secret_key: OCR_KEY, type_id: '2005', background_image: bgB64, slide_image: slideB64 } })
-    candidates.push({ name: '2006双图', body: { secret_key: OCR_KEY, type_id: '2006', background_image: bgB64, slide_image: slideB64 } })
-  }
-  candidates.push({ name: '2000单图', body: { secret_key: OCR_KEY, type_id: '2000', image: bgB64 } })
-  candidates.push({ name: '2000单图+meta', body: { secret_key: OCR_KEY, type_id: '2000', image: bgB64, meta: 'True' } })
+import { inflateSync } from 'node:zlib'
 
-  let lastErr = null
-  for (const c of candidates) {
+/**
+ * 从 base64 PNG 解出 RGBA 像素（8bit，非交错）
+ * @returns {{w,h,data:Uint8Array}|null}
+ */
+function decodePng(b64) {
+  try {
+    const buf = Buffer.from(b64, 'base64')
+    if (buf.length < 33 || buf[1] !== 0x50 || buf[2] !== 0x4E || buf[3] !== 0x47) return null
+    let p = 8, w = 0, h = 0, bitDepth = 8, colorType = 6
+    const idat = []
+    while (p + 8 <= buf.length) {
+      const len = buf.readUInt32BE(p)
+      const type = buf.slice(p + 4, p + 8).toString('ascii')
+      if (type === 'IHDR') { w = buf.readUInt32BE(p + 8); h = buf.readUInt32BE(p + 12); bitDepth = buf[p + 16]; colorType = buf[p + 17] }
+      else if (type === 'IDAT') idat.push(buf.slice(p + 8, p + 8 + len))
+      else if (type === 'IEND') break
+      p += 12 + len
+    }
+    if (!w || !h || bitDepth !== 8) return null
+    const ch = colorType === 6 ? 4 : colorType === 2 ? 3 : colorType === 0 ? 1 : 0
+    if (!ch) return null
+    let inf
+    try { inf = inflateSync(Buffer.concat(idat)) } catch { return null }
+    const stride = w * ch
+    const out = new Uint8Array(w * h * 4)
+    const prev = new Uint8Array(stride), cur = new Uint8Array(stride)
+    let off = 0
+    for (let y = 0; y < h; y++) {
+      const filter = inf[off++]
+      for (let i = 0; i < stride; i++) cur[i] = inf[off++]
+      for (let i = 0; i < stride; i++) {
+        const a = i >= ch ? cur[i - ch] : 0, b = prev[i], c = i >= ch ? prev[i - ch] : 0
+        let v = cur[i]
+        if (filter === 1) v = (v + a) & 0xff
+        else if (filter === 2) v = (v + b) & 0xff
+        else if (filter === 3) v = (v + ((a + b) >> 1)) & 0xff
+        else if (filter === 4) {
+          const pp = a + b - c, pa = Math.abs(pp - a), pb = Math.abs(pp - b), pc = Math.abs(pp - c)
+          v = (v + (pa <= pb && pa <= pc ? a : pb <= pc ? b : c)) & 0xff
+        }
+        cur[i] = v
+      }
+      for (let x = 0; x < w; x++) {
+        const si = x * ch, di = (y * w + x) * 4
+        if (ch === 4) { out[di] = cur[si]; out[di + 1] = cur[si + 1]; out[di + 2] = cur[si + 2]; out[di + 3] = cur[si + 3] }
+        else if (ch === 3) { out[di] = cur[si]; out[di + 1] = cur[si + 1]; out[di + 2] = cur[si + 2]; out[di + 3] = 255 }
+        else { const g = cur[si]; out[di] = out[di + 1] = out[di + 2] = g; out[di + 3] = 255 }
+      }
+      prev.set(cur)
+    }
+    return { w, h, data: out }
+  } catch { return null }
+}
+
+/**
+ * 找拼图块图形在块 PNG 内的横向左偏移（alpha > 20 的最左列）
+ * 实测 PDD 拼图块 PNG 60x160，图形只占 x[10,49]，偏移 = 10
+ */
+function findPieceOffset(png) {
+  try {
+    for (let x = 0; x < png.w; x++) {
+      for (let y = 0; y < png.h; y++) {
+        if (png.data[(y * png.w + x) * 4 + 3] > 20) return x
+      }
+    }
+  } catch { /* ignore */ }
+  return 0
+}
+
+/**
+ * 调 yydsocr 识别缺口。
+ *
+ * ★★★ 双缺口真相（2026-10-23 dump 原始响应查明）★★★
+ *   PDD 验证码背景图里有 **2 个缺口**：1 个真、1 个干扰。
+ *   yydsocr 不同 type_id 会各自返回不同答案：
+ *
+ *     2002 / 2005 / 2006  → 三者返回**同一个值**（= 干扰缺口）
+ *     2004                → 返回**不同的值** + 额外字段 `externel:1`
+ *
+ *   实测同一次验证码：2002/2005/2006 都给 255，只有 2004 给 169；
+ *   而像素梯度最强峰 = 171，与 169 吻合 → **2004 才是真缺口**。
+ *   另一次：2004=169，drag=169×0.85=144，与「梯度 171×0.85=145 通过」
+ *   只差 1px，互证 2004 正确。
+ *
+ *   所以策略改为：
+ *     ① 优先用 2004
+ *     ② 2004 失败时，用「2002/2005/2006 的多数值」作为**干扰缺口**排除，
+ *        若 2004 有值且与多数不同 → 坚定用 2004
+ *     ③ 全失败才回退 2000 单图
+ *
+ * @returns {{ ok, x, via, all, consensus }} all = 各 type_id 的原始返回
+ */
+async function solveSlider(bgB64, slideB64) {
+  const all = {}
+  const call = async (tid, extra) => {
     try {
       const resp = await fetch(OCR_ENDPOINT, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(c.body),
+        body: JSON.stringify({ secret_key: OCR_KEY, type_id: tid, ...extra }),
       })
       const j = await resp.json().catch(() => null)
-      if (j?.code === 200) {
-        const x = parseInt(String(j.data?.data ?? j.data).replace(/[^\d]/g, ''), 10)
-        if (Number.isFinite(x)) return { ok: true, x, recId: j.rec_id, via: c.name }
+      if (String(j?.code) === '200') {
+        const raw = String(j.data?.data ?? '')
+        const nums = raw.match(/\d+/g) || []
+        if (nums.length) {
+          const x = parseInt(nums[0], 10)
+          all[tid] = { x, externel: j.data?.externel, raw }
+          return x
+        }
       }
-      lastErr = { code: j?.code, msg: j?.err_msg, via: c.name }
-      console.error(`[solver] ${c.name} 失败: code=${j?.code} ${j?.err_msg || ''}`)
-    } catch (e) { lastErr = { code: -1, msg: e.message, via: c.name } }
-    await new Promise(r => setTimeout(r, 600))   // 避免频率限制
+      all[tid] = { x: null, code: j?.code, msg: j?.err_msg }
+      return null
+    } catch (e) {
+      all[tid] = { x: null, err: e.message?.slice(0, 60) }
+      return null
+    }
   }
-  return { ok: false, code: lastErr?.code, msg: lastErr?.msg, via: lastErr?.via }
+
+  if (slideB64) {
+    // ★ 2004 优先（唯一能给出真缺口的 type_id）
+    await call('2004', { background_image: bgB64, slide_image: slideB64 })
+    // 干扰缺口三方投票（2002/2005/2006 通常一致）
+    await call('2002', { background_image: bgB64, slide_image: slideB64 })
+    await call('2005', { background_image: bgB64, slide_image: slideB64 })
+    await call('2006', { background_image: bgB64, slide_image: slideB64 })
+  } else {
+    await call('2000', { image: bgB64 })
+  }
+
+  // 统计干扰缺口的「多数值」
+  const distractVotes = ['2002', '2005', '2006'].map(t => all[t]?.x).filter(v => Number.isFinite(v))
+  const counts = {}
+  for (const v of distractVotes) counts[v] = (counts[v] || 0) + 1
+  const consensus = Object.entries(counts).sort((a, b) => b[1] - a[1])[0]
+  const consensusX = consensus ? parseInt(consensus[0], 10) : null
+
+  const real = all['2004']?.x
+  if (Number.isFinite(real)) {
+    const differentFromDistract = consensusX == null || real !== consensusX
+    console.error(`[solver] 2004=${real} | 干扰共识=${consensusX ?? '—'}（${distractVotes.join('/')}）| ${differentFromDistract ? '✅2004是真缺口' : '⚠️两者相同'}`)
+    return { ok: true, x: real, via: '2004(真缺口)', all, consensus: consensusX }
+  }
+  // 2004 没有 → 用单图兜底
+  const solo = all['2000']?.x
+  if (Number.isFinite(solo)) return { ok: true, x: solo, via: '2000(单图兜底)', all, consensus: consensusX }
+  return { ok: false, code: all['2004']?.code, msg: all['2004']?.msg || all['2000']?.msg, all, consensus: consensusX }
 }
 
 /**
@@ -194,13 +313,40 @@ export async function solveSliderInPage(page, shopKey, opts = {}) {
     for (const m of ms) {
       if (!/滑块|拼图|向右|验证/.test((m.innerText || '').slice(0, 60))) continue
       const imgs = Array.from(m.querySelectorAll('img'))
-        .map(el => { const b = el.getBoundingClientRect(); return { src: el.src || '', w: Math.round(b.width), h: Math.round(b.height), x: Math.round(b.x), y: Math.round(b.y) } })
+        .map(el => {
+          const b = el.getBoundingClientRect()
+          const src = el.src || ''
+          // ★ 解析 PNG 原始尺寸（base64 头部 IHDR：offset 16 起 4B 宽 + 4B 高）
+          //   必须拿到，否则 cannot 算 scale（DOM 272 / PNG 320 = 0.85）
+          let pngW = 0, pngH = 0
+          try {
+            const b64 = src.replace(/^data:image\/\w+;base64,/, '')
+            if (b64) {
+              const head = atob(b64.slice(0, 40))
+              if (head.slice(1, 4) === 'PNG') {
+                pngW = (head.charCodeAt(16) << 24) | (head.charCodeAt(17) << 16) | (head.charCodeAt(18) << 8) | head.charCodeAt(19)
+                pngH = (head.charCodeAt(20) << 24) | (head.charCodeAt(21) << 16) | (head.charCodeAt(22) << 8) | head.charCodeAt(23)
+              }
+            }
+          } catch { /* ignore */ }
+          return { src, w: Math.round(b.width), h: Math.round(b.height), x: Math.round(b.x), y: Math.round(b.y), pngW: Math.abs(pngW), pngH: Math.abs(pngH) }
+        })
         .filter(o => /^data:image/.test(o.src) && o.w > 0)
       const handle = Array.from(m.querySelectorAll('.slide-button, [class*="slide-button"], [class*="slideButton"]'))
         .map(el => { const b = el.getBoundingClientRect(); return { x: Math.round(b.x + b.width / 2), y: Math.round(b.y + b.height / 2), w: Math.round(b.width), h: Math.round(b.height) } })
         .filter(o => o.w > 10)
       if (!imgs.length || !handle.length) continue
-      return { imgs, handle, text: (m.innerText || '').replace(/\n/g, ' ').slice(0, 80) }
+      // ★ 计算拼图块的「块内图形左偏移」（PNG 像素基准）
+      //   PDD 块 PNG 60x160，图形实际只占 x[10,49]；不减去这 10px 会恒差 8.5px(DOM)
+      let pieceOffsetPng = 0
+      try {
+        const blkImg = imgs.find(i => i.w > 30 && i.w < 100)
+        if (blkImg?.src) {
+          const png = decodePng(blkImg.src.replace(/^data:image\/\w+;base64,/, ''))
+          if (png) { pieceOffsetPng = findPieceOffset(png); blkImg.pieceOffsetPng = pieceOffsetPng }
+        }
+      } catch { /* ignore */ }
+      return { imgs, handle, pieceOffsetPng, text: (m.innerText || '').replace(/\n/g, ' ').slice(0, 80) }
     }
     return null
   })
@@ -301,7 +447,7 @@ export async function solveSliderInPage(page, shopKey, opts = {}) {
     //   但指纹完全相同。只看 ΔgapX 会被骗，必须结合指纹。
     if (!imgRefreshed && prevGapX >= 0) {
       const dGap = solved.x - prevGapX
-      const dTarget = (bg.x + solved.x - (blk?.w || 49) / 2) - prevTargetX
+      const dTarget = (handle.x + solved.x) - prevTargetX
       console.error(`[slider] 位移计算：ΔgapX=${dGap}px  ΔtargetX=${dTarget}px（图未刷新 → 位置不该变）`)
       if (Math.abs(dGap) < 2 && attempt > 1) {
         console.error('[slider] 缺口位置未变但上次失败 → 主动刷新验证码')
@@ -346,7 +492,7 @@ export async function solveSliderInPage(page, shopKey, opts = {}) {
         prevBgHash = ''
         continue
       }
-      return { ok: false, gapX: solved.x, targetX: Math.round(bg.x + solved.x - (blk?.w || 49) / 2), text: `缺口位置可疑（X=${solved.x}，${(ratio * 100).toFixed(1)}%），拒绝拖动` }
+      return { ok: false, gapX: solved.x, targetX: Math.round(handle.x + solved.x), text: `缺口位置可疑（X=${solved.x}，${(ratio * 100).toFixed(1)}%），拒绝拖动` }
     }
 
     // ★ 滑块复位：失败后平台不一定把滑块弹回原点。
@@ -370,14 +516,39 @@ export async function solveSliderInPage(page, shopKey, opts = {}) {
     }
     const handle = slider.handle[0]
 
-    const targetX = bg.x + solved.x - (blk?.w || 49) / 2
-    // ★ 正确位移：始终从「当前滑块实际位置」算到 targetX，
-    //   不是从固定的 handle.x 算（那个可能是上一轮的旧值）
+    // ══════════════════════════════════════════════════════════════════
+    // ★★★ 位移公式（2026-10-23 最终版，含块内偏移）★★★
+    //
+    //   drag = (gapPngX − pieceOffsetPngX) × scale
+    //   targetX = handle.x + drag
+    //
+    //   scale            = bg.domW / bg.pngW   （实测 272/320 = 0.85）
+    //   gapPngX          = 真缺口左边缘（PNG 像素，yydsocr 2004 或梯度扫描）
+    //   pieceOffsetPngX  = 拼图块图形在块 PNG 内的左偏移
+    //
+    // ★ 关键：拼图块 PNG 是 60x160 的整条，但里面的图形只占 x[10,49] 40x40。
+    //   块元素与背景图左边缘对齐（都 x=657），所以图形静止时视觉位置是
+    //   bg.x + 10×scale = 657 + 8.5 = 665.5。
+    //   要让它对齐缺口左边缘 (657 + gapPngX×scale)，就得拖
+    //   (gapPngX − 10) × scale。
+    //
+    //   旧公式漏了 −10，恒差 8.5px（DOM）——这就是一直「差一点」的根因。
+    //
+    // 历史错误链（全部踩过）：
+    //   ① bg.x + gapX − blkW/2     绝对坐标 + 没缩放
+    //   ② handle.x + gapX          没缩放（scale=0.85，差 15%）
+    //   ③ handle.x + gapX×scale    缩放了但漏块内偏移（差 8.5px）
+    //   ④ 本案：handle.x + (gapX − pieceOffset)×scale
+    // ══════════════════════════════════════════════════════════════════
+    const scale = bg.w && bg.pngW ? bg.w / bg.pngW : 1
+    const pieceOffset = blk?.pieceOffsetPng ?? 0
+    const drag = Math.round((solved.x - pieceOffset) * scale)
+    const targetX = handle.x + drag
     const realDist = targetX - handle.x
     const dFromPrev = prevTargetX >= 0 ? targetX - prevTargetX : null
-    console.error(`[slider] 位移计算：起点 ${handle.x} → 目标 ${Math.round(targetX)}，实际位移 ${Math.round(realDist)}px`
-      + (dFromPrev != null ? `（与上轮目标差 ${Math.round(dFromPrev)}px）` : ''))
-    if (DRY) return { ok: true, gapX: solved.x, targetX: Math.round(targetX), text: `[dry-run] 缺口 X=${solved.x}px，应拖到 ${Math.round(targetX)}（从 ${handle.x} 出发，位移 ${Math.round(realDist)}px）` }
+    console.error(`[slider] 位移：gap=${solved.x} − 块内偏移=${pieceOffset} = ${solved.x - pieceOffset}（PNG）× scale ${scale.toFixed(3)} = drag ${drag}px → 目标 ${Math.round(targetX)}`
+      + (dFromPrev != null ? `（与上轮差 ${Math.round(dFromPrev)}px）` : ''))
+    if (DRY) return { ok: true, gapX: solved.x, targetX: Math.round(targetX), text: `[dry-run] gap ${solved.x} − offset ${pieceOffset} → drag ${drag}px → targetX ${Math.round(targetX)}` }
 
     const cdp = await page.target().createCDPSession()
     const traj = humanTrajectory(handle.x, targetX, handle.y)
@@ -484,13 +655,40 @@ if (!IS_IMPORTED) (async () => {
     for (const m of ms) {
       if (!/滑块|拼图|向右|验证/.test((m.innerText || '').slice(0, 60))) continue
       const imgs = Array.from(m.querySelectorAll('img'))
-        .map(el => { const b = el.getBoundingClientRect(); return { src: el.src || '', w: Math.round(b.width), h: Math.round(b.height), x: Math.round(b.x), y: Math.round(b.y) } })
+        .map(el => {
+          const b = el.getBoundingClientRect()
+          const src = el.src || ''
+          // ★ 解析 PNG 原始尺寸（base64 头部 IHDR：offset 16 起 4B 宽 + 4B 高）
+          //   必须拿到，否则 cannot 算 scale（DOM 272 / PNG 320 = 0.85）
+          let pngW = 0, pngH = 0
+          try {
+            const b64 = src.replace(/^data:image\/\w+;base64,/, '')
+            if (b64) {
+              const head = atob(b64.slice(0, 40))
+              if (head.slice(1, 4) === 'PNG') {
+                pngW = (head.charCodeAt(16) << 24) | (head.charCodeAt(17) << 16) | (head.charCodeAt(18) << 8) | head.charCodeAt(19)
+                pngH = (head.charCodeAt(20) << 24) | (head.charCodeAt(21) << 16) | (head.charCodeAt(22) << 8) | head.charCodeAt(23)
+              }
+            }
+          } catch { /* ignore */ }
+          return { src, w: Math.round(b.width), h: Math.round(b.height), x: Math.round(b.x), y: Math.round(b.y), pngW: Math.abs(pngW), pngH: Math.abs(pngH) }
+        })
         .filter(o => /^data:image/.test(o.src) && o.w > 0)
       const handle = Array.from(m.querySelectorAll('.slide-button, [class*="slide-button"], [class*="slideButton"]'))
         .map(el => { const b = el.getBoundingClientRect(); return { x: Math.round(b.x + b.width / 2), y: Math.round(b.y + b.height / 2), w: Math.round(b.width), h: Math.round(b.height) } })
         .filter(o => o.w > 10)
       if (!imgs.length || !handle.length) continue
-      return { imgs, handle, text: (m.innerText || '').replace(/\n/g, ' ').slice(0, 80) }
+      // ★ 计算拼图块的「块内图形左偏移」（PNG 像素基准）
+      //   PDD 块 PNG 60x160，图形实际只占 x[10,49]；不减去这 10px 会恒差 8.5px(DOM)
+      let pieceOffsetPng = 0
+      try {
+        const blkImg = imgs.find(i => i.w > 30 && i.w < 100)
+        if (blkImg?.src) {
+          const png = decodePng(blkImg.src.replace(/^data:image\/\w+;base64,/, ''))
+          if (png) { pieceOffsetPng = findPieceOffset(png); blkImg.pieceOffsetPng = pieceOffsetPng }
+        }
+      } catch { /* ignore */ }
+      return { imgs, handle, pieceOffsetPng, text: (m.innerText || '').replace(/\n/g, ' ').slice(0, 80) }
     }
     return null
   })
@@ -527,8 +725,8 @@ if (!IS_IMPORTED) (async () => {
     process.exit(2)
   }
 
-  // 目标 X = 背景图左缘 + 缺口 X - 滑块宽/2（滑块中心对齐缺口中心）
-  const targetX = bg.x + solved.x - (blk?.w || 49) / 2
+  // 目标 X = 滑块把手起点 + 缺口 X（PDD 线性 1:1，2026-10-23 黑盒标定验证）
+  const targetX = handle.x + solved.x
   const result = {
     ok: true, mode: DRY ? 'dry-run' : 'solve', shopKey: SHOP,
     gapX: solved.x, targetX, handleX: handle.x,

@@ -1,0 +1,35 @@
+{
+  "schema": "dsagent/skill-contract@1",
+  "id": "douyin-order",
+  "entry": {
+    "form": "script",
+    "script": "scripts/order.mjs"
+  },
+  "input": {
+    "args": [
+      {
+        "name": "mode",
+        "description": "overview=订单总览(默认)；list=订单列表。detail 尚未实现（接口未确认）"
+      },
+      {
+        "name": "status",
+        "description": "订单状态 tab：all=全部(默认) / topay=待支付 / stock_up=待发货 / on_delivery=已发货 / received=已完成",
+        "flag": "--status"
+      },
+      {
+        "name": "limit",
+        "description": "返回条数上限，默认 20，上限 100"
+      },
+      {
+        "name": "account",
+        "description": "账号 shopKey（可选）；该平台多账号且未绑定时需先向用户确认",
+        "flag": "--account"
+      }
+    ]
+  },
+  "output": {
+    "protocol": "dsagent-result",
+    "resultPrefix": "__DSAGENT_RESULT__",
+    "filesMarker": "---[OUTPUT_FILES]"
+  }
+}

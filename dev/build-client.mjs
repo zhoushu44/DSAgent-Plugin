@@ -52,8 +52,38 @@ const NODE_ALIASES = [
   'node:path',
   'node:crypto',
   'node:child_process',
+  // ★ node:module（createRequire）由 host 半区的 gateway-cache.ts 引入，
+  //   会被 src/client.ts 的传递依赖带进浏览器包；缺它 esbuild 直接报
+  //   "Could not resolve node:module" 并让整个 client 构建失败。
+  'node:module',
   'node:os',
   'node:url',
+  'node:zlib',
+  'node:http',
+  'node:https',
+  'node:net',
+  'node:tls',
+  'node:dns',
+  'node:events',
+  'node:stream',
+  'node:util',
+  'node:tty',
+  'node:assert',
+  'node:buffer',
+  'node:worker_threads',
+  // ★ 裸名（无 node: 前缀）**不能**进 alias 列表：esbuild 的 alias 是子串式替换，
+  //   `--alias:fs=...node-stub.js` 会把 `fs/promises` 也匹配成
+  //   `...node-stub.js/promises` 而报 "Cannot read directory"（实测踩坑）。
+  //   裸名一律通过下方 NODE_BUILTIN_STUBS 的 package.json "browser"/imports 字段处理，
+  //   或干脆标 external —— 浏览器半区不会真的执行它们。
+]
+/** 需要在浏览器包里就地短路的内置模块（裸名形式，puppeteer-core 等 host 依赖会这样 import） */
+const NODE_BUILTIN_STUBS = [
+  'fs', 'path', 'os', 'url', 'events', 'stream', 'util', 'tty', 'process',
+  'http', 'https', 'net', 'tls', 'zlib', 'crypto', 'child_process',
+  'assert', 'buffer', 'string_decoder', 'querystring', 'punycode',
+  'dns', 'dgram', 'readline', 'cluster', 'perf_hooks', 'async_hooks',
+  'v8', 'vm', 'constants', 'timers', 'console', 'string_decoder',
 ]
 
 const entry = resolve(root, 'src/client.ts')
@@ -85,6 +115,9 @@ function esbuildArgs(outputFile) {
     '--external:react',
     '--legal-comments=none',
     ...NODE_ALIASES.map((m) => `--alias:${m}=${stub}`),
+    // 裸名内置模块标 external：浏览器半区不会执行，标外部可避免 esbuild
+    // 试图解析 node_modules 里的 puppeteer-core 等纯 host 依赖
+    ...NODE_BUILTIN_STUBS.map((m) => `--external:${m}`),
     `--outfile=${outputFile}`,
     '--log-level=warning',
   ]

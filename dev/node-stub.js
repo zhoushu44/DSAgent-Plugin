@@ -32,6 +32,8 @@ export const unlink = async () => {}
 export const unlinkSync = noop
 export const copyFile = async () => {}
 export const copyFileSync = noop
+// ★ browser-login.ts（host 半区）用 cpSync 复制浏览器 profile
+export const cpSync = noop
 export const rename = async () => {}
 export const renameSync = noop
 export const stat = async () => ({ isDirectory: () => false, isFile: () => false, mtimeMs: 0, size: 0 })
@@ -112,3 +114,50 @@ export const fileURLToPath = (u) => String(u).replace(/^file:\/\/\/?/, '')
 export const pathToFileURL = (p) => ({ href: `file:///${String(p).replace(/\\/g, '/')}`, toString: () => `file:///${p}` })
 export const URL = globalThis.URL
 export const URLSearchParams = globalThis.URLSearchParams
+
+// ── zlib ─────────────────────────────────────────────────────────────
+// host 半区（gateway-proxy.ts）解响应用；浏览器半区不会真的调用，返回空缓冲即可。
+const emptyBuf = () => new Uint8Array(0)
+export const gzipSync = emptyBuf
+export const gunzipSync = emptyBuf
+export const gzip = emptyBuf
+export const gunzip = emptyBuf
+export const deflateSync = emptyBuf
+export const inflateSync = emptyBuf
+export const deflate = emptyBuf
+export const inflate = emptyBuf
+export const deflateRawSync = emptyBuf
+export const inflateRawSync = emptyBuf
+export const brotliCompressSync = emptyBuf
+export const brotliDecompressSync = emptyBuf
+export const createGzip = () => ({ on: noop, pipe: noop, write: noop, end: noop })
+export const createGunzip = () => ({ on: noop, pipe: noop, write: noop, end: noop })
+export const zlibConstants = {}
+
+// ── dns / net / tls / http（host 半区专用）───────────────────────────
+export const lookup = (_h, cb) => { if (typeof cb === 'function') cb(null, '127.0.0.1', 4); return { on: noop } }
+export const resolve4 = (_h, cb) => { if (typeof cb === 'function') cb(null, []); return { on: noop } }
+export const createConnection = () => ({ on: noop, write: noop, end: noop, destroy: noop })
+export const connect = () => ({ on: noop, write: noop, end: noop, destroy: noop })
+export const request = () => ({ on: noop, write: noop, end: noop, destroy: noop })
+export const get = (_u, cb) => { if (typeof cb === 'function') cb({ on: noop }); return { on: noop } }
+export const createServer = () => ({ on: noop, listen: noop, close: noop })
+
+// ── assert ───────────────────────────────────────────────────────────
+export const ok = () => true
+export const strictEqual = () => true
+export const notStrictEqual = () => true
+export const deepStrictEqual = () => true
+export const equal = () => true
+export const throws = () => true
+export const fail = () => { throw new Error('stub assert.fail') }
+
+// ── module（node:module）─────────────────────────────────────────────
+// gateway-cache.ts 用 createRequire 读 host 侧 JSON；浏览器半区不会执行。
+export const createRequire = () => ((id) => {
+  if (String(id).endsWith('.json')) return {}
+  throw new Error(`node-stub: cannot require ${id} in browser half-zone`)
+})
+
+// ── buffer ───────────────────────────────────────────────────────────
+export const Buffer = globalThis.Buffer

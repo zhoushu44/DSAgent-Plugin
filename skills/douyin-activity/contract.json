@@ -1,0 +1,35 @@
+{
+  "schema": "dsagent/skill-contract@1",
+  "id": "douyin-activity",
+  "entry": {
+    "form": "script",
+    "script": "scripts/activity.mjs"
+  },
+  "input": {
+    "args": [
+      {
+        "name": "mode",
+        "description": "overview=活动总览(默认)；list=可报名活动列表；types=活动类型清单；records=报名记录列表"
+      },
+      {
+        "name": "limit",
+        "description": "返回条数上限，默认 20，上限 100"
+      },
+      {
+        "name": "confirm",
+        "description": "写操作确认（预留）：enroll/quit 等报名操作在本版未实现，必须带 true 才执行（L2 门禁）",
+        "flag": "--confirm"
+      },
+      {
+        "name": "account",
+        "description": "账号 shopKey（可选）；该平台多账号且未绑定时需先向用户确认",
+        "flag": "--account"
+      }
+    ]
+  },
+  "output": {
+    "protocol": "dsagent-result",
+    "resultPrefix": "__DSAGENT_RESULT__",
+    "filesMarker": "---[OUTPUT_FILES]"
+  }
+}

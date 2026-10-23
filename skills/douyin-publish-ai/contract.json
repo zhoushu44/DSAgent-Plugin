@@ -1,0 +1,50 @@
+{
+  "schema": "dsagent/skill-contract@1",
+  "id": "douyin-publish-ai",
+  "entry": {
+    "form": "script",
+    "script": "scripts/ai-publish.mjs"
+  },
+  "input": {
+    "args": [
+      {
+        "name": "mode",
+        "description": "material=上传材料并跑AI识别(默认)：出推荐标题/类目/物料包；config=查AI发品上传配置；check=查能否发品"
+      },
+      {
+        "name": "images",
+        "description": "本地图片路径，多个用英文逗号分隔（material 模式必填；最多 50 张，单张图 ≤5MB）"
+      },
+      {
+        "name": "excel",
+        "description": "选填：规格/价格库存 Excel 文件路径（.csv/.xls/.xlsx，≤1MB），AI 会从中识别 SKU",
+        "flag": "--excel"
+      },
+      {
+        "name": "title",
+        "description": "选填：指定标题（不传则用 AI 推荐）",
+        "flag": "--title"
+      },
+      {
+        "name": "out",
+        "description": "物料包输出目录（默认 artifacts/douyin-publish-ai/）",
+        "flag": "--out"
+      },
+      {
+        "name": "confirm",
+        "description": "提交确认：本技能只产出物料包，真实提交由 douyin-publish-mqs 完成（L2 门禁在该技能）",
+        "flag": "--confirm"
+      },
+      {
+        "name": "account",
+        "description": "账号 shopKey（可选）；该平台多账号且未绑定时需先向用户确认",
+        "flag": "--account"
+      }
+    ]
+  },
+  "output": {
+    "protocol": "dsagent-result",
+    "resultPrefix": "__DSAGENT_RESULT__",
+    "filesMarker": "---[OUTPUT_FILES]"
+  }
+}

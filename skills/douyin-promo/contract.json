@@ -1,0 +1,44 @@
+{
+  "schema": "dsagent/skill-contract@1",
+  "id": "douyin-promo",
+  "entry": {
+    "form": "script",
+    "script": "scripts/promo.mjs"
+  },
+  "input": {
+    "args": [
+      {
+        "name": "mode",
+        "description": "overview=千川推广总览(默认)：广告余额+在投计划数。plans/units/goods/cost 尚未实现（无在投计划，字段未验证）"
+      },
+      {
+        "name": "goods_id",
+        "description": "商品 ID（预留，goods 模式未实现）",
+        "flag": "--goods-id"
+      },
+      {
+        "name": "days",
+        "description": "统计窗口天数（预留，cost 模式未实现），默认 7，上限 90"
+      },
+      {
+        "name": "limit",
+        "description": "返回条数上限（预留），默认 20，上限 100"
+      },
+      {
+        "name": "confirm",
+        "description": "写操作确认（预留）：pause/resume/maxcost/roi 等写操作在本版未实现，必须带 true 才执行（L2 门禁）",
+        "flag": "--confirm"
+      },
+      {
+        "name": "account",
+        "description": "账号 shopKey（可选）；该平台多账号且未绑定时需先向用户确认",
+        "flag": "--account"
+      }
+    ]
+  },
+  "output": {
+    "protocol": "dsagent-result",
+    "resultPrefix": "__DSAGENT_RESULT__",
+    "filesMarker": "---[OUTPUT_FILES]"
+  }
+}

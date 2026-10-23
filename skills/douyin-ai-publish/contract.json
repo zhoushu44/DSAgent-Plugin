@@ -1,0 +1,63 @@
+{
+  "schema": "dsagent/skill-contract@1",
+  "id": "douyin-ai-publish",
+  "entry": {
+    "form": "script",
+    "script": "scripts/ai-publish.mjs"
+  },
+  "input": {
+    "args": [
+      {
+        "name": "mode",
+        "description": "material=上传图/Excel并跑AI识别(默认)；props=查类目必填属性清单；submit=AI填表后点发布(L2，需 --confirm true)"
+      },
+      {
+        "name": "images",
+        "description": "本地图片路径，英文逗号分隔（material/submit 模式必填）"
+      },
+      {
+        "name": "excel",
+        "description": "SKU Excel 文件（.xlsx/.xls/.csv，≤1MB）。表头建议：颜色/规格/价格/库存 —— AI 会自动识别并填入第二级 SKU 表",
+        "flag": "--excel"
+      },
+      {
+        "name": "title",
+        "description": "选填：指定标题；不传则用 AI 推荐候选"
+      },
+      {
+        "name": "category",
+        "description": "类目搜索词（选填）。不传用 title 前 10 字"
+      },
+      {
+        "name": "attrs",
+        "description": "属性值指定（选填，JSON）。如 {\"材质\":\"玻璃\",\"容量\":\"300\"} —— 支持完整候选名或关键词/数字模糊匹配；未指定的必填属性自动选第一个",
+        "flag": "--attrs"
+      },
+      {
+        "name": "skus",
+        "description": "SKU 规格（选填，JSON）。形如 {\"specs\":{\"颜色分类\":[\"红茶\",\"白茶\"]},\"price\":\"12\",\"stock\":\"500\",\"itemNo\":\"SKU001\"} 或 {\"rows\":[{\"颜色分类\":\"红茶\",\"价格\":\"12\",\"库存\":\"500\"}]}。★ 不填且无 Excel 时 SKU 表为空，发布会被「价格必填」拦下",
+        "flag": "--skus"
+      },
+      {
+        "name": "out",
+        "description": "物料包输出目录（默认 artifacts/douyin-ai-publish/）",
+        "flag": "--out"
+      },
+      {
+        "name": "confirm",
+        "description": "L2 门禁：submit 模式必须带 true 才真正点发布；省略只做到 AI 填表完成",
+        "flag": "--confirm"
+      },
+      {
+        "name": "account",
+        "description": "账号 shopKey（可选）；该平台多账号且未绑定时先向用户确认",
+        "flag": "--account"
+      }
+    ]
+  },
+  "output": {
+    "protocol": "dsagent-result",
+    "resultPrefix": "__DSAGENT_RESULT__",
+    "filesMarker": "---[OUTPUT_FILES]"
+  }
+}

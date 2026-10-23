@@ -19,24 +19,28 @@ metadata:
 ## 何时使用
 
 - 用户说「查抖店商品」「抖音小店商品列表」「我上了哪些商品」→ 用本技能
-- 要查**单商品 SKU**（规格组合/价格/库存/预览图）→ `sku` 模式
-- 要拿**单商品详情**（标题/类目/价格带/状态）→ `detail` 模式
-- 要**采集规格池**（规格值 → spec_id，上架前的准备）→ `spec-pool` 模式
+- 要看**各状态商品数**（在售/草稿/审核中/违规）→ `overview` 模式
+- 要按状态筛商品（只看已下架、只看草稿）→ `list` + `--status`
 
 ## 能力
 
 | 模式 | 类型 | 说明 |
 |------|------|------|
-| `overview` | 只读 | 商品总览：在售/未在售计数 + 前 N 条明细（默认） |
-| `list` | 只读 | 商品列表：商品ID/标题/类目/SKU数/价格带/在售状态 |
-| `detail` | 只读 | 单商品详情：标题/类目/主图/价格带/状态 |
-| `sku` | 只读 | 单商品 SKU 全量：规格/价格/库存/预览图 |
-| `spec-pool` | 只读 | 全店规格池采集：遍历商品抽 规格值→spec_id |
-| `offsale` / `onsale` / `delete` | **规划中** | 下架/上架/删除商品（L2，本版不实现） |
+| `overview` | 只读 | 商品总览：各状态计数 + 前 10 条明细（默认） |
+| `list` | 只读 | 商品列表：`product_id`/标题/销量/价格带/状态/审核/类目 |
+
+**本版未实现**（调用会明确返回 `api_error`，不假装支持）：
+
+| 模式 | 缺什么 |
+|------|--------|
+| `detail` | 单商品详情接口未确认（需打开 `/ffa/g/detail` 单独抓包） |
+| `sku` | 单商品 SKU 全量接口未确认 |
+| `spec-pool` | 规格池接口未确认 |
+| `offsale` / `onsale` / `delete` | L2 写操作，规划中 |
 
 ## 前置条件
 
-1. **账号已绑定**：「账号连接」页已绑定**抖音小店**账号（抖店后台 `fxg.jinritemai.com`）。
+1. **账号已绑定**：「账号连接」页已绑定**抖音小店（抖店）**账号（platform=`douyin_shop`，抖店后台 `fxg.jinritemai.com`）。★ 与内容平台 `douyin` 是**两套独立登录态**：抖音账号的 Cookie 进不了抖店后台（实测跳登录页），必须单独扫码登录一次抖店。
 2. **登录态有效**：失效时技能会返回 `token_expired`，引导用户重新登录。
 3. **Chrome 可用**（抖店后台接口需要页面环境取数）。
 
@@ -44,8 +48,8 @@ metadata:
 
 | 参数 | 类型 | 必需 | 说明 |
 |------|------|------|------|
-| `--mode` | string | 否 | overview(默认) / list / detail / sku / spec-pool |
-| `--product-id` | string | 条件 | detail / sku 模式必填 |
+| `--mode` | string | 否 | overview(默认) / list |
+| `--status` | string | 否 | onSale=在售(默认) / offSale=已下架 / draft=草稿 / audit=审核中 / soldOut=已售罄 |
 | `--limit` | number | 否 | 返回条数上限，默认 20，上限 100 |
 | `--account` | string | 否 | 账号 shopKey；多账号未绑定时先向用户确认 |
 
@@ -55,10 +59,25 @@ metadata:
 |------|------|
 | `ok` | 是否成功 |
 | `mode` | 实际执行的模式 |
-| `summary` | overview 模式：`{onSale, notOnSale, totalShown}` |
-| `items` | 商品明细数组（结构随 mode 变化） |
-| `sku` | sku 模式：规格/价格/库存/预览图数组 |
+| `goodsCount` | `{onsale, draft, audit, forbidden, unpass, unpassNew, sellOut}` 各状态计数 |
+| `total` | 在售商品总数 |
+| `items` | 商品明细数组 |
 | `text` | 面向用户的中文文案，原样转述 |
+
+`items[]` 字段：
+
+```
+id            19 位字符串商品 ID（product_id）
+name / img    标题 / 主图 URL
+sellNum       销量
+priceLower / priceHigher   SKU 价格带，**已由分换算为元**
+marketPrice / discountPrice 市场价 / 折扣价（元）
+status / checkStatus / draftStatus   商品状态 / 审核状态 / 草稿状态
+cates         [first_cid, second_cid, third_cid] 类目
+specId        规格 ID
+createTime / updateTime
+productUrl    商品前台链接
+```
 
 ## 用法
 
@@ -150,7 +169,7 @@ node {baseDir}/scripts/goods.mjs --mode spec-pool
 
 ### 浏览器环境
 
-- `profileDir('douyin', shopKey)` 定位账号独立 profile；
+- `profileDir('douyin_shop', shopKey)` 定位账号独立 profile（与内容平台 `douyin` 分开）；
 - `tryAcquireProfile` / `releaseProfile` / `clearProfileLocks` 保证同一账号
   不会并发起两个浏览器；
 - `headless: false` + `--no-sandbox --disable-blink-features=AutomationControlled`

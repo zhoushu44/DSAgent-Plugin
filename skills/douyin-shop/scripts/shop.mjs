@@ -27,6 +27,9 @@ const PLUGIN_ROOT = process.env.DSAGENT_PLUGIN_ROOT || join(HERE, '..', '..', '.
 // Windows 下绝对路径必须转 file:// URL 才能被 ESM loader 接受
 const PURL = (p) => pathToFileURL(p).href
 
+// 抖店风控绕过（hook XHR/fetch 让风控检测请求不发出去，不过滑块）
+const { injectRiskBypass } = await import(PURL(join(PLUGIN_ROOT, 'skills', '_shared', 'douyin-risk-bypass.mjs')))
+
 // ── 参数解析 ──────────────────────────────────────────────
 function parseArgs(argv) {
   const out = {}
@@ -71,10 +74,11 @@ try {
   fail('api_error', `无法加载插件库（${PLUGIN_ROOT}）：${e.message}`)
 }
 
-// 抖店后台与 douyin 同平台凭证（credentialPlatform 同源，域为 .jinritemai.com）
-const accounts = store.listAccounts().filter((a) => a.platform === 'douyin' && a.status !== 'invalid')
+// 抖店后台用独立平台键 douyin_shop（与内容平台 douyin 分开管理，
+// 避免「发抖音视频」和「抖店经营查询」互相抢号；依据 src/mqs-publish.ts 的 platform 设计）
+const accounts = store.listAccounts().filter((a) => a.platform === 'douyin_shop' && a.status !== 'invalid')
 if (!accounts.length) {
-  fail('not_bound', '未找到抖音账号。请到「账号连接」页面添加抖音小店账号（抖店后台 fxg.jinritemai.com）。')
+  fail('not_bound', '未找到抖音小店账号。请到「账号连接」页面添加「抖店」账号（platform=douyin_shop，需有抖店商家权限）。')
 }
 let account
 if (ACCOUNT) {
@@ -91,9 +95,9 @@ if (ACCOUNT) {
     { accounts: accounts.map((a) => ({ shop_key: a.shop_key, nickname: a.nickname })) })
 }
 
-const dir = profileDir('douyin', account.shop_key)
+const dir = profileDir('douyin_shop', account.shop_key)
 if (!tryAcquireProfile(dir, 'douyin-shop')) {
-  fail('api_error', '抖音的浏览器环境正被其他任务占用，请稍后重试。')
+  fail('api_error', '抖店的浏览器环境正被其他任务占用，请稍后重试。')
 }
 clearProfileLocks(dir)
 
@@ -112,6 +116,7 @@ try {
     args: ['--no-sandbox', '--disable-blink-features=AutomationControlled', '--window-size=1400,900'],
   })
   const page = (await browser.pages())[0] || await browser.newPage()
+  await injectRiskBypass(page)   // 风控绕过：拦掉检测请求，不过滑块
 
   // 抖店后台域 + 抖音主域双域注入（与 _douyin_probe 一致）
   const cookieList = Object.entries(account.cookies || {})
@@ -125,16 +130,20 @@ try {
   const cdp = await page.target().createCDPSession()
   await cdp.send('Network.enable')
 
-  // ── APIS：接口 path 片段 → key ───────────────────────────
-  // TODO(待探测回填)：跑 node skills/_douyin_probe/probe.mjs，从 probe-out/hits-*.json
-  //   里按响应内容定位下列用途的真实接口，把 'TODO:...' 换成 path 片段（如 'byteshop/xxx/list'）。
-  //   含 'TODO' 的条目不参与匹配（见 ACTIVE_APIS），回填后自动生效。
+  // ── APIS：接口 path 片段 → key（已由 _douyin_probe/probe8 实测回填）──────
+  // 判据：抖店域 st===0；千川域 status_code===0（见 isOk 分支）。
   const APIS = [
-    ['shopInfo',      'TODO:店铺信息/等级接口 path 片段'],
-    ['flow',          'TODO:店铺流量接口 path 片段'],
-    ['score',         'TODO:店铺体验分接口 path 片段'],
-    ['goodsOverview', 'TODO:商品数据总览接口 path 片段'],
-    ['goodsList',     'TODO:商品数据明细接口 path 片段'],
+    // 店铺经营首页（等级/今日昨日概况）
+    ['shopInfo',      '/pc/api/home/homepage'],
+    // 店铺指标
+    ['shopMetrics',   '/byteshop/shop_util/mertrics'],
+    // 体验分（governance 域）
+    ['score',         '/governance/shop/experiencescore/getOverviewV10'],
+    ['scoreTrend',    '/governance/shop/experiencescore/getTrendByVersion'],
+    ['scoreSub',      '/governance/shop/experiencescore/getSubScoreMetricsV10'],
+    // 商品数据（与 douyin-goods 同源，用于 overview 的「成交最高商品」）
+    ['goodsList',     '/product/tproduct/list'],
+    ['goodsCount',    '/product/tproduct/aggsProductCount'],
   ]
   const ACTIVE_APIS = APIS.filter(([, frag]) => frag && !String(frag).startsWith('TODO'))
 
@@ -157,17 +166,18 @@ try {
       if (!j) return
       const rec = { key: hit[0], url: u.slice(0, 300), status: e.response.status, data: j }
       globalThis.__HITS.push(rec)
-      // 抖店响应体统一 {st, code, msg, data}；st===0 / code==='0' 为成功
-      const okCode = j.st === 0 || j.code === 0 || j.code === '0' || j.success === true
-      if (okCode) byApi[hit[0]] = j.data ?? j
+      // 抖店域判据 st===0 / code===0；千川域判据 status_code===0
+      const isOk = j.st === 0 || j.code === 0 || j.code === '0'
+        || j.status_code === 0 || j.success === true
+      if (isOk) byApi[hit[0]] = j.data ?? j
     } catch { /* 单条失败不阻断 */ }
   })
 
-  // 打开抖店后台页面，让页面自己发数据请求
+  // 打开抖店后台页面，让页面自己发数据请求（路由由 probe7 从菜单 DOM 实测）
   const PAGES = [
-    'https://fxg.jinritemai.com/ffa/',
-    'https://fxg.jinritemai.com/ffa/shop',
-    'https://fxg.jinritemai.com/ffa/data',
+    'https://fxg.jinritemai.com/ffa/mshop/homepage/index',   // 经营首页 → homepage/mertrics
+    'https://fxg.jinritemai.com/ffa/eco/experience-score',   // 体验分 → governance/*
+    'https://fxg.jinritemai.com/ffa/g/list',                 // 商品 → tproduct/*
   ]
   for (const u of PAGES) {
     try {
@@ -195,60 +205,92 @@ try {
       { mode: MODE, stub: true, pages: PAGES, hits: 0, activeApis: ACTIVE_APIS.map(([k, f]) => `${k}=${f}`) })
   }
 
-  // ── 解析 ────────────────────────────────────────────────
-  // TODO(待探测回填)：以下字段映射需按真实响应结构调整
+  // ── 解析（字段依据 _douyin_probe/API-FINDINGS.md 与实测响应）────────
   const shopInfo = byApi.shopInfo || null
-  const flow = byApi.flow || null
-  const score = byApi.score || null
-  const gOverview = byApi.goodsOverview || null
-  const gList = byApi.goodsList?.list || byApi.goodsList?.items || []
+  const shopMetrics = byApi.shopMetrics || null
+  const score = byApi.score || null            // getOverviewV10
+  const scoreSub = byApi.scoreSub || null      // getSubScoreMetricsV10
+  const gCount = byApi.goodsCount || null      // aggsProductCount
+  const gList = byApi.goodsList?.list || byApi.goodsList?.items || byApi.goodsList || []
+  const gArr = Array.isArray(gList) ? gList : []
 
-  const goodsItems = gList.slice(0, LIMIT).map((g) => ({
-    id: g.id ?? g.product_id ?? g.productId ?? null,
-    name: g.name ?? g.title ?? '',
-    // TODO(待探测回填)：按真实字段名调整下列取值
-    uv: g.uv ?? null,
-    payAmt: g.pay_amount ?? g.payAmt ?? null,
-    payCnt: g.pay_count ?? g.payCnt ?? null,
-    vcr: g.pay_uv_rate ?? g.vcr ?? null,
+  // 金额一律「分 → 元」
+  const yuan = (v) => (v == null || v === '') ? null : (Number(v) / 100)
+  const fmtYuan = (v) => { const y = yuan(v); return y == null ? '—' : y.toFixed(2) }
+
+  const goodsItems = gArr.slice(0, LIMIT).map((g) => ({
+    id: g.product_id ?? g.id ?? null,
+    name: g.name ?? '',
+    img: g.img ?? null,
+    sellNum: g.sell_num ?? null,
+    priceLower: yuan(g.price_lower),          // 元
+    priceHigher: yuan(g.price_higher),        // 元
+    status: g.status ?? null,
+    checkStatus: g.check_status ?? null,
+    cates: [g.first_cid, g.second_cid, g.third_cid].filter((v) => v != null),
+    createTime: g.create_time ?? null,
+    updateTime: g.update_time ?? null,
+  }))
+
+  // 体验分：grow_score_info.grow_shop_score；子项在 scoreSub.grow_score_metric_info
+  const growInfo = score?.grow_score_info || null
+  const shopScore = growInfo?.grow_shop_score ?? null
+  const shopName = scoreSub?.shop_name || shopMetrics?.shop_name || null
+  const subMetrics = (scoreSub?.grow_score_metric_info?.grow_score_metrics || []).map((m) => ({
+    node: m.experience_node,
+    title: m.title,
+    value: m.value?.value_figure ?? null,
+    valueType: m.value?.value_type ?? null,
+    decimal: m.value?.decimal_places ?? 0,
+    outStandard: m.metric_out_standard ?? null,
   }))
 
   const out = { ok: true, mode: MODE, shopKey: account.shop_key, items: [] }
   const lines = []
 
-  if (MODE === 'overview' || MODE === 'flow') {
-    out.flow = flow ? { uv: flow.uv ?? null, pv: flow.pv ?? null, payAmt: flow.pay_amount ?? null, payCnt: flow.pay_count ?? null } : null
-    if (MODE === 'flow') {
-      lines.push('店铺流量：')
-      lines.push(`  访客(uv)：${out.flow?.uv ?? '—'}`)
-      lines.push(`  浏览量(pv)：${out.flow?.pv ?? '—'}`)
-      lines.push(`  成交金额：${out.flow?.payAmt ?? '—'} | 成交订单：${out.flow?.payCnt ?? '—'}`)
-      out.text = lines.join('\n')
-    }
-  }
-
   if (MODE === 'overview' || MODE === 'score') {
-    out.score = score || null
+    out.score = {
+      shopName,
+      category: score?.category ?? scoreSub?.category ?? null,
+      score: shopScore,
+      yesterday: growInfo?.grow_score_yesterday_info?.grow_score_yesterday ?? null,
+      scoreType: score?.score_type ?? null,
+      doneDate: score?.done_info?.done_date ?? null,
+      shopOpenDays: growInfo?.shop_open_days ?? null,
+      isStandardOut: growInfo?.is_metric_standard_out ?? null,
+      subMetrics,
+    }
     if (MODE === 'score') {
-      // TODO(待探测回填)：按真实体验分字段调整
-      lines.push('店铺体验分（服务数据）：')
-      lines.push(`  商品体验：${score?.product_experience ?? '—'}`)
-      lines.push(`  物流体验：${score?.logistics_experience ?? '—'}`)
-      lines.push(`  服务体验：${score?.service_experience ?? '—'}`)
-      lines.push(`  综合体验分：${score?.shop_experience ?? '—'}`)
+      lines.push('店铺体验分：')
+      lines.push(`  店铺：${shopName ?? '—'}${out.score.category ? `（${out.score.category}）` : ''}`)
+      lines.push(`  当前体验分：${shopScore ?? '—'}${out.score.yesterday != null ? `（昨日 ${out.score.yesterday}）` : ''}`)
+      lines.push(`  开店天数：${out.score.shopOpenDays ?? '—'} | 数据日期：${out.score.doneDate ?? '—'}`)
+      if (subMetrics.length) {
+        lines.push('  子项指标：')
+        for (const m of subMetrics.slice(0, 12)) {
+          const dec = m.decimal || 0
+          const val = m.value == null ? '—' : Number(m.value).toFixed(dec)
+          lines.push(`    · ${m.title}：${val}${m.outStandard != null ? `（标准 ${m.outStandard}）` : ''}`)
+        }
+      }
       out.text = lines.join('\n') || '店铺体验分：暂无数据'
     }
   }
 
   if (MODE === 'overview' || MODE === 'goods') {
-    out.goodsOverview = gOverview || null
+    out.goodsCount = gCount ? {
+      onsale: gCount.onsale ?? 0, draft: gCount.draft ?? 0, audit: gCount.audit ?? 0,
+      forbidden: gCount.forbidden ?? 0, unpass: gCount.unpass ?? 0, sellOut: gCount.sell_out_new ?? 0,
+    } : null
     out.goods = goodsItems
     out.items = goodsItems
     if (MODE === 'goods') {
       out.text = goodsItems.length
-        ? `商品数据明细（${goodsItems.length} 个商品）：\n` + goodsItems.map((g, i) =>
-            `  ${i + 1}. [${g.id}] ${String(g.name).slice(0, 24)}`
-            + `\n     访客=${g.uv ?? '—'} 成交=${g.payAmt ?? '—'}元 订单=${g.payCnt ?? '—'} 转化率=${g.vcr ?? '—'}`
+        ? `商品数据（${goodsItems.length} 个，按页面前 ${LIMIT} 条）：\n`
+          + goodsItems.map((g, i) =>
+            `  ${i + 1}. [${g.id}] ${String(g.name).slice(0, 26)}`
+            + `\n     销量=${g.sellNum ?? '—'} 价格带=${g.priceLower ?? '—'}~${g.priceHigher ?? '—'} 元`
+            + `\n     状态=${g.status ?? '—'} 审核=${g.checkStatus ?? '—'} 类目=${g.cates.join('/') || '—'}`
           ).join('\n')
         : '商品数据：暂无明细（接口未返回或页面未加载完）'
     }
@@ -257,17 +299,21 @@ try {
   if (MODE === 'overview') {
     lines.length = 0
     lines.push('店铺经营总览：')
-    if (shopInfo) lines.push(`  店铺：${shopInfo.name ?? '—'}${shopInfo.level ? `（${shopInfo.level}）` : ''}`)
-    if (out.flow) lines.push(`  访客 ${out.flow.uv ?? '—'} | 浏览量 ${out.flow.pv ?? '—'}`)
+    if (shopName) lines.push(`  店铺：${shopName}${out.score?.category ? `（${out.score.category}）` : ''}`)
+    if (shopScore != null) lines.push(`  体验分：${shopScore}${out.score?.yesterday != null ? `（昨日 ${out.score.yesterday}）` : ''}`)
+    if (out.goodsCount) {
+      lines.push(`  商品：在售 ${out.goodsCount.onsale} | 草稿 ${out.goodsCount.draft} | 审核中 ${out.goodsCount.audit}`
+        + ` | 违规 ${out.goodsCount.forbidden} | 未通过 ${out.goodsCount.unpass}`)
+    }
     if (goodsItems.length) {
-      const top = goodsItems.slice().sort((a, b) => Number(b.payAmt || 0) - Number(a.payAmt || 0))[0]
-      lines.push(`  成交金额最高商品：[${top.id}] ${String(top.name).slice(0, 24)}（${top.payAmt ?? '—'}元 / ${top.payCnt ?? '—'}单）`)
+      const top = goodsItems.slice().sort((a, b) => Number(b.sellNum || 0) - Number(a.sellNum || 0))[0]
+      lines.push(`  销量最高商品：[${top.id}] ${String(top.name).slice(0, 24)}（销量 ${top.sellNum ?? '—'}，价格带 ${top.priceLower ?? '—'}~${top.priceHigher ?? '—'} 元）`)
     }
     out.text = lines.join('\n')
   }
 
-  if (!['overview', 'flow', 'score', 'goods'].includes(MODE)) {
-    fail('api_error', `未知 mode：${MODE}。可用：overview / flow / score / goods`, { mode: MODE })
+  if (!['overview', 'score', 'goods'].includes(MODE)) {
+    fail('api_error', `未知 mode：${MODE}。可用：overview / score / goods`, { mode: MODE })
   }
 
   emit(out)

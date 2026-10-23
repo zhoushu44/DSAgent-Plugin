@@ -29,6 +29,9 @@ const PLUGIN_ROOT = process.env.DSAGENT_PLUGIN_ROOT || join(HERE, '..', '..', '.
 // Windows 下绝对路径必须转 file:// URL 才能被 ESM loader 接受
 const PURL = (p) => pathToFileURL(p).href
 
+// 抖店风控绕过（hook XHR/fetch 让风控检测请求不发出去，不过滑块）
+const { injectRiskBypass } = await import(PURL(join(PLUGIN_ROOT, 'skills', '_shared', 'douyin-risk-bypass.mjs')))
+
 // ── 参数解析 ──────────────────────────────────────────────
 function parseArgs(argv) {
   const out = {}
@@ -48,6 +51,8 @@ const truthy = (v) => String(v ?? '').trim().toLowerCase() === 'true'
 const MODE = (ARGS.mode || 'overview').trim()
 const PRODUCT_ID = (ARGS['product-id'] || ARGS.productId || ARGS.goods_id || '').trim()
 const LIMIT = Math.min(100, Math.max(1, parseInt(ARGS.limit || '20', 10) || 20))
+// status/tab：onSale=在售(默认) / offSale=已下架 / draft=草稿 / audit=审核中 / soldOut=已售罄
+const STATUS = (ARGS.status || ARGS.tab || '').trim()
 const ACCOUNT = (ARGS.account || '').trim()
 
 // 必须是**单行** JSON：宿主按行读取 __DSAGENT_RESULT__ 协议
@@ -73,9 +78,10 @@ try {
   fail('api_error', `无法加载插件库（${PLUGIN_ROOT}）：${e.message}`)
 }
 
-const accounts = store.listAccounts().filter((a) => a.platform === 'douyin' && a.status !== 'invalid')
+// 抖店后台用独立平台键 douyin_shop（与内容平台 douyin 两套独立登录态）
+const accounts = store.listAccounts().filter((a) => a.platform === 'douyin_shop' && a.status !== 'invalid')
 if (!accounts.length) {
-  fail('not_bound', '未找到抖音账号。请到「账号连接」页面添加抖音小店账号（抖店后台 fxg.jinritemai.com）。')
+  fail('not_bound', '未找到抖音小店账号。请到「账号连接」页面添加「抖店」账号（platform=douyin_shop，需有抖店商家权限）。')
 }
 let account
 if (ACCOUNT) {
@@ -92,16 +98,20 @@ if (ACCOUNT) {
     { accounts: accounts.map((a) => ({ shop_key: a.shop_key, nickname: a.nickname })) })
 }
 
-const dir = profileDir('douyin', account.shop_key)
+const dir = profileDir('douyin_shop', account.shop_key)
 if (!tryAcquireProfile(dir, 'douyin-goods')) {
-  fail('api_error', '抖音的浏览器环境正被其他任务占用，请稍后重试。')
+  fail('api_error', '抖店的浏览器环境正被其他任务占用，请稍后重试。')
 }
 clearProfileLocks(dir)
 
 // 参数前置校验（未过校验不必起浏览器）
-if ((MODE === 'detail' || MODE === 'sku') && !PRODUCT_ID) {
+// detail / sku / spec-pool 尚未实现，提前拒掉，避免白开浏览器
+if (['detail', 'sku', 'spec-pool'].includes(MODE)) {
   releaseProfile(dir)
-  fail('api_error', `${MODE} 模式需要 --product-id 参数。`, { mode: MODE })
+  fail('api_error',
+    `mode=${MODE} 尚未实现：单商品详情 / SKU / 规格池接口未在探测中确认`
+    + `（需打开 /ffa/g/detail 页面单独抓包）。当前可用：overview / list。`,
+    { mode: MODE, available: ['overview', 'list'] })
 }
 
 let browser = null
@@ -119,6 +129,7 @@ try {
     args: ['--no-sandbox', '--disable-blink-features=AutomationControlled', '--window-size=1400,900'],
   })
   const page = (await browser.pages())[0] || await browser.newPage()
+  await injectRiskBypass(page)   // 风控绕过：拦掉检测请求，不过滑块
 
   // 抖店后台域 + 抖音主域双域注入（与 _douyin_probe 一致）
   const cookieList = Object.entries(account.cookies || {})
@@ -132,16 +143,14 @@ try {
   const cdp = await page.target().createCDPSession()
   await cdp.send('Network.enable')
 
-  // ── APIS：接口 path 片段 → key ───────────────────────────
-  // TODO(待探测回填)：跑 node skills/_douyin_probe/probe.mjs，从 probe-out/hits-*.json
-  //   里按响应内容定位下列用途的真实接口，把 'TODO:...' 换成 path 片段。
-  //   含 'TODO' 的条目不参与匹配（见 ACTIVE_APIS），回填后自动生效。
+  // ── APIS：接口 path 片段 → key（已由 _douyin_probe/probe5 实测回填）──────
+  // 判据：抖店域 st===0
   const APIS = [
-    ['goodsOverview', 'TODO:商品总览接口 path 片段'],
-    ['goodsList',     'TODO:商品列表接口 path 片段'],
-    ['goodsDetail',   'TODO:单商品详情接口 path 片段'],
-    ['goodsSku',      'TODO:单商品 SKU 全量接口 path 片段'],
-    ['specPool',      'TODO:规格池接口 path 片段'],
+    ['goodsCount',  '/product/tproduct/aggsProductCount'],   // 各状态计数
+    ['goodsList',   '/product/tproduct/list'],               // 商品列表（主接口）
+    ['productGroup','/product/tproduct/getProductGroupList'],// 商品分组
+    ['categoryOpt', '/product/tproduct/categoryOptionsN'],   // 类目选项
+    ['freightTpl',  '/freight/template/getFreightTemplateList'], // 运费模板
   ]
   const ACTIVE_APIS = APIS.filter(([, frag]) => frag && !String(frag).startsWith('TODO'))
 
@@ -164,19 +173,19 @@ try {
       if (!j) return
       const rec = { key: hit[0], url: u.slice(0, 300), status: e.response.status, data: j }
       globalThis.__HITS.push(rec)
-      const okCode = j.st === 0 || j.code === 0 || j.code === '0' || j.success === true
-      if (okCode) byApi[hit[0]] = j.data ?? j
+      // 抖店域判据 st===0 / code===0
+      const isOk = j.st === 0 || j.code === 0 || j.code === '0'
+        || j.status_code === 0 || j.success === true
+      if (isOk) byApi[hit[0]] = j.data ?? j
     } catch { /* 单条失败不阻断 */ }
   })
 
-  // 打开抖店后台商品页，让页面自己发数据请求
+  // 打开抖店后台商品页，让页面自己发数据请求（路由由 probe7 从菜单 DOM 实测）
+  // tab 参数实测值：onSale=在售 / offSale=已下架 / draft=草稿 / audit=审核中 / soldOut=已售罄
+  const TAB = (STATUS && STATUS !== 'all') ? STATUS : 'onSale'
   const PAGES = [
-    'https://fxg.jinritemai.com/ffa/g/list',
-    'https://fxg.jinritemai.com/ffa/g/list?status=1',
+    `https://fxg.jinritemai.com/ffa/g/list?tab=${encodeURIComponent(TAB)}`,
   ]
-  if (MODE === 'detail' || MODE === 'sku') {
-    PAGES.unshift(`https://fxg.jinritemai.com/ffa/g/detail?id=${encodeURIComponent(PRODUCT_ID)}`)
-  }
   for (const u of PAGES) {
     try {
       log('open ' + u)
@@ -203,98 +212,77 @@ try {
       { mode: MODE, stub: true, pages: PAGES, hits: 0, activeApis: ACTIVE_APIS.map(([k, f]) => `${k}=${f}`) })
   }
 
-  // ── 解析 ────────────────────────────────────────────────
-  // TODO(待探测回填)：以下字段映射需按真实响应结构调整
-  const gOverview = byApi.goodsOverview || null
-  const gList = byApi.goodsList?.list || byApi.goodsList?.items || byApi.goodsList?.products || []
-  const gDetail = byApi.goodsDetail || null
-  const gSku = byApi.goodsSku?.skus || byApi.goodsSku?.list || []
-  const specPool = byApi.specPool || null
+  // ── 解析（字段依据 _douyin_probe/API-FINDINGS.md 与实测响应）────────
+  const gCount = byApi.goodsCount || null       // aggsProductCount
+  const gListRaw = byApi.goodsList
+  const gArr = Array.isArray(gListRaw) ? gListRaw
+    : Array.isArray(gListRaw?.list) ? gListRaw.list
+    : Array.isArray(gListRaw?.items) ? gListRaw.items : []
+  const groups = byApi.productGroup || null
 
-  const listItems = gList.slice(0, LIMIT).map((g) => ({
-    // TODO(待探测回填)：按真实字段名调整
+  // 金额一律「分 → 元」
+  const yuan = (v) => (v == null || v === '') ? null : (Number(v) / 100)
+
+  const listItems = gArr.slice(0, LIMIT).map((g) => ({
     id: g.product_id ?? g.id ?? null,
     name: g.name ?? g.title ?? '',
-    category: g.category ?? g.category_name ?? null,
-    skuCount: g.sku_count ?? null,
-    priceRange: g.price_range ?? g.price ?? null,
-    status: g.status ?? g.product_status ?? null,
+    img: g.img ?? null,
+    sellNum: g.sell_num ?? null,
+    priceLower: yuan(g.price_lower),
+    priceHigher: yuan(g.price_higher),
+    marketPrice: yuan(g.market_price),
+    discountPrice: yuan(g.discount_price),
+    status: g.status ?? null,
+    checkStatus: g.check_status ?? null,
+    draftStatus: g.draft_status ?? null,
+    cates: [g.first_cid, g.second_cid, g.third_cid].filter((v) => v != null),
+    specId: g.spec_id ?? null,
+    createTime: g.create_time ?? null,
+    updateTime: g.update_time ?? null,
+    productUrl: g.product_url ?? null,
   }))
 
   const out = { ok: true, mode: MODE, shopKey: account.shop_key, items: [] }
   const lines = []
 
-  if (MODE === 'overview') {
-    const onSale = listItems.filter((g) => String(g.status) === '1' || g.status === 'online' || g.status === 1).length
-    out.summary = {
-      onSale: gOverview?.on_sale ?? onSale ?? null,
-      notOnSale: gOverview?.off_sale ?? null,
-      totalShown: listItems.length,
-    }
+  if (MODE === 'overview' || MODE === 'list') {
+    out.goodsCount = gCount ? {
+      onsale: gCount.onsale ?? 0, draft: gCount.draft ?? 0, audit: gCount.audit ?? 0,
+      forbidden: gCount.forbidden ?? 0, unpass: gCount.unpass ?? 0,
+      unpassNew: gCount.unpass_new ?? 0, sellOut: gCount.sell_out_new ?? 0,
+    } : null
+    out.total = gCount ? (gCount.onsale ?? 0) : gArr.length
     out.items = listItems
-    out.goodsOverview = gOverview
-    lines.push('商品总览：')
-    lines.push(`  在售：${out.summary.onSale ?? '—'} | 未在售：${out.summary.notOnSale ?? '—'}`)
+    if (groups) out.groups = groups
+
+    const head = MODE === 'overview' ? '商品总览：' : `商品列表（${listItems.length} 条）：`
+    lines.push(head)
+    if (gCount) {
+      lines.push(`  在售 ${gCount.onsale ?? 0} | 草稿 ${gCount.draft ?? 0} | 审核中 ${gCount.audit ?? 0}`
+        + ` | 违规 ${gCount.forbidden ?? 0} | 未通过 ${gCount.unpass ?? 0}`
+        + ` | 已售罄 ${gCount.sell_out_new ?? 0}`)
+    }
     if (listItems.length) {
-      lines.push(`  前 ${listItems.length} 条：`)
-      listItems.slice(0, 10).forEach((g, i) => {
-        lines.push(`    ${i + 1}. [${g.id}] ${String(g.name).slice(0, 30)}${g.priceRange ? `（${g.priceRange}）` : ''}`)
+      lines.push('')
+      listItems.slice(0, MODE === 'overview' ? 10 : LIMIT).forEach((g, i) => {
+        lines.push(`  ${i + 1}. [${g.id}] ${String(g.name).slice(0, 30)}`)
+        lines.push(`     销量=${g.sellNum ?? '—'} 价格带=${g.priceLower ?? '—'}~${g.priceHigher ?? '—'} 元`
+          + ` 状态=${g.status ?? '—'} 审核=${g.checkStatus ?? '—'}`)
       })
     }
-    out.text = lines.join('\n') || '商品总览：暂无数据'
+    out.text = lines.join('\n') || (MODE === 'overview' ? '商品总览：暂无数据' : '商品列表：暂无数据')
   }
 
-  if (MODE === 'list') {
-    out.items = listItems
-    out.text = listItems.length
-      ? `商品列表（${listItems.length} 条）：\n` + listItems.map((g, i) =>
-          `  ${i + 1}. [${g.id}] ${String(g.name).slice(0, 30)}`
-          + `\n     类目=${g.category ?? '—'} SKU数=${g.skuCount ?? '—'} 价格=${g.priceRange ?? '—'} 状态=${g.status ?? '—'}`
-        ).join('\n')
-      : '商品列表：暂无数据'
+  // detail / sku / spec-pool：所需接口未在探测中确认，明确失败，不假装支持
+  if (MODE === 'detail' || MODE === 'sku' || MODE === 'spec-pool') {
+    fail('api_error',
+      `mode=${MODE} 尚未实现：单商品详情 / SKU / 规格池接口未在探测中确认`
+      + `（需打开 /ffa/g/detail 页面单独抓包）。当前可用：overview / list。`,
+      { mode: MODE, available: ['overview', 'list'] })
   }
 
-  if (MODE === 'detail') {
-    out.detail = gDetail ? {
-      id: gDetail.product_id ?? gDetail.id ?? PRODUCT_ID,
-      name: gDetail.name ?? gDetail.title ?? '',
-      category: gDetail.category ?? null,
-      images: gDetail.images ?? gDetail.imgs ?? null,
-      priceRange: gDetail.price_range ?? null,
-      status: gDetail.status ?? null,
-    } : null
-    out.text = out.detail
-      ? `商品详情 [${out.detail.id}] ${out.detail.name}\n  类目=${out.detail.category ?? '—'} 价格=${out.detail.priceRange ?? '—'} 状态=${out.detail.status ?? '—'}`
-      : `商品 ${PRODUCT_ID}：暂无详情（接口未返回）`
-  }
-
-  if (MODE === 'sku') {
-    out.productId = PRODUCT_ID
-    out.sku = gSku.map((s) => ({
-      // TODO(待探测回填)：按真实字段名调整
-      skuId: s.sku_id ?? s.id ?? null,
-      spec: s.spec ?? s.spec_name ?? null,
-      price: s.price ?? null,
-      stock: s.stock ?? null,
-      image: s.image ?? null,
-    }))
-    out.items = out.sku
-    out.text = out.sku.length
-      ? `商品 ${PRODUCT_ID} SKU（${out.sku.length} 个）：\n` + out.sku.map((s, i) =>
-          `  ${i + 1}. [${s.skuId}] ${String(s.spec ?? '—').slice(0, 30)} 价格=${s.price ?? '—'} 库存=${s.stock ?? '—'}`
-        ).join('\n')
-      : `商品 ${PRODUCT_ID}：暂无 SKU 数据`
-  }
-
-  if (MODE === 'spec-pool') {
-    out.specPool = specPool || null
-    out.text = specPool
-      ? '规格池采集完成，详见 specPool 字段。'
-      : '规格池：暂无数据（接口未返回）'
-  }
-
-  if (!['overview', 'list', 'detail', 'sku', 'spec-pool'].includes(MODE)) {
-    fail('api_error', `未知 mode：${MODE}。可用：overview / list / detail / sku / spec-pool`, { mode: MODE })
+  if (!['overview', 'list'].includes(MODE)) {
+    fail('api_error', `未知或未实现的 mode：${MODE}。当前可用：overview / list`, { mode: MODE })
   }
 
   emit(out)

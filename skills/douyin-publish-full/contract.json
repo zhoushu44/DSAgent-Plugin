@@ -1,0 +1,56 @@
+{
+  "schema": "dsagent/skill-contract@1",
+  "id": "douyin-publish-full",
+  "entry": {
+    "form": "script",
+    "script": "scripts/publish-full.mjs"
+  },
+  "input": {
+    "args": [
+      {
+        "name": "mode",
+        "description": "preview=预览(默认，零写操作)；publish=真正发布(L2，需 --confirm true)"
+      },
+      {
+        "name": "product_file",
+        "description": "统一商品 JSON 文件路径（优先于 --product）",
+        "flag": "--product-file"
+      },
+      {
+        "name": "product",
+        "description": "统一商品 JSON 字符串：{title, images[], detailImages?, category?, price?, stock?, specs?, skus?, attributes?, itemNo?}",
+        "flag": "--product"
+      },
+      {
+        "name": "category",
+        "description": "类目关键词（选填）。不传则用 product.category；再没有则用 title 前 10 字搜",
+        "flag": "--category"
+      },
+      {
+        "name": "cate_id",
+        "description": "直接指定叶子类目 ID（选填，跳过搜索；可用 --mode cate 查询）",
+        "flag": "--cate-id"
+      },
+      {
+        "name": "cate_query",
+        "description": "类目查询词（--mode cate 时用）",
+        "flag": "--cate-query"
+      },
+      {
+        "name": "confirm",
+        "description": "L2 门禁：必须显式传 true 才真正发布；省略只返回预览",
+        "flag": "--confirm"
+      },
+      {
+        "name": "account",
+        "description": "账号 shopKey（可选）；该平台多账号且未绑定时先向用户确认",
+        "flag": "--account"
+      }
+    ]
+  },
+  "output": {
+    "protocol": "dsagent-result",
+    "resultPrefix": "__DSAGENT_RESULT__",
+    "filesMarker": "---[OUTPUT_FILES]"
+  }
+}
