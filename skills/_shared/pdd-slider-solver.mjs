@@ -184,6 +184,53 @@ export async function solveSliderInPage(page, shopKey, opts = {}) {
   })
   const sliderGone = async () => !(await findSlider())
 
+  /**
+   * 主动刷新验证码（点滑块遮罩里的刷新按钮）。
+   *
+   * 为什么需要：实测发现失败后平台**不一定**自动换图——
+   * 2026-10-23 日志里第 2、3 次识别返回同一个 262px，说明是同一张图，
+   * 此时重拖必然再失败。必须主动刷新。
+   *
+   * 常见刷新入口（按优先级）：
+   *   ① 遮罩内 class 含 refresh/reload/refresh-icon 的可点元素
+   *   ② 右上角小图标（svg / i 标签）
+   *   ③ 兜底：关闭遮罩重开（点遮罩外部 / 重新触发原操作）——成本高，暂不实现
+   *
+   * @returns {Promise<boolean>} 是否成功触发刷新
+   */
+  const refreshCaptcha = async () => {
+    const clicked = await safeEval(() => {
+      const ms = Array.from(document.querySelectorAll('[class*="Modal"], [class*="modal"], [class*="MDL"], [class*="Dialog"]'))
+        .filter(m => { const r = m.getBoundingClientRect(); return r.width > 200 && r.height > 150 })
+      for (const m of ms) {
+        if (!/滑块|拼图|向右|验证/.test((m.innerText || '').slice(0, 60))) continue
+        // ① 明确的刷新按钮
+        const cands = Array.from(m.querySelectorAll('[class*="refresh" i], [class*="reload" i], [class*="close" i], [class*="shut" i]'))
+          .filter(e => { const r = e.getBoundingClientRect(); return r.width > 8 && r.height > 8 && r.width < 60 && r.height < 60 })
+        if (cands.length) {
+          cands[0].click()
+          return { via: 'refresh-btn', cls: String(cands[0].className).slice(0, 50) }
+        }
+        // ② 兜底：遮罩右上角的可点元素
+        const mr = m.getBoundingClientRect()
+        const corner = Array.from(m.querySelectorAll('i, svg, span, div'))
+          .filter(e => { const r = e.getBoundingClientRect(); return r.width > 8 && r.height > 8 })
+          .filter(e => { const r = e.getBoundingClientRect(); return r.x > mr.x + mr.width - 60 && r.y < mr.y + 60 })
+        if (corner.length) { corner[0].click(); return { via: 'corner-icon' } }
+      }
+      return null
+    })
+    if (clicked) console.error(`[slider] 已点刷新（${clicked.via}${clicked.cls ? ' ' + clicked.cls : ''}）`)
+    else console.error('[slider] 未找到刷新按钮（等待平台自动换图）')
+    return !!clicked
+  }
+
+  // ★ 跨轮次状态：记录上一轮的图指纹和缺口 X，用于判断「验证码是否刷新」
+  //   以及失败后该「重新取码」还是「修正位移」。
+  let prevBgHash = ''
+  let prevGapX = -1
+  let prevTargetX = -1
+
   for (let attempt = 1; attempt <= MAX; attempt++) {
     const slider = await findSlider()
     if (!slider) return { ok: false, text: '当前页面未找到滑块（可能遮罩已消失）' }
@@ -194,9 +241,14 @@ export async function solveSliderInPage(page, shopKey, opts = {}) {
     const bgB64 = bg.src.replace(/^data:image\/\w+;base64,/, '')
     const blkB64 = blk ? blk.src.replace(/^data:image\/\w+;base64,/, '') : null
 
+    // ★ 图指纹：用 base64 长度 + 头尾各 64 字符做轻量哈希（整串 MD5 太慢）
+    const bgHash = `${bgB64.length}:${bgB64.slice(0, 64)}:${bgB64.slice(-64)}`
+    const imgRefreshed = bgHash !== prevBgHash
+    console.error(`[slider] 第 ${attempt} 轮：验证码${imgRefreshed ? '已刷新' : '未刷新（同一张图）'}`)
+
     const solved = await solveSlider(bgB64, blkB64)
     if (!solved.ok) {
-      if (attempt < MAX) { await new Promise(r => setTimeout(r, 2000)); continue }
+      if (attempt < MAX) { await refreshCaptcha(); await new Promise(r => setTimeout(r, 2000)); continue }
       return { ok: false, text: `识别失败：${solved.msg || `code=${solved.code}`}`, ocr: solved }
     }
 
@@ -204,9 +256,40 @@ export async function solveSliderInPage(page, shopKey, opts = {}) {
     const ratio = solved.x / bg.w
     const plausible = ratio >= 0.25 && ratio <= 0.90
     console.error(`[slider] 第 ${attempt} 次识别：缺口 X=${solved.x}px（图宽 ${bg.w}，${(ratio * 100).toFixed(1)}%）${plausible ? '✅合理' : '⚠️可疑'}`)
+
+    // ★ 位移修正计算：
+    //   两个独立判据，任一命中都要刷新验证码，不能用旧图重拖。
+    //   判据A（图指纹）：base64 长度+头尾 64 字符，最可靠
+    //   判据B（位移差）：|ΔgapX| < 2 说明缺口位置没动
+    //   实测教训（2026-10-23）：第 1 轮 gapX=221 失败，第 2、3 轮都返回 262 ——
+    //   同一张图被 OCR 误判成 262（ΔgapX=41 看起来"像刷新了"），
+    //   但指纹完全相同。只看 ΔgapX 会被骗，必须结合指纹。
+    if (!imgRefreshed && prevGapX >= 0) {
+      const dGap = solved.x - prevGapX
+      const dTarget = (bg.x + solved.x - (blk?.w || 49) / 2) - prevTargetX
+      console.error(`[slider] 位移计算：ΔgapX=${dGap}px  ΔtargetX=${dTarget}px（图未刷新 → 位置不该变）`)
+      if (Math.abs(dGap) < 2 && attempt > 1) {
+        console.error('[slider] 缺口位置未变但上次失败 → 主动刷新验证码')
+        await refreshCaptcha()
+        prevBgHash = ''     // 重置指纹，下一轮重新判定
+        await new Promise(r => setTimeout(r, 2500))
+        continue
+      }
+    }
+
+    // 指纹变了但缺口位置几乎没动 → 平台换了图但缺口在同一位置
+    // （正常情况，不该刷新，直接用新 targetX 拖）
+    if (imgRefreshed && prevGapX >= 0) {
+      const dGap = solved.x - prevGapX
+      console.error(`[slider] 图已刷新，缺口位移 ΔgapX=${dGap}px`)
+    }
+
     if (!plausible && attempt < MAX) {
-      // 可疑 → 点刷新按钮重取验证码（如果有点击刷新入口）
-      await new Promise(r => setTimeout(r, 2000))
+      // 可疑（缺口贴边）→ 刷新重取
+      console.error('[slider] 缺口位置可疑 → 刷新验证码')
+      await refreshCaptcha()
+      prevBgHash = ''
+      await new Promise(r => setTimeout(r, 2500))
       continue
     }
 
@@ -215,7 +298,7 @@ export async function solveSliderInPage(page, shopKey, opts = {}) {
 
     const cdp = await page.target().createCDPSession()
     const traj = humanTrajectory(handle.x, targetX, handle.y)
-    console.error(`[slider-inpage] 拖动 ${handle.x} → ${Math.round(targetX)}（${traj.length} 步）`)
+    console.error(`[slider-inpage] 拖动 ${handle.x} → ${Math.round(targetX)}（${traj.length} 步，第 ${attempt} 轮）`)
     try {
       await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: handle.x, y: handle.y, button: 'left', clickCount: 1 })
       for (const p of traj) {
@@ -236,12 +319,18 @@ export async function solveSliderInPage(page, shopKey, opts = {}) {
       if (await sliderGone()) { passed = true; break }
     }
     if (passed) {
-      return { ok: true, gapX: solved.x, targetX: Math.round(targetX), text: `✅ 滑块已过（缺口 X=${solved.x}，${traj.length} 步，第 ${attempt} 次尝试）` }
+      return { ok: true, gapX: solved.x, targetX: Math.round(targetX), text: `✅ 滑块已过（缺口 X=${solved.x}，${traj.length} 步，第 ${attempt} 轮尝试）` }
     }
-    // 未通过 → 下一轮重试（平台会刷新验证码）
-    console.error(`[slider] 第 ${attempt} 次拖动未通过，重试...`)
+
+    // ★ 记录本轮状态，供下一轮做位移对比
+    prevBgHash = bgHash
+    prevGapX = solved.x
+    prevTargetX = Math.round(targetX)
+
+    // 未通过 → 下一轮重试（平台可能已自动换图；没换的话下一轮会判定并主动刷新）
+    console.error(`[slider] 第 ${attempt} 轮拖动未通过，准备重试...`)
     if (attempt === MAX) {
-      return { ok: false, gapX: solved.x, targetX: Math.round(targetX), text: `⚠️ ${MAX} 次尝试后仍未通过（缺口 X=${solved.x}）` }
+      return { ok: false, gapX: solved.x, targetX: Math.round(targetX), text: `⚠️ ${MAX} 轮尝试后仍未通过（缺口 X=${solved.x}）` }
     }
     await new Promise(r => setTimeout(r, 3000))
   }
