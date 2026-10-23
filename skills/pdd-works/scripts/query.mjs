@@ -129,41 +129,53 @@ const wantCsv = process.argv.includes('--csv')
   }
   await ensureAntiContent(page)
 
-  // ★ 风控 L1：接口级节流（同一 URL 最小间隔）+ L2：遇控即停
-  const lastHit = new Map()
-  const MIN_GAP = 3000
+  // ★ 风控 L1：接口级节流（落盘跨进程）+ L2：遇控即停
+  //   2026-10-24：切到 pdd-client 统一入口（t1 简化签名 / t2 真签名自动选）
+  const { call: clientCall, createSession, ERR: CLIENT_ERR } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-client.mjs`)
+  const accForT1 = store.listAccounts().find(a => a.shop_key === SHOP)
+  const COOKIES_T1 = accForT1 ? Object.entries(accForT1.cookies || {}).map(([k, v]) => `${k}=${v}`).join('; ') : ''
+  let sessForT2 = null
+
   const call = async (url, body) => {
-    await throttleRequest(SHOP, /vodka|glide/.test(url) ? 'strict' : 'loose')
-    const now = Date.now()
-    const gap = now - (lastHit.get(url) || 0)
-    if (gap < MIN_GAP) await new Promise(r => setTimeout(r, MIN_GAP - gap))
-    lastHit.set(url, Date.now())
-    const a = await getAntiContent(page, { force: true })
-    // ★ 带上 captcha 通行证（有则带，避免弹滑块）
-    const vtk = getTok(SHOP)
-    const r = await safeEval(async (u, bd, av, vt) => {
-      const resp = await fetch(u, {
-        method: 'POST', credentials: 'include',
-        headers: { 'Content-Type': 'application/json', 'Anti-Content': av, ...(vt ? { VerifyAuthToken: vt } : {}) },
-        body: JSON.stringify(bd),
-      })
-      return await resp.json().catch(() => null)
-    }, url, body, a.data, vtk?.token || null)
-    // ★ 54001 → 提取新 token 存起来，下次自动带
-    if (r && (r.error_code === 54001 || r.errorCode === 54001)) {
-      const nt = extractTok(r)
-      if (nt) { saveTok(SHOP, nt); console.warn('[pdd-works] 已提取新 captcha 通行证（10 分钟有效）') }
-    }
-    // L2：识别频控码 → 记冷却 + 抛错中断当前批次
-    const code = detectRiskCode(r)
-    if (code) {
-      markCooldown(SHOP, code)
-      const err = new Error(`RISK_${code}`)
-      err.riskCode = code
-      err.riskMsg = r?.error_msg || r?.errorMsg || ''
+    // ★ 通道选择：vodka/glide 走 t2（真签名），其余 t1（简化签名）
+    const needT2 = /\/vodka\/|\/glide\//.test(url)
+    try {
+      const r = needT2
+        ? await (async () => {
+            if (!sessForT2) {
+              console.warn('[pdd-works] 检测到严格接口，建立 t2 会话（真签名）...')
+              sessForT2 = await createSession(SHOP)
+              await sessForT2.goto('https://mms.pinduoduo.com/goods/goods_list', 15000)
+              await sessForT2.waitStable()
+            }
+            return await clientCall({ shopKey: SHOP, session: sessForT2, url, body, referer: 'https://mms.pinduoduo.com/goods/goods_list' })
+          })()
+        : await clientCall({ shopKey: SHOP, cookies: COOKIES_T1, url, body })
+
+      // 54001 → 自动重试已内建；这里只归一错误
+      if (r.ok) return r.json
+      const code = r.ec
+      if (code === 54001) {
+        markCooldown(SHOP, 54001, r.hint)
+        const err = new Error(`RISK_54001`); err.riskCode = 54001; err.riskMsg = r.hint || ''
+        throw err
+      }
+      if (code === 43001 || r.kind === 'session_expired') {
+        const err = new Error(`RISK_43001`); err.riskCode = 43001; err.riskMsg = '会话已过期'
+        throw err
+      }
+      if (code === 40002) {
+        markCooldown(SHOP, 40002, '高频限流')
+        const err = new Error(`RISK_40002`); err.riskCode = 40002; err.riskMsg = r.hint || ''
+        throw err
+      }
+      // 业务错误：原样返回（调用方自行判断 success）
+      return r.json || { success: false, error_code: code, error_msg: r.msg || r.hint }
+    } catch (e) {
+      if (e.riskCode) throw e
+      const err = new Error('RISK_NETWORK'); err.riskCode = 0; err.riskMsg = e.message
       throw err
     }
-    return r
   }
 
   const LIST_URL = 'https://mms.pinduoduo.com/vodka/v2/mms/query/display/mall/goodsList'
@@ -382,8 +394,10 @@ const wantCsv = process.argv.includes('--csv')
     emit({ ok: false, failureKind: 'api_error', text: `未知 mode：${mode}。可用：overview / list / detail / sku / commit / edit / spec-pool` })
   }
   clearInterval(hb)
+  if (sessForT2) await sessForT2.close().catch(() => {})
   await browser.close()
 })().catch(async (e) => {
+  if (typeof sessForT2 !== 'undefined' && sessForT2) await sessForT2.close().catch(() => {})
   // ★ 风控异常 → 友好提示（而不是裸的 RISK_54001）
   const { checkCooldown, fmtRemain } = await import(`file:///${PLUGIN_ROOT}/skills/_shared/pdd-risk.mjs`).catch(() => ({}))
   if (e?.riskCode && checkCooldown) {

@@ -58,6 +58,7 @@
  *             （见 readSubmitErrors），并继续等待、识别用户手动提交的结果。
  */
 import { CredentialStore, resolveAccountForRequest, type StoredAccount } from './services/credential-store.js'
+import { CAPTCHA_SELF_HEAL } from './pdd-captcha'
 import { applyStealth } from './stealth-inject'
 import { preuploadProductImages } from './pdd-image-preupload.js'
 import { clearProfileLocks, findChromePath, profileDir, profileOwner, releaseProfile, tryAcquireProfile, sleep, UI_STEP_DELAY_MS } from './browser-login.js'
@@ -3847,7 +3848,11 @@ export async function pddPublish(
     const page = await browser.newPage()
     // 用本机真实 UA：硬改 UA 会与内核自动发出的 sec-ch-ua / userAgentData 矛盾
     await page.setViewport({ width: 1440, height: 900 })
+    // ★ 2026-10-24：反检测改用 applyStealth（data descriptor，不留自定义 getter）
     await applyStealth(page)
+    // ★ 2026-10-24：54001 静默自愈（官方五步闭环）
+    //   收到 54001 → 先清 token → 提取新 token → 有值就重放，不弹滑块
+    await page.evaluateOnNewDocument(CAPTCHA_SELF_HEAL)
 
     /**
      * 注入拼多多域 Cookie（商家后台登录票据 PASS_ID 写在 .pinduoduo.com 域）。
@@ -4783,3 +4788,4 @@ export async function pddPublish(
     }
   }
 }
+
