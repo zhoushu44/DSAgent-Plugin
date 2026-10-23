@@ -163,4 +163,30 @@ export const RISK_SDK_INJECT = () => {
       return { err: String(e).slice(0, 200) }
     }
   }
+
+  // ④ ★ 后台预热：页面加载完就自动生成一份签名缓存
+  //    这样 Node 侧调用时不需要再 evaluate（避开 detached Frame）
+  setTimeout(async () => {
+    for (let i = 0; i < 30; i++) {
+      const all = window.__pddWpAll || {}
+      let ready = false
+      for (const s of Object.values(all)) {
+        if (s.modules && s.modules['eDaA']) { ready = true; break }
+      }
+      if (!ready) { await new Promise(r => setTimeout(r, 2000)); continue }
+      try {
+        const r = await window.__pddGenRiskSig()
+        if (r && r.ok) { window.__pddSigCache = { sig: r.sig, len: r.len, at: Date.now() } }
+      } catch { /* ignore */ }
+      return
+    }
+  }, 3000)
+
+  // ⑤ ★ 自动保持签名新鲜（每 3 分钟刷新一次，token 有效期 10 分钟）
+  setInterval(async () => {
+    try {
+      const r = await window.__pddGenRiskSig()
+      if (r && r.ok) window.__pddSigCache = { sig: r.sig, len: r.len, at: Date.now() }
+    } catch { /* ignore */ }
+  }, 180000)
 }

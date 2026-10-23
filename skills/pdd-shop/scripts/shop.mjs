@@ -88,9 +88,8 @@ const TRANSPORT = argOf('transport') || 'http'   // ★ 默认纯 Node
       let sess = null
       try {
         sess = await createSession(SHOP)
-        // ★ 先等页面完全稳定（含网络空闲），再取签名
-        await sess.goto('https://mms.pinduoduo.com/sycm/goods_effect', 12000)
-        await sess.waitStable()
+        // ★ 只导航一次，等预热签名就绪（不要 waitStable —— 长等待会被风控关页）
+        await sess.goto('https://mms.pinduoduo.com/sycm/goods_effect', 20000)
 
         const r = await callT3({
           shopKey: SHOP,
@@ -181,6 +180,19 @@ const TRANSPORT = argOf('transport') || 'http'   // ★ 默认纯 Node
           L.push('ℹ️ 当前值字段为空（今日数据未生成），已自动改用「上期值」')
         }
         out.text = L.join('\n')
+
+        // ★ 趋势分析（--trend 或默认附加）
+        try {
+          const { analyze, report } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-trend.mjs`)
+          const trend = analyze(rawList)
+          out.trend = trend
+          out.text += '\n\n' + report(trend)
+          fs.mkdirSync(path.join(process.cwd(), 'artifacts', 'pdd-re'), { recursive: true })
+          fs.writeFileSync(path.join(process.cwd(), 'artifacts', 'pdd-re', 'trend.json'), JSON.stringify(trend, null, 1), 'utf8')
+          fs.writeFileSync(path.join(process.cwd(), 'artifacts', 'pdd-re', 'goods-final.json'), JSON.stringify(rawList, null, 1), 'utf8')
+        } catch (e) {
+          console.error('[pdd-shop] 趋势分析失败: ' + e.message.slice(0, 80))
+        }
 
         emit(out)
         process.exit(0)

@@ -44,6 +44,59 @@ export function clearVerifyToken(shopKey) { const d = readTokens(); if (d[shopKe
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 
 /**
+ * ★ 页面内执行的签名生成函数（源码字符串形式）
+ *
+ * 为什么用字符串：
+ *   · 箭头函数经 puppeteer 序列化后，某些 Node 版本会因闭包/this 丢失
+ *     报 `detached Frame`
+ *   · 字符串形式 `page.evaluate(\`(${GEN_SIG_SRC})()\`)` 最稳
+ *
+ * 现场扫 window.__pddWpAll（注入器收集的 webpack 模块）拿 eDaA。
+ */
+const GEN_SIG_SRC = `async () => {
+  var all = window.__pddWpAll || {}
+  var mods = {}
+  for (var k in all) { var m2 = all[k].modules || {}; for (var k2 in m2) mods[k2] = m2[k2] }
+  var count = 0; for (var x in mods) count++
+  if (!mods['eDaA']) {
+    return { err: 'eDaA module not found', moduleCount: count, wpInstances: Object.keys(all).length }
+  }
+  var cache = {}
+  function R(id) {
+    if (cache[id]) return cache[id].exports
+    var m = cache[id] = { i: id, l: false, exports: {} }
+    mods[id].call(m.exports, m, m.exports, R)
+    m.l = true
+    return m.exports
+  }
+  R.m = mods; R.c = cache
+  R.d = function (e, n, g) { if (!R.o(e, n)) Object.defineProperty(e, n, { enumerable: true, get: g }) }
+  R.r = function (e) { Object.defineProperty(e, '__esModule', { value: true }) }
+  R.n = function (m) { var g = m && m.__esModule ? function () { return m['default'] } : function () { return m }; R.d(g, 'a', g); return g }
+  R.o = function (o, p) { return Object.prototype.hasOwnProperty.call(o, p) }
+  R.p = ''; R.s = undefined
+  try {
+    var exp = R('eDaA')
+    var Ctor = exp.default || exp
+    if (typeof Ctor !== 'function') return { err: 'eDaA default is not a constructor' }
+    var tb = window.mmsCMT && window.mmsCMT.timeBaseline
+    var serverTime = tb ? (tb.serverTime + (Date.now() - tb.localTime)) : Date.now()
+    var sdk = new Ctor({ serverTime: serverTime, _2827c887a48a351a: false })
+    sdk.init(null)
+    var sig = await sdk.messagePack({
+      touchEventData: true, clickEventData: true, focusblurEventData: true,
+      changeEventData: true, locationInfo: true, referrer: true,
+      browserSize: true, browserInfo: true, token: true, fingerprint: true,
+    })
+    try { sdk.clearCache() } catch (e2) {}
+    return { ok: true, sig: String(sig), len: String(sig).length, serverTime: serverTime, hasTimeBaseline: !!tb }
+  } catch (e) {
+    return { err: String(e).slice(0, 200) }
+  }
+}`
+
+
+/**
  * 创建浏览器会话（用于 t2/t3 通道）
  *
  * 关键：必须用 evaluateOnNewDocument 注入 RISK_SDK_INJECT，
@@ -65,6 +118,10 @@ export async function createSession(shopKey, opts = {}) {
   }
   const browser = await puppeteer.launch(launchOptions(shopKey, launchExtra))
   const page = (await browser.pages())[0] || await browser.newPage()
+
+  // ★★★ 必须在第一次 goto 前注入 ★★★
+  //   RISK_SDK_INJECT 靠 hook webpackJsonp.push 收集模块，
+  //   页面加载完再注入就什么都抓不到了。
   await page.evaluateOnNewDocument(STEALTH_SCRIPT)
   await page.evaluateOnNewDocument(RISK_SDK_INJECT)
 
@@ -78,6 +135,12 @@ export async function createSession(shopKey, opts = {}) {
     const r = h['webSpiderRule'] || h['webspiderrule']
     if (r && !spiderRule) spiderRule = String(r)
   })
+
+  // 新开页时也要注入（revive 用）
+  const setupInject = async (pg) => {
+    await pg.evaluateOnNewDocument(STEALTH_SCRIPT)
+    await pg.evaluateOnNewDocument(RISK_SDK_INJECT)
+  }
 
   const session = {
     browser,
@@ -110,42 +173,52 @@ export async function createSession(shopKey, opts = {}) {
         return { str: '', map: {}, count: 0, via: 'failed', err: e.message }
       }
     },
+    /**
+     * ★ 生成真签名（自带完整实现，不依赖注入）
+     *
+     * 直接在当前页面里：
+     *   ① 从 webpackJsonp 全局数组的已加载模块里找 eDaA
+     *   ② 手工实现 webpack require
+     *   ③ new Ctor({serverTime, _2827c887a48a351a:false}).init(null)
+     *   ④ messagePack(10 域) + clearCache()
+     *
+     * 为什么自带：RISK_SDK_INJECT 的 push 拦截器在页面已加载完成后
+     * 才注入会漏掉模块，所以这里改成「现场扫 window.webpackJsonp*」。
+     */
+    /**
+     * ★ 取真签名
+     *
+     * 优先读页面缓存 __pddSigCache（注入器后台预热生成的），
+     * 缓存没有再现场生成。这样绝大多数情况下不需要 evaluate，
+     * 从根本上避开 `detached Frame`。
+     */
     async genSig() {
-      // ① 等页面稳定（无导航、frame 未分离）
-      for (let i = 0; i < 20; i++) {
-        if (page.isClosed()) return { err: 'page closed' }
-        try {
-          const u = await page.evaluate(() => location.href).catch(() => null)
-          if (u && !/\/login|\/sso/i.test(u)) break
-        } catch { /* frame 分离中，重试 */ }
-        await sleep(1500)
-      }
-      // ② 等 eDaA 模块加载（最多 30 秒）
-      for (let i = 0; i < 15; i++) {
-        try {
-          const ready = await page.evaluate(() => {
-            const all = window.__pddWpAll || {}
-            for (const s of Object.values(all)) {
-              if (s.modules && s.modules['eDaA']) return true
-            }
-            return false
-          })
-          if (ready) break
-        } catch { /* 重试 */ }
-        await sleep(2000)
-      }
-      // ③ 生成签名（带 3 次重试，应对偶发 frame 分离）
+      // ① 先读缓存（零 evaluate，绕过 detached Frame）
+      //   ★ 只试 1 次，失败立刻走现场生成——不要反复 evaluate
+      //     一个正在关闭的页面上，多次 evaluate 会放大失败概率
+      try {
+        const c = await page.evaluate(() => {
+          const s = window.__pddSigCache
+          if (!s || !s.sig) return null
+          if (Date.now() - s.at > 5 * 60 * 1000) return null
+          return { sig: s.sig, len: s.len, at: s.at }
+        })
+        if (c?.sig) return { ok: true, sig: c.sig, len: c.len, via: 'cache' }
+      } catch { /* 落到下面 */ }
+
+      // ② 现场生成：短等待（长等待会让风控把页面关掉）
       let lastErr = null
       for (let i = 0; i < 3; i++) {
+        if (page.isClosed()) return { err: 'page closed' }
         try {
           const r = await page.evaluate(() => window.__pddGenRiskSig())
           if (r?.ok) return r
           lastErr = r?.err || 'unknown'
-          if (lastErr === 'eDaA module not found') { await sleep(3000); continue }
+          if (lastErr === 'eDaA module not found') { await sleep(2500); continue }
           return r
         } catch (e) {
           lastErr = String(e).slice(0, 120)
-          await sleep(2000)
+          await sleep(1500)
         }
       }
       return { err: lastErr }
