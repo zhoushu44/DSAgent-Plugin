@@ -20,9 +20,10 @@
  *
  * 用法：
  *   node scripts/chance.mjs --mode list [--page 1] [--size 35] [--cat-id 16548]
- *   node scripts/chance.mjs --mode mine       我的机会商品
+ *   node scripts/chance.mjs --mode mine       我的机会商品（已跟款）
  *   node scripts/chance.mjs --mode collection 收藏列表
  *   node scripts/chance.mjs --mode mission    任务信息
+ *   node scripts/chance.mjs --mode follow-check   ★ 一键验证跟款是否成功
  *   node scripts/chance.mjs --mode filters    筛选项（含 51 个站内热搜/缺货词）
  *   node scripts/chance.mjs --mode cates      机会类目树（259 个，看哪些类目开了机会池）
  *
@@ -201,6 +202,52 @@ const catId = argOf('cat-id') ? Number(argOf('cat-id')) : null
           ? `类目 ${catId} 暂无机会商品（total=${res.total ?? 0}）。\n可能：①该类目未开放机会池（当前仅 19 个一级类目开放，用 --mode cates 查看）\n②平台正在补录。建议隔天再试。`
           : '机会商品：本页无数据',
     })
+  } else if (mode === 'follow-check') {
+    // ★ 一键验证跟款是否成功：同时查 my_list（已跟款清单）+ mission_info.follow_goods_cnt
+    //   判定标准（平台侧）：
+    //     ① my_list 里出现该 chance_id = 跟款成功（最直接）
+    //     ② mission_info.follow_goods_cnt / follow_goods_cnt_1m 递增 = 跟款计数
+    //   注意：商品「发布成功」≠「跟款成功」——必须从机会商品页「发布同款」入口进，
+    //        提交体才会带 chance_id；直接走「发布新商品」不算跟款。
+    const [mine, mission] = await Promise.all([
+      call(`${BASE}/my_list`, { size: 50, page: 1 }),
+      call(`${BASE}/mission_info`, {}),
+    ])
+    const mineList = mine?.result?.list || []
+    const mineTotal = mine?.result?.total ?? mineList.length
+    const mi = mission?.result || {}
+    const followCnt = mi.follow_goods_cnt ?? 0
+    const follow1m = mi.follow_goods_cnt_1m ?? 0
+    fs.mkdirSync(path.join(process.cwd(), 'artifacts', 'pdd-chance'), { recursive: true })
+    fs.writeFileSync(path.join(process.cwd(), 'artifacts', 'pdd-chance', 'follow-check.json'), JSON.stringify({ mine, mission }, null, 2), 'utf8')
+
+    const items = mineList.map(g => ({
+      chanceId: g.chance_id,
+      keywords: g.keywords || '',
+      referPrice: g.refer_price,
+      labels: (g.labels || []).map(l => l.title).filter(Boolean),
+      cats: [g.cat_id_1, g.cat_id_2, g.cat_id_3].filter(Boolean),
+      collected: !!g.is_collection,
+    }))
+    const ok = mineTotal > 0 || followCnt > 0
+    emit({
+      ok: true, mode, shopKey: SHOP,
+      followed: ok,
+      myTotal: mineTotal, followCnt, follow1m,
+      items,
+      text: ok
+        ? `✅ 已跟款 ${mineTotal} 个机会商品（任务计数 ${followCnt}，近 1 月 ${follow1m}）\n`
+          + (items.length ? items.slice(0, 10).map((g, i) =>
+              `  ${i + 1}. [${g.chanceId.slice(0, 12)}] ${g.keywords} | 参考价 ${g.referPrice} | ${g.labels.join('/') || '—'}`
+            ).join('\n') + (items.length > 10 ? `\n  ...（共 ${items.length} 条，见 follow-check.json）` : '') : '')
+        : `❌ 尚未跟款（my_list total=0，follow_goods_cnt=0）\n\n`
+          + `跟款流程：\n`
+          + `  1. node chance.mjs --mode list                    选机会商品（看 labels/refer_price）\n`
+          + `  2. 后台 → 商品管理 → 机会商品 → 点该商品「发布同款」  ← 必须从此入口进\n`
+          + `  3. 标题/主图保持与原款相似；定价 ≤ refer_price 可吃「低价跟款」搜索倾斜\n`
+          + `  4. 提交发布后再跑 --mode follow-check 验证\n\n`
+          + `判定标准：my_list 出现该 chance_id = 跟款成功（商品发布成功 ≠ 跟款成功）`,
+    })
   } else if (mode === 'mission') {
     const r = await call(`${BASE}/mission_info`, {})
     const m = r?.result || {}
@@ -261,7 +308,7 @@ const catId = argOf('cat-id') ? Number(argOf('cat-id')) : null
            : norm.slice(0, 30).map(c => `  [${c.cateId}] ${c.name}（lvl ${c.lvl}，上级 ${c.parentId}）`).join('\n')),
     })
   } else {
-    emit({ ok: false, failureKind: 'api_error', text: `未知 mode：${mode}。可用：list / mine / collection / mission / filters / cates` })
+    emit({ ok: false, failureKind: 'api_error', text: `未知 mode：${mode}。可用：list / mine / collection / follow-check / mission / filters / cates` })
     await browser.close(); process.exit(2)
   }
   await browser.close()

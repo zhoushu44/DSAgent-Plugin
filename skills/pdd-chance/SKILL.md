@@ -22,6 +22,7 @@
 | `list` | 机会商品主列表（默认） | `keywords` 推荐关键词 / `refer_price` 参考价 / `hot_index` 热度 / `potential_index` 潜力 / `labels` 流量标签 |
 | `mine` | 我的机会商品（已跟款） | 同上 |
 | `collection` | 收藏的机会商品 | 同上 |
+| **`follow-check`** | **★ 一键验证跟款是否成功** | `my_total` / `follow_cnt` / `follow_1m` |
 | `mission` | 机会商品任务 | 礼物/考试/图片任务进度与奖励 |
 | `filters` | 筛选项 + **51 个站内热搜/缺货词** | `mall_chance_words` 是选品金矿 |
 | `cates` | 机会类目树 | 看哪些一级类目开了机会池（当前 19 个） |
@@ -39,6 +40,9 @@ node scripts/chance.mjs --mode list --cat-id 15543
 node scripts/chance.mjs --mode list --page 2 --size 50
 node scripts/chance.mjs --mode list --cat-id 15543 --page 3
 
+# ★ 跟款后验证（my_list + follow_goods_cnt 一键判定）
+node scripts/chance.mjs --mode follow-check
+
 # 我的机会商品 / 收藏
 node scripts/chance.mjs --mode mine
 node scripts/chance.mjs --mode collection
@@ -55,6 +59,49 @@ node scripts/chance.mjs --mode cates
 # 多账号指定
 node scripts/chance.mjs --mode list --account pdd_mms_xxxx
 ```
+
+## 跟款流程与判定（重要）
+
+**「商品发布成功」≠「跟款成功」**。平台三层判定：
+
+```
+① 商品发布成功      → goodsCommit/action/edit + commit/submit 都成功
+② 平台认定「跟款」   → 提交体带 chance_id（必须从机会商品页「发布同款」入口进）
+③ 跟款成功（官方标记）→ 以下任一变化：
+   - my_list 里出现该 chance_id          ← 最直接
+   - mission_info.follow_goods_cnt +1    ← 任务计数
+```
+
+**正确流程**：
+
+```bash
+# 1. 选机会商品（看 labels / refer_price）
+node scripts/chance.mjs --mode list
+
+# 2. 后台 → 商品管理 → 机会商品 → 点该商品「发布同款」
+#    ★ 必须从这个入口进！直接走「发布新商品」提交体不带 chance_id，不算跟款
+
+# 3. 表单页会自动带出类目/关键词/参考价/素材
+#    标题/主图保持与原款相似（平台会比对）
+#    定价 ≤ refer_price 可吃「低价跟款」搜索流量倾斜
+
+# 4. 提交发布后验证
+node scripts/chance.mjs --mode follow-check
+```
+
+**流量机制（labels 决定）**：
+
+| 标签 | 流量机制 | 操作要点 |
+|------|---------|---------|
+| 首页流量 | 发布同款可入选拼多多首页，大幅流量加成 | 主图/标题贴近原款 |
+| 当季新品 | 可获新品标，新品流量先机 | 赶应季窗口发布 |
+| 热门跟款 | 平台正在推的热门款 | 立即发，越快越好 |
+| 潜力商品 | 入选首页 + 长尾推荐 | 保持关键词一致 |
+| 全网热销 | 需求已验证，竞争也大 | 拼价格/差异化 |
+| 低价跟款 | 不高于建议价 → 搜索流量倾斜 | 定价 ≤ `refer_price` |
+| 热门收藏 | 收藏加购加权 | — |
+
+> `refer_price` 单位是**分**。
 
 ## `--cat-id` 跨类目查询
 

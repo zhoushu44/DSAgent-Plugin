@@ -1,10 +1,10 @@
 {
   "name": "pdd-chance",
-  "version": "1.1.0",
-  "description": "拼多多机会商品（蓝海商机）数据采集：主列表/我的机会/收藏/任务/筛选项/机会类目树，支持按一级类目跨类目查询。域 /opportunity-goods/* 不在官方风控白名单，风控宽松。",
+  "version": "1.2.0",
+  "description": "拼多多机会商品（蓝海商机）数据采集：主列表/我的机会/收藏/跟款验证/任务/筛选项/机会类目树，支持按一级类目跨类目查询。域 /opportunity-goods/* 不在官方风控白名单，风控宽松。",
   "entry": "scripts/chance.mjs",
   "args": [
-    { "name": "mode", "type": "string", "required": false, "default": "list", "options": ["list", "mine", "collection", "mission", "filters", "cates"], "description": "模式：list 主列表 / mine 我的机会 / collection 收藏 / mission 任务 / filters 筛选项（含站内热搜缺货词）/ cates 机会类目树" },
+    { "name": "mode", "type": "string", "required": false, "default": "list", "options": ["list", "mine", "collection", "follow-check", "mission", "filters", "cates"], "description": "模式：list 主列表 / mine 我的机会 / collection 收藏 / follow-check 跟款验证（my_list+follow_goods_cnt 一键判定）/ mission 任务 / filters 筛选项（含站内热搜缺货词）/ cates 机会类目树" },
     { "name": "page", "type": "number", "required": false, "default": 1, "description": "页码（list/mine/collection）" },
     { "name": "size", "type": "number", "required": false, "default": 35, "description": "每页条数（1-100）" },
     { "name": "cat-id", "type": "number", "required": false, "description": "一级类目 ID（跨类目查机会商品）。空=店铺主营类目。已开放 19 个一级类目，用 --mode cates 查看" },
