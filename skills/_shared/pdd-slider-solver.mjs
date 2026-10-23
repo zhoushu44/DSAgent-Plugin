@@ -215,37 +215,47 @@ export async function solveSliderInPage(page, shopKey, opts = {}) {
    * 2026-10-23 日志里第 2、3 次识别返回同一个 262px，说明是同一张图，
    * 此时重拖必然再失败。必须主动刷新。
    *
-   * 常见刷新入口（按优先级）：
-   *   ① 遮罩内 class 含 refresh/reload/refresh-icon 的可点元素
-   *   ② 右上角小图标（svg / i 标签）
-   *   ③ 兜底：关闭遮罩重开（点遮罩外部 / 重新触发原操作）——成本高，暂不实现
+   * ⚠️ 血的教训（2026-10-23 实测）：**绝不能点「关闭」按钮！**
+   *    `MDL_headerCloseIcon` 这类 close 类名元素，点了 = 放弃验证，
+   *    平台直接踢到登录页（URL 变 /login/sso），整条链路报废。
+   *    所以：
+   *     - 只认 refresh / reload / change / switch 语义
+   *     - close / shut / cancel / dismiss / exit 一律排除
+   *     - 兜底的小图标也要排除右上角（关闭按钮的固定位置）
+   *     - 找不到刷新按钮就返回 false，让上层等平台自动换图（宁可慢，别点错）
    *
    * @returns {Promise<boolean>} 是否成功触发刷新
    */
   const refreshCaptcha = async () => {
     const clicked = await safeEval(() => {
+      const NEG = /close|shut|cancel|dismiss|exit/i
       const ms = Array.from(document.querySelectorAll('[class*="Modal"], [class*="modal"], [class*="MDL"], [class*="Dialog"]'))
         .filter(m => { const r = m.getBoundingClientRect(); return r.width > 200 && r.height > 150 })
       for (const m of ms) {
         if (!/滑块|拼图|向右|验证/.test((m.innerText || '').slice(0, 60))) continue
-        // ① 明确的刷新按钮
-        const cands = Array.from(m.querySelectorAll('[class*="refresh" i], [class*="reload" i], [class*="close" i], [class*="shut" i]'))
-          .filter(e => { const r = e.getBoundingClientRect(); return r.width > 8 && r.height > 8 && r.width < 60 && r.height < 60 })
+        // ① 只认 refresh / reload / change / switch 语义
+        const cands = Array.from(m.querySelectorAll('[class*="refresh" i], [class*="reload" i], [class*="change" i], [class*="switch" i]'))
+          .filter(e => !NEG.test(String(e.className)))
+          .filter(e => { const r = e.getBoundingClientRect(); return r.width > 8 && r.height > 8 && r.width < 80 && r.height < 80 })
         if (cands.length) {
           cands[0].click()
-          return { via: 'refresh-btn', cls: String(cands[0].className).slice(0, 50) }
+          return { via: 'refresh-btn', cls: String(cands[0].className).slice(0, 60) }
         }
-        // ② 兜底：遮罩右上角的可点元素
+        // ② 兜底：遮罩内的小图标，排除 close 语义 + 排除右上角
         const mr = m.getBoundingClientRect()
-        const corner = Array.from(m.querySelectorAll('i, svg, span, div'))
-          .filter(e => { const r = e.getBoundingClientRect(); return r.width > 8 && r.height > 8 })
-          .filter(e => { const r = e.getBoundingClientRect(); return r.x > mr.x + mr.width - 60 && r.y < mr.y + 60 })
-        if (corner.length) { corner[0].click(); return { via: 'corner-icon' } }
+        const icons = Array.from(m.querySelectorAll('i, svg'))
+          .filter(e => !NEG.test(String(e.className)))
+          .filter(e => { const r = e.getBoundingClientRect(); return r.width > 8 && r.height > 8 && r.width < 40 && r.height < 40 })
+          .filter(e => {
+            const r = e.getBoundingClientRect()
+            return !(r.x > mr.x + mr.width - 60 && r.y < mr.y + 60)   // 排除右上角
+          })
+        if (icons.length) { icons[0].click(); return { via: 'small-icon', cls: String(icons[0].className).slice(0, 60) } }
       }
       return null
     })
-    if (clicked) console.error(`[slider] 已点刷新（${clicked.via}${clicked.cls ? ' ' + clicked.cls : ''}）`)
-    else console.error('[slider] 未找到刷新按钮（等待平台自动换图）')
+    if (clicked) console.error(`[slider] 已点刷新（${clicked.via} ${clicked.cls}）`)
+    else console.error('[slider] 未找到刷新按钮（不点关闭！等平台自动换图）')
     return !!clicked
   }
 
@@ -310,14 +320,30 @@ export async function solveSliderInPage(page, shopKey, opts = {}) {
     }
 
     if (!plausible) {
-      // 缺口贴边（<25% 或 >90%）→ OCR 大概率误判，必须刷新重取
+      // 缺口贴边（<25% 或 >90%）→ OCR 大概率误判，必须重取
       // 注意：即使是最后一轮也不该用可疑值拖——拖了也是浪费，
       // 还会让平台记录一次失败。直接返回失败让上层决定。
       if (attempt < MAX) {
         console.error(`[slider] 缺口位置可疑（ratio=${(ratio * 100).toFixed(1)}%）→ 刷新验证码`)
-        await refreshCaptcha()
-        prevBgHash = ''
+        const refreshed = await refreshCaptcha()
         await new Promise(r => setTimeout(r, 2500))
+        // ★ 刷新后遮罩可能消失（平台放过了/换验证方式）。
+        //   这时不能当成「滑块已过」——先看页面还在不在 mms 域，
+        //   被踢到 /login 就是失败了。
+        const stillThere = await findSlider()
+        const kicked = await page.evaluate(() => /\/login/i.test(location.href)).catch(() => true)
+        if (kicked) {
+          return { ok: false, gapX: solved.x, text: '刷新后被踢到登录页（验证失败）' }
+        }
+        if (!stillThere) {
+          console.error('[slider] 刷新后遮罩消失，等 3s 再看')
+          await new Promise(r => setTimeout(r, 3000))
+          if (await findSlider()) { prevBgHash = ''; continue }
+          // 真没了：可能是平台放过了（不弹了）或换成别的方式
+          const gone2 = !(await findSlider())
+          return { ok: gone2, gapX: solved.x, text: gone2 ? '遮罩已消失（平台未再弹滑块）' : '遮罩状态异常' }
+        }
+        prevBgHash = ''
         continue
       }
       return { ok: false, gapX: solved.x, targetX: Math.round(bg.x + solved.x - (blk?.w || 49) / 2), text: `缺口位置可疑（X=${solved.x}，${(ratio * 100).toFixed(1)}%），拒绝拖动` }
