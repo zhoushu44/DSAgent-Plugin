@@ -17,19 +17,34 @@
  * 便于运行时动态追加规则与偷 __token。
  */
 
-/** 要拦掉的 URL 特征（url.includes 匹配）。只拦风控相关，**别拦业务接口**。 */
+/**
+ * 要拦掉的 URL 特征（url.includes 匹配）。只拦风控相关，**别拦业务接口**。
+ *
+ * ★★★ 2026-10-23 重要修正：
+ *   之前加了 `/risk/`、`/verify/`、`/captcha/` 这类**过宽**的通用规则，
+ *   结果把业务接口也拦了（抖店有些 URL 里带这些字样），页面 JS 直接崩，
+ *   表现为 CDP `Session closed` / `Target closed`。
+ *
+ *   原逆向方案（抖音风控绕过方案.md 第 249 行）明确写：
+ *     「拦太多会坏功能 —— 只拦风控相关的，别拦业务接口（/product/tproduct/* 不能拦）」
+ *
+ *   所以这里**只保留逆向确证的 3 个 + 1 个本项目实测确认的**，
+ *   猜测性的通用规则全部移除。要加新规则必须先用抓包证实。
+ */
 export const BLOCK_RULES = [
-  // ── 抖上货逆出的三个入口（原样保留）──
+  // ── 抖上货逆出的三个入口（原样保留，已确证）──
   '/session_check',                        // session 检查（触发就登出/弹验证）
   '/byteshop/questionnaire/checkPutIn',    // 问卷验证
   '49.79.224.248',                         // 风控服务 IP
 
-  // ── 本项目实测补充（2026-10）──
+  // ── 本项目实测补充（唯一确认的一条）──
   '/ecomauth/loginv1/common_login_check',  // 频繁轮询的登录态检查，会触发验证
-  '/byteshop/menu/navigate',               // 菜单导航埋点（非业务）
-  '/risk/', '/verify/', '/captcha/',       // 通用风控路径
-  'rc-verify', 'verify.SM',                // 滑块验证 SDK
-  '/log/sentry/v2/',                       // 错误埋点（可选）
+
+  // ★ 以下曾被误加、已移除（会拦坏业务）：
+  //   '/risk/', '/verify/', '/captcha/'     ← 太宽，会命中业务接口
+  //   'rc-verify', 'verify.SM'              ← 同上
+  //   '/byteshop/menu/navigate'             ← 菜单导航是 UI 依赖，拦了页面会缺菜单
+  //   '/log/sentry/v2/'                     ← 埋点，拦了没收益但可能影响错误上报
 ]
 
 /** 拦掉跳 App 验证的协议 */
