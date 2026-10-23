@@ -1,10 +1,10 @@
 ---
 name: pdd-promo
-description: "拼多多推广数据与推广操作：读——推广总览（资金账户/日消耗/广告组/场景）、商品维度报表（每商品花费/GMV/订单/ROI/点击/CTR/收藏）、推广单元列表；写（L2）——创建推广、暂停/开启推广、删除推广、改日限额、改投产比。全部 HTTP，无平台副作用（读）。触发：拼多多推广、推广数据、推广报表、商品推广数据、广告组、推广单元、推广计划、消耗、ROI、开启推广、暂停推广、删除推广、创建推广、投产比、拼多多招财、pdd promo。排除：拼多多商品上架（用 pdd-publish-http）、商品查询/下架（用 pdd-works）、商品采集（用 pdd-crawl）。需绑定「拼多多商家后台」账号。"
+description: "拼多多推广数据、推广诊断与推广操作：读——推广总览（资金账户/日消耗/广告组/场景）、商品维度报表（每商品花费/GMV/订单/ROI/点击/CTR/收藏）、推广单元列表、**推广诊断（出价竞争力/排名/建议出价/竞争力下滑/创意素材/排名过低）**、**推广平衡分析（打分 + 该加价/该降价/该保持 + 预算重分配）**；写（L2）——创建推广、暂停/开启推广、删除推广、改日限额、改投产比。触发：拼多多推广、推广数据、推广报表、商品推广数据、广告组、推广单元、推广计划、消耗、ROI、**推广诊断、优化建议、出价建议、竞争力、排名、推广平衡、该加价还是降价、预算分配**、开启推广、暂停推广、删除推广、创建推广、投产比、拼多多招财、pdd promo。排除：拼多多商品上架（用 pdd-publish-http）、商品查询/下架（用 pdd-works）、商品采集（用 pdd-crawl）。需绑定「拼多多商家后台」账号。"
 metadata:
-  builtin_skill_version: "1.4"
+  builtin_skill_version: "1.5"
   dsagent:
-    display_name: "拼多多·推广数据"
+    display_name: "拼多多·推广数据与诊断"
     emoji: "📊"
     requires: {}
 ---
@@ -32,12 +32,95 @@ metadata:
 | `cost` | 只读 | 每日消耗明细（`getAdvertiserDailyCosts`） |
 | `goods` | 只读 | **商品维度报表**（`poseidon/api/report/queryEntityReport`）：每商品 花费/GMV/订单/ROI/点击/CTR/收藏 |
 | `units` | 只读 | 推广单元列表（`goods/promotion/v3/list`：adInfos + totalAdNum） |
+| **`diagnose`** | **只读** | **★ 推广诊断**（`smartTool/diagnosis/queryStableCostAdDiagnosis`）：5 类诊断模块 — 出价竞争力/投放状态/竞争力下滑/创意素材/排名过低；含竞争等级、排名、建议出价、效果预估 |
+| **`balance`** | **只读** | **★ 推广平衡分析**：用诊断数据打分（0~100），输出「该加价/该降价/该保持」+ 预算重分配建议 |
 | `pause` | **L2 写** | 暂停推广单元（`venus/api/global/unit/batchUpdateStatus`，`adStatus:2`） |
 | `resume` | **L2 写** | 开启推广单元（同接口，`adStatus:1`） |
 | `delete` | **L2 写** | 删除商品推广（`venus/api/goods/promotion/virtual/delete`） |
 | `create` | **L2 写** | 创建商品推广（`venus/api/promotion/batchCreate`，稳定成本推广） |
 | `maxcost` | **L2 写** | 改日限额（`venus/api/goods/promotion/update/max/cost`，`{adId, maxCost}`，分；0=不限） |
 | `roi` | **L2 写** | 改投产比/出价（`venus/api/promotion/batchUpdateBid`，`{adIdList, bid, bidType}`） |
+
+## `diagnose` / `balance` 详解（2026-10-23 逆向）
+
+### 入口机制（关键）
+
+诊断接口**只在打开抽屉时才发**：
+
+```
+https://yingxiao.pinduoduo.com/goods/promotion/list?adId=<推广ID>&drawerTab=promoteDiagnosis
+```
+
+所以 `diagnose` / `balance` 模式会：
+1. 先从 `goods/promotion/v3/list` 拿全部 `adId`
+2. 逐个打开诊断抽屉 URL（受 `--limit` 限制，默认 10）
+3. 从页面内 hook 的 XHR 缓冲里捞 `queryStableCostAdDiagnosis` 响应
+
+> ⚠️ **绝不能主动 fetch 调接口** —— 实测主动补发全部返回 `54001` + `verifyAuthToken`。
+> 只能被动截获页面自己发的请求（hook `XMLHttpRequest` 的 `load` 事件）。
+
+### 5 类诊断模块（moduleType）
+
+| moduleType | 模块 | 关键字段 |
+|-----------|------|---------|
+| 1 | 出价竞争力 | `competitionLevel` `rank` `suggestBid` `alertType` `effectPredict` |
+| 2 | 投放状态 | `rank` `competitionLevel` `suggestionType` |
+| 3 | 竞争力下滑 | `rank` `labelType=4` `referenceDays` |
+| 4 | 创意素材 | `creativeLabelType` |
+| 5 | 排名过低 | `rank` `labelType=7` |
+
+### balance 打分算法
+
+```
+基础分（缺失项权重并入其它）：
+  出价竞争力 45%   competitionLevel 1~10 → 0~100
+  排名       35%   rank 1~100 → 反向 0~100
+  损失       15%   trafficLoss/orderLoss（越小越好）
+  素材        5%   creativeLabelType
+
+扣分项（直接减）：
+  labelType=4（竞争力下滑）  −20
+  labelType=7（排名过低）    −15
+
+动作判定：
+  ≥70       ✅ 保持现状
+  50~69     ⚠️ 微调（有建议价则给出）
+  <50 + alertType=21 + 有建议价  🔼 加价到建议价
+  <50 + 有 labelType 4/7         🔽 降价/止损
+  无投放                          ➕ 可开新推广
+```
+
+### 用法示例
+
+```bash
+# 诊断全部（默认最多 10 个）
+node scripts/promo.mjs --mode diagnose
+
+# 只诊断指定推广单元
+node scripts/promo.mjs --mode diagnose --ad-id 9451903287
+
+# 平衡分析（按动作分组 + 预算重分配建议）
+node scripts/promo.mjs --mode balance --limit 20
+```
+
+### 实跑输出样例
+
+```
+推广诊断（2 个推广单元）：
+  1. [9451903289] 一次性纸杯带盖咖啡纸杯子 | ⚠️ 微调 总分64
+     依据：竞争等级 7/10；排名 31/100
+  2. [9451903287] 咖啡杯纸杯一次性带盖卡通 | ✅ 保持 总分73
+     依据：竞争等级 10/10；排名 10/100
+
+推广平衡分析（4 个推广单元）：
+⚠️ 建议微调（1 个）
+  · [9451903289] 一次性纸杯带盖咖啡纸杯子 | 总分68
+      竞争等级 7/10；排名 31/100
+✅ 保持现状（3 个）
+  · [9451903287] 咖啡杯纸杯一次性带盖卡通 | 总分96
+      竞争等级 10/10；排名 10/100
+💡 当前推广结构健康，无需大调整
+```
 
 ## 前置条件
 
