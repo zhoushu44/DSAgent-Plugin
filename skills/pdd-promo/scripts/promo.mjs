@@ -631,7 +631,10 @@ const mode = argOf('mode') || 'overview'
       process.exit(0)
     }
     // 真实执行：在页面上下文里发请求（带 Anti-Content 签名）
-    const r = await page.evaluate(async (m, uid, gid, mcYuan, roiVal, sig, pid, ids) => {
+    // ★ 取 captcha 通行证（有则带，10 分钟内不再弹滑块）
+    const { getCaptchaToken: _getTok, saveCaptchaToken: _saveTok, extractCaptchaToken: _extractTok } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-risk.mjs`)
+    const vtkToken = _getTok(SHOP)?.token || null
+    const r = await page.evaluate(async (m, uid, gid, mcYuan, roiVal, sig, pid, ids, vtk) => {
       const yuanToApi = (y) => Math.round(Number(y) * 100)   // 元 → 分
       const APIs = {
         pause: '/mms-gateway/venus/api/global/unit/batchUpdateStatus',
@@ -687,13 +690,15 @@ const mode = argOf('mode') || 'overview'
         body = { ...body, crawlerInfo: sig.crawlerInfo }
         headers['Anti-Content'] = sig.anti
       }
+      // ★ 带上 captcha 通行证
+      if (vtk) headers['VerifyAuthToken'] = vtk
       try {
         const resp = await fetch(url, {
           method: 'POST', credentials: 'include', headers, body: JSON.stringify(body),
         })
         return { status: resp.status, json: await resp.json().catch(() => null) }
       } catch (e) { return { status: -1, json: null, err: e.message } }
-    }, mode, unitId, goodsId, maxCostYuan, roi, sigPair, planId, ids)
+    }, mode, unitId, goodsId, maxCostYuan, roi, sigPair, planId, ids, vtkToken)
     const ok = r.json?.success === true || r.json?.errorCode === 1000 || r.json?.error_code === 1000000
     const succ = r.json?.result?.successList || []
     const fail = r.json?.result?.failedList || []

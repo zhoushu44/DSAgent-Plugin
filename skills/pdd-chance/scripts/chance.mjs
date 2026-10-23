@@ -58,7 +58,8 @@ const PRICE_LABEL_NAMES = { 0: '品质档', 1: '主流档', 2: '引流档' }
 ;(async () => {
   const puppeteer = require('puppeteer-core')
   const { CredentialStore } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/lib/services/credential-store.js`)
-  const { checkCooldown, detectSlider, autoSolveSlider, fmtRemain } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-risk.mjs`)
+  const { checkCooldown, detectSlider, autoSolveSlider, fmtRemain, getCaptchaToken, saveCaptchaToken, extractCaptchaToken } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-risk.mjs`)
+  const getTok = getCaptchaToken, saveTok = saveCaptchaToken, extractTok = extractCaptchaToken
   const store = new CredentialStore(path.join(homedir(), '.dsh', 'dsagent-accounts.json'))
   const SHOP = argOf('account') || store.findByPlatform('pdd_mms')?.shop_key
   if (!SHOP) { emit({ ok: false, failureKind: 'not_bound', text: '未绑定拼多多商家后台账号，请到「账号连接」添加。' }); process.exit(2) }
@@ -154,18 +155,26 @@ const PRICE_LABEL_NAMES = { 0: '品质档', 1: '主流档', 2: '引流档' }
   const call = async (apiPath, body) => {
     // 该域不需要 crawlerInfo/Anti-Content；有签名就带上（兜底未来加风控）
     const payload = sig ? { ...body, crawlerInfo: sig.crawlerInfo } : body
+    // ★ 带上 captcha 通行证（有则带，10 分钟内不再弹滑块）
+    const vtk = getTok(SHOP)
     // ★ puppeteer 的 frame.evaluate 只接受「一个」arg —— 多参数会被丢，
     //   导致 fetch 拿到 undefined → 平台报 4000000「请求method,argument,body错误」。
     //   必须打包成单对象传入。
-    const argObj = { p: apiPath, bd: payload, av: sig?.anti || null }
-    return await safeEval(async (o) => {
+    const argObj = { p: apiPath, bd: payload, av: sig?.anti || null, vt: vtk?.token || null }
+    const r = await safeEval(async (o) => {
       const resp = await fetch('https://mms.pinduoduo.com' + o.p, {
         method: 'POST', credentials: 'include',
-        headers: { 'Content-Type': 'application/json', ...(o.av ? { 'Anti-Content': o.av } : {}) },
+        headers: { 'Content-Type': 'application/json', ...(o.av ? { 'Anti-Content': o.av } : {}), ...(o.vt ? { VerifyAuthToken: o.vt } : {}) },
         body: JSON.stringify(o.bd),
       })
       return await resp.json().catch(() => null)
     }, argObj)
+    // ★ 54001 → 提取新 token 存起来
+    if (r && (r.error_code === 54001 || r.errorCode === 54001)) {
+      const nt = extractTok(r)
+      if (nt) { saveTok(SHOP, nt); console.error('[chance] 已提取新 captcha 通行证（10 分钟有效）') }
+    }
+    return r
   }
 
   const BASE = '/opportunity-goods/chance-goods'

@@ -550,7 +550,16 @@ export async function solveSliderInPage(page, shopKey, opts = {}) {
       + (dFromPrev != null ? `（与上轮差 ${Math.round(dFromPrev)}px）` : ''))
     if (DRY) return { ok: true, gapX: solved.x, targetX: Math.round(targetX), text: `[dry-run] gap ${solved.x} − offset ${pieceOffset} → drag ${drag}px → targetX ${Math.round(targetX)}` }
 
-    const cdp = await page.target().createCDPSession()
+    // ★ CDP session 容错：page.target() 在页面导航后可能失效（Connection closed）。
+    //   重试 3 次，每次重新取 target。
+    let cdp = null
+    for (let ci = 0; ci < 3; ci++) {
+      try { cdp = await page.target().createCDPSession(); break } catch (e) {
+        console.error(`[slider] createCDPSession 失败（第 ${ci + 1} 次）：${e.message?.slice(0, 50)}`)
+        await new Promise(r => setTimeout(r, 1500))
+      }
+    }
+    if (!cdp) return { ok: false, gapX: solved.x, text: 'CDP session 创建失败（页面可能已关闭）' }
     const traj = humanTrajectory(handle.x, targetX, handle.y)
     console.error(`[slider-inpage] 拖动 ${handle.x} → ${Math.round(targetX)}（${traj.length} 步，位移 ${Math.round(realDist)}px，第 ${attempt} 轮）`)
     try {

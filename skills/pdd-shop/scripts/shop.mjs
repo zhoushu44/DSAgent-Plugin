@@ -86,6 +86,17 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
     }
   }
 
+  /** 跨 frame 安全求值（页面可能在 iframe 里） */
+  const safeEval = async (fn, arg) => {
+    for (let i = 0; i < 12; i++) {
+      for (const f of page.frames()) {
+        try { return await f.evaluate(fn, arg) } catch { /* 换下一个 frame */ }
+      }
+      await new Promise(r => setTimeout(r, 1200))
+    }
+    return null
+  }
+
   // hook 经营数据响应（/sydney/api/* + 等级）
   const byApi = {}
   const APIS = [
@@ -138,6 +149,80 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
   const gOverview = byApi.goodsOverview || null
   const gList = byApi.goodsList?.goodsDetailList || []
   const mallLevel = byApi.mallLevel || null
+
+  // ══════════════════════════════════════════════════════════════════════
+  // ★★★ DOM 明文优先（2026-10-23 新增）★★★
+  //
+  // 为什么需要：sycm 用 PUA 字符混淆数字，但实测发现**映射不是全局固定的**
+  //   —— 同一码点在不同字段代表不同数字（"每个字段独立偏移"）。
+  //   证据：cate3AvgGoodsVcr 的 U+E6EA 对应 0，但 goodsVcr 的 U+E6EA 对应 1。
+  //
+  // 既然页面能正常显示 26.07% / 124 这些明文（前端解过码），
+  // 最可靠的办法是**直接读 DOM 渲染出来的数字**，而不是自己逆向 PUA。
+  //
+  // 策略：DOM 优先（真实值）→ 接口 PUA 解码兜底（近似值）
+  // ══════════════════════════════════════════════════════════════════════
+  let domGoods = []
+  if (mode === 'goods' || mode === 'overview') {
+    domGoods = await safeEval(() => {
+      // sycm 的商品表格可能是 div 布局（不是 table），两种都试
+      const out = []
+      let headers = []
+
+      // ── 方案 1：标准 table ──
+      for (const tb of document.querySelectorAll('table')) {
+        const headText = (tb.querySelector('thead')?.innerText || '').slice(0, 400)
+        if (!/曝光|访客|浏览量|支付|商品/.test(headText)) continue
+        headers = Array.from(tb.querySelectorAll('thead th')).map(th => (th.innerText || '').trim().replace(/\s+/g, ''))
+        for (const tr of tb.querySelectorAll('tbody tr')) {
+          const tds = Array.from(tr.querySelectorAll('td'))
+          if (tds.length < 3) continue
+          const rec = {}
+          tds.forEach((td, i) => { rec[headers[i] || `col${i}`] = (td.innerText || '').trim().replace(/\s+/g, ' ').replace(/,/g, '') })
+          const gid = (Object.values(rec).join(' ').match(/\b(\d{11,14})\b/) || [])[1]
+          if (gid) rec.__goodsId = gid
+          if (Object.keys(rec).length >= 3) out.push(rec)
+        }
+        if (out.length) return { headers, rows: out, via: 'table' }
+      }
+
+      // ── 方案 2：div 布局（找「行」容器：含商品ID 且 含多个数字单元）──
+      // 思路：先找所有含 11-14 位商品ID 的元素，再往上找共同父级，读其文本
+      const idNodes = []
+      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT)
+      while (walker.nextNode()) {
+        const t = walker.currentNode.nodeValue || ''
+        const m = t.match(/\b(\d{11,14})\b/)
+        if (m) {
+          let el = walker.currentNode.parentElement
+          for (let i = 0; i < 6 && el; i++) {
+            // 找到含足够多数字的祖先（一行数据）
+            const txt = (el.innerText || '').replace(/\s+/g, ' ')
+            if (txt.length > 30 && (txt.match(/\d/g) || []).length > 8) { idNodes.push({ el, gid: m[1], txt }); break }
+            el = el.parentElement
+          }
+        }
+      }
+      if (idNodes.length) {
+        // 用第一个元素的文本推断列（按 空格/tab 切）
+        return { headers: [], rows: idNodes.map(x => ({ __goodsId: x.gid, __raw: x.txt })), via: 'div' }
+      }
+
+      // ── 方案 3：整页文本（最后兜底，让 Node 侧解析）──
+      const bodyTxt = (document.body?.innerText || '').slice(0, 20000)
+      return { headers: [], rows: [], via: 'text', bodyText: bodyTxt }
+    }).catch(() => ({ headers: [], rows: [], via: 'error' }))
+    console.error(`[pdd-shop] DOM 抓取：via=${domGoods?.via} rows=${domGoods?.rows?.length || 0} headers=${domGoods?.headers?.length || 0}`)
+    if (domGoods?.rows?.length) {
+      console.error(`[pdd-shop] DOM 明文读取成功（${domGoods.via}）：${domGoods.rows.length} 行`)
+      if (domGoods.headers?.length) console.error(`  表头: ${domGoods.headers.slice(0, 12).join(' | ')}`)
+      console.error(`  首行: ${JSON.stringify(domGoods.rows[0]).slice(0, 300)}`)
+    } else if (domGoods?.bodyText) {
+      // 存整页文本供分析
+      console.error(`[pdd-shop] DOM 未读到结构化行，但拿到整页文本 ${domGoods.bodyText.length} 字`)
+      try { fs.writeFileSync(path.join(process.cwd(), 'artifacts', 'pdd-shop-page.txt'), domGoods.bodyText, 'utf8') } catch { /* ignore */ }
+    }
+  }
 
   // ── PUA 数字混淆解码器 ──────────────────────────────────────────
   // 拼多多 sycm 对数字字段用 PUA 私用区字符（U+E000~U+F8FF）混淆反采集，
@@ -202,47 +287,87 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
 
   const pua = buildPuaMap(gList)
   const map = pua.map
+  // ★ DOM 明文索引（按 goodsId），用于覆盖 PUA 解码结果
+  const domById = new Map()
+  for (const r of (domGoods?.rows || [])) {
+    if (r.__goodsId) domById.set(String(r.__goodsId), r)
+  }
+  /** 从 DOM 行里按「表头关键词」取数字（表头名各账号略有差异，用模糊匹配） */
+  const domNum = (rec, kws) => {
+    if (!rec) return null
+    for (const [k, v] of Object.entries(rec)) {
+      if (k === '__goodsId') continue
+      if (kws.some(kw => k.includes(kw))) {
+        // 去掉 % , 空格，取数字
+        const m = String(v).replace(/[,%\s]/g, '').match(/-?\d+(\.\d+)?/)
+        if (m) return m[0]
+      }
+    }
+    return null
+  }
   const goodsItems = gList.slice(0, limit).map(g => {
     // 先用整表推映射，再逐字段解码（映射对该响应全局有效）
     const d = (v) => decodePua(v, map)
+    const dom = domById.get(String(g.goodsId))
+    // ★ DOM 明文优先；取不到才用 PUA 解码
+    const pick = (kws, puaVal) => {
+      const dv = domNum(dom, kws)
+      return dv != null ? dv : puaVal
+    }
     return {
       goodsId: g.goodsId,
       name: g.goodsName || '',
       date: g.statDate,
+      src: dom ? 'dom' : 'pua',    // 数据来源标记
       // ── 曝光（隐藏数据，sycm 商品效果页核心指标）──
-      imprUsrCnt: d(g.imprUsrCnt),        // 曝光访客数（今日）
-      imprUsrCntYtd: d(g.imprUsrCntYtd),  // 曝光访客数（昨日）
+      imprUsrCnt: pick(['曝光访客', '曝光人数', '曝光'], d(g.imprUsrCnt)),
+      imprUsrCntYtd: d(g.imprUsrCntYtd),
       // ── 流量 ──
-      uv: d(g.goodsUv),           // 访客
-      pv: d(g.goodsPv),           // 浏览量
+      uv: pick(['商品访客', '访客数', '访客'], d(g.goodsUv)),
+      pv: pick(['浏览量', '浏览'], d(g.goodsPv)),
       uvYtd: d(g.goodsUvYtd),
       pvYtd: d(g.goodsPvYtd),
       // ── 成交 ──
-      payAmt: d(g.payOrdrAmt),    // 支付金额
-      payCnt: d(g.payOrdrCnt),    // 支付订单
-      payQty: d(g.payOrdrGoodsQty),
-      payUsers: d(g.payOrdrUsrCnt),
-      cfmOrdrCnt: d(g.cfmOrdrCnt),        // 确认订单
-      ordrCrtUsrCnt: d(g.ordrCrtUsrCnt),  // 下单人数
+      payAmt: pick(['支付金额', '成交金额'], d(g.payOrdrAmt)),
+      payCnt: pick(['支付订单', '订单数'], d(g.payOrdrCnt)),
+      payQty: pick(['支付件数', '件数'], d(g.payOrdrGoodsQty)),
+      payUsers: pick(['支付人数', '支付买家数'], d(g.payOrdrUsrCnt)),
+      cfmOrdrCnt: d(g.cfmOrdrCnt),
+      ordrCrtUsrCnt: pick(['下单人数', '下单买家数'], d(g.ordrCrtUsrCnt)),
       // ── 转化 ──
-      vcr: d(g.goodsVcr),         // 转化率
-      ordrVstrRto: d(g.ordrVstrRto),      // 下单访客率
-      payOrdrRto: d(g.payOrdrRto),        // 支付访客率
-      goodsPtHelpRate: d(g.goodsPtHelpRate),  // 商品帮扶率
+      vcr: pick(['转化率'], d(g.goodsVcr)),
+      ordrVstrRto: pick(['下单访客率', '下单转化率'], d(g.ordrVstrRto)),
+      payOrdrRto: pick(['支付访客率', '支付转化率', '支付率'], d(g.payOrdrRto)),
+      goodsPtHelpRate: d(g.goodsPtHelpRate),
       // ── 互动 ──
-      fav: d(g.goodsFavCnt),      // 收藏
-      cnsltUsrQty: d(g.cnsltUsrQty),      // 咨询人数
+      fav: pick(['收藏'], d(g.goodsFavCnt)),
+      cnsltUsrQty: pick(['咨询'], d(g.cnsltUsrQty)),
       // 较上周期参考值（Ppr 明文字段；部分账号返回的是当前值而非差值，仅作参考不用于算环比）
       uvRef: g.goodsUvPpr, pvRef: g.goodsPvPpr, payAmtRef: g.payOrdrAmtPpr,
       vcrRef: g.goodsVcrPpr, favRef: g.goodsFavCntPpr,
       imprRef: g.imprUsrCntPpr,
       // 类目对比 + 指标
-      cate3Vcr: d(g.cate3PctGoodsVcr),      // 本店三级类目转化率
-      cate3AvgVcr: d(g.cate3AvgGoodsVcr),   // 三级类目均值
+      cate3Vcr: d(g.cate3PctGoodsVcr),
+      cate3AvgVcr: d(g.cate3AvgGoodsVcr),
       goodsStatus: g.goodsStatus,
       cate1Id: g.cate1Id, cate2Id: g.cate2Id, cate3Id: g.cate3Id,
     }
   })
+
+  // ══════════════════════════════════════════════════════════════════════
+  // ★ 派生指标（真实点击率等）—— 只有拿到 DOM 明文曝光时才算得准
+  // ══════════════════════════════════════════════════════════════════════
+  for (const it of goodsItems) {
+    const nImpr = parseFloat(it.imprUsrCnt)
+    const nUv = parseFloat(it.uv)
+    const nPv = parseFloat(it.pv)
+    // 真实点击率（曝光→访客）≈ 访客 / 曝光访客
+    it.realCtr = (nImpr > 0 && nUv >= 0) ? +(nUv / nImpr * 100).toFixed(2) : null
+    // UV 率（访客/浏览，衡量浏览深度，不是点击率）
+    it.uvRate = (nPv > 0 && nUv >= 0) ? +(nUv / nPv * 100).toFixed(2) : null
+    // 人均浏览页数
+    it.pagesPerUv = (nUv > 0 && nPv > 0) ? +(nPv / nUv).toFixed(2) : null
+  }
 
   const out = { ok: true, mode, shopKey: SHOP, items: [] }
   const lines = []

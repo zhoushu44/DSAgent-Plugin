@@ -33,7 +33,9 @@ const wantCsv = process.argv.includes('--csv')
 ;(async () => {
   const puppeteer = require('puppeteer-core')
   const { ensureAntiContent, getAntiContent } = await import(`file:///${PLUGIN_ROOT}/lib/pdd-mode2.js`)
-  const { checkCooldown, detectSlider, autoSolveSlider, fmtRemain, tryAcquireAccountLock, releaseAccountLock, heartbeatAccountLock, throttleRequest } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-risk.mjs`)
+  const { checkCooldown, detectSlider, autoSolveSlider, fmtRemain, tryAcquireAccountLock, releaseAccountLock, heartbeatAccountLock, throttleRequest, detectRiskCode, getCaptchaToken, saveCaptchaToken, extractCaptchaToken } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-risk.mjs`)
+  // 简写
+  const getTok = getCaptchaToken, saveTok = saveCaptchaToken, extractTok = extractCaptchaToken
 
   // 账号选择：优先 --account，否则按平台自动找
   const { CredentialStore } = await import(`file:///${PLUGIN_ROOT}/lib/services/credential-store.js`)
@@ -132,10 +134,21 @@ const wantCsv = process.argv.includes('--csv')
     if (gap < MIN_GAP) await new Promise(r => setTimeout(r, MIN_GAP - gap))
     lastHit.set(url, Date.now())
     const a = await getAntiContent(page, { force: true })
-    const r = await safeEval(async (u, bd, av) => {
-      const resp = await fetch(u, { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', 'Anti-Content': av }, body: JSON.stringify(bd) })
+    // ★ 带上 captcha 通行证（有则带，避免弹滑块）
+    const vtk = getTok(SHOP)
+    const r = await safeEval(async (u, bd, av, vt) => {
+      const resp = await fetch(u, {
+        method: 'POST', credentials: 'include',
+        headers: { 'Content-Type': 'application/json', 'Anti-Content': av, ...(vt ? { VerifyAuthToken: vt } : {}) },
+        body: JSON.stringify(bd),
+      })
       return await resp.json().catch(() => null)
-    }, url, body, a.data)
+    }, url, body, a.data, vtk?.token || null)
+    // ★ 54001 → 提取新 token 存起来，下次自动带
+    if (r && (r.error_code === 54001 || r.errorCode === 54001)) {
+      const nt = extractTok(r)
+      if (nt) { saveTok(SHOP, nt); console.warn('[pdd-works] 已提取新 captcha 通行证（10 分钟有效）') }
+    }
     // L2：识别频控码 → 记冷却 + 抛错中断当前批次
     const code = detectRiskCode(r)
     if (code) {
@@ -217,10 +230,11 @@ const wantCsv = process.argv.includes('--csv')
       await call('https://mms.pinduoduo.com/vodka/v2/mms/pc/resourceValidate', { goodsIdList: [gid], checkItem: ['if_in_bidding_check', 'if_in_goods_decoration', 'if_in_combine_buy'] }).catch(() => null)
       // ② 下架
       const a = await getAntiContent(page, { force: true })
-      const r = await safeEval(async (u, bd, av) => {
-        const resp = await fetch(u, { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', 'Anti-Content': av }, body: JSON.stringify(bd) })
+      const vtk0 = getTok(SHOP)
+      const r = await safeEval(async (u, bd, av, vt) => {
+        const resp = await fetch(u, { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', 'Anti-Content': av, ...(vt ? { VerifyAuthToken: vt } : {}) }, body: JSON.stringify(bd) })
         return await resp.json().catch(() => null)
-      }, 'https://mms.pinduoduo.com/vodka/v2/mms/pc/offSale', { goodsId: gid }, a.data)
+      }, 'https://mms.pinduoduo.com/vodka/v2/mms/pc/offSale', { goodsId: gid }, a.data, vtk0?.token || null)
       const ok = r?.success === true
       emit({
         ok, mode: 'offsale', goodsId,
@@ -230,10 +244,11 @@ const wantCsv = process.argv.includes('--csv')
       })
     } else if (mode === 'onsale') {
       const a = await getAntiContent(page, { force: true })
-      const r = await safeEval(async (u, bd, av) => {
-        const resp = await fetch(u, { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', 'Anti-Content': av }, body: JSON.stringify(bd) })
+      const vtk1 = getTok(SHOP)
+      const r = await safeEval(async (u, bd, av, vt) => {
+        const resp = await fetch(u, { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', 'Anti-Content': av, ...(vt ? { VerifyAuthToken: vt } : {}) }, body: JSON.stringify(bd) })
         return await resp.json().catch(() => null)
-      }, 'https://mms.pinduoduo.com/vodka/v2/mms/pc/onSale', { goodsId: gid }, a.data)
+      }, 'https://mms.pinduoduo.com/vodka/v2/mms/pc/onSale', { goodsId: gid }, a.data, vtk1?.token || null)
       const ok = r?.success === true
       emit({
         ok, mode: 'onsale', goodsId,
@@ -379,4 +394,5 @@ const wantCsv = process.argv.includes('--csv')
   emit({ ok: false, failureKind: 'api_error', text: `执行异常：${e?.message || String(e)}` })
   process.exit(1)
 })
+
 
