@@ -70,18 +70,139 @@ const TRANSPORT = argOf('transport') || 'http'   // ★ 默认纯 Node
   // 不启浏览器、不弹滑块，速度 ~200ms/请求
   // ══════════════════════════════════════════════════════════════════════
   if (TRANSPORT === 'http') {
-    const { call, cookiesOf } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-http.mjs`)
+    // ★ t1 通道：简化签名 + 凭证库 Cookie
+    const { call: callT1, cookiesOf } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-http.mjs`)
+    const R = 'https://mms.pinduoduo.com/sydney/api'
+
+    // ── goods 模式：走 t3 通道（真签名 + webSpiderRule + CDP Cookie），不依赖凭证库 ──
+    if (mode === 'goods') {
+      const pad = (n) => String(n).padStart(2, '0')
+      const now = new Date()
+      const TODAY = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
+      const dateArg = argOf('date') || TODAY
+
+      console.error('[pdd-shop] goods 使用 t3 通道（真签名 + webSpiderRule + CDP Cookie）...')
+      const { call: callT3, createSession } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-client.mjs`)
+      const { decodePua } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-risksdk.mjs`)
+
+      let sess = null
+      try {
+        sess = await createSession(SHOP)
+        // ★ 先等页面完全稳定（含网络空闲），再取签名
+        await sess.goto('https://mms.pinduoduo.com/sycm/goods_effect', 12000)
+        await sess.waitStable()
+
+        const r = await callT3({
+          shopKey: SHOP,
+          session: sess,
+          url: `${R}/goodsDataShow/queryGoodsDetailVOListForMMS`,
+          body: {
+            startDate: dateArg, endDate: dateArg, queryType: 6,
+            sortCol: 0, sortType: 1, pageNum: 1, pageSize: limit, actVs: 1,
+          },
+          referer: 'https://mms.pinduoduo.com/sycm/goods_effect',
+        })
+
+        if (!r.ok) {
+          emit({
+            ok: false, mode, transport: 't3', shopKey: SHOP,
+            failureKind: r.kind, ec: r.ec,
+            text: `商品明细取数失败（t3 通道）：${r.kind}\n${r.hint || r.msg || ''}`,
+          })
+          process.exit(2)
+        }
+
+        const rawList = r.json.result?.goodsDetailList || []
+        const isPua = (c) => { const p = c.codePointAt(0); return p >= 0xE000 && p <= 0xF8FF }
+        const dec = (v) => (typeof v === 'string' && [...v].some(isPua)) ? decodePua(v) : v
+
+        const items = rawList.map(g => ({
+          goodsId: g.goodsId,
+          name: g.goodsName,
+          date: g.statDate,
+          cur: {
+            uv: dec(g.goodsUv), pv: dec(g.goodsPv),
+            payAmt: dec(g.payOrdrAmt), payCnt: dec(g.payOrdrCnt),
+            payUsers: dec(g.payOrdrUsrCnt), payQty: dec(g.payOrdrGoodsQty),
+            vcr: dec(g.goodsVcr), fav: dec(g.goodsFavCnt),
+            imprUsrCnt: dec(g.imprUsrCnt), cnsltUsrQty: dec(g.cnsltUsrQty),
+          },
+          prev: {
+            uv: g.goodsUvPpr, pv: g.goodsPvPpr,
+            payAmt: g.payOrdrAmtPpr, payCnt: g.payOrdrCntPpr,
+            payUsers: g.payOrdrUsrCntPpr, payQty: g.payOrdrGoodsQtyPpr,
+            vcr: g.goodsVcrPpr, fav: g.goodsFavCntPpr,
+            imprUsrCnt: g.imprUsrCntPpr, ordrCrtUsrCnt: g.ordrCrtUsrCntPpr,
+            cnsltUsrQty: g.cnsltUsrQtyPpr, payOrdrRto: g.payOrdrRtoPpr,
+            ordrVstrRto: g.ordrVstrRtoPpr,
+            vcrCalc: (g.goodsUvPpr > 0) ? +((g.payOrdrCntPpr || 0) / g.goodsUvPpr * 100).toFixed(2) : null,
+            aov: (g.payOrdrCntPpr > 0) ? +((g.payOrdrAmtPpr || 0) / g.payOrdrCntPpr).toFixed(2) : null,
+          },
+          cate: [g.cate1Id, g.cate2Id, g.cate3Id].filter(Boolean),
+          status: g.goodsStatus,
+        }))
+
+        const tot = items.reduce((s, x) => ({
+          uv: s.uv + (Number(x.prev.uv) || 0),
+          pv: s.pv + (Number(x.prev.pv) || 0),
+          payAmt: s.payAmt + (Number(x.prev.payAmt) || 0),
+          payCnt: s.payCnt + (Number(x.prev.payCnt) || 0),
+        }), { uv: 0, pv: 0, payAmt: 0, payCnt: 0 })
+
+        const out = {
+          ok: true, mode, transport: 't3', shopKey: SHOP,
+          date: dateArg,
+          goods: items,
+          totals: {
+            ...tot, payAmt: +tot.payAmt.toFixed(2),
+            vcr: tot.uv > 0 ? +(tot.payCnt / tot.uv * 100).toFixed(2) : null,
+            aov: tot.payCnt > 0 ? +(tot.payAmt / tot.payCnt).toFixed(2) : null,
+          },
+          signature: r.signature,
+          spiderRule: sess.spiderRule ? `${sess.spiderRule.length} 字符` : 'missing',
+        }
+
+        const L = []
+        L.push(`商品数据明细（${items.length} 个，日期 ${dateArg}，t3 通道）`)
+        L.push(`签名: ${r.signature?.type} ${r.signature?.len} 字符 | webSpiderRule: ${out.spiderRule}`)
+        L.push('')
+        L.push('★ 上期值（= 昨日，通常有数据）：')
+        L.push('  商品                            访客  浏览   支付      订单  转化率  客单价')
+        for (const x of items.slice(0, 20)) {
+          const p = x.prev
+          L.push(`  ${String(x.name || '').slice(0, 26).padEnd(30)}${String(p.uv ?? '—').padStart(6)}${String(p.pv ?? '—').padStart(6)}${String(p.payAmt ?? '—').padStart(10)}${String(p.payCnt ?? '—').padStart(6)}${String(p.vcrCalc != null ? p.vcrCalc + '%' : '—').padStart(8)}${String(p.aov ?? '—').padStart(8)}`)
+        }
+        L.push('')
+        L.push(`合计：访客 ${out.totals.uv} / 浏览 ${out.totals.pv} / 支付 ¥${out.totals.payAmt} / 订单 ${out.totals.payCnt}`)
+        L.push(`      转化率 ${out.totals.vcr}% / 客单价 ¥${out.totals.aov}`)
+        const hasCur = items.some(x => x.cur.uv && x.cur.uv !== '0')
+        if (!hasCur) {
+          L.push('')
+          L.push('ℹ️ 当前值字段为空（今日数据未生成），已自动改用「上期值」')
+        }
+        out.text = L.join('\n')
+
+        emit(out)
+        process.exit(0)
+      } catch (e) {
+        emit({ ok: false, mode, transport: 't3', failureKind: 'exception', text: `商品明细取数异常：${e.message?.slice(0, 200)}` })
+        process.exit(2)
+      } finally {
+        if (sess) await sess.close()
+      }
+    }
+
+    // ── 其他模式：t1 通道 ──
     const acc = store.findByPlatform('pdd_mms', SHOP) || store.listAccounts().find(a => a.shop_key === SHOP)
     if (!acc?.cookies?.['PASS_ID']) {
       emit({ ok: false, failureKind: 'token_expired', text: '账号缺少 PASS_ID，请到「账号连接」重新登录拼多多商家后台。' })
       process.exit(2)
     }
     const COOKIES = cookiesOf(acc)
-    const R = 'https://mms.pinduoduo.com/sydney/api'
 
     /** 统一调用 + 错误归一 */
     const get = async (url, body, referer) => {
-      const r = await call({ shopKey: SHOP, cookies: COOKIES, url, body, referer })
+      const r = await callT1({ shopKey: SHOP, cookies: COOKIES, url, body, referer })
       if (!r.ok) {
         const kind = r.kind === 'session_expired' ? 'token_expired'
           : r.kind === 'captcha' ? 'risk_control'
@@ -110,18 +231,6 @@ const TRANSPORT = argOf('transport') || 'http'   // ★ 默认纯 Node
     if (mode === 'score' || mode === 'overview') {
       const scR = await get(`${R}/mallScore/queryMallScoreOverView`, {}, 'https://mms.pinduoduo.com/sycm/evaluation')
       if (scR.ok) out.score = scR.data
-    }
-
-    // ── goods 明细（需要日期参数，实测该接口参数未完全破解 → 提示走 browser）──
-    if (mode === 'goods') {
-      out.text = [
-        '⚠️ 商品明细接口（queryGoodsDetailVOListForMMS）的参数格式尚未破解（已试 25 种组合全部失败）。',
-        '   请用：--mode goods --transport browser',
-        '',
-        out.goodsOverview ? `可用数据（商品总览）：今日支付 ¥${out.goodsOverview.today?.payOrdrAmt} / ${out.goodsOverview.today?.payOrdrCnt} 单 / ${out.goodsOverview.today?.guv} 访客` : '',
-      ].filter(Boolean).join('\n')
-      emit(out)
-      process.exit(0)
     }
 
     // ── 汇总文本 ──
@@ -567,4 +676,5 @@ const TRANSPORT = argOf('transport') || 'http'   // ★ 默认纯 Node
   emit({ ok: false, failureKind: 'api_error', text: `执行异常：${e?.message || String(e)}` })
   process.exit(1)
 })
+
 

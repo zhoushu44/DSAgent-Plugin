@@ -111,19 +111,89 @@ export async function createSession(shopKey, opts = {}) {
       }
     },
     async genSig() {
-      try {
+      // ① 等页面稳定（无导航、frame 未分离）
+      for (let i = 0; i < 20; i++) {
         if (page.isClosed()) return { err: 'page closed' }
-        const r = await page.evaluate(() => window.__pddGenRiskSig())
-        return r
-      } catch (e) {
-        return { err: String(e).slice(0, 120) }
+        try {
+          const u = await page.evaluate(() => location.href).catch(() => null)
+          if (u && !/\/login|\/sso/i.test(u)) break
+        } catch { /* frame 分离中，重试 */ }
+        await sleep(1500)
       }
+      // ② 等 eDaA 模块加载（最多 30 秒）
+      for (let i = 0; i < 15; i++) {
+        try {
+          const ready = await page.evaluate(() => {
+            const all = window.__pddWpAll || {}
+            for (const s of Object.values(all)) {
+              if (s.modules && s.modules['eDaA']) return true
+            }
+            return false
+          })
+          if (ready) break
+        } catch { /* 重试 */ }
+        await sleep(2000)
+      }
+      // ③ 生成签名（带 3 次重试，应对偶发 frame 分离）
+      let lastErr = null
+      for (let i = 0; i < 3; i++) {
+        try {
+          const r = await page.evaluate(() => window.__pddGenRiskSig())
+          if (r?.ok) return r
+          lastErr = r?.err || 'unknown'
+          if (lastErr === 'eDaA module not found') { await sleep(3000); continue }
+          return r
+        } catch (e) {
+          lastErr = String(e).slice(0, 120)
+          await sleep(2000)
+        }
+      }
+      return { err: lastErr }
     },
     async goto(url, waitMs = 12000) {
       try {
         await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 90000 })
       } catch { /* ignore */ }
       await sleep(waitMs)
+    },
+    /**
+     * ★ 等页面真正稳定：
+     *   ① URL 不再变（连续 3 次相同）
+     *   ② 能连续 3 次 evaluate 成功（frame 未分离）
+     *   ③ eDaA 模块已就绪
+     */
+    async waitStable(maxWaitMs = 60000) {
+      const t0 = Date.now()
+      let lastUrl = ''
+      let sameCount = 0
+      let evalOk = 0
+      while (Date.now() - t0 < maxWaitMs) {
+        if (page.isClosed()) return false
+        let url = null
+        try { url = await page.evaluate(() => location.href) } catch { /* frame 分离 */ }
+        if (url) {
+          evalOk++
+          if (url === lastUrl) sameCount++
+          else { sameCount = 0; lastUrl = url }
+        } else {
+          evalOk = 0
+        }
+        if (sameCount >= 2 && evalOk >= 3) {
+          // 再看 eDaA
+          try {
+            const ready = await page.evaluate(() => {
+              const all = window.__pddWpAll || {}
+              for (const s of Object.values(all)) {
+                if (s.modules && s.modules['eDaA']) return true
+              }
+              return false
+            })
+            if (ready) return true
+          } catch { /* ignore */ }
+        }
+        await sleep(1500)
+      }
+      return false
     },
     async close() { try { await browser.close() } catch { /* ignore */ } },
     /**
