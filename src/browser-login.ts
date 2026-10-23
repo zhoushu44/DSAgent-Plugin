@@ -635,6 +635,33 @@ function isOffLoginPage(loginUrl: string, currentUrl: string): boolean {
   }
 }
 
+/**
+ * 抓 PDD 商家后台的店铺名（用于「账号连接」页显示）。
+ *
+ * 背景：PDD 的店铺名不在任何 Cookie 里，`resolveDisplayNick` 只会退回
+ * account_id（32 位 hex），用户在账号连接页看到一堆哈希分不清是哪家店。
+ * 店铺名在 `POST /earth/api/mallInfo/commonMallInfo` 的 `result.mall_name`。
+ *
+ * @param cookieStr 已保存账号的 cookie_str
+ * @returns 店铺名；失败返回 ''（不影响登录流程）
+ */
+async function fetchPddMallName(cookieStr: string): Promise<string> {
+  try {
+    const resp = await fetch('https://mms.pinduoduo.com/earth/api/mallInfo/commonMallInfo', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: cookieStr },
+      body: JSON.stringify({}),
+      signal: AbortSignal.timeout(15_000),
+    })
+    if (!resp.ok) return ''
+    const j = await resp.json().catch(() => null) as any
+    const name = j?.result?.mall_name || j?.result?.mallName || j?.result?.name || ''
+    return typeof name === 'string' ? name.trim() : ''
+  } catch {
+    return ''
+  }
+}
+
 export async function doBrowserLogin(
   platform: string,
   loginUrl: string,
@@ -760,10 +787,11 @@ export async function doBrowserLogin(
 
     // 抖音：主页加载后需要点击"登录"按钮弹出登录窗
     // 使用 page.mouse.click() 在坐标上点击，避免 ElementHandle detached 问题
-    // ★ 抖店（douyin_shop）走与抖音**同一套主页登录弹窗**（阿里 SSO 之外的抖音自己的 SSO）：
-    //   显式登录抖店后台（fxg.jinritemai.com）会先跳抖音扫码，多绕一跳且 domain 判定更脆；
-    //   这里复用已验证的抖音弹窗路径，登录成功后由 getAllDomainCookies 一并取 .jinritemai.com 域。
-    if (platform === 'douyin' || platform === 'douyin_shop') {
+    // ★ 抖店（douyin_shop）**不**走这条：它的登录入口就是 fxg.jinritemai.com/login/common
+    //   自己的扫码页（二维码已直接在页面上）。实测「登录抖音主页后自动获得抖店域
+    //   Cookie」不成立 —— 抖店有独立会话校验，走抖音弹窗扫码后仍打不开后台。
+    //   故这里只对 platform === 'douyin' 生效，抖店走独立分支（见下方）。
+    if (platform === 'douyin') {
       try {
         await page.waitForSelector('button', { timeout: 10000 })
         // 等待页面完全渲染
@@ -1018,6 +1046,27 @@ export async function doBrowserLogin(
       console.log(`[dsagent-login] 登录成功，准备保存凭证...${replaceShopKey ? `（替换旧账号 ${replaceShopKey}，绑定关系继承）` : ''}`)
       const saved = await store.save(platform, jar, { replaceShopKey })
       console.log(`[dsagent-login] 凭证已保存: shopKey=${saved.shop_key}, accountId=${saved.account_id}`)
+
+      // ★ PDD 商家后台：登录成功后抓店铺名，写回 display_label。
+      //   PDD 的店铺名不在任何 Cookie 里（resolveDisplayNick 只会退回 account_id
+      //   一串 hex），而在 /earth/api/mallInfo/commonMallInfo 返回的 mall_name。
+      //   不抓的话「账号连接」页只能显示 de55c3e1590… 这种哈希，用户分不清是哪家店。
+      if (platform === 'pdd_mms') {
+        try {
+          const mallName = await fetchPddMallName(saved.cookie_str)
+          if (mallName) {
+            await store.save(platform, jar, {
+              replaceShopKey,
+              displayLabel: mallName,
+              accountMeta: { ...(saved.account_meta || {}), mall_name: mallName, display_nick: mallName },
+            })
+            console.log(`[dsagent-login] PDD 店铺名已写入 display_label: ${mallName}`)
+            saved.display_label = mallName
+          }
+        } catch (e) {
+          console.warn(`[dsagent-login] 抓 PDD 店铺名失败（不影响登录）: ${(e as Error).message}`)
+        }
+      }
 
       // ★ P1-3：首次登录时绑定环境指纹（UA / viewport / 时区 / 语言）。
       //   已有 env 的账号不覆盖（env 是账号身份的一部分）。
