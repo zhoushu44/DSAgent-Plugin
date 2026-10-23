@@ -29,6 +29,7 @@
  *   - 提交被拦要三路回读（toast + 字段红字 + 建议面板）。
  */
 import { existsSync, statSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs'
+import { applyStealth } from './stealth-inject'
 import { basename, join } from 'node:path'
 import type { CredentialStore, StoredAccount } from './services/credential-store.js'
 import { resolveAccountForRequest, toAccountChoice } from './services/credential-store.js'
@@ -1333,9 +1334,7 @@ export async function mqsPublish(
       } catch { /* 弹窗可能已被处理 */ }
     })
     await page.setViewport({ width: 1440, height: 900 })
-    await page.evaluateOnNewDocument(() => {
-      Object.defineProperty(navigator, 'webdriver', { get: () => undefined })
-    })
+    await applyStealth(page)
 
     // Cookie 注入（多域：抖店要同时喂 .jinritemai.com 与 .douyin.com）
     const cookieList = Object.entries(cookies)

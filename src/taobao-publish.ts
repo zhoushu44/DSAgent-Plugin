@@ -27,6 +27,7 @@
  *             窗口内补全，若提交被校验拦住，工具会继续等待并识别用户手动提交的结果。
  */
 import { CredentialStore, resolveAccountForRequest, type StoredAccount } from './services/credential-store.js'
+import { applyStealth } from './stealth-inject'
 import { type AttrModelHandle } from './pdd-publish.js'
 import { loadPublishConfig, anchorSpec, configString, configTimeout, type PublishConfig } from './services/publish-config-loader.js'
 import { clearProfileLocks, findChromePath, profileDir, profileOwner, releaseProfile, tryAcquireProfile, registerProfilePort, registeredPortFor, verifyPortOwnership, sleep, UI_STEP_DELAY_MS } from './browser-login.js'
@@ -3133,9 +3134,7 @@ export async function taobaoPublish(
     })
     // 用本机真实 UA：硬改 UA 会与内核自动发出的 sec-ch-ua / userAgentData 矛盾
     await page.setViewport({ width: 1440, height: 900 })
-    await page.evaluateOnNewDocument(() => {
-      Object.defineProperty(navigator, 'webdriver', { get: () => undefined })
-    })
+    await applyStealth(page)
     // ★ replayMode（觅千手式 Json/Json2 setter 劫持重放）：在页面任何脚本执行前注入，
     //   劫持 window.Json / window.Json2 的 setter，框架赋值瞬间把 payload merge 进表单 state。
     //   新开的发布标签页（sell/v2/publish.htm?catId=...）同属本 browser 上下文，init script 自动生效。

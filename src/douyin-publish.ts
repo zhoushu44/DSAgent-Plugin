@@ -15,6 +15,7 @@
  *   - 发布按钮文本「发布」，另有「我知道了」弹窗需先关闭
  */
 import { CredentialStore, resolveAccountForRequest, type StoredAccount } from './services/credential-store.js'
+import { applyStealth } from './stealth-inject'
 import { clearProfileLocks, findChromePath, profileDir, profileOwner, releaseProfile, tryAcquireProfile, sleep, UI_STEP_DELAY_MS } from './browser-login.js'
 import { existsSync, statSync } from 'node:fs'
 
@@ -206,9 +207,7 @@ export async function douyinPublish(
     const page = await browser.newPage()
     // 用本机真实 UA：硬改 UA 会与内核自动发出的 sec-ch-ua / userAgentData 矛盾
     await page.setViewport({ width: 1440, height: 900 })
-    await page.evaluateOnNewDocument(() => {
-      Object.defineProperty(navigator, 'webdriver', { get: () => undefined })
-    })
+    await applyStealth(page)
 
     // 注入抖音域 Cookie（domain 必须写 .douyin.com，creator 子域才认）
     const cookieList = Object.entries(accountCookies)

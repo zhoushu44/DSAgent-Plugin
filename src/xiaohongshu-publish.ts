@@ -17,6 +17,7 @@
  *   - tab 切换：div.creator-tab（内含 span.title「上传视频」/「上传图文」）
  */
 import { CredentialStore, resolveAccountForRequest, type StoredAccount } from './services/credential-store.js'
+import { applyStealth } from './stealth-inject'
 import { clearProfileLocks, findChromePath, profileDir, profileOwner, releaseProfile, tryAcquireProfile, sleep, UI_STEP_DELAY_MS } from './browser-login.js'
 import { existsSync, statSync } from 'node:fs'
 
@@ -241,9 +242,7 @@ export async function xiaohongshuPublish(
     const page = await browser.newPage()
     // 用本机真实 UA：硬改 UA 会与内核自动发出的 sec-ch-ua / userAgentData 矛盾
     await page.setViewport({ width: 1440, height: 900 })
-    await page.evaluateOnNewDocument(() => {
-      Object.defineProperty(navigator, 'webdriver', { get: () => undefined })
-    })
+    await applyStealth(page)
 
     // 注入小红书域 Cookie（domain 必须写 .xiaohongshu.com，creator 子域才认）
     const cookieList = Object.entries(accountCookies)

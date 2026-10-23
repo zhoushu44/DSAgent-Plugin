@@ -24,6 +24,7 @@
  *   因此本技能要求凭证库中已存在 pdd 账号（否则返回 not_bound 引导扫码登录）。
  */
 import { CredentialStore, resolveAccountForRequest, type StoredAccount } from './services/credential-store.js'
+import { applyStealth } from './stealth-inject'
 import { clearProfileLocks, findChromePath, profileDir, profileOwner, releaseProfile, tryAcquireProfile } from './browser-login.js'
 
 const H5_BASE = 'https://mobile.yangkeduo.com'
@@ -346,9 +347,7 @@ export async function pddCrawl(
     const page = await browser.newPage()
     await page.setViewport({ width: 390, height: 844, isMobile: true, hasTouch: true, deviceScaleFactor: 3 })
     await page.setUserAgent(MOBILE_UA)
-    await page.evaluateOnNewDocument(() => {
-      Object.defineProperty(navigator, 'webdriver', { get: () => undefined })
-    })
+    await applyStealth(page)
 
     // 注入拼多多域 Cookie（H5 站登录态在 .yangkeduo.com）
     const cookieList = Object.entries(accountCookies)

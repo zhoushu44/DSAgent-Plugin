@@ -19,6 +19,7 @@
  *   在 goofish 域下恒为未登录态，本工具会返回 token_expired 引导用户重新扫码。
  */
 import { CredentialStore, resolveAccountForRequest, type StoredAccount } from './services/credential-store.js'
+import { applyStealth } from './stealth-inject'
 import { clearProfileLocks, findChromePath, profileDir, profileOwner, releaseProfile, tryAcquireProfile } from './browser-login.js'
 
 const PERSONAL_URL = 'https://www.goofish.com/personal'
@@ -318,9 +319,7 @@ export async function xianyuAnalytics(
     const page = await browser.newPage()
     // 用本机真实 UA：硬改 UA 会与内核自动发出的 sec-ch-ua / userAgentData 矛盾
     await page.setViewport({ width: 1440, height: 900 })
-    await page.evaluateOnNewDocument(() => {
-      Object.defineProperty(navigator, 'webdriver', { get: () => undefined })
-    })
+    await applyStealth(page)
 
     // 注入闲鱼域 Cookie。★ 必须同时写 .goofish.com 与 .taobao.com：
     // 闲鱼登录态在 goofish 域，但 SSO 相关票据（_tb_token_ / cookie2 / unb）写在 taobao 域。

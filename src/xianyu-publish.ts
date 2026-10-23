@@ -26,6 +26,7 @@
  *   扫码登录**得到的（只有这条路能拿到 havana_lgc2_77 会话票据）。
  */
 import { CredentialStore, resolveAccountForRequest, type StoredAccount } from './services/credential-store.js'
+import { applyStealth } from './stealth-inject'
 import { clearProfileLocks, findChromePath, profileDir, profileOwner, releaseProfile, tryAcquireProfile, sleep, UI_STEP_DELAY_MS } from './browser-login.js'
 import { existsSync, statSync } from 'node:fs'
 import { loadPublishConfig, anchorSpec, configString, configTimeout, type PublishConfig } from './services/publish-config-loader.js'
@@ -402,9 +403,7 @@ export async function xianyuPublish(
     const page = await browser.newPage()
     // 用本机真实 UA：硬改 UA 会与内核自动发出的 sec-ch-ua / userAgentData 矛盾
     await page.setViewport({ width: 1440, height: 900 })
-    await page.evaluateOnNewDocument(() => {
-      Object.defineProperty(navigator, 'webdriver', { get: () => undefined })
-    })
+    await applyStealth(page)
 
     // 注入闲鱼域 Cookie。★ 必须同时写 .goofish.com 与 .taobao.com：
     // 闲鱼登录态在 goofish 域，但 SSO 相关票据（_tb_token_ / cookie2 / unb）写在 taobao 域。

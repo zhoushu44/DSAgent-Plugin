@@ -22,6 +22,7 @@
  *   - 发布设置（封面 / 话题 / 投稿至问题）是页面侧栏，非阻塞弹窗
  */
 import { CredentialStore, resolveAccountForRequest, type StoredAccount } from './services/credential-store.js'
+import { applyStealth } from './stealth-inject'
 import { clearProfileLocks, findChromePath, profileDir, profileOwner, releaseProfile, tryAcquireProfile, sleep, UI_STEP_DELAY_MS } from './browser-login.js'
 
 const WRITE_URL = 'https://zhuanlan.zhihu.com/write'
@@ -203,9 +204,7 @@ export async function zhihuPublish(
     const page = await browser.newPage()
     // 用本机真实 UA：硬改 UA 会与内核自动发出的 sec-ch-ua / userAgentData 矛盾
     await page.setViewport({ width: 1440, height: 900 })
-    await page.evaluateOnNewDocument(() => {
-      Object.defineProperty(navigator, 'webdriver', { get: () => undefined })
-    })
+    await applyStealth(page)
 
     // 注入知乎域 Cookie（domain 必须写 .zhihu.com，zhuanlan 子域才认）
     const cookieList = Object.entries(accountCookies)

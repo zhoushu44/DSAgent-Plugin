@@ -4,6 +4,7 @@
  * 动态导入 puppeteer-core，连接本机 Chrome，导航到登录页，轮询关键 Cookie。
  */
 import { CredentialStore, keyCookies, credentialPlatform, isRiskPassCookie, type AccountEnv } from './services/credential-store.js'
+import { applyStealth } from './stealth-inject'
 import { clearRiskCooldown, probePlatformPermission, invalidateGatewayCache, desktopUserAgent } from './gateway-proxy.js'
 import * as authOp from './services/auth-operation.js'
 import { cpSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync } from 'node:fs'
@@ -796,8 +797,11 @@ export async function doBrowserLogin(
     // 反自动化检测：隐藏 webdriver 标志
     // 同时埋一个「用户操作计数器」：页面内的点击/按键/滚动/拖动鼠标都会累加，
     // 供轮询判断「用户正在操作」→ 有操作就续时，不把正在扫码的用户误判成超时（FIX-LOG #66）。
+    // ★ 2026-10-24：webdriver 隐藏改用 applyStealth（HTML 注入 + 随机化 + 自删除），
+    //   不再用 Object.defineProperty 覆写 —— 那会留下自定义 getter，
+    //   PDD 官方 hl 检测用 in + hasOwnProperty 双查 + getOwnPropertyDescriptor 一行识破。
+    await applyStealth(page)
     await page.evaluateOnNewDocument(() => {
-      Object.defineProperty(navigator, 'webdriver', { get: () => undefined })
       const w = window as unknown as Record<string, unknown>
       w.__dsaActivity = 0
       const bump = () => { w.__dsaActivity = ((w.__dsaActivity as number) || 0) + 1 }
@@ -1314,9 +1318,7 @@ async function doRefreshXianyuCookies(
       await applyAccountEnv(page, refreshEnv)
 
       // 反自动化检测
-      await page.evaluateOnNewDocument(() => {
-        Object.defineProperty(navigator, 'webdriver', { get: () => undefined })
-      })
+      await applyStealth(page)
 
       // 先访问 taobao.com 设置 Cookie 域
       await page.goto('https://www.taobao.com/', { waitUntil: 'domcontentloaded', timeout: 15000 })
@@ -1670,9 +1672,7 @@ export async function riskVerify(
       // P1-3：风控验证按账号绑定的 env 设置 viewport（无 env 时回退默认 1440x900）
       const verifyEnv = envOf(store.get(shopKey))
       await applyAccountEnv(page, verifyEnv)
-      await page.evaluateOnNewDocument(() => {
-        Object.defineProperty(navigator, 'webdriver', { get: () => undefined })
-      })
+      await applyStealth(page)
 
       // 先把已有 Cookie 写进 .taobao.com 域，验证页才会挂到同一个账号上
       try {
