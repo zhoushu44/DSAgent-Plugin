@@ -183,6 +183,8 @@ export async function solveSliderInPage(page, shopKey, opts = {}) {
     return null
   })
   const sliderGone = async () => !(await findSlider())
+  const handle0 = await findSlider().then(s => s?.handle?.[0] || { x: 0, y: 0, w: 0, h: 0 })
+  if (!handle0.x) return { ok: false, text: '当前页面未找到滑块（可能遮罩已消失）' }
 
   /**
    * 主动刷新验证码（点滑块遮罩里的刷新按钮）。
@@ -225,11 +227,13 @@ export async function solveSliderInPage(page, shopKey, opts = {}) {
     return !!clicked
   }
 
-  // ★ 跨轮次状态：记录上一轮的图指纹和缺口 X，用于判断「验证码是否刷新」
-  //   以及失败后该「重新取码」还是「修正位移」。
+  // ★ 跨轮次状态：记录上一轮的图指纹、缺口 X、起点、目标，用于判断
+  //   「验证码是否刷新」以及失败后该「重新取码」还是「修正位移」。
   let prevBgHash = ''
   let prevGapX = -1
+  let prevStartX = -1
   let prevTargetX = -1
+  const ORIGIN_START_X = handle0.x   // 首次读取的滑块原点（平台复位后的标准位置）
 
   for (let attempt = 1; attempt <= MAX; attempt++) {
     const slider = await findSlider()
@@ -237,7 +241,6 @@ export async function solveSliderInPage(page, shopKey, opts = {}) {
 
     const bg = slider.imgs.find(i => i.w > 200) || slider.imgs[0]
     const blk = slider.imgs.find(i => i.w > 30 && i.w < 100)
-    const handle = slider.handle[0]
     const bgB64 = bg.src.replace(/^data:image\/\w+;base64,/, '')
     const blkB64 = blk ? blk.src.replace(/^data:image\/\w+;base64,/, '') : null
 
@@ -293,12 +296,39 @@ export async function solveSliderInPage(page, shopKey, opts = {}) {
       continue
     }
 
+    // ★ 滑块复位：失败后平台不一定把滑块弹回原点。
+    //   若滑块还停在 prevTargetX，直接从这里发 mousePressed 会导致
+    //   实际位移 = targetX - prevTargetX（远小于应有值），验证必失败。
+    //   所以每轮先读当前滑块位置，若偏离原点则先拖回去（瞬时，无轨迹）。
+    const curHandle = slider.handle[0]
+    const needReset = Math.abs(curHandle.x - ORIGIN_START_X) > 2
+    if (needReset) {
+      console.error(`[slider] 滑块偏离原点 ${ORIGIN_START_X} → ${curHandle.x}，先复位`)
+      try {
+        const rc = await page.target().createCDPSession()
+        await rc.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: curHandle.x, y: curHandle.y, button: 'left', clickCount: 1 })
+        await rc.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: ORIGIN_START_X, y: curHandle.y, button: 'left' })
+        await rc.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: ORIGIN_START_X, y: curHandle.y, button: 'left', clickCount: 1 })
+        await new Promise(r => setTimeout(r, 800))
+      } catch { /* 复位失败不阻塞，继续尝试 */ }
+      // 复位后重新读一次（位置可能因动画未稳）
+      const s2 = await findSlider()
+      if (s2) { slider.handle = s2.handle; slider.imgs = s2.imgs }
+    }
+    const handle = slider.handle[0]
+
     const targetX = bg.x + solved.x - (blk?.w || 49) / 2
-    if (DRY) return { ok: true, gapX: solved.x, targetX: Math.round(targetX), text: `[dry-run] 缺口 X=${solved.x}px，应拖到 ${Math.round(targetX)}` }
+    // ★ 正确位移：始终从「当前滑块实际位置」算到 targetX，
+    //   不是从固定的 handle.x 算（那个可能是上一轮的旧值）
+    const realDist = targetX - handle.x
+    const dFromPrev = prevTargetX >= 0 ? targetX - prevTargetX : null
+    console.error(`[slider] 位移计算：起点 ${handle.x} → 目标 ${Math.round(targetX)}，实际位移 ${Math.round(realDist)}px`
+      + (dFromPrev != null ? `（与上轮目标差 ${Math.round(dFromPrev)}px）` : ''))
+    if (DRY) return { ok: true, gapX: solved.x, targetX: Math.round(targetX), text: `[dry-run] 缺口 X=${solved.x}px，应拖到 ${Math.round(targetX)}（从 ${handle.x} 出发，位移 ${Math.round(realDist)}px）` }
 
     const cdp = await page.target().createCDPSession()
     const traj = humanTrajectory(handle.x, targetX, handle.y)
-    console.error(`[slider-inpage] 拖动 ${handle.x} → ${Math.round(targetX)}（${traj.length} 步，第 ${attempt} 轮）`)
+    console.error(`[slider-inpage] 拖动 ${handle.x} → ${Math.round(targetX)}（${traj.length} 步，位移 ${Math.round(realDist)}px，第 ${attempt} 轮）`)
     try {
       await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: handle.x, y: handle.y, button: 'left', clickCount: 1 })
       for (const p of traj) {
@@ -322,9 +352,10 @@ export async function solveSliderInPage(page, shopKey, opts = {}) {
       return { ok: true, gapX: solved.x, targetX: Math.round(targetX), text: `✅ 滑块已过（缺口 X=${solved.x}，${traj.length} 步，第 ${attempt} 轮尝试）` }
     }
 
-    // ★ 记录本轮状态，供下一轮做位移对比
+    // ★ 记录本轮状态，供下一轮做图指纹 + 位移对比
     prevBgHash = bgHash
     prevGapX = solved.x
+    prevStartX = handle.x
     prevTargetX = Math.round(targetX)
 
     // 未通过 → 下一轮重试（平台可能已自动换图；没换的话下一轮会判定并主动刷新）
