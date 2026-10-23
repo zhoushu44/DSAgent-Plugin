@@ -46,6 +46,15 @@ const size = Math.min(100, Math.max(1, parseInt(argOf('size') || '35', 10) || 35
 // ★ --cat-id：按一级类目查机会商品。空 = 店铺主营类目（平台推荐）
 const catId = argOf('cat-id') ? Number(argOf('cat-id')) : null
 
+/**
+ * 平台价格档位（2026-10-23 从 35 个样本实测算出，价格带几乎不重叠）：
+ *   0 = 品质档，中位 83.50 元（范围 10.70 ~ 257.45）
+ *   1 = 主流档，中位 14.47 元（范围 5.90 ~ 79.63）
+ *   2 = 引流档，中位  5.58 元（范围 1.01 ~ 12.50）
+ * 定价 ≤ refer_price 可打上 low_price「低价跟款」标签，获得搜索流量倾斜。
+ */
+const PRICE_LABEL_NAMES = { 0: '品质档', 1: '主流档', 2: '引流档' }
+
 ;(async () => {
   const puppeteer = require('puppeteer-core')
   const { CredentialStore } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/lib/services/credential-store.js`)
@@ -175,8 +184,13 @@ const catId = argOf('cat-id') ? Number(argOf('cat-id')) : null
     const items = list.map(g => ({
       chanceId: g.chance_id,
       keywords: g.keywords || '',
+      // ★ refer_price 单位是「分」，price_label 是平台价格档位（0/1/2）
+      //   0=品质档(中位83.5元) 1=主流档(中位14.5元) 2=引流档(中位5.6元)
+      //   定价 ≤ refer_price 可拿 low_price「低价跟款」标签 → 搜索流量倾斜
       referPrice: g.refer_price,
-      priceLabel: g.price_label || '',
+      referPriceYuan: typeof g.refer_price === 'number' ? +(g.refer_price / 100).toFixed(2) : null,
+      priceLabel: g.price_label,
+      priceLabelName: PRICE_LABEL_NAMES[g.price_label] ?? '',
       hotIndex: g.hot_index,
       mmsHotIndex: g.mms_hot_index,
       oprtyIndex: g.mms_oprty_index,
@@ -195,9 +209,10 @@ const catId = argOf('cat-id') ? Number(argOf('cat-id')) : null
       text: items.length
         ? `机会商品（${catId ? `类目 ${catId} · ` : ''}第 ${pageNo} 页，共 ${res.total ?? '?'} 条，本页 ${items.length}）：\n` + items.slice(0, 15).map((g, i) =>
             `  ${i + 1}. [${g.chanceId.slice(0, 12)}] ${g.keywords}\n`
-            + `     参考价 ${g.referPrice}${g.priceLabel ? '（' + g.priceLabel + '）' : ''} | 热度 ${g.hotIndex} | 潜力 ${g.potentialIndex} | ${g.pics} 图\n`
+            + `     建议价 ¥${g.referPriceYuan ?? '—'}${g.priceLabelName ? `（${g.priceLabelName}）` : ''} | 热度 ${g.hotIndex} | 潜力 ${g.potentialIndex} | ${g.pics} 图\n`
             + `     标签：${g.labels.join(' / ') || '—'} | 类目 ${g.cats.join('>')}${g.collected ? ' | 已收藏' : ''}`
           ).join('\n') + (items.length > 15 ? `\n  ...（其余 ${items.length - 15} 条见 JSON）` : '')
+          + `\n\n💡 定价 ≤ 建议价可拿「低价跟款」标签 → 搜索流量倾斜`
         : catId
           ? `类目 ${catId} 暂无机会商品（total=${res.total ?? 0}）。\n可能：①该类目未开放机会池（当前仅 19 个一级类目开放，用 --mode cates 查看）\n②平台正在补录。建议隔天再试。`
           : '机会商品：本页无数据',
