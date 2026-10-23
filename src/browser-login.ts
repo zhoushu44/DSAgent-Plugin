@@ -640,23 +640,58 @@ function isOffLoginPage(loginUrl: string, currentUrl: string): boolean {
  *
  * 背景：PDD 的店铺名不在任何 Cookie 里，`resolveDisplayNick` 只会退回
  * account_id（32 位 hex），用户在账号连接页看到一堆哈希分不清是哪家店。
- * 店铺名在 `POST /earth/api/mallInfo/commonMallInfo` 的 `result.mall_name`。
  *
- * @param cookieStr 已保存账号的 cookie_str
+ * 三条通路（2026-10-23 实测，按优先级）：
+ *   ① DOM 提取：后台任意页面左上角/侧栏有店铺名文本（带「旗舰店/专营店/…」后缀）。
+ *      最稳，不依赖接口。
+ *   ② POST /earth/api/mallInfo/queryCredential → result.result.stapleName（经营品类，
+ *      非店铺名，仅兜底）——注意 querySimpleCredential/commonMallInfo 都是 405，
+ *      POST 不通。
+ *   ③ window.__INITIAL_STATE__ / 全局变量里的 mallName。
+ *
+ * ⚠️ 该接口域需要 Anti-Content 签名头，纯 Node fetch（只带 Cookie）会 405 ——
+ *    必须借已登录的浏览器页面调。
+ *
+ * @param page 已登录的 puppeteer page（登录成功后浏览器还没关）
  * @returns 店铺名；失败返回 ''（不影响登录流程）
  */
-async function fetchPddMallName(cookieStr: string): Promise<string> {
+async function fetchPddMallName(page: any): Promise<string> {
   try {
-    const resp = await fetch('https://mms.pinduoduo.com/earth/api/mallInfo/commonMallInfo', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Cookie: cookieStr },
-      body: JSON.stringify({}),
-      signal: AbortSignal.timeout(15_000),
-    })
-    if (!resp.ok) return ''
-    const j = await resp.json().catch(() => null) as any
-    const name = j?.result?.mall_name || j?.result?.mallName || j?.result?.name || ''
-    return typeof name === 'string' ? name.trim() : ''
+    // 登录刚结束时页面可能还在扫码页/登录页，Anti-Content 签名器未初始化。
+    // 先导航到商品列表页（必然发带 Anti-Content 的请求，签名器一定会初始化），
+    // 等签名器就绪再抓。
+    try {
+      if (!/mms\.pinduoduo\.com/.test(page.url() || '')) {
+        await page.goto('https://mms.pinduoduo.com/goods/goods_list', { waitUntil: 'domcontentloaded', timeout: 20000 })
+      }
+      await new Promise(r => setTimeout(r, 3000))
+    } catch {
+      // 导航失败也继续试（可能已经在 mms 域内）
+    }
+
+    // ① DOM 提取（最稳）
+    const domName = await page.evaluate(() => {
+      const t = document.body?.innerText || ''
+      const m = t.match(/([^\n\s]{2,20}(?:旗舰店|专营店|专卖店|企业店|百货店|工厂店|仓库|商行|店铺))/)
+      return m ? m[1].trim() : ''
+    }).catch(() => '')
+    if (domName && !/商家后台|拼多多/.test(domName)) return domName
+
+    // ② 接口兜底（XHR 走签名器）
+    const apiName = await page.evaluate(() => new Promise<string>((resolve) => {
+      const x = new XMLHttpRequest()
+      x.open('POST', 'https://mms.pinduoduo.com/earth/api/mallInfo/queryCredential', true)
+      x.setRequestHeader('Content-Type', 'application/json')
+      x.onload = () => {
+        try {
+          const j = JSON.parse(x.responseText)
+          resolve(String(j?.result?.result?.mallName || j?.result?.mallName || ''))
+        } catch { resolve('') }
+      }
+      x.onerror = () => resolve('')
+      x.send(JSON.stringify({}))
+    })).catch(() => '')
+    return typeof apiName === 'string' ? apiName.trim() : ''
   } catch {
     return ''
   }
@@ -1049,11 +1084,12 @@ export async function doBrowserLogin(
 
       // ★ PDD 商家后台：登录成功后抓店铺名，写回 display_label。
       //   PDD 的店铺名不在任何 Cookie 里（resolveDisplayNick 只会退回 account_id
-      //   一串 hex），而在 /earth/api/mallInfo/commonMallInfo 返回的 mall_name。
+      //   一串 hex），且 /earth/api/mallInfo/querySimpleCredential 需要 Anti-Content
+      //   签名头，纯 Node fetch 会 405 —— 必须借刚登录完还没关的浏览器页面调。
       //   不抓的话「账号连接」页只能显示 de55c3e1590… 这种哈希，用户分不清是哪家店。
-      if (platform === 'pdd_mms') {
+      if (platform === 'pdd_mms' && activeBrowser?.page) {
         try {
-          const mallName = await fetchPddMallName(saved.cookie_str)
+          const mallName = await fetchPddMallName(activeBrowser.page)
           if (mallName) {
             await store.save(platform, jar, {
               replaceShopKey,
@@ -1062,6 +1098,8 @@ export async function doBrowserLogin(
             })
             console.log(`[dsagent-login] PDD 店铺名已写入 display_label: ${mallName}`)
             saved.display_label = mallName
+          } else {
+            console.warn('[dsagent-login] PDD 店铺名抓取为空（接口可能变更），display_label 保持原值')
           }
         } catch (e) {
           console.warn(`[dsagent-login] 抓 PDD 店铺名失败（不影响登录）: ${(e as Error).message}`)
