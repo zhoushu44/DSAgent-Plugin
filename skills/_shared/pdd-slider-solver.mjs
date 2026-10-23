@@ -75,69 +75,91 @@ async function solveSlider(bgB64, slideB64) {
 }
 
 /**
- * 生成人类化鼠标轨迹（2026-10-23 重写）
+ * 生成人类化鼠标轨迹（2026-10-23 三次重写）
  *
- * ★ 旧版问题（17 次实测数据反推）：
- *   旧版用 easeOutQuad（1-(1-t)²），速度曲线「快→慢」：
- *     - 起始速度 260px/s（mousedown 后瞬间全速）  ← 典型机器特征
- *     - 峰值出现在前 5%，没有起步犹豫
- *   账号累计分低时平台只查位置，能过；累计分高后开始查轨迹，
- *   「瞬间全速」直接毙——这就是今天「滑块失败→踢会话」升级的原因。
+ * ★ 演进历程（全部基于实测失败反推）：
+ *   旧版 easeOutQuad：起始 260px/s 瞬间全速 → 累计分一高就被毙
+ *   一次重写：起步犹豫 + 四段式慢→快→慢 → 解决了「瞬间全速」
+ *   二次重写：±1px 噪声 + Y 轴随机游走 + 二次微调回退 + 间隔收窄
  *
- * ★ 新版特征（对齐真人行为学）：
- *   ① 起步犹豫：mousedown 后停 100-250ms（真人 100% 有，旧版完全没有）
- *   ② 速度曲线「慢→快→慢」四段式：慢启动(抛物线) → 加速 → 匀速主体 → 缓入终点
- *   ③ 过冲 5-10px + 回退（真人过冲比旧版 2-5px 更大）
- *   ④ 中段随机停顿（8% 概率，模拟犹豫）+ 终点微抖 + Y 轴微小波动
+ * ★ 二次重写后仍失败，局部平滑度诊断定位到 3 处加速度突变：
+ *     #1~#5  起步处：19px → 1px（比率 19）  ← 抛物线 t² 起步太猛
+ *     #28~33 85% 处：1px → 9px（比率 9）    ← 加速段末尾
+ *     #48~56 终点处：1px → 8px（比率 8）    ← 过冲点
+ *   全都是四段式曲线分段交界处加速度不连续——真人速度变化是连续的。
  *
- * 实测对比（602→714，112px）：
- *   旧版：起始 260px/s，峰值 260px/s（前 5%），总 943ms，单调递减
- *   新版：起始   0px/s，峰值 ~432px/s（~20% 处），总 ~1114ms，慢→快→慢
- *
- * @param delay 单位 ms，仅第一步（起步犹豫）和随机停顿点带该字段
+ * ★ 三次重写（本版）：改用全程 C² 连续的光滑曲线
+ *   ① 主位移用 smootherstep（6t⁵-15t⁴+10t³）：
+ *      一阶导（速度）和二阶导（加速度）在 0/1 处都为 0，
+ *      全程无加速度突变，天然就是「慢→快→慢」
+ *   ② 叠加一层低频正弦扰动（幅度随速度缩放，不破坏平滑性）
+ *   ③ 起步犹豫 100-250ms（保留）
+ *   ④ 过冲改为「先加速冲出，再平滑回摆」，不用跳变
  */
 function humanTrajectory(startX, targetX, startY) {
   const dist = targetX - startX
   const absDist = Math.abs(dist)
   if (absDist < 1) return []
   const steps = []
+  let yDrift = (Math.random() - 0.5) * 0.6
 
   // ① 起步犹豫：真人按下后不会立刻移动（100-250ms）
-  steps.push({ x: startX, y: startY + (Math.random() - 0.5) * 0.8, delay: 100 + Math.random() * 150 })
+  steps.push({ x: startX, y: startY + yDrift, delay: 100 + Math.random() * 150 })
 
-  // ② 四段式速度曲线
-  const overshoot = (Math.random() * 5 + 5) * Math.sign(dist)   // 过冲 5~10px
+  // ② smootherstep（C² 连续）+ 末端最小步长补偿
+  //    smootherstep 末端速度趋 0，会导致接近目标时每步只走 0.05px，
+  //    然后过冲点突然来一下（实测：5.93px → -1.63px，比率突变）。
+  //    真人到终点前是「减速但保持可感知步长」匀速逼近，
+  //    所以给末端加一个最小步长下限（0.35px）。
+  const smoother = (t) => t * t * t * (t * (t * 6 - 15) + 10)
+  const MIN_STEP = 0.35                      // 末端最小步长（px）
   const n = Math.max(25, Math.min(90, Math.round(absDist / 3)))
+  let prevX = startX
   for (let i = 1; i <= n; i++) {
     const p = i / n
-    let eased
-    if (p < 0.15) {
-      const q = p / 0.15
-      eased = 0.5 * q * q                              // 慢启动：抛物线加速
-    } else if (p < 0.6) {
-      const q = (p - 0.15) / 0.45
-      eased = 0.5 + 0.35 * q                           // 加速段：线性升到匀速
-    } else if (p < 0.85) {
-      const q = (p - 0.6) / 0.25
-      eased = 0.85 + 0.10 * q                          // 匀速主体
-    } else {
-      const q = (p - 0.85) / 0.15
-      eased = 0.95 + 0.05 * q * q                      // 缓入终点
+    const eased = smoother(p)
+    let x = startX + dist * eased
+    // 末端最小步长补偿：若本步位移不足 MIN_STEP 且还没到终点，补足
+    const step = x - prevX
+    if (Math.abs(step) < MIN_STEP && i < n) {
+      x = prevX + Math.sign(dist) * MIN_STEP * (0.6 + Math.random() * 0.8)
     }
-    const x = startX + dist * eased
-    const y = startY + (Math.random() - 0.5) * 1.2
-    steps.push({ x, y })
-    // 中段犹豫：只在中后段出现，概率 4%（真人通常 1-3 次停顿）
-    if (p > 0.3 && p < 0.8 && Math.random() < 0.04) steps.push({ x, y, delay: 40 + Math.random() * 80 })
+    // ③ 低频正弦扰动：中段幅度最大（速度最快时手最不稳），两端趋 0
+    const wobFreq = 0.12 + Math.random() * 0.08
+    const wobAmp = Math.min(1.2, absDist * 0.012)
+    const wobble = Math.sin(p * Math.PI * 2 * wobFreq + (i * 0.7)) * wobAmp * Math.sin(p * Math.PI)
+    x += wobble
+    prevX = x
+    // ④ Y 轴随机游走（低频漂移）
+    yDrift += (Math.random() - 0.5) * 0.35
+    yDrift = Math.max(-1.5, Math.min(1.5, yDrift))
+    steps.push({ x, y: startY + yDrift })
+    // 中段犹豫：4% 概率
+    if (p > 0.3 && p < 0.8 && Math.random() < 0.04) steps.push({ x, y: startY + yDrift, delay: 40 + Math.random() * 80 })
   }
+  // 注意：不再单独 push 一个 targetX 点——末段由下面的 tailN 段统一生成
+  // （它自然地从逼近过冲到回正落位，全程光滑）
 
-  // ③ 过冲段
-  const overX = targetX + overshoot
-  steps.push({ x: overX, y: startY })
-  // ④ 回退精确到位（3 步）
-  for (let i = 1; i <= 3; i++) steps.push({ x: overX + (targetX - overX) * (i / 3), y: startY })
-  // ⑤ 终点微抖动
-  for (let i = 0; i < 3; i++) steps.push({ x: targetX + (Math.random() - 0.5) * 1.5, y: startY + (Math.random() - 0.5) * 1.5 })
+  // ⑤ 过冲 + 光滑回摆：把「末步 → 过冲 → 回摆」整段用同一条光滑曲线生成，
+  //    避免「末端微步长 0.11px 突然跳到过冲 9px」的突变（实测该处比率超界）。
+  //    真人形态：匀速逼近 → 略微冲过 → 平滑回正，全程连续。
+  const overshoot = (Math.random() * 5 + 5) * Math.sign(dist)   // 过冲 5~10px
+  const tailN = 10
+  for (let i = 1; i <= tailN; i++) {
+    const t = i / tailN
+    // 用一段带过冲的 smootherstep 变体：先冲到 1+overshootRatio，再回落到 1
+    const oRatio = overshoot / Math.abs(dist)
+    // 前 30% 冲到过冲点，后 70% 平滑回正
+    let pos
+    if (t < 0.3) pos = smoother(t / 0.3) * oRatio
+    else pos = oRatio * (1 - smoother((t - 0.3) / 0.7))
+    const x = targetX + pos * Math.abs(dist) * Math.sign(dist)
+    yDrift += (Math.random() - 0.5) * 0.3
+    yDrift = Math.max(-1.5, Math.min(1.5, yDrift))
+    steps.push({ x, y: startY + yDrift })
+  }
+  // ⑥ 终点微抖动
+  for (let i = 0; i < 3; i++) steps.push({ x: targetX + (Math.random() - 0.5) * 1.0, y: startY + yDrift + (Math.random() - 0.5) * 1.0 })
   return steps
 }
 
@@ -287,13 +309,18 @@ export async function solveSliderInPage(page, shopKey, opts = {}) {
       console.error(`[slider] 图已刷新，缺口位移 ΔgapX=${dGap}px`)
     }
 
-    if (!plausible && attempt < MAX) {
-      // 可疑（缺口贴边）→ 刷新重取
-      console.error('[slider] 缺口位置可疑 → 刷新验证码')
-      await refreshCaptcha()
-      prevBgHash = ''
-      await new Promise(r => setTimeout(r, 2500))
-      continue
+    if (!plausible) {
+      // 缺口贴边（<25% 或 >90%）→ OCR 大概率误判，必须刷新重取
+      // 注意：即使是最后一轮也不该用可疑值拖——拖了也是浪费，
+      // 还会让平台记录一次失败。直接返回失败让上层决定。
+      if (attempt < MAX) {
+        console.error(`[slider] 缺口位置可疑（ratio=${(ratio * 100).toFixed(1)}%）→ 刷新验证码`)
+        await refreshCaptcha()
+        prevBgHash = ''
+        await new Promise(r => setTimeout(r, 2500))
+        continue
+      }
+      return { ok: false, gapX: solved.x, targetX: Math.round(bg.x + solved.x - (blk?.w || 49) / 2), text: `缺口位置可疑（X=${solved.x}，${(ratio * 100).toFixed(1)}%），拒绝拖动` }
     }
 
     // ★ 滑块复位：失败后平台不一定把滑块弹回原点。
@@ -333,9 +360,10 @@ export async function solveSliderInPage(page, shopKey, opts = {}) {
       await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: handle.x, y: handle.y, button: 'left', clickCount: 1 })
       for (const p of traj) {
         await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: p.x, y: p.y, button: 'left' })
-        // ★ 支持 per-step delay：起步犹豫（100-250ms）和中段停顿（40-120ms）
-        //   没有 delay 的点用常规 12-34ms（模拟连续移动）
-        await new Promise(r => setTimeout(r, p.delay != null ? p.delay : (12 + Math.random() * 22)))
+        // ★ per-step delay：起步犹豫（100-250ms）/ 中段停顿（40-120ms）；
+        //   常规间隔收窄到 12+random*8（原 12+random*22 的 CV≈0.65，
+        //   真人鼠标间隔 CV<0.3，太散会被判机器）
+        await new Promise(r => setTimeout(r, p.delay != null ? p.delay : (12 + Math.random() * 8)))
       }
       await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: targetX, y: handle.y, button: 'left', clickCount: 1 })
     } catch (e) {
@@ -490,8 +518,8 @@ if (!IS_IMPORTED) (async () => {
   await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: handle.x, y: handle.y, button: 'left', clickCount: 1 })
   for (const p of traj) {
     await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: p.x, y: p.y, button: 'left' })
-    // ★ 支持 per-step delay（起步犹豫 100-250ms / 中段停顿 40-120ms）
-    await new Promise(r => setTimeout(r, p.delay != null ? p.delay : (12 + Math.random() * 22)))
+    // ★ 同上：常规间隔 12+random*8（CV 对齐真人 <0.3）
+    await new Promise(r => setTimeout(r, p.delay != null ? p.delay : (12 + Math.random() * 8)))
   }
   await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: targetX, y: handle.y, button: 'left', clickCount: 1 })
   console.error('[solver] 拖动完成，等待验证结果...')
