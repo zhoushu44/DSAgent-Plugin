@@ -32,6 +32,7 @@
  *   已开放机会池的一级类目共 19 个（用 --mode cates 看），未开放的返回 total=0。
  */
 import { createRequire } from 'node:module'
+const { CHROME_PATH, STEALTH_ARGS, STEALTH_SCRIPT } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-launch.mjs`)
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { homedir } from 'node:os'
@@ -74,12 +75,16 @@ const PRICE_LABEL_NAMES = { 0: '品质档', 1: '主流档', 2: '引流档' }
   if (!fs.existsSync(profile)) profile = path.join(homedir(), '.dsh', 'browser-profiles', 'accounts', 'pdd_mms_de55c3e159072dfb5297b234eaa487c3')
 
   const browser = await puppeteer.launch({
-    executablePath: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-    userDataDir: profile, headless: false,
-    defaultViewport: { width: 1440, height: 900 },
-    args: ['--no-sandbox', '--disable-blink-features=AutomationControlled', '--window-position=100,50'],
+    executablePath: CHROME_PATH,
+    userDataDir: profile,
+    headless: false,
+    defaultViewport: null,        // ★ 用真实窗口尺寸（SDK 会采集 innerWidth/screen.*）
+    ignoreDefaultArgs: ['--enable-automation'],
+    args: STEALTH_ARGS,
   })
   const page = (await browser.pages())[0] || await browser.newPage()
+  // ★ 注入反检测（webdriver / plugins / languages / chrome.runtime）
+  await page.evaluateOnNewDocument(STEALTH_SCRIPT);
   const safeEval = async (fn, arg) => {
     for (let i = 0; i < 15; i++) {
       for (const f of page.frames()) { try { return await f.evaluate(fn, arg) } catch { /* 换 */ } }

@@ -15,6 +15,7 @@
  *   node scripts/query.mjs --mode spec-pool
  */
 import { createRequire } from 'node:module'
+const { CHROME_PATH, STEALTH_ARGS, STEALTH_SCRIPT } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-launch.mjs`)
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { homedir } from 'node:os'
@@ -73,12 +74,16 @@ const wantCsv = process.argv.includes('--csv')
     profile = path.join(homedir(), '.dsh', 'browser-profiles', 'accounts', 'pdd_mms_de55c3e159072dfb5297b234eaa487c3')
   }
   const browser = await puppeteer.launch({
-    executablePath: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-    userDataDir: profile, headless: false,
-    defaultViewport: { width: 1400, height: 900 },
-    args: ['--no-sandbox', '--disable-blink-features=AutomationControlled'],
+    executablePath: CHROME_PATH,
+    userDataDir: profile,
+    headless: false,
+    defaultViewport: null,        // ★ 用真实窗口尺寸（SDK 会采集 innerWidth/screen.*）
+    ignoreDefaultArgs: ['--enable-automation'],
+    args: STEALTH_ARGS,
   })
   const page = (await browser.pages())[0] || await browser.newPage()
+  // ★ 注入反检测（webdriver / plugins / languages / chrome.runtime）
+  await page.evaluateOnNewDocument(STEALTH_SCRIPT);
   // safeEval：页面跳转会导致 frame detached，重试遍历所有 frame
   const safeEval = async (fn, arg) => {
     for (let i = 0; i < 12; i++) {

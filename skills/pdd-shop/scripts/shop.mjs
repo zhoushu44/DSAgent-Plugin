@@ -2,8 +2,13 @@
  * 拼多多店铺经营数据（pdd-shop）—— 只读
  *
  * 数据源：生意参谋（mms.pinduoduo.com/sycm/*），接口统一 /sydney/api/* 前缀。
- * 全部 HTTP，无平台副作用。采用「打开经营页 → hook 页面自己的响应」取数
- * （与 pdd-promo 同思路，规避 sycm 的风控签名）。
+ * 全部 HTTP，无平台副作用。
+ *
+ * ★ 双通道（2026-10-23 新增纯 Node）：
+ *   --transport http    纯 Node + 本地 anti-content 签名（默认，快 10 倍，不弹滑块）
+ *                       实测通过：queryMallFlowData / queryGoodsPageOverviewForMms /
+ *                                 queryFinalCredentialNew
+ *   --transport browser 页面 hook（兜底，接口改版/签名失效时用）
  *
  * 能力：
  *   overview   店铺经营总览（流量 + 评分 + 商品数据 + 店铺等级）
@@ -12,8 +17,10 @@
  *   goods      商品数据明细（每商品 访客/支付金额/支付订单/转化率/收藏）
  *
  * 用法：node scripts/shop.mjs --mode overview
+ *       node scripts/shop.mjs --mode goods --transport browser
  */
 import { createRequire } from 'node:module'
+const { CHROME_PATH, STEALTH_ARGS, STEALTH_SCRIPT } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-launch.mjs`)
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { homedir } from 'node:os'
@@ -25,6 +32,7 @@ const emit = (obj) => { process.stdout.write('__DSAGENT_RESULT__' + JSON.stringi
 
 const mode = argOf('mode') || 'overview'
 const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 20))
+const TRANSPORT = argOf('transport') || 'http'   // ★ 默认纯 Node
 
 ;(async () => {
   const puppeteer = require('puppeteer-core')
@@ -57,17 +65,113 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
   const hb = setInterval(() => heartbeatAccountLock(SHOP, 'pdd-shop'), 180000)
 
 
+  // ══════════════════════════════════════════════════════════════════════
+  // ★★★ 纯 Node 通道（默认）★★★
+  // 不启浏览器、不弹滑块，速度 ~200ms/请求
+  // ══════════════════════════════════════════════════════════════════════
+  if (TRANSPORT === 'http') {
+    const { call, cookiesOf } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-http.mjs`)
+    const acc = store.findByPlatform('pdd_mms', SHOP) || store.listAccounts().find(a => a.shop_key === SHOP)
+    if (!acc?.cookies?.['PASS_ID']) {
+      emit({ ok: false, failureKind: 'token_expired', text: '账号缺少 PASS_ID，请到「账号连接」重新登录拼多多商家后台。' })
+      process.exit(2)
+    }
+    const COOKIES = cookiesOf(acc)
+    const R = 'https://mms.pinduoduo.com/sydney/api'
+
+    /** 统一调用 + 错误归一 */
+    const get = async (url, body, referer) => {
+      const r = await call({ shopKey: SHOP, cookies: COOKIES, url, body, referer })
+      if (!r.ok) {
+        const kind = r.kind === 'session_expired' ? 'token_expired'
+          : r.kind === 'captcha' ? 'risk_control'
+          : r.kind === 'rate_limit' ? 'rate_limit'
+          : 'api_error'
+        return { ok: false, kind, err: r }
+      }
+      return { ok: true, data: r.json.result }
+    }
+
+    const out = { ok: true, mode, transport: 'http', shopKey: SHOP }
+
+    // ── flow ──
+    const flowR = await get(`${R}/mallScore/queryMallFlowData`, {}, 'https://mms.pinduoduo.com/sycm/evaluation')
+    if (flowR.ok) out.flow = {
+      uv: flowR.data.uv, pv: flowR.data.pv, fans: flowR.data.totalFansCnt,
+      srchIndex: flowR.data.srchIndex, orderIndex: flowR.data.orderIndex,
+      uvPct: flowR.data.uvPct, pvPct: flowR.data.pvPct,
+    }
+
+    // ── goodsOverview（今日/昨日）──
+    const ovR = await get(`${R}/goodsDataShow/queryGoodsPageOverviewForMms`, {}, 'https://mms.pinduoduo.com/sycm/goods_effect')
+    if (ovR.ok) out.goodsOverview = { today: ovR.data.todayData, yesterday: ovR.data.yesterdayData }
+
+    // ── score ──
+    if (mode === 'score' || mode === 'overview') {
+      const scR = await get(`${R}/mallScore/queryMallScoreOverView`, {}, 'https://mms.pinduoduo.com/sycm/evaluation')
+      if (scR.ok) out.score = scR.data
+    }
+
+    // ── goods 明细（需要日期参数，实测该接口参数未完全破解 → 提示走 browser）──
+    if (mode === 'goods') {
+      out.text = [
+        '⚠️ 商品明细接口（queryGoodsDetailVOListForMMS）的参数格式尚未破解（已试 25 种组合全部失败）。',
+        '   请用：--mode goods --transport browser',
+        '',
+        out.goodsOverview ? `可用数据（商品总览）：今日支付 ¥${out.goodsOverview.today?.payOrdrAmt} / ${out.goodsOverview.today?.payOrdrCnt} 单 / ${out.goodsOverview.today?.guv} 访客` : '',
+      ].filter(Boolean).join('\n')
+      emit(out)
+      process.exit(0)
+    }
+
+    // ── 汇总文本 ──
+    const lines = []
+    if (out.flow) lines.push(`店铺流量：访客 ${out.flow.uv} / 浏览 ${out.flow.pv} / 粉丝 ${out.flow.fans} / 搜索指数 ${out.flow.srchIndex}`)
+    if (out.goodsOverview?.today) {
+      const t = out.goodsOverview.today
+      lines.push(`今日：支付 ¥${t.payOrdrAmt} / ${t.payOrdrCnt} 单 / ${t.guv} 访客 / ${t.gpv} 浏览 / 支付转化 ${t.payUvRto}`)
+    }
+    if (out.goodsOverview?.yesterday) {
+      const y = out.goodsOverview.yesterday
+      lines.push(`昨日：支付 ¥${y.payOrdrAmt} / ${y.payOrdrCnt} 单 / ${y.guv} 访客 / ${y.gpv} 浏览`)
+    }
+    if (out.score) {
+      const s = out.score
+      const parts = []
+      if (s.mallScore != null) parts.push(`店铺分 ${s.mallScore}`)
+      if (s.serveScore != null) parts.push(`服务分 ${s.serveScore}`)
+      if (parts.length) lines.push(parts.join(' / '))
+    }
+    if (!lines.length) {
+      const e = flowR.err || {}
+      out.ok = false
+      out.failureKind = flowR.kind
+      out.text = `取数失败：${e.kind} ${e.ec ?? ''} ${e.msg || e.text?.slice(0, 120) || ''}\n${e.hint || ''}`
+    } else {
+      out.text = `【纯 Node·${mode}】\n` + lines.join('\n')
+    }
+    emit(out)
+    process.exit(out.ok ? 0 : 2)
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // 浏览器通道（兜底）
+  // ══════════════════════════════════════════════════════════════════════
   let profile = path.join(homedir(), '.dsh', 'browser-profiles', 'accounts', SHOP)
   if (!fs.existsSync(profile)) {
     profile = path.join(homedir(), '.dsh', 'browser-profiles', 'accounts', 'pdd_mms_de55c3e159072dfb5297b234eaa487c3')
   }
   const browser = await puppeteer.launch({
-    executablePath: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-    userDataDir: profile, headless: false,
-    defaultViewport: { width: 1400, height: 900 },
-    args: ['--no-sandbox', '--disable-blink-features=AutomationControlled'],
+    executablePath: CHROME_PATH,
+    userDataDir: profile,
+    headless: false,
+    defaultViewport: null,        // ★ 用真实窗口尺寸（SDK 会采集 innerWidth/screen.*）
+    ignoreDefaultArgs: ['--enable-automation'],
+    args: STEALTH_ARGS,
   })
   const page = (await browser.pages())[0] || await browser.newPage()
+  // ★ 注入反检测（webdriver / plugins / languages / chrome.runtime）
+  await page.evaluateOnNewDocument(STEALTH_SCRIPT);
   const cdp = await page.target().createCDPSession()
   await cdp.send('Network.enable')
 
