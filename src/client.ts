@@ -188,11 +188,17 @@ export function apply(ctx: ClientContext, cfg?: Config) {
   ]
 
   // 动作词表：判定最近完成的链路阶段
+  // ★ 2026-10-24 补：
+  //   · collect 加「看下/查一下/数据/多少」等口语词——用户说
+  //     「看下多多视频的带货数据」时旧词表判不出 stage，推荐直接掉到初始态。
+  //   · publish 加「上传」单词（不是「上传视频」四连字）——用户实际说
+  //     「帮我上传一条多多视频」，「上传」和「视频」不连续，四连词匹配不到。
+  //   · publish 加「开推广/提价/改日限额」——推广写操作也是 publish 阶段。
   const STAGE_WORDS: ReadonlyArray<{ readonly stage: Stage; readonly words: readonly string[] }> = [
-    { stage: 'collect', words: ['采集', '爬取', '抓取', '爬虫', '抓取数据'] },
-    { stage: 'analyze', words: ['分析', '统计', '对比', '选品', '分层', '评价分析'] },
-    { stage: 'publish', words: ['发布', '上传视频', '发笔记', '上架'] },
-    { stage: 'manage', words: ['账号', '绑定', '连接状态', '登录'] },
+    { stage: 'collect', words: ['采集', '爬取', '抓取', '爬虫', '抓取数据', '获取数据', '拿数据', '看下', '查一下', '查拼多多', '数据', '多少'] },
+    { stage: 'analyze', words: ['分析', '统计', '对比', '选品', '分层', '诊断', '平衡', '评价分析'] },
+    { stage: 'publish', words: ['发布', '上传', '投稿', '发笔记', '上架', '铺货', '开推广', '提价', '改日限额'] },
+    { stage: 'manage', words: ['账号', '绑定', '连接状态', '登录', '风控', '权限'] },
   ]
 
   // 推荐清单：按「平台 × 链路阶段」索引；platform 缺省 = 任意平台可用
@@ -213,10 +219,29 @@ export function apply(ctx: ClientContext, cfg?: Config) {
     // 小红书链路
     { label: '分析小红书笔记', text: '分析采集到的小红书笔记数据', platform: 'xiaohongshu', stage: 'analyze' },
     { label: '发布小红书笔记', text: '帮我发布一篇小红书笔记', platform: 'xiaohongshu', stage: 'publish' },
-    // 拼多多链路
+    // ════════════ 拼多多链路（9 技能闭环，2026-10-24 补全）════════════
+    // 真实运营链路：选品 → 发布 → 视频 → ★拿数据 → 推广 → 优化 → 风控
+    // collect 阶段的四个数据入口按「发布后最可能点的」排序：
+    //   视频带货数据 → 单个视频 → 推广数据 → 店铺数据 → 机会商品
+    // （publish 的下一阶段是 collect，会取 collect 前几项，顺序即优先级）
+    { label: '看多多视频带货数据', text: '看下多多视频的带货数据', platform: 'pdd', stage: 'collect' },
+    { label: '看单个视频的数据', text: '看下刚发布那条视频的数据', platform: 'pdd', stage: 'collect' },
+    { label: '看拼多多推广数据', text: '看下拼多多推广花了多少钱、ROI 多少', platform: 'pdd', stage: 'collect' },
+    { label: '查拼多多店铺数据', text: '看下拼多多店铺的经营数据', platform: 'pdd', stage: 'collect' },
+    { label: '看拼多多机会商品', text: '看下拼多多机会商品，平台推荐卖什么', platform: 'pdd', stage: 'collect' },
     { label: '采集拼多多商品', text: '采集拼多多商品数据', platform: 'pdd', stage: 'collect' },
     { label: '分析拼多多商品', text: '分析拼多多商品数据', platform: 'pdd', stage: 'analyze' },
-    { label: '发布拼多多商品', text: '帮我上架一个拼多多商品', platform: 'pdd', stage: 'publish' },
+    // 选品/分析后 → 发布
+    { label: '上架拼多多商品', text: '帮我上架一个拼多多商品', platform: 'pdd', stage: 'publish' },
+    { label: '一款铺多条链接', text: '帮我把一个款铺多条拼多多链接', platform: 'pdd', stage: 'publish' },
+    // 发布后 → 视频（第二增长曲线）
+    { label: '上传多多视频', text: '帮我上传一条多多视频', platform: 'pdd', stage: 'publish' },
+    // 拿数据后 → 推广诊断/优化
+    { label: '查推广商品图 CTR', text: '看下拼多多推广里哪个商品的主图点击率低', platform: 'pdd', stage: 'analyze' },
+    { label: '推广诊断该加价还是降价', text: '帮我做拼多多推广平衡分析，看该加价还是降价', platform: 'pdd', stage: 'analyze' },
+    // 优化后 → 管理/风控/权限
+    { label: '看拼多多账号状态', text: '看下拼多多账号的连接状态和风控情况', platform: 'pdd', stage: 'manage' },
+    { label: '看多多视频权限', text: '看下多多视频的带货权限和流量卡奖励', platform: 'pdd', stage: 'manage' },
     // 通用下一步
     { label: '发布到其他平台', text: '把结果整理后发布到', stage: 'publish' },
   ]
@@ -268,9 +293,21 @@ export function apply(ctx: ClientContext, cfg?: Config) {
       // 初始态：清单前 5 条即平台入口组（见 SUGGESTIONS 排列，避免误捞后段链路 chips）
       return SUGGESTIONS.slice(0, 5)
     }
+
+    // ★ 平台专属链路覆盖（2026-10-24）
+    //   通用链路是 collect→analyze→publish→manage→collect，
+    //   但拼多多的真实运营链路是「发布后要拿数据」：
+    //     选品(collect) → 分析(analyze) → 发布(publish) → ★拿数据(collect)
+    //       → 推广数据(collect) → 诊断优化(analyze) → 风控权限(manage)
+    //   所以 pdd 的 publish 下一阶段必须是 collect，不是 manage。
+    const PLATFORM_NEXT: Record<string, Partial<Record<Stage, Stage>>> = {
+      pdd: { publish: 'collect', analyze: 'publish', collect: 'analyze', manage: 'collect' },
+    }
+    const override = platform ? PLATFORM_NEXT[platform] : undefined
+
     // 链路推进：当前 stage 的下一阶段，同平台优先
     const order: Record<Stage, Stage> = { collect: 'analyze', analyze: 'publish', publish: 'manage', manage: 'collect' }
-    const nextStage = stage ? order[stage] : 'collect'
+    const nextStage = (stage && override?.[stage]) || (stage ? order[stage] : 'collect')
     const next = SUGGESTIONS.filter((s) => s.stage === nextStage)
     const samePlatform = next.filter((s) => s.platform === platform)
     const anyPlatform = next.filter((s) => s.platform === undefined)
@@ -279,7 +316,14 @@ export function apply(ctx: ClientContext, cfg?: Config) {
     // 无平台场景（如「查看账号连接状态」后的 manage→collect）同平台下阶段项可能全空，
     // 回落到其他平台的下阶段项——否则只剩用户刚用过的那条，推荐原地踏步
     const nextPool = samePlatform.length + anyPlatform.length > 0 ? [...samePlatform, ...anyPlatform] : next
-    const pool = [...nextPool, ...sameStage]
+    // ★ 2026-10-24：同阶段补位保底占 2 席。
+    //   拼多多同一 stage 下有多个并列入口（collect 有 机会商品/店铺数据/
+    //   视频带货数据/推广数据 四条），若全被下阶段项挤掉，用户只能看到
+    //   「分析」而看不到他想点的下一条数据入口 —— 链路看起来是断的。
+    const head = nextPool.slice(0, 3)
+    const tail = sameStage.slice(0, 2)
+    const rest = nextPool.slice(3)
+    const pool = [...head, ...tail, ...rest]
     // 去重保序，最多 5 条
     const seen = new Set<string>()
     return pool.filter((s) => (seen.has(s.label) ? false : (seen.add(s.label), true))).slice(0, 5)
