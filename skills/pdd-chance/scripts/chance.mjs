@@ -177,7 +177,7 @@ const PRICE_LABEL_NAMES = { 0: '品质档', 1: '主流档', 2: '引流档' }
     //   导致 fetch 拿到 undefined → 平台报 4000000「请求method,argument,body错误」。
     //   必须打包成单对象传入。
     const argObj = { p: apiPath, bd: payload, av: sig?.anti || null, vt: vtk?.token || null }
-    const r = await safeEval(async (o) => {
+    let r = await safeEval(async (o) => {
       const resp = await fetch('https://mms.pinduoduo.com' + o.p, {
         method: 'POST', credentials: 'include',
         headers: { 'Content-Type': 'application/json', ...(o.av ? { 'Anti-Content': o.av } : {}), ...(o.vt ? { VerifyAuthToken: o.vt } : {}) },
@@ -185,6 +185,35 @@ const PRICE_LABEL_NAMES = { 0: '品质档', 1: '主流档', 2: '引流档' }
       })
       return await resp.json().catch(() => null)
     }, argObj)
+    // ★ 43001 → 凭证库 Cookie 过期，用浏览器页面的 Cookie 重试一次
+    if (r && (r.error_code === 43001 || r.errorCode === 43001)) {
+      try {
+        const s = await page.target().createCDPSession()
+        await s.send('Network.enable')
+        const cr = await s.send('Network.getCookies', { urls: ['https://mms.pinduoduo.com/'] })
+        const map = {}
+        for (const x of cr.cookies || []) map[x.name] = x.value
+        const fresh = Object.entries(map).map(([k, v]) => `${k}=${v}`).join('; ')
+        if (fresh && map['PASS_ID']) {
+          console.error('[chance] 凭证库 Cookie 过期，已切换页面 Cookie 重试')
+          // ★ 显式带 cookie header（credentials:'include' 在某些情况不带）
+          const argObj2 = { ...argObj, ck: fresh }
+          r = await safeEval(async (o) => {
+            const resp = await fetch('https://mms.pinduoduo.com' + o.p, {
+              method: 'POST', credentials: 'include',
+              headers: {
+                'Content-Type': 'application/json',
+                ...(o.ck ? { cookie: o.ck } : {}),
+                ...(o.av ? { 'Anti-Content': o.av } : {}),
+                ...(o.vt ? { VerifyAuthToken: o.vt } : {}),
+              },
+              body: JSON.stringify(o.bd),
+            })
+            return await resp.json().catch(() => null)
+          }, argObj2)
+        }
+      } catch { /* ignore */ }
+    }
     // ★ 54001 → 提取新 token 存起来
     if (r && (r.error_code === 54001 || r.errorCode === 54001)) {
       const nt = extractTok(r)

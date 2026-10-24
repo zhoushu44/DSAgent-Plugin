@@ -133,7 +133,21 @@ const wantCsv = process.argv.includes('--csv')
   //   2026-10-24：切到 pdd-client 统一入口（t1 简化签名 / t2 真签名自动选）
   const { call: clientCall, createSession, ERR: CLIENT_ERR } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-client.mjs`)
   const accForT1 = store.listAccounts().find(a => a.shop_key === SHOP)
-  const COOKIES_T1 = accForT1 ? Object.entries(accForT1.cookies || {}).map(([k, v]) => `${k}=${v}`).join('; ') : ''
+  let COOKIES_T1 = accForT1 ? Object.entries(accForT1.cookies || {}).map(([k, v]) => `${k}=${v}`).join('; ') : ''
+
+  // ★ 2026-10-24：43001 时用当前浏览器页面的 Cookie 兜底
+  //   凭证库快照可能是几天前的旧票，而浏览器 Profile 里的是新的（实测 5 个账号全踩）
+  async function freshCookiesFromPage() {
+    try {
+      const s = await page.target().createCDPSession()
+      await s.send('Network.enable')
+      const r = await s.send('Network.getCookies', { urls: ['https://mms.pinduoduo.com/'] })
+      const map = {}
+      for (const x of r.cookies || []) map[x.name] = x.value
+      if (map['PASS_ID']) return Object.entries(map).map(([k, v]) => `${k}=${v}`).join('; ')
+    } catch { /* ignore */ }
+    return null
+  }
   let sessForT2 = null
 
   const call = async (url, body) => {
@@ -151,6 +165,16 @@ const wantCsv = process.argv.includes('--csv')
             return await clientCall({ shopKey: SHOP, session: sessForT2, url, body, referer: 'https://mms.pinduoduo.com/goods/goods_list' })
           })()
         : await clientCall({ shopKey: SHOP, cookies: COOKIES_T1, url, body })
+
+      // ★ 43001 → 用浏览器 Cookie 重试一次
+      if (!r.ok && (r.ec === 43001 || r.kind === 'session_expired') && !needT2) {
+        const fresh = await freshCookiesFromPage()
+        if (fresh && fresh !== COOKIES_T1) {
+          COOKIES_T1 = fresh
+          console.warn('[pdd-works] 凭证库 Cookie 过期，已切换浏览器 Cookie 重试')
+          r = await clientCall({ shopKey: SHOP, cookies: COOKIES_T1, url, body })
+        }
+      }
 
       // 54001 → 自动重试已内建；这里只归一错误
       if (r.ok) return r.json

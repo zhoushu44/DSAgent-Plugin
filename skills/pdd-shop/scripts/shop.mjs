@@ -215,12 +215,37 @@ const TRANSPORT = argOf('transport') || 'http'   // ★ 默认纯 Node
       emit({ ok: false, failureKind: 'token_expired', text: '账号缺少 PASS_ID，请到「账号连接」重新登录拼多多商家后台。' })
       process.exit(2)
     }
-    const COOKIES = cookiesOf(acc)
+    let COOKIES = cookiesOf(acc)
 
     /** 统一调用 + 错误归一（★ 2026-10-24 改用共享 pdd-error） */
     const { normalize } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-error.mjs`)
+    // ★ 2026-10-24：43001 时用浏览器 Profile 的 Cookie 兜底
+    //   凭证库快照可能是几天前的旧票，而 Profile 里的是新的（Chrome 自己刷新/用户刚登录）
+    let browserCookies = null
+    async function freshCookiesFromBrowser() {
+      if (browserCookies) return browserCookies
+      try {
+        const { createSession } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-client.mjs`)
+        const s = await createSession(SHOP)
+        await s.goto('https://mms.pinduuduo.com/home'.replace('pinduuduo', 'pinduoduo'), 12000)
+        const c = await s.cookieStr()
+        await s.close()
+        if (c.map['PASS_ID']) { browserCookies = c.str; return browserCookies }
+      } catch { /* ignore */ }
+      return null
+    }
+
     const get = async (url, body, referer) => {
-      const r = await callT1({ shopKey: SHOP, cookies: COOKIES, url, body, referer })
+      let r = await callT1({ shopKey: SHOP, cookies: COOKIES, url, body, referer })
+      // 43001 会话过期 → 用浏览器 Cookie 重试一次
+      if (!r.ok && (r.ec === 43001 || r.kind === 'session_expired')) {
+        const fresh = await freshCookiesFromBrowser()
+        if (fresh) {
+          COOKIES = fresh
+          console.error('[pdd-shop] 凭证库 Cookie 过期，已切换浏览器 Cookie 重试')
+          r = await callT1({ shopKey: SHOP, cookies: COOKIES, url, body, referer })
+        }
+      }
       if (!r.ok) return { ok: false, ...normalize(r, '接口调用'), err: r }
       return { ok: true, data: r.json.result }
     }
@@ -240,34 +265,53 @@ const TRANSPORT = argOf('transport') || 'http'   // ★ 默认纯 Node
     if (ovR.ok) out.goodsOverview = { today: ovR.data.todayData, yesterday: ovR.data.yesterdayData }
 
     // ── score ──
+    let scR = null
     if (mode === 'score' || mode === 'overview') {
-      const scR = await get(`${R}/mallScore/queryMallScoreOverView`, {}, 'https://mms.pinduoduo.com/sycm/evaluation')
-      if (scR.ok) out.score = scR.data
+      scR = await get(`${R}/mallScore/queryMallScoreOverView`, {}, 'https://mms.pinduuduo.com/sycm/evaluation'.replace('pinduuduo', 'pinduoduo'))
     }
 
-    // ── 汇总文本 ──
+    // ── 汇总文本（★ 2026-10-24 修：按 mode 只输出对应数据，
+    //    之前 score 模式也显示 flow 的内容）──
     const lines = []
-    if (out.flow) lines.push(`店铺流量：访客 ${out.flow.uv} / 浏览 ${out.flow.pv} / 粉丝 ${out.flow.fans} / 搜索指数 ${out.flow.srchIndex}`)
-    if (out.goodsOverview?.today) {
+    if (out.flow && (mode === 'flow' || mode === 'overview')) {
+      lines.push(`店铺流量：访客 ${out.flow.uv} / 浏览 ${out.flow.pv} / 粉丝 ${out.flow.fans} / 搜索指数 ${out.flow.srchIndex}`)
+    }
+    if (out.goodsOverview?.today && (mode === 'overview' || mode === 'goods')) {
       const t = out.goodsOverview.today
       lines.push(`今日：支付 ¥${t.payOrdrAmt} / ${t.payOrdrCnt} 单 / ${t.guv} 访客 / ${t.gpv} 浏览 / 支付转化 ${t.payUvRto}`)
     }
-    if (out.goodsOverview?.yesterday) {
+    if (out.goodsOverview?.yesterday && (mode === 'overview' || mode === 'goods')) {
       const y = out.goodsOverview.yesterday
       lines.push(`昨日：支付 ¥${y.payOrdrAmt} / ${y.payOrdrCnt} 单 / ${y.guv} 访客 / ${y.gpv} 浏览`)
     }
-    if (out.score) {
+    if (out.score && (mode === 'score' || mode === 'overview')) {
       const s = out.score
       const parts = []
       if (s.mallScore != null) parts.push(`店铺分 ${s.mallScore}`)
       if (s.serveScore != null) parts.push(`服务分 ${s.serveScore}`)
+      if (s.logisticsScore != null) parts.push(`物流分 ${s.logisticsScore}`)
+      if (s.goodsScore != null) parts.push(`商品分 ${s.goodsScore}`)
+      if (s.refundRate != null) parts.push(`退款率 ${s.refundRate}`)
+      if (s.platformInterveneRate != null) parts.push(`平台介入率 ${s.platformInterveneRate}`)
       if (parts.length) lines.push(parts.join(' / '))
+      // 评分接口返回结构不一时，把数字字段全打出来便于排查
+      if (!parts.length) {
+        const nums = Object.entries(s).filter(([, v]) => typeof v === 'number').slice(0, 10)
+        if (nums.length) lines.push(nums.map(([k, v]) => `${k} ${v}`).join(' / '))
+      }
     }
     if (!lines.length) {
-      const e = flowR.err || {}
+      const e = flowR.err || scR?.err || {}
       out.ok = false
-      out.failureKind = flowR.kind
-      out.text = `取数失败：${e.kind} ${e.ec ?? ''} ${e.msg || e.text?.slice(0, 120) || ''}\n${e.hint || ''}`
+      out.failureKind = (flowR.kind || scR?.kind || 'api_error')
+      out.text = [
+        `取数失败：${e.kind || 'unknown'} ${e.ec ?? ''}`,
+        e.msg || e.hint || '',
+        '',
+        mode === 'flow' ? 'flow 模式需要 queryMallFlowData 接口返回数据。' : '',
+        mode === 'score' ? 'score 模式需要 queryMallScoreOverView 接口返回数据。' : '',
+        '可重试；若持续失败，到「账号连接」重新扫码登录。',
+      ].filter(Boolean).join('\n')
     } else {
       out.text = `【纯 Node·${mode}】\n` + lines.join('\n')
     }
