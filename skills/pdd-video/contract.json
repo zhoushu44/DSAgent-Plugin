@@ -1,0 +1,30 @@
+{
+  "schema": "dsagent/skill-contract@1",
+  "id": "pdd-video",
+  "entry": {
+    "form": "script",
+    "script": "scripts/video.mjs"
+  },
+  "input": {
+    "args": [
+      {
+        "name": "mode",
+        "description": "list=我的视频列表(默认)；anchor=主播信息；qualify=发布资格；topics=话题列表"
+      },
+      {
+        "name": "limit",
+        "description": "list 模式返回条数上限，默认 20，上限 100"
+      },
+      {
+        "name": "account",
+        "description": "账号 shopKey（可选）；默认取最近绑定的 pdd_mms 账号",
+        "flag": "--account"
+      }
+    ]
+  },
+  "output": {
+    "protocol": "dsagent-result",
+    "resultPrefix": "__DSAGENT_RESULT__",
+    "filesMarker": "---[OUTPUT_FILES]"
+  }
+}
