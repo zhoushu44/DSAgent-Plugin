@@ -320,16 +320,26 @@ const mode = argOf('mode') || 'overview'
     }
   }
   // ── units 模式：推广单元列表 ──
-  const units = (byApi.unitList?.adInfos || []).map(u => ({
-    adId: u.adId ?? u.id,
-    adName: u.adName ?? u.name ?? '',
-    goodsId: u.goodsId,
-    goodsName: u.goodsName ?? '',
-    status: u.adStatus ?? u.status,
-    impression: u.impression, click: u.click,
-    spend: u.orderSpend ?? u.spend, roi: u.orderSpendRoiUnified ?? u.roi,
-    maxCost: u.maxCost,
-  }))
+  const units = (byApi.unitList?.adInfos || []).map(u => {
+    // 拆 {value, unit} → number
+    const nv = (v) => (v && typeof v === 'object' && 'value' in v) ? parseFloat(v.value) : (typeof v === 'number' ? v : null)
+    return {
+      adId: u.adId ?? u.id,
+      adName: u.adName ?? u.name ?? '',
+      goodsId: u.goodsId,
+      goodsName: u.goodsName ?? '',
+      status: u.adStatus ?? u.status,
+      impression: nv(u.impression), click: nv(u.click),
+      spend: nv(u.orderSpend ?? u.spend), roi: nv(u.orderSpendRoiUnified ?? u.roi),
+      maxCost: nv(u.maxCost),
+      // ★ 出价相关（balance 用）
+      expectedBid: nv(u.bidAlertInfo?.expectedBid),
+      bidAlertType: u.bidAlertInfo?.alertType ?? null,
+      bidMin: nv(u.suggestLimitInfo?.minValue),
+      bidMax: nv(u.suggestLimitInfo?.maxValue),
+      suggestMaxCost: nv(u.maxCostSuggestVO?.suggestMaxCost),
+    }
+  })
   out.units = units
   out.totalAdNum = byApi.unitList?.totalAdNum ?? units.length
   if (mode === 'units') {
@@ -497,12 +507,24 @@ const mode = argOf('mode') || 'overview'
     const merged = diagItems.map(d => {
       const u = unitMap[String(d.adId)] || {}
       const dec = BALANCE.decide(d.modules)
+      // ★ suggestBid 兜底：诊断接口没给时，用 v3/list 的 expectedBid
+      let suggestBid = dec.suggestBid
+      if (!suggestBid && u.expectedBid) {
+        suggestBid = u.expectedBid
+        dec.suggestBid = suggestBid
+        if (dec.action === 'tune') dec.label = `⚠️ 微调（建议出价 ¥${suggestBid}）`
+        if (dec.action === 'healthy') dec.label = `✅ 保持（可提到 ¥${suggestBid}）`
+      }
       return {
         adId: d.adId,
         adName: u.adName || u.goodsName || '',
         goodsId: u.goodsId ?? null,
         spend: u.spend ?? null,
         roi: u.roi ?? null,
+        maxCost: u.maxCost ?? null,
+        bidMin: u.bidMin ?? null,
+        bidMax: u.bidMax ?? null,
+        suggestMaxCost: u.suggestMaxCost ?? null,
         ...dec,
         modules: d.modules,
         updatedAt: d.updatedAt,
@@ -556,28 +578,69 @@ const mode = argOf('mode') || 'overview'
       for (const x of merged) if (x.spend) totalSpend += Number(x.spend)
       if (totalSpend) lines.push(`总花费：¥${totalSpend.toFixed(2)}`)
       lines.push('')
+
+      // ★ 每个单元的「当前出价」从 suggestLimitInfo / bidAlertInfo 附近拿
+      //   诊断接口给的是「建议出价」，当前出价从 v3/list 的 targetRoi / optimizationBid 推
+      //   简化：用 suggestBid 与 alert 21（出价偏低）判断差额
       for (const act of ACTION_ORDER) {
         const group = byAction[act]
         if (!group?.length) continue
         lines.push(`${ACTION_LABEL[act]}（${group.length} 个）`)
         for (const x of group) {
           lines.push(`  · [${x.adId}] ${String(x.adName || x.goodsId).slice(0, 26)}${x.score != null ? ` | 总分${x.score}` : ''}`)
-          if (x.reason) lines.push(`      ${x.reason}`)
-          if (act === 'raise' && x.suggestBid) lines.push(`      → 出价提到 ¥${x.suggestBid}`)
-          if (act === 'cut') lines.push(`      → 降 10~20% 或暂停观察 3 天`)
+          if (x.reason) lines.push(`     依据：${x.reason}`)
+          const m1 = x.modules.find(m => m.moduleType === 1)
+          if (m1) {
+            lines.push(`     竞争等级 ${m1.competitionLevel ?? '—'}/10 · 排名 ${m1.rank ?? '—'}/100${m1.suggestBid ? ` · 建议出价 ¥${m1.suggestBid}` : ''}`)
+            if (m1.effectPredict && (m1.effectPredict.orderMaxPct || m1.effectPredict.impressionMaxPct)) {
+              lines.push(`     提价效果预估：订单 +0~${m1.effectPredict.orderMaxPct ?? '?'}% · 曝光 +0~${m1.effectPredict.impressionMaxPct ?? '?'}%`)
+            }
+          }
+          if (x.spend != null || x.roi != null) {
+            lines.push(`     当前：花费 ¥${x.spend ?? '—'} · ROI ${x.roi ?? '—'}${x.maxCost != null ? ` · 日限额 ¥${x.maxCost}` : ''}`)
+          }
+          // ★ 可执行动作 + 命令
+          if (act === 'raise' && x.suggestBid) {
+            lines.push(`     ▶ 动作：出价提到 ¥${x.suggestBid}`)
+            lines.push(`     ▶ 命令：--mode roi --ad-id ${x.adId} --bid ${x.suggestBid} --bid-type 2 --confirm true`)
+          } else if (act === 'tune' && x.suggestBid) {
+            lines.push(`     ▶ 动作：小步上调 5~10%，目标 ¥${x.suggestBid}（别一次到位）`)
+            lines.push(`     ▶ 命令：--mode roi --ad-id ${x.adId} --bid ${x.suggestBid} --bid-type 2 --confirm true`)
+          } else if (act === 'cut') {
+            lines.push(`     ▶ 动作：降 10~20% 或暂停观察 3 天`)
+            lines.push(`     ▶ 暂停：--mode pause --ad-id ${x.adId} --confirm true`)
+          } else if (act === 'healthy') {
+            lines.push(`     ▶ 动作：不动。若日限额天天跑满，可提限额 20~30%`)
+            lines.push(`     ▶ 命令：--mode maxcost --ad-id ${x.adId} --max-cost <新限额> --confirm true`)
+          }
         }
         lines.push('')
       }
-      // 预算分配建议
-      const raise = byAction.raise || [], cut = byAction.cut || []
+
+      // 预算分配建议（带金额）
+      const raise = byAction.raise || [], cut = byAction.cut || [], tune = byAction.tune || []
+      const cutSpend = cut.reduce((s, x) => s + (Number(x.spend) || 0), 0)
       if (raise.length && cut.length) {
-        lines.push(`💡 预算重分配：从「${cut.length} 个待降」腾出的预算，加到「${raise.length} 个待加」上`)
+        lines.push(`💡 预算重分配：`)
+        lines.push(`   从 ${cut.length} 个待降单元腾出 ¥${cutSpend.toFixed(2)}/日`)
+        lines.push(`   加到 ${raise.length} 个待加单元（ROI 已证明更好）`)
       } else if (raise.length) {
         lines.push(`💡 建议给 ${raise.length} 个推广单元加价/加预算`)
       } else if (cut.length) {
-        lines.push(`💡 建议对 ${cut.length} 个低效单元降价或暂停，避免无效消耗`)
+        lines.push(`💡 建议对 ${cut.length} 个低效单元降价或暂停，避免 ¥${cutSpend.toFixed(2)}/日 无效消耗`)
+      } else if (tune.length) {
+        lines.push(`💡 ${tune.length} 个单元建议微调，按建议出价小步上调`)
       } else if (merged.length) {
         lines.push('💡 当前推广结构健康，无需大调整')
+      }
+      // 执行顺序提示
+      if (raise.length || cut.length) {
+        lines.push('')
+        lines.push('📋 执行顺序（重要）：')
+        if (cut.length) lines.push(`   1. 先降/停 ${cut.length} 个低效单元（止血）`)
+        if (raise.length) lines.push(`   ${cut.length ? 2 : 1}. 观察 1~2 天，确认 ROI 没掉`)
+        if (raise.length) lines.push(`   ${cut.length ? 3 : 2}. 再加价 ${raise.length} 个优质单元（放量）`)
+        lines.push('   ⚠️ 一次只改一类，间隔 ≥1 天，否则分不清是哪个动作起的效果')
       }
       out.text = lines.join('\n')
       out.balance = {
