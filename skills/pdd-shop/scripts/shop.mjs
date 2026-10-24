@@ -224,14 +224,28 @@ const TRANSPORT = argOf('transport') || 'http'   // ★ 默认纯 Node
     let browserCookies = null
     async function freshCookiesFromBrowser() {
       if (browserCookies) return browserCookies
-      try {
-        const { createSession } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-client.mjs`)
-        const s = await createSession(SHOP)
-        await s.goto('https://mms.pinduuduo.com/home'.replace('pinduuduo', 'pinduoduo'), 12000)
-        const c = await s.cookieStr()
-        await s.close()
-        if (c.map['PASS_ID']) { browserCookies = c.str; return browserCookies }
-      } catch { /* ignore */ }
+      // ★ 遍历所有候选 profile 目录（shopKey 自己的可能是过期票，
+      //   display_label 对应的才是有效的）
+      const { profileCandidates } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-launch.mjs`)
+      const cands = profileCandidates(SHOP)
+      for (const dir of cands) {
+        try {
+          const { createSession } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-client.mjs`)
+          const s = await createSession(dir)
+          await s.goto('https://mms.pinduoduo.com/home', 10000)
+          const c = await s.cookieStr()
+          await s.close()
+          if (c.map['PASS_ID']) {
+            // 直接试一次，通了才算
+            const test = await callT1({
+              shopKey: SHOP, cookies: c.str,
+              url: `${R}/mallScore/queryMallFlowData`, body: {},
+              referer: 'https://mms.pinduuduo.com/sycm/evaluation'.replace('pinduuduo', 'pinduoduo'),
+            })
+            if (test.ok) { browserCookies = c.str; return browserCookies }
+          }
+        } catch { /* 试下一个 */ }
+      }
       return null
     }
 

@@ -74,6 +74,13 @@ const PRICE_LABEL_NAMES = { 0: '品质档', 1: '主流档', 2: '引流档' }
   let profile = path.join(homedir(), '.dsh', 'browser-profiles', 'accounts', SHOP)
   if (!fs.existsSync(profile)) profile = path.join(homedir(), '.dsh', 'browser-profiles', 'accounts', 'pdd_mms_de55c3e159072dfb5297b234eaa487c3')
 
+  // ★ 2026-10-24：凭证库 Cookie 有效 ≠ Profile Cookie 有效（实测踩坑）。
+  //   凭证库里 3b39d748 的 PASS_ID 是好的，但它自己的 profile 目录里是旧票，
+  //   直接打开会跳登录页 → 误报 token_expired。
+  //   解法：先用凭证库 Cookie 覆盖注入（见下方 page.setCookie）。
+  const storeAcc = store.listAccounts().find(a => a.shop_key === SHOP)
+  const storePid = storeAcc?.cookies?.['PASS_ID']
+
   const browser = await puppeteer.launch({
     executablePath: CHROME_PATH,
     userDataDir: profile,
@@ -84,6 +91,22 @@ const PRICE_LABEL_NAMES = { 0: '品质档', 1: '主流档', 2: '引流档' }
   })
   const page = (await browser.pages())[0] || await browser.newPage()
   // ★ 注入反检测（webdriver / plugins / languages / chrome.runtime）
+  await page.evaluateOnNewDocument(STEALTH_SCRIPT)
+
+  // ★ 凭证库有 PASS_ID 就注入，覆盖 profile 里的旧票
+  if (storePid) {
+    try {
+      const jar = Object.entries(storeAcc.cookies).filter(([, v]) => v !== '' && v != null)
+      const cookieList = jar.flatMap(([name, value]) => ([
+        { name, value: String(value), domain: '.pinduoduo.com', path: '/' },
+        { name, value: String(value), domain: 'mms.pinduuduo.com'.replace('pinduuduo', 'pinduoduo'), path: '/' },
+      ]))
+      await page.setCookie(...cookieList)
+      console.error(`[chance] 已从凭证库注入 ${cookieList.length} 个 Cookie（PASS_ID ${storePid.length} 字符）`)
+    } catch (e) {
+      console.error(`[chance] Cookie 注入失败: ${e.message?.slice(0, 80)}`)
+    }
+  }
   await page.evaluateOnNewDocument(STEALTH_SCRIPT);
   const safeEval = async (fn, arg) => {
     for (let i = 0; i < 15; i++) {
@@ -105,8 +128,22 @@ const PRICE_LABEL_NAMES = { 0: '品质档', 1: '主流档', 2: '引流档' }
   await safeGoto('https://mms.pinduoduo.com/goods/goods_list', { waitUntil: 'domcontentloaded', timeout: 60000 })
   await new Promise(r => setTimeout(r, 12000))
   if (/\/login/i.test(page.url())) {
+    // ★ 2026-10-24：区分「真未登录」与「接口要签名但页面没跳登录」
+    //   机会商品页需要 mms 会话，但 /opportunity-goods/* 本身不要签名。
+    //   若页面跳登录页，说明该 profile 的票据确实失效。
     await browser.close()
-    emit({ ok: false, failureKind: 'token_expired', text: '拼多多商家后台登录态失效，请到「账号连接」重新登录。' })
+    emit({
+      ok: false, failureKind: 'token_expired',
+      text: [
+        '拼多多商家后台登录态失效（打开商品列表跳到了登录页）。',
+        '',
+        '排查：',
+        '  1. 该账号的浏览器 Profile 票据已过期（凭证库的可能还有效）',
+        '  2. 已尝试从凭证库注入 Cookie，但仍被跳登录 → 服务端已判定过期',
+        '',
+        '处理：到「账号连接」对该账号重新扫码登录（会同时刷新 Profile 和凭证库）。',
+      ].join('\n'),
+    })
     process.exit(2)
   }
   // 滑块自动过

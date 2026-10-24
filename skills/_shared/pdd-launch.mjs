@@ -23,6 +23,10 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { homedir } from 'node:os'
+import { createRequire } from 'node:module'
+
+// 凭证库是 ESM，但本文件需要同步读 → 用 createRequire 走 CJS 入口
+const _require = createRequire('E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/package.json')
 
 export const CHROME_PATH = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'
 
@@ -48,10 +52,31 @@ export const STEALTH_ARGS = [
  * @param {object} extra 额外参数
  */
 export function launchOptions(shopKey, extra = {}) {
-  let profile = path.join(homedir(), '.dsh', 'browser-profiles', 'accounts', shopKey)
+  const base = path.join(homedir(), '.dsh', 'browser-profiles', 'accounts')
+  let profile = path.join(base, shopKey)
+
+  // ★ 2026-10-24：shopKey 自带的 profile 目录里可能是**过期票据**。
+  //
+  //   实例（实测）：
+  //     shopKey       = pdd_mms_0701d3ca4163a60d16f06a679099dcc8
+  //     display_label = de55c3e159072dfb5297b234eaa487c3
+  //     · pdd_mms_0701d3ca... 目录存在，但里面 PASS_ID 已过期（43001）
+  //     · pdd_mms_de55c3e...  目录里才是有效登录态
+  //
+  //   根因：账号连接器「收编 Profile」时按 display_label 命名目录，
+  //   而 shopKey 用 account_id 命名，两者不一致。
+  //
+  //   解法：shopKey 目录不存在时，按 profileCandidates() 列出的
+  //   候选名依次试，取第一个存在的。票据是否有效仍靠 43001 判定。
+  if (!fs.existsSync(profile)) {
+    for (const alt of profileCandidates(shopKey)) {
+      if (fs.existsSync(path.join(base, alt))) { profile = path.join(base, alt); break }
+    }
+  }
+
   if (!fs.existsSync(profile)) {
     // 兼容旧的 hash 目录
-    const fallback = path.join(homedir(), '.dsh', 'browser-profiles', 'accounts', 'pdd_mms_de55c3e159072dfb5297b234eaa487c3')
+    const fallback = path.join(base, 'pdd_mms_de55c3e159072dfb5297b234eaa487c3')
     if (fs.existsSync(fallback)) profile = fallback
   }
   return {
@@ -64,6 +89,30 @@ export function launchOptions(shopKey, extra = {}) {
     ignoreDefaultArgs: ['--enable-automation'],   // ★ 去掉「Chrome 正受自动化软件控制」提示
     ...extra,
   }
+}
+
+/**
+ * 列出该 shopKey 可能对应的 profile 目录名（按优先级）
+ *
+ * 账号连接器的命名历史：
+ *   ① pdd_mms_{account_id}                 shopKey 本体
+ *   ② pdd_mms_{display_label}              收编 Profile 时的名字
+ *      （display_label 常是 mall_id / 32 位 hex，如 de55c3e159072dfb5297b234eaa487c3）
+ */
+export function profileCandidates(shopKey) {
+  const out = [shopKey]
+  try {
+    // ★ 凭证库是 AES-256-GCM 加密的，不能直接读 JSON，
+    //   要用 CredentialStore 的解密接口（listAccounts 是同步的）。
+    const { CredentialStore } = _require('./lib/services/credential-store.js')
+    const store = new CredentialStore(path.join(homedir(), '.dsh', 'dsagent-accounts.json'))
+    const acc = store.listAccounts().find(a => a.shop_key === shopKey)
+    if (acc) {
+      const label = acc.display_label || acc.account_meta?.display_nick || acc.account_meta?.mall_name
+      if (label && /^[0-9a-f]{16,}$/i.test(String(label))) out.push('pdd_mms_' + label)
+    }
+  } catch { /* ignore */ }
+  return [...new Set(out)]
 }
 
 /**
