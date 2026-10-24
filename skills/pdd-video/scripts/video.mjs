@@ -1,25 +1,68 @@
 /**
- * 多多视频上传 + 删除（pdd-video）
+ * 多多视频（pdd-video）—— 读 + 写
  *
- * 链路（2026-10-24 逆向）：
+ * 域：live.pinduoduo.com/n-creator/video/home?from=mms
+ *     （独立域，mms 扫码后 SSO 自动打通，不用单独登录）
  *
- *  上传：
- *   ① /api/galerie/large_file/v1/video/upload_init     拿 uploadId + 分片大小
- *   ② /api/galerie/large_file/v1/video/upload_part     逐片上传
- *   ③ /api/galerie/large_file/v1/video/upload_complete 合并 → 拿 fileId/url
- *   ④ /api/backbone/video/meta/query                   读时长/尺寸
- *   ⑤ /api/backbone/video/quality/check                质量检查
+ * ══════════════════════════════════════════════════════════════════
+ * 上传链路（2026-10-24 逆向，已实证跑通）
+ * ══════════════════════════════════════════════════════════════════
+ *   ① POST /mms/amco/prePublish/clear              清空待发布队列
+ *   ② POST /api/backbone/video/publish/page/query  拿发布页配置 + 内容声明清单
+ *   ③ POST /live/galerie/signature                 ★ 拿视频上传票据
+ *        body: {"bucket_tag":"backbone-video-sign"}
+ *        ★★ 不调这个，upload_init 会 403（实测 10 种参数组合全失败）
+ *   ④ POST /api/galerie/large_file/v1/video/upload_init     拿 uploadId + partSize
+ *   ⑤ POST /api/galerie/large_file/v1/video/upload_part     二进制分片
+ *   ⑥ POST /api/galerie/large_file/v1/video/upload_complete 合并
+ *   ⑦ POST /api/backbone/video/meta/query           拿 vid
+ *   ⑧ POST /live/galerie/signature                  ★ 封面票据
+ *        body: {"bucket_tag":"backbone-cover-b"}
+ *   ⑨ POST /v3/store_image                          封面上传
+ *   ⑩ POST /mms/amco/prePublish/add                 加入待发布队列
  *
- *  发布：
- *   ⑥ /api/backbone/video/promotion_goods/bind         绑商品（可选）
- *   ⑦ /api/backbone/video/publish                      发布
+ * ══════════════════════════════════════════════════════════════════
+ * 发布链路（2026-10-24 逆向，参数结构已实证正确）
+ * ══════════════════════════════════════════════════════════════════
+ *   POST /api/backbone/video/publish
+ *   body: { feeds: [ feed, ... ] }
  *
- *  删除：
- *   /mms/amco/prePublish/delete   （待发布队列删除）
- *   /api/backbone/video/delete    （已发布删除，未验证）
+ *   feed 结构（来自 chunk 2990-59211e1343c3e949.js 官方构造逻辑）：
+ *     {
+ *       desc: "",                      // 描述
+ *       scheduleTime: null,            // 定时发布（毫秒时间戳），null = 立即
+ *       goodsIdList: [],               // 带货商品 ID 列表
+ *       outVideoUrl: "",               // 外部视频 URL（同步视频用）
+ *       useRecRelatedGoods: false,     // 用推荐商品
+ *       anchorDeclarationType: 11,     // ★ 内容声明类型（必填）
+ *       cover: "https://...",          // 封面 URL
+ *       cutStartTime: null,            // 裁剪起点（毫秒）
+ *       cutEndTime: null,              // 裁剪终点（毫秒）
+ *       vid: "backbone-video-sign-b#xxx",   // ★ 上传拿到的 vid
+ *       topicId: null,                 // 话题 ID
+ *       syncVideo: false,              // 同步到店铺动态
+ *       needCreateCoverUrl: null,
+ *       newPushPxq: null,
+ *     }
  *
- * 注意：/api/galerie/* 是上传域，**不需要 Anti-Content**（与 pdd-publish-http
- * 的 store_image 同族）；/api/backbone/* 需要页面会话。
+ *   内容声明类型（anchorDeclarationType）：
+ *     11 = 内容无需标注      1 = 含AI生成内容     5 = 含虚构演绎内容
+ *      7 = 内容含营销信息    3 = 内容为转载       8 = 个人观点，仅供参考
+ *
+ *   ★ cutStartTime/cutEndTime 官方会 × 1000（秒→毫秒）
+ *
+ * 发布后清理草稿：
+ *   POST /mms/amco/prePublish/delete
+ *   body: { urlList: [...], vidList: [vid] }
+ *
+ * ══════════════════════════════════════════════════════════════════
+ * 实测状态（爱绿森账号）
+ * ══════════════════════════════════════════════════════════════════
+ *   上传链路      ✅ 完整跑通，vid/coverUrl 都拿到
+ *   发布接口      ⚠️ 参数结构正确，但账号返回
+ *                 errorCode 2000000「您的账号被系统判定不适合发布」
+ *                 → 因为 goodsFeedPermission / commonFeedPermission 均未开通
+ *                   是权限问题，不是技术问题
  */
 import { createRequire } from 'node:module'
 import * as fs from 'node:fs'
@@ -226,23 +269,120 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
       out.upload = { vid, fileId, parts, size }
       out.add = added
       out.pageConfig = pageCfg ? { keys: Object.keys(pageCfg).slice(0, 15) } : null
-      out.text = out.ok
-        ? [
-            `✅ 多多视频已加入待发布`,
-            `  vid: ${vid}`,
-            `  标题: ${title}`,
-            `  分片: ${parts} 片 / ${(size / 1024 / 1024).toFixed(2)}MB`,
-            goodsId ? `  绑定商品: ${goodsId}` : `  绑定商品: 无`,
-            '',
-            '⚠️ 视频进入待发布队列，需在后台「内容管理」里点发布，',
-            '   审核通过后才会对外展示。',
-          ].join('\n')
-        : `❌ prePublish/add 失败：${JSON.stringify(addR.json).slice(0, 300)}`
-      if (!out.ok) process.exitCode = 2
+
+      const L = []
+      if (out.ok) {
+        L.push(`✅ 多多视频已加入待发布`)
+        L.push(`  vid: ${vid}`)
+        L.push(`  标题: ${title}`)
+        L.push(`  分片: ${parts} 片 / ${(size / 1024 / 1024).toFixed(2)}MB`)
+        L.push(goodsId ? `  绑定商品: ${goodsId}` : `  绑定商品: 无`)
+      } else {
+        L.push(`❌ prePublish/add 失败：${JSON.stringify(addR.json).slice(0, 300)}`)
+        out.text = L.join('\n')
+        emit(out)
+        process.exit(2)
+      }
+
+      // ⑪ 可选：直接发布（--publish true）
+      if (has('publish') && argOf('publish') !== 'false') {
+        L.push('')
+        L.push('▶ 执行发布...')
+        const feed = {
+          desc: argOf('desc') || '',
+          scheduleTime: null,
+          goodsIdList: goodsId ? [goodsId] : [],
+          outVideoUrl: '',
+          useRecRelatedGoods: false,
+          anchorDeclarationType: Number(argOf('declaration') || 11),   // 11 = 内容无需标注
+          cover: coverUrl || '',
+          cutStartTime: null,
+          cutEndTime: null,
+          vid,
+          topicId: null,
+          syncVideo: false,
+          needCreateCoverUrl: null,
+          newPushPxq: null,
+        }
+        const pubR = await api('/api/backbone/video/publish', { feeds: [feed] })
+        out.publish = pubR.json?.result ?? pubR.json
+        out.publishCode = pubR.json?.errorCode ?? pubR.json?.error_code
+        out.publishMsg = pubR.json?.errorMsg ?? pubR.json?.error_msg
+
+        if (pubR.json?.success) {
+          L.push(`✅ 发布成功！`)
+          // 清理草稿
+          try {
+            await api('/mms/amco/prePublish/delete', { urlList: [], vidList: [vid] })
+            L.push(`  草稿已清理`)
+          } catch { /* ignore */ }
+          L.push('')
+          L.push('视频已提交审核，通过后对外展示。')
+        } else {
+          L.push(`⚠️ 发布返回：errorCode=${out.publishCode ?? '?'} ${out.publishMsg || ''}`)
+          if (out.publishCode === 2000000) {
+            L.push('')
+            L.push('「账号被系统判定不适合发布」→ 权限问题，不是技术问题。')
+            L.push('用 --mode permission 查带货/内容权限是否开通。')
+          }
+          out.ok = false
+          out.failureKind = 'no_permission'
+          process.exitCode = 2
+        }
+      } else {
+        L.push('')
+        L.push('⚠️ 视频在待发布队列，需在后台「内容管理」点发布。')
+        L.push('   或加 --publish true 直接发布（需先填内容声明 anchorDeclarationType）。')
+        L.push('   审核通过后才会对外展示。')
+      }
+      out.text = L.join('\n')
     }
 
     // ── 读模式：list / anchor / qualify / topics / permission ──
     if (mode !== 'upload' && mode !== 'delete') {
+      if (mode === 'published') {
+        // 已发布视频列表（/api/backbone/video/query）
+        // status: 0~4 均有效（5 报 BAD_PARAMS），-1 = 全部
+        const statusArg = argOf('status')
+        const status = statusArg != null ? Number(statusArg) : 1
+        const pad = (n) => String(n).padStart(2, '0')
+        const now = new Date()
+        const end = now.getTime()
+        const start = (argOf('start') ? new Date(argOf('start')).getTime() : end - 30 * 86400000)
+        const r = await api('/api/backbone/video/query', {
+          status, pageSize: Math.min(100, limit), page: 1,
+          startTime: start, endTime: end,
+        })
+        const res = r.json?.result
+        const feeds = res?.feeds || []
+        out.feeds = feeds.map(f => ({
+          feedId: f.feedId ?? f.id,
+          title: String(f.title ?? f.desc ?? '').slice(0, 80),
+          desc: String(f.desc ?? '').slice(0, 200),
+          cover: f.cover ?? f.coverUrl ?? '',
+          vid: f.vid ?? null,
+          status: f.status ?? null,
+          publishTime: f.publishTime ?? f.gmtCreated ?? null,
+          playCnt: f.playCnt ?? f.viewCnt ?? f.playCount ?? null,
+          likeCnt: f.likeCnt ?? f.likeCount ?? null,
+          commentCnt: f.commentCnt ?? f.commentCount ?? null,
+          goodsList: (f.goodsList || []).map(g => ({ goodsId: g.goodsId, name: g.goodsName })),
+          raw: f,
+        }))
+        out.count = feeds.length
+        out.total = res?.total ?? null
+        out.status = status
+        out.text = out.feeds.length
+          ? `已发布视频（status=${status}，${out.feeds.length} 个${out.total != null ? ` / total ${out.total}` : ''}）：\n` +
+            out.feeds.map((f, i) => {
+              const lines = [`  ${i + 1}. [${f.feedId}] ${f.title.slice(0, 50)}`]
+              lines.push(`     播放=${f.playCnt ?? '—'} 点赞=${f.likeCnt ?? '—'} 评论=${f.commentCnt ?? '—'} 状态=${f.status ?? '—'}`)
+              if (f.goodsList.length) lines.push(`     商品: ${f.goodsList.map(g => g.name || g.goodsId).slice(0, 3).join('、')}`)
+              return lines.join('\n')
+            }).join('\n')
+          : `已发布视频（status=${status}）：0 个\n\nstatus 取值：\n  0~4 有效（5 报 BAD_PARAMS），-1 = 全部\n  查不到可能是没发过，或 status 值不对`
+      }
+
       if (mode === 'list') {
         const r = await api('/mms/amco/prePublish/query', { pageSize: Math.min(100, limit), pageNum: 1 })
         // 双层 result: {success, result:{result:{list, total, hasMore, sortTotal}}}
