@@ -350,13 +350,50 @@ export function apply(ctx: ClientContext, cfg?: Config) {
     //（早退 return 之前），否则违反 Rules of Hooks。
     const useChat = props.useChat ?? NO_CHAT_HOOK
     const items = useChat((s) => s.navigation?.items() ?? NO_CHAT_ITEMS)
+    // ★ 2026-10-24：setDraft 不再是「必需」。宿主不注入 inputActions 时
+    //   原来直接 return null → 整条推荐消失（v11.0 引入至今从未渲染过，
+    //   实测 DSH 确实不给这个 prop）。现在降级为「无 setDraft 也渲染」，
+    //   点击走三级兜底：inputActions.setDraft → 直写 composer → 复制到剪贴板。
     const setDraft = props.inputActions?.setDraft
-    if (!setDraft) return null
 
     // 读聊天记录推断上下文；hook 不存在或无消息时回落初始态
     const blankSession = props.session?.blank === true || items.length === 0
     const context = blankSession ? {} : inferContext(items)
     const suggestions = pickSuggestions(context)
+
+    /** 点击兜底链：优先用宿主 API，其次直写输入框，最后复制到剪贴板 */
+    const fillInput = (text: string) => {
+      if (setDraft) { try { setDraft(text); return true } catch { /* 继续降级 */ } }
+      // 直写 composer：优先 contenteditable（DSH 用的是它），其次 textarea/input
+      const editable = document.querySelector(
+        '[contenteditable="true"], textarea, input[type="text"]',
+      ) as HTMLElement | null
+      if (editable) {
+        try {
+          if (editable instanceof HTMLTextAreaElement || editable instanceof HTMLInputElement) {
+            editable.value = text
+          } else {
+            editable.innerText = text
+          }
+          editable.dispatchEvent(new Event('input', { bubbles: true }))
+          editable.dispatchEvent(new Event('change', { bubbles: true }))
+          editable.focus?.()
+          // 把光标移到末尾，方便直接接着改
+          const sel = window.getSelection()
+          const range = document.createRange()
+          range.selectNodeContents(editable)
+          range.collapse(false)
+          sel?.removeAllRanges()
+          sel?.addRange(range)
+          return true
+        } catch { /* 继续降级 */ }
+      }
+      // 最后：复制到剪贴板，用户手动粘贴
+      try {
+        void navigator.clipboard?.writeText(text)
+        return false
+      } catch { return false }
+    }
 
     return React.createElement(
       'div',
@@ -380,7 +417,18 @@ export function apply(ctx: ClientContext, cfg?: Config) {
           {
             type: 'button',
             key: s.label,
-            onClick: () => setDraft(s.text),
+            onClick: () => {
+              const ok = fillInput(s.text)
+              if (!ok) {
+                // 剪贴板兜底：给一眼可见的反馈（改标题 2 秒）
+                const btn = document.activeElement as HTMLElement | null
+                if (btn) {
+                  const old = btn.textContent
+                  btn.textContent = '已复制，请粘贴'
+                  setTimeout(() => { btn.textContent = old }, 2000)
+                }
+              }
+            },
             style: {
               // 暗色主题适配：跟随宿主前景/描边语义变量，缺省回退到中性灰
               border: '1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.12))',
