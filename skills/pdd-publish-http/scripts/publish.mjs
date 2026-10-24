@@ -136,6 +136,20 @@ if (!confirm) {
 
 // ─── 4. 真实发布（调插件 lib） ───
 try {
+  // ★ 2026-10-24 补：前置账号检查（冷却中/健康分过低 → 不发请求）
+  const { checkAccountUsable } = await import(`file:///${PLUGIN_ROOT}/skills/_shared/pdd-error.mjs`)
+  const store0 = new (await import(`file:///${PLUGIN_ROOT}/lib/services/credential-store.js`)).CredentialStore(
+    path.join(homedir(), '.dsh', 'dsagent-accounts.json'))
+  const mmsAccs = store0.listAccounts().filter(a => a.platform === 'pdd_mms' && a.cookies?.['PASS_ID'])
+  const shopKey0 = account || mmsAccs.slice(-1)[0]?.shop_key
+  if (shopKey0) {
+    const chk = await checkAccountUsable(shopKey0, '商品发布')
+    if (chk.blocked) {
+      emit({ ok: false, failureKind: chk.failureKind, shopKey: shopKey0, text: chk.text })
+      process.exit(2)
+    }
+  }
+
   const { pddPublish2 } = await import(`file:///${PLUGIN_ROOT}/lib/pdd-publish2.js`)
   const extra = { product: raw, confirm: true, mode2: true }
   if (account)
@@ -155,6 +169,13 @@ try {
       path.join(homedir(), '.dsh', 'dsagent-accounts.json')),
     extra,
   )
+  // ★ 记账号健康分（成功/失败都记）
+  if (shopKey0) {
+    try {
+      const { recordToAntiban } = await import(`file:///${PLUGIN_ROOT}/skills/_shared/pdd-error.mjs`)
+      await recordToAntiban(shopKey0, result?.ok ? 1000000 : null, result?.ok ? 'ok' : null)
+    } catch { /* ignore */ }
+  }
   emit({
     ok: !!result?.ok,
     failureKind: result?.failureKind,
@@ -164,6 +185,14 @@ try {
   })
   process.exit(result?.ok ? 0 : 1)
 } catch (e) {
+  // ★ 错误归一（detached Frame = 风控关页面）
+  try {
+    const { normalizeError, recordToAntiban } = await import(`file:///${PLUGIN_ROOT}/skills/_shared/pdd-error.mjs`)
+    const n = normalizeError(e, '商品发布')
+    if (account) await recordToAntiban(account, null, n.failureKind === 'risk_control' ? 'captcha' : null).catch(() => {})
+    emit({ ok: false, failureKind: n.failureKind, text: n.text })
+    process.exit(2)
+  } catch { /* ignore */ }
   emit({ ok: false, failureKind: 'api_error', text: `发布异常：${e?.message || String(e)}` })
   process.exit(1)
 }

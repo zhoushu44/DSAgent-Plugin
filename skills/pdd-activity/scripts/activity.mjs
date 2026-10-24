@@ -442,6 +442,9 @@ const mode = argOf('mode') || 'overview'
     }
     const sig = await page.evaluate(() => window.__sigPair || null).catch(() => null)
     const mallId0 = await page.evaluate(() => window.__mallId || null).catch(() => null)
+    // ★ 2026-10-24 补：captcha 通行证（54001 时不用人工过滑块）
+    const { getCaptchaToken: getTok, extractCaptchaToken: exTok, saveCaptchaToken: saveTok } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-captcha.mjs`).catch(() => ({}))
+    const vtk = getTok ? getTok(SHOP) : null
     const variants = [
       ['全参', { activity_goods_id: Number(agid), activity_id: aid ? Number(aid) : undefined, goods_id: gid ? Number(gid) : undefined }],
       ['仅主键', { activity_goods_id: Number(agid) }],
@@ -449,18 +452,23 @@ const mode = argOf('mode') || 'overview'
     let last = null
     for (const [name, body] of variants) {
       const clean = Object.fromEntries(Object.entries(body).filter(([, v]) => v !== undefined))
-      const r = await page.evaluate(async (bd, s, mall) => {
+      const r = await page.evaluate(async (bd, s, mall, vt) => {
         const payload = s ? { ...bd, crawlerInfo: s.crawlerInfo } : bd
         try {
-          const resp = await fetch('https://mms.pinduoduo.com/lakemms/activityGoods/cancelEnroll', {
+          const resp = await fetch('https://mms.pinduuduo.com/lakemms/activityGoods/cancelEnroll'.replace('pinduuduo', 'pinduoduo'), {
             method: 'POST', credentials: 'include',
-            headers: { 'Content-Type': 'application/json', ...(s ? { 'Anti-Content': s.anti } : {}) },
+            headers: { 'Content-Type': 'application/json', ...(s ? { 'Anti-Content': s.anti } : {}), ...(vt ? { VerifyAuthToken: vt } : {}) },
             body: JSON.stringify(payload),
           })
           return { status: resp.status, json: await resp.json().catch(() => null) }
         } catch (e) { return { status: -1, json: null, err: e.message } }
-      }, clean, sig, mallId0).catch(() => ({ status: -1, json: null }))
+      }, clean, sig, mallId0, vtk).catch(() => ({ status: -1, json: null }))
       last = { name, ...r }
+      // ★ 54001 → 提取新 token
+      if (r.json?.errorCode === 54001 && exTok && saveTok) {
+        const nt = exTok(r.json)
+        if (nt) { saveTok(SHOP, nt); console.error('[activity] 已提取新 captcha 通行证（10 分钟有效）') }
+      }
       if (r.json?.success === true) break
       await new Promise(r2 => setTimeout(r2, 2000))
     }
@@ -576,6 +584,17 @@ const mode = argOf('mode') || 'overview'
       ok: false, failureKind: 'rate_limit',
       text: `命中平台频控（code=${e.riskCode}${e.riskMsg ? `：${e.riskMsg}` : ''}），已记冷却 ${fmtRemain(cd.remainMs)}。\n期间请勿重复调用（会延长封禁）。\n若急需使用，可在浏览器窗口手动过滑块验证，然后重试。`,
     })
+    process.exit(2)
+  }
+  // ★ 2026-10-24 补：detached Frame / 页面关闭 → 风控关页面
+  const { normalizeError } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-error.mjs`).catch(() => ({}))
+  const n = normalizeError ? normalizeError(e, '活动报名') : null
+  if (n) {
+    const { recordToAntiban } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-error.mjs`).catch(() => ({}))
+    if (recordToAntiban) await recordToAntiban(SHOP, null, n.failureKind === 'risk_control' ? 'captcha' : null).catch(() => {})
+  }
+  if (n) {
+    emit({ ok: false, failureKind: n.failureKind, text: n.text })
     process.exit(2)
   }
   emit({ ok: false, failureKind: 'api_error', text: `执行异常：${e?.message || String(e)}` })

@@ -157,7 +157,18 @@ const PRICE_LABEL_NAMES = { 0: '品质档', 1: '主流档', 2: '引流档' }
   const sig = await page.evaluate(() => window.__sig).catch(() => null)
   console.error(`[chance] 签名: ${sig ? '有' : '无（该域不需要，无影响）'}`)
 
+  // ★ 2026-10-24 补：接口级节流（该域虽不需要签名，但高频一样会被 429/40002）
+  const lastHit = new Map()
+  const MIN_GAP = 2000
+  await new Promise(r => setTimeout(r, 0))
+
   const call = async (apiPath, body) => {
+    // 节流：同一接口最小 2s 间隔
+    const now = Date.now()
+    const gap = now - (lastHit.get(apiPath) || 0)
+    if (gap < MIN_GAP) await new Promise(r => setTimeout(r, MIN_GAP - gap))
+    lastHit.set(apiPath, Date.now())
+
     // 该域不需要 crawlerInfo/Anti-Content；有签名就带上（兜底未来加风控）
     const payload = sig ? { ...body, crawlerInfo: sig.crawlerInfo } : body
     // ★ 带上 captcha 通行证（有则带，10 分钟内不再弹滑块）
@@ -178,6 +189,21 @@ const PRICE_LABEL_NAMES = { 0: '品质档', 1: '主流档', 2: '引流档' }
     if (r && (r.error_code === 54001 || r.errorCode === 54001)) {
       const nt = extractTok(r)
       if (nt) { saveTok(SHOP, nt); console.error('[chance] 已提取新 captcha 通行证（10 分钟有效）') }
+    }
+    // ★ 40002 高频 → 明确提示 + 记健康分
+    if (r && (r.error_code === 40002 || r.errorCode === 40002)) {
+      console.error('[chance] ⚠️ 40002 高频限流，稍后重试')
+      try {
+        const { recordToAntiban } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-error.mjs`)
+        await recordToAntiban(SHOP, 40002, 'rate_limit')
+      } catch { /* ignore */ }
+    }
+    // ★ 54001 → 记健康分（该域一般不踩，兜底）
+    if (r && (r.error_code === 54001 || r.errorCode === 54001)) {
+      try {
+        const { recordToAntiban } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-error.mjs`)
+        await recordToAntiban(SHOP, 54001, 'captcha')
+      } catch { /* ignore */ }
     }
     return r
   }

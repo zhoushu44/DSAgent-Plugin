@@ -733,14 +733,29 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
       process.exitCode = 2
     }
   } catch (e) {
-    out.ok = false; out.failureKind = 'exception'
-    out.text = `多多视频 ${mode} 失败：${e.message?.slice(0, 200)}`
+    // ★ 错误归一 + 冷却提示 + 账号健康分（2026-10-24 补）
+    const { normalizeError, recordToAntiban } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-error.mjs`)
+    const n = normalizeError(e, `多多视频 ${mode}`)
+    await recordToAntiban(SHOP, null, n.failureKind === 'risk_control' ? 'captcha' : null).catch(() => {})
+    // 附加冷却剩余
+    try {
+      const { checkCooldown, fmtRemain } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-risk.mjs`)
+      const cd = checkCooldown(SHOP)
+      if (cd?.remainMs > 0) {
+        n.text += `\n\n账号冷却剩余 ${fmtRemain(cd.remainMs)}，期间请勿重复调用（会延长封禁）。`
+      }
+    } catch { /* ignore */ }
+    out.ok = false
+    out.failureKind = n.failureKind
+    out.text = n.text
     emit(out); process.exit(2)
   }
 
   emit(out)
   process.exit(out.ok ? 0 : 2)
 })().catch(async (e) => {
-  emit({ ok: false, failureKind: 'exception', text: `多多视频异常：${e.message?.slice(0, 200)}` })
+  const { normalizeError } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-error.mjs`).catch(() => ({}))
+  const n = normalizeError ? normalizeError(e, '多多视频') : { failureKind: 'exception', text: `异常：${e?.message?.slice(0, 200)}` }
+  emit({ ok: false, failureKind: n.failureKind, text: n.text })
   process.exit(2)
 })

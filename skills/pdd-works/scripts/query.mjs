@@ -410,6 +410,14 @@ const wantCsv = process.argv.includes('--csv')
     })
     process.exit(2)
   }
+  // ★ 2026-10-24 补：detached Frame → 风控关页面 + 记账号健康分
+  try {
+    const { normalizeError, recordToAntiban } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-error.mjs`)
+    const n = normalizeError(e, '商品管理')
+    await recordToAntiban(SHOP, null, n.failureKind === 'risk_control' ? 'captcha' : null).catch(() => {})
+    emit({ ok: false, failureKind: n.failureKind, text: n.text })
+    process.exit(2)
+  } catch { /* ignore */ }
   emit({ ok: false, failureKind: 'api_error', text: `执行异常：${e?.message || String(e)}` })
   process.exit(1)
 })

@@ -103,10 +103,15 @@ const TRANSPORT = argOf('transport') || 'http'   // ★ 默认纯 Node
         })
 
         if (!r.ok) {
+          // ★ 错误码分级 + 账号健康分（2026-10-24 补）：t3 通道最容易踩 54001
+          const { checkCooldown, fmtRemain } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-risk.mjs`).catch(() => ({}))
+          const { normalizeWithCooldown, recordToAntiban } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-error.mjs`)
+          const n = normalizeWithCooldown(r, '商品明细取数（t3 通道）', SHOP, { checkCooldown, fmtRemain })
+          await recordToAntiban(SHOP, r.ec, r.kind).catch(() => {})
           emit({
             ok: false, mode, transport: 't3', shopKey: SHOP,
-            failureKind: r.kind, ec: r.ec,
-            text: `商品明细取数失败（t3 通道）：${r.kind}\n${r.hint || r.msg || ''}`,
+            failureKind: n.failureKind, ec: n.ec,
+            text: n.text,
           })
           process.exit(2)
         }
@@ -212,16 +217,11 @@ const TRANSPORT = argOf('transport') || 'http'   // ★ 默认纯 Node
     }
     const COOKIES = cookiesOf(acc)
 
-    /** 统一调用 + 错误归一 */
+    /** 统一调用 + 错误归一（★ 2026-10-24 改用共享 pdd-error） */
+    const { normalize } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-error.mjs`)
     const get = async (url, body, referer) => {
       const r = await callT1({ shopKey: SHOP, cookies: COOKIES, url, body, referer })
-      if (!r.ok) {
-        const kind = r.kind === 'session_expired' ? 'token_expired'
-          : r.kind === 'captcha' ? 'risk_control'
-          : r.kind === 'rate_limit' ? 'rate_limit'
-          : 'api_error'
-        return { ok: false, kind, err: r }
-      }
+      if (!r.ok) return { ok: false, ...normalize(r, '接口调用'), err: r }
       return { ok: true, data: r.json.result }
     }
 

@@ -788,16 +788,28 @@ const mode = argOf('mode') || 'overview'
   clearInterval(hb)
   await browser.close()
 })().catch(async (e) => {
-  // ★ 风控异常 → 友好提示
+  // ★ 风控异常 → 友好提示 + 记账号健康分
   const { checkCooldown, fmtRemain } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-risk.mjs`).catch(() => ({}))
   if (e?.riskCode && checkCooldown) {
     const cd = checkCooldown(SHOP)
+    try {
+      const { recordToAntiban } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-error.mjs`)
+      await recordToAntiban(SHOP, e.riskCode, null)
+    } catch { /* ignore */ }
     emit({
       ok: false, failureKind: 'rate_limit',
       text: `命中平台频控（code=${e.riskCode}${e.riskMsg ? `：${e.riskMsg}` : ''}），已记冷却 ${fmtRemain(cd.remainMs)}。\n期间请勿重复调用（会延长封禁）。\n若急需使用，可在浏览器窗口手动过滑块验证，然后重试。`,
     })
     process.exit(2)
   }
+  // ★ 2026-10-24 补：detached Frame → 风控关页面
+  try {
+    const { normalizeError, recordToAntiban } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-error.mjs`)
+    const n = normalizeError(e, '推广')
+    await recordToAntiban(SHOP, null, n.failureKind === 'risk_control' ? 'captcha' : null).catch(() => {})
+    emit({ ok: false, failureKind: n.failureKind, text: n.text })
+    process.exit(2)
+  } catch { /* ignore */ }
   emit({ ok: false, failureKind: 'api_error', text: `执行异常：${e?.message || String(e)}` })
   process.exit(1)
 })

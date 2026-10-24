@@ -1,0 +1,37 @@
+{
+  "schema": "dsagent/skill-contract@1",
+  "id": "pdd-link-matrix",
+  "entry": {
+    "form": "script",
+    "script": "scripts/matrix.mjs"
+  },
+  "input": {
+    "args": [
+      {
+        "name": "product-file",
+        "description": "基础商品 JSON 文件路径（必填）",
+        "flag": "--product-file"
+      },
+      {
+        "name": "variants",
+        "description": "变体 JSON 数组字符串（必填）：[{\"title\":\"A款\",\"images\":[\"/img/a1.jpg\"],\"desc?\":\"...\"}]",
+        "flag": "--variants"
+      },
+      {
+        "name": "confirm",
+        "description": "L2 门禁：必须带 true 才真正执行；省略只返回预览",
+        "flag": "--confirm"
+      },
+      {
+        "name": "account",
+        "description": "账号 shopKey（可选）",
+        "flag": "--account"
+      }
+    ]
+  },
+  "output": {
+    "protocol": "dsagent-result",
+    "resultPrefix": "__DSAGENT_RESULT__",
+    "filesMarker": "---[OUTPUT_FILES]"
+  }
+}
