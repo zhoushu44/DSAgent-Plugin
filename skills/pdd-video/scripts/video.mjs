@@ -34,6 +34,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms))
 const mode = argOf('mode') || 'list'
 const HOME = 'https://live.pinduoduo.com/n-creator/video/home?from=mms'
 const has = (n) => process.argv.includes(`--${n}`)
+const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 20))
 
 ;(async () => {
   const puppeteer = require('puppeteer-core')
@@ -238,6 +239,96 @@ const has = (n) => process.argv.includes(`--${n}`)
           ].join('\n')
         : `❌ prePublish/add 失败：${JSON.stringify(addR.json).slice(0, 300)}`
       if (!out.ok) process.exitCode = 2
+    }
+
+    // ── 读模式：list / anchor / qualify / topics / permission ──
+    if (mode !== 'upload' && mode !== 'delete') {
+      if (mode === 'list') {
+        const r = await api('/mms/amco/prePublish/query', { pageSize: Math.min(100, limit), pageNum: 1 })
+        // 双层 result: {success, result:{result:{list, total, hasMore, sortTotal}}}
+        const inner = r.json?.result?.result ?? r.json?.result
+        const items = Array.isArray(inner) ? inner : (inner?.list || [])
+        out.videos = items.slice(0, limit).map(v => ({
+          videoId: v.videoId ?? v.vid ?? v.id,
+          title: String(v.title ?? '').slice(0, 80),
+          desc: String(v.desc ?? '').slice(0, 120),
+          url: v.url ?? '',
+          coverUrl: v.coverUrl ?? '',
+          cutStartT: v.cutStartT ?? null,
+          scheduleTime: v.scheduleTime ?? null,
+          goodsList: (v.goodsItemList || []).map(g => ({ goodsId: g.goodsId, name: g.goodsName })),
+          status: v.status ?? null,
+        }))
+        out.count = items.length
+        out.total = inner?.total ?? inner?.sortTotal ?? null
+        out.text = out.videos.length
+          ? `多多视频待发布队列（${out.videos.length} 个${out.total != null ? ` / total ${out.total}` : ''}）：\n` +
+            out.videos.map((v, i) => `  ${i + 1}. ${v.title.slice(0, 50)}\n     ${v.url ? '     ' + v.url.slice(0, 90) : ''}${v.coverUrl ? '\n     封面 ' + v.coverUrl.slice(0, 80) : ''}${v.goodsList.length ? `\n     商品 ${v.goodsList.length} 个` : ''}`).join('\n')
+          : `多多视频待发布队列：0 个。\n店铺还没发过带货视频。\n\n页面提示：\n  · 上传入口：点击上传或直接把视频拖到上传区域，支持批量\n  · 快捷发布：用商品 id 命名视频文件，上传后平台自动匹配商品\n  · 流量奖励：上传成功 + 添加有流量奖励的商品 + 审核通过 → 得大额流量卡`
+      }
+
+      if (mode === 'anchor') {
+        // /kiwi/obs/anchor/info 是 GET（POST 会 405）
+        const r = await page.evaluate(async () => {
+          const resp = await fetch('https://live.pinduoduo.com/kiwi/obs/anchor/info', { credentials: 'include' })
+          return { status: resp.status, json: await resp.json().catch(() => null) }
+        })
+        const a = r.json?.result ?? r.json
+        const valid = a && typeof a === 'object' && (a.anchorUid || a.anchorName)
+        out.anchor = a
+        out.text = valid
+          ? `主播信息：\n  anchorUid:  ${a.anchorUid ?? '—'}\n  anchorName: ${a.anchorName ?? '—'}\n  anchorIcon: ${(a.anchorIcon ?? '—').slice(0, 100)}${Object.keys(a).length > 3 ? '\n  其它字段: ' + Object.keys(a).filter(k => !/^anchor/.test(k)).slice(0, 8).join(', ') : ''}`
+          : `主播信息：接口返回异常（${JSON.stringify(a).slice(0, 150)}）\n\n兜底：主播名可从 mms 店铺名推断。`
+      }
+
+      if (mode === 'qualify') {
+        const r = await api('/api/backbone/video/publish_qualification', {})
+        const q = r.json?.result
+        out.qualify = q
+        out.text = q
+          ? `发布资格：${q.hasQualification ? '✅ 有资格' : '❌ 无资格'}${q.reason ? `（${q.reason}）` : ''}${q.disableGoodsTab ? '\n⚠️ 商品带货 tab 被禁用' : ''}`
+          : `发布资格：未获取到`
+      }
+
+      if (mode === 'permission') {
+        // 带货/内容权限 + 流量卡奖励 + 带货配置（2026-10-24 实测）
+        const [contract, flowCard, cfg] = await Promise.all([
+          api('/api/backbone/video/signed_contract/query', {}),
+          api('/element/obs/video_flow_card/entrance', {}),
+          api('/carllive/replay/mall_promotion_config', {}),
+        ])
+        const c = contract.json?.result, f = flowCard.json?.result, g = cfg.json?.result
+        out.permission = { contract: c, flowCard: f, cfg: g }
+        const L = ['多多视频 · 权限与奖励', '', '【带货/内容权限】',
+          `  商品带货权限   ${c?.goodsFeedPermission ? '✅ 已开通' : '❌ 未开通'}`,
+          `  普通内容权限   ${c?.commonFeedPermission ? '✅ 已开通' : '❌ 未开通'}`]
+        if (c?.commonFeedPermissionUrl) L.push(`  协议: ${c.commonFeedPermissionUrl}（v${c.commonFeedPermissionVer || '?'}）`)
+        L.push('', '【流量卡奖励】',
+          `  入口显示       ${f?.showEntry ? '✅' : '❌'}`,
+          `  审核奖励       ${f?.auditVideoFlowCardReward ?? '—'} 张流量卡`,
+          `  批量投放灰度   ${f?.grayResult?.video_batch_flow_limit ? '✅' : '❌'}`,
+          '', '【带货配置】',
+          `  入口           ${g?.show_entrance ? '✅ 显示' : '❌ 隐藏'}`,
+          `  有流量标签     ${g?.has_stream_tag ? '✅' : '❌'}`,
+          `  切片视频奖励   ${g?.hit_slice_video_reward_qualified ? '✅ 符合' : '❌ 不符合'}`)
+        out.text = L.join('\n')
+      }
+
+      if (mode === 'topics') {
+        const r = await api('/api/orpheus-obs/topic/list', { page_size: 20, page: 1 })
+        const arr = r.json?.result?.topic_volist || []
+        out.topics = r.json?.result
+        if (arr.length) {
+          out.text = `话题 ${arr.length} 个：\n` + arr.slice(0, 20).map(x => `  · ${x.name || x.title || x.topicName}（${x.id || x.topicId || '—'}）`).join('\n')
+        } else {
+          // 实测店铺无话题，改输出发布必填的「内容声明」
+          const pcfg = await api('/api/backbone/video/publish/page/query', {})
+          const decl = pcfg.json?.result?.anchorDeclarationList || []
+          out.declarations = decl
+          out.text = `话题：0 个（topic_volist 空）\n\n发布必填 · 内容声明（anchorDeclarationList）：\n` +
+            (decl.length ? decl.map(d => `  · type=${d.type}  ${d.name}`).join('\n') : '  （未获取到）')
+        }
+      }
     }
 
     // ── delete ──
