@@ -41,6 +41,61 @@ metadata:
 | `maxcost` | **L2 写** | 改日限额（`venus/api/goods/promotion/update/max/cost`，`{adId, maxCost}`，分；0=不限） |
 | `roi` | **L2 写** | 改投产比/出价（`venus/api/promotion/batchUpdateBid`，`{adIdList, bid, bidType}`） |
 
+## `goods-images` / `creative`（2026-10-24 逆向）
+
+### goods-images：商品图 + 推广数据
+
+**单接口拿全部**：hook 页面的 `POST /mms-gateway/venus/api/goods/promotion/v3/list`，
+`result.adInfos[]` 每条已内嵌：
+
+```
+goodsInfo   → thumbUrl / goodsId / goodsName / catId / minOnSaleGroupPrice
+reportInfo  → impression / click / ctr / cvr / spend / gmv / roi / orderNum ...（★ 指标在这里，不在顶层）
+maxCostSuggestVO / suggestLimitInfo / bidAlertInfo → 出价建议
+```
+
+```bash
+node scripts/images.mjs --mode goods-images --limit 20
+```
+
+### creative：创意图（多图）数据
+
+**需要权限**：`hasCustomCreativePrivilege` / `hasMallCustomCreativePrivilege` 为 `true`。
+
+实测爱绿森店铺：40 个推广单元这两个字段**全为 null**（稳定成本推广，
+平台自动选素材，没有手动创意图）。
+
+```bash
+node scripts/images.mjs --mode creative
+# 无权限时明确提示 + 列出接口清单
+```
+
+### 已定位的创意图接口（权限开通后可用）
+
+```
+/mms-gateway/star/promotion/unitCreative/list                       ★ 单元创意列表
+/mms-gateway/goodsPromotionQuery/list/v3/creativeJoinReportRefined  ★ 创意加入报表
+/mms-gateway/goodsPromotionQuery/queryCustomCreativeImage           ★ 自定义创意图
+/mms-gateway/venus/api/raw/material/list                            ★ 素材列表
+/mms-gateway/venus/api/raw/material/create                          创建素材
+/mms-gateway/venus/api/raw/material/delete                          删除素材
+/mms-gateway/ryze/creative/queryAvailableCreativeTitles             可用创意标题
+/mms-gateway/venus/api/goods/promotion/query/availableCreativeTitle 可用创意标题
+/mms-gateway/star/unitCreative/create                               建创意
+/mms-gateway/star/unitCreative/creative/create                      创意内建
+/mms-gateway/star/unitCreative/creative/edit                        创意编辑
+/mms-gateway/star/unitCreative/edit                                 编辑
+/mms-gateway/starmall/unitCreative/delete                           删创意
+/mms-gateway/starmall/creative/delete                               删创意
+/mms-gateway/starmall/unit/editCreativeSmartChoice                  智能优选切换
+/mms-gateway/venus/api/goods/promotion/update/creativeV2            更新创意
+/mms-gateway/audit/appeal/queryAuditRejectedCreative                审核驳回创意
+```
+
+**这些接口主动 fetch 全部 54001**（要签名），只能被动 hook 页面自己发的请求。
+
+详见知识库「拼多多推广创意图逆向」。
+
 ## `diagnose` / `balance` 详解（2026-10-23 逆向）
 
 ### 入口机制（关键）

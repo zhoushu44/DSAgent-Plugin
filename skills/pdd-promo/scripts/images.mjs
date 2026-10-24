@@ -86,8 +86,8 @@ function raw(v) {
           const txt = self.responseText
           if (!txt || txt.length < 20) return
           JSON.parse(txt)   // 只存合法 JSON
-          window.__caps.push({ url: u.slice(0, 260), body: txt })
-          if (window.__caps.length > 60) window.__caps.splice(0, 20)
+          window.__caps.push({ url: u.slice(0, 300), body: txt })
+          if (window.__caps.length > 200) window.__caps.splice(0, 80)
         } catch { /* ignore */ }
       })
       return S.apply(this, arguments)
@@ -121,9 +121,21 @@ function raw(v) {
   await waitReady()
   await sleep(16000)
 
+  // ★ 必须重新导航一次，evaluateOnNewDocument 的 hook 才对后续请求生效
+  //   （首次 goto 时 hook 还没注入）
+  await page.goto('https://yingxiao.pinduoduo.com/goods/promotion/list', { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {})
+  await waitReady()
+  await sleep(14000)
+  const hooked = await ev(() => (window.__caps || []).filter(c => /goods\/promotion\/v3\/list/.test(c.url)).length) || 0
+  console.error(`[pdd-promo] hook 到 ${hooked} 个 v3/list`)
+
   const out = { ok: true, mode, shopKey: SHOP }
 
   try {
+    // ══════════════════ creative：创意图（多图）数据 ══════════════════
+    // 需 hasCustomCreativePrivilege / hasMallCustomCreativePrivilege 开通
+    // 接口必须被动 hook（主动 fetch 全 54001）
+    // 先取 v3/list（所有模式共用）
     // 页面内解析，只回传需要的字段（响应 324KB，整串回传会被截断）
     const res = await ev(() => {
       const caps = window.__caps || []
@@ -147,6 +159,81 @@ function raw(v) {
       out.text = `未 hook 到推广单元（${res?.found ?? 0} 个 v3/list${res?.err ? '，解析失败: ' + res.err : ''}）`
       emit(out); process.exit(2)
     }
+
+    // ══════════════════ creative：创意图（多图）数据 ══════════════════
+    if (mode === 'creative') {
+      const u0 = res.units[0] || {}
+      const res0 = {
+        custom: u0.hasCustomCreativePrivilege ?? null,
+        mallCustom: u0.hasMallCustomCreativePrivilege ?? null,
+        adId: u0.adId ?? null,
+        goodsId: u0.goodsId ?? null,
+      }
+      const enabled = !!(res0.custom || res0.mallCustom)
+      out.creative = { ...res0, enabled }
+
+      if (!enabled) {
+        // ★ 注意：null ?? 'x' 会返回 'x'，要用三元区分 null / undefined
+        const show = (v) => (v === null ? 'null（字段存在但无权限）' : v === undefined ? '未取到' : String(v))
+        out.ok = false; out.failureKind = 'no_permission'
+        out.text = [
+          '❌ 创意图（多图）权限未开通',
+          '',
+          `  hasCustomCreativePrivilege:     ${show(res0.custom)}`,
+          `  hasMallCustomCreativePrivilege: ${show(res0.mallCustom)}`,
+          '',
+          `  实测：${res.total ?? 0} 个推广单元，两个权限字段全为 null。`,
+          '',
+          '当前推广单元全是「稳定成本推广」—— 平台自动选素材，',
+          '没有手动创意图，所以拿不到「一商品多图各自的数据」。',
+          '',
+          '可用 --mode goods-images 拿商品维度数据（曝光/点击/CTR/花费/GMV/ROI）。',
+          '',
+          '接口已定位（权限开通后直接可用）：',
+          '  /mms-gateway/star/promotion/unitCreative/list',
+          '  /mms-gateway/goodsPromotionQuery/list/v3/creativeJoinReportRefined',
+          '  /mms-gateway/goodsPromotionQuery/queryCustomCreativeImage',
+          '  /mms-gateway/venus/api/raw/material/list',
+          '',
+          '详见知识库「拼多多推广创意图逆向」。',
+        ].join('\n')
+        emit(out); process.exit(2)
+      }
+
+      // 权限已开通：从 hook 缓冲里捞创意接口响应
+      const cr = await ev(() => {
+        const caps = window.__caps || []
+        const keys = ['unitCreative/list', 'creativeJoinReportRefined', 'queryCustomCreativeImage', 'raw/material/list']
+        const out2 = {}
+        for (const k of keys) {
+          const hits = caps.filter(c => c.url.includes(k))
+          if (hits.length) {
+            try { out2[k] = JSON.parse(hits[hits.length - 1].body) } catch { /* ignore */ }
+          }
+        }
+        return out2
+      })
+
+      out.creativeData = cr
+      const found = Object.keys(cr || {})
+      if (!found.length) {
+        out.ok = false; out.failureKind = 'api_error'
+        out.text = [
+          '✅ 创意图权限已开通，但没 hook 到创意接口响应。',
+          '',
+          '需在前端页面打开创意图面板（如「推广 → 创意管理」或单元详情里的「创意」tab），',
+          '让页面自己发请求，本脚本被动截获。',
+          '',
+          '或直接在页面上操作后重跑本命令（hook 缓冲只保留本次会话）。',
+        ].join('\n')
+        emit(out); process.exit(2)
+      }
+
+      out.text = `✅ 创意图数据已捕获：${found.join(', ')}\n\n${JSON.stringify(cr).slice(0, 2000)}`
+      emit(out)
+      process.exit(0)
+    }
+
 
     // 指标字段清单（★ 都在 u.reportInfo 里，不在顶层）
     const METRICS = [
@@ -204,8 +291,17 @@ function raw(v) {
     out.reportTime = res.reportTime
     out.sum = res.sum ? Object.fromEntries(Object.entries(res.sum).slice(0, 12).map(([k, v]) => [k, raw(v)])) : null
 
+    // ★ 创意图权限状态（决定能不能拿「一商品多图」数据）
+    const u0 = res.units[0] || {}
+    out.creative = {
+      custom: u0.hasCustomCreativePrivilege ?? null,
+      mallCustom: u0.hasMallCustomCreativePrivilege ?? null,
+      enabled: !!(u0.hasCustomCreativePrivilege || u0.hasMallCustomCreativePrivilege),
+    }
+
     const L = [`推广商品图片 + 推广数据（${items.length}/${res.total ?? items.length} 个）`, '']
     if (out.reportTime) L.push(`数据更新时间: ${out.reportTime}`)
+    L.push(`创意图权限: ${out.creative.enabled ? '✅ 已开通（可用 --mode creative 拿多图数据）' : '❌ 未开通（稳定成本推广，平台自动选素材，只有商品维度数据）'}`)
     if (out.sum) {
       L.push('')
       L.push('【全店合计】')
