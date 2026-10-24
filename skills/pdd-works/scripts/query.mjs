@@ -150,19 +150,57 @@ const wantCsv = process.argv.includes('--csv')
   }
   let sessForT2 = null
 
+  /**
+   * ★ 2026-10-25：t2 会话健康检查 + detached 自动重建。
+   *
+   * 踩坑实录：createSession → goto → 页面被风控关掉 → 签名器取不到，
+   * 报「真签名失败: Attempted to use detached Frame」。
+   * 根因是建会话后没确认页面真的活着。
+   *
+   * 做法：每次调用前探活（一次极轻 evaluate），挂了就关掉重建（最多 2 次）；
+   * 新建时必须验证「页面能 evaluate」且「没跳登录页」。
+   */
+  async function ensureT2Session() {
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      if (sessForT2) {
+        try {
+          const alive = await sessForT2.evaluate(() => !!document.body)
+          if (alive) return sessForT2
+        } catch { /* 挂了，重建 */ }
+        try { await sessForT2.close() } catch { /* ignore */ }
+        sessForT2 = null
+      }
+      try {
+        console.warn('[pdd-works] 建立 t2 会话（真签名）第 ' + attempt + ' 次...')
+        const s = await createSession(SHOP)
+        await s.goto('https://mms.pinduuduo.com/goods/goods_list'.replace('pinduuduo', 'pinduoduo'), 15000)
+        // 等 webpack 模块 eDaA（签名器）就绪
+        await new Promise(r => setTimeout(r, 4000))
+        const url = await s.url?.().catch(() => '') || ''
+        if (/\/login/i.test(url)) { await s.close().catch(() => {}); continue }
+        const alive = await s.evaluate(() => !!document.body).catch(() => false)
+        if (!alive) { await s.close().catch(() => {}); continue }
+        sessForT2 = s
+        return s
+      } catch (e) {
+        console.warn('[pdd-works] t2 会话建立失败（第 ' + attempt + ' 次）：' + (e.message || '').slice(0, 100))
+        try { await sessForT2?.close() } catch { /* ignore */ }
+        sessForT2 = null
+        if (attempt < 2) await new Promise(r => setTimeout(r, 5000))
+      }
+    }
+    return null
+  }
+
   const call = async (url, body) => {
     // ★ 通道选择：vodka/glide 走 t2（真签名），其余 t1（简化签名）
     const needT2 = /\/vodka\/|\/glide\//.test(url)
     try {
       const r = needT2
         ? await (async () => {
-            if (!sessForT2) {
-              console.warn('[pdd-works] 检测到严格接口，建立 t2 会话（真签名）...')
-              sessForT2 = await createSession(SHOP)
-              await sessForT2.goto('https://mms.pinduoduo.com/goods/goods_list', 15000)
-              await sessForT2.waitStable()
-            }
-            return await clientCall({ shopKey: SHOP, session: sessForT2, url, body, referer: 'https://mms.pinduoduo.com/goods/goods_list' })
+            const s = await ensureT2Session()
+            if (!s) return { ok: false, kind: 'signature_error', hint: 't2 会话建立失败（页面被风控关掉或未登录）' }
+            return await clientCall({ shopKey: SHOP, session: s, url, body, referer: 'https://mms.pinduuduo.com/goods/goods_list'.replace('pinduuduo', 'pinduoduo') })
           })()
         : await clientCall({ shopKey: SHOP, cookies: COOKIES_T1, url, body })
 

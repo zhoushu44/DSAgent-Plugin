@@ -199,9 +199,27 @@ export async function call(opts) {
     }
 
     // ── 43001：会话过期（不是风控！）──
-    if (ec === ERR.SESSION_EXPIRED || resp.status === 430) {
+    // ★ 2026-10-25：HTTP 430 与 body 43001 是两回事，必须分开。
+    //   实测：queryMallScoreOverView 返回 http=430 + {"error_code":"43001"}，
+    //   但 Cookie 明明是好的（同一 Cookie 打 queryMallFlowData 立刻成功）。
+    //   → HTTP 430 是**网关级频率惩罚**（edge 层限流），不是会话过期。
+    //   误判成 session_expired 会让上层去"重新登录"，纯属误导。
+    if (resp.status === 430) {
+      // 网关级惩罚：等更久再试（比 40002 更久）
+      if (attempt < maxRetry) {
+        const wait = 15000 * (attempt + 1)
+        await new Promise(r => setTimeout(r, wait))
+        continue
+      }
       return {
-        ok: false, kind: 'session_expired', ec: ec || 43001, http: resp.status, json, text,
+        ok: false, kind: 'rate_limit', ec: ec || 430, http: resp.status, json, text,
+        attempts: attempt + 1,
+        hint: 'HTTP 430 网关级频率惩罚（Cookie 有效，是请求太密）。等 1~2 分钟再试。',
+      }
+    }
+    if (ec === ERR.SESSION_EXPIRED) {
+      return {
+        ok: false, kind: 'session_expired', ec, http: resp.status, json, text,
         attempts: attempt + 1,
         hint: 'Cookie 已过期，请到「账号连接」重新登录拼多多商家后台',
       }

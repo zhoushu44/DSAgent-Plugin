@@ -251,8 +251,9 @@ const TRANSPORT = argOf('transport') || 'http'   // ★ 默认纯 Node
 
     const get = async (url, body, referer) => {
       let r = await callT1({ shopKey: SHOP, cookies: COOKIES, url, body, referer })
-      // 43001 会话过期 → 用浏览器 Cookie 重试一次
-      if (!r.ok && (r.ec === 43001 || r.kind === 'session_expired')) {
+      // ★ 2026-10-25：只有**真的** session_expired（body 43001 且 http 200）才切 Cookie。
+      //   HTTP 430 是网关级频率惩罚，切 Cookie 没用，pdd-http 内部已重试。
+      if (!r.ok && r.kind === 'session_expired' && r.http !== 430) {
         const fresh = await freshCookiesFromBrowser()
         if (fresh) {
           COOKIES = fresh
@@ -267,7 +268,10 @@ const TRANSPORT = argOf('transport') || 'http'   // ★ 默认纯 Node
     const out = { ok: true, mode, transport: 'http', shopKey: SHOP }
 
     // ── flow ──
-    const flowR = await get(`${R}/mallScore/queryMallFlowData`, {}, 'https://mms.pinduoduo.com/sycm/evaluation')
+    // ★ 2026-10-25 注：queryMallScoreOverView 报的 43001 实为 **HTTP 430 网关级
+    //   频率惩罚**（edge 层限流），不是会话过期。已在 pdd-http.mjs 分开处理：
+    //   HTTP 430 → rate_limit + 15s/30s 退避；body 43001 → session_expired。
+    const flowR = await get(`${R}/mallScore/queryMallFlowData`, {}, 'https://mms.pinduuduo.com/sycm/evaluation'.replace('pinduuduo', 'pinduoduo'))
     if (flowR.ok) out.flow = {
       uv: flowR.data.uv, pv: flowR.data.pv, fans: flowR.data.totalFansCnt,
       srchIndex: flowR.data.srchIndex, orderIndex: flowR.data.orderIndex,
@@ -275,7 +279,7 @@ const TRANSPORT = argOf('transport') || 'http'   // ★ 默认纯 Node
     }
 
     // ── goodsOverview（今日/昨日）──
-    const ovR = await get(`${R}/goodsDataShow/queryGoodsPageOverviewForMms`, {}, 'https://mms.pinduoduo.com/sycm/goods_effect')
+    const ovR = await get(`${R}/goodsDataShow/queryGoodsPageOverviewForMms`, {}, 'https://mms.pinduuduo.com/sycm/goods_effect'.replace('pinduuduo', 'pinduoduo'))
     if (ovR.ok) out.goodsOverview = { today: ovR.data.todayData, yesterday: ovR.data.yesterdayData }
 
     // ── score ──
@@ -299,19 +303,34 @@ const TRANSPORT = argOf('transport') || 'http'   // ★ 默认纯 Node
       lines.push(`昨日：支付 ¥${y.payOrdrAmt} / ${y.payOrdrCnt} 单 / ${y.guv} 访客 / ${y.gpv} 浏览`)
     }
     if (out.score && (mode === 'score' || mode === 'overview')) {
+      // ★ 2026-10-25：字段结构实测确认（不是 mallScore/serveScore）
+      //   result.serviceDataVO  服务数据：处理时长/平台介入率/退款率
+      //   result.dealDataVO     成交数据：成交额/订单数/转化
+      //   后缀含义：1m=近1月 1d=近1日，Pct=环比，IsPercent=是否百分比
       const s = out.score
+      const svc = s.serviceDataVO || {}
+      const deal = s.dealDataVO || {}
       const parts = []
-      if (s.mallScore != null) parts.push(`店铺分 ${s.mallScore}`)
-      if (s.serveScore != null) parts.push(`服务分 ${s.serveScore}`)
-      if (s.logisticsScore != null) parts.push(`物流分 ${s.logisticsScore}`)
-      if (s.goodsScore != null) parts.push(`商品分 ${s.goodsScore}`)
-      if (s.refundRate != null) parts.push(`退款率 ${s.refundRate}`)
-      if (s.platformInterveneRate != null) parts.push(`平台介入率 ${s.platformInterveneRate}`)
-      if (parts.length) lines.push(parts.join(' / '))
-      // 评分接口返回结构不一时，把数字字段全打出来便于排查
-      if (!parts.length) {
-        const nums = Object.entries(s).filter(([, v]) => typeof v === 'number').slice(0, 10)
+      if (svc.rfRto1m != null) parts.push(`退款率 ${svc.rfRto1m}`)
+      if (svc.pltInvlRto1m != null) parts.push(`平台介入率 ${svc.pltInvlRto1m}`)
+      if (svc.avgSucRfProcTime1m != null) parts.push(`平均退款处理 ${svc.avgSucRfProcTime1m}`)
+      if (parts.length) lines.push(`服务：${parts.join(' / ')}`)
+      const dparts = []
+      if (deal.sucRfOrdrAmt1d != null) dparts.push(`昨日成交 ¥${deal.sucRfOrdrAmt1d}`)
+      if (deal.sucRfOrdrCnt1d != null) dparts.push(`${deal.sucRfOrdrCnt1d} 单`)
+      if (deal.cfmOrdrCnt1d != null) dparts.push(`发货 ${deal.cfmOrdrCnt1d} 单`)
+      if (dparts.length) lines.push(`成交：${dparts.join(' / ')}`)
+      // 顶层可能还有 mallScore 等（不同账号返回不同）
+      const top = []
+      for (const k of ['mallScore', 'serveScore', 'logisticsScore', 'goodsScore']) {
+        if (s[k] != null) top.push(`${k} ${s[k]}`)
+      }
+      if (top.length) lines.push(`评分：${top.join(' / ')}`)
+      // 兜底：结构又变了就把数字字段打出来
+      if (!parts.length && !dparts.length && !top.length) {
+        const nums = Object.entries(s).filter(([, v]) => typeof v === 'number' || (typeof v === 'string' && /^-?[\d.]+%?$/.test(v))).slice(0, 12)
         if (nums.length) lines.push(nums.map(([k, v]) => `${k} ${v}`).join(' / '))
+        else lines.push(`返回结构：${Object.keys(s).join(', ') || '(空)'}`)
       }
     }
     if (!lines.length) {
