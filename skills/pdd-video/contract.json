@@ -9,11 +9,46 @@
     "args": [
       {
         "name": "mode",
-        "description": "list=我的视频列表(默认)；anchor=主播信息；qualify=发布资格；topics=话题列表"
+        "description": "list=我的视频列表(默认)；anchor=主播信息；qualify=发布资格；topics=话题列表；upload=上传视频(L2写)；delete=删除视频(L2写)"
       },
       {
         "name": "limit",
         "description": "list 模式返回条数上限，默认 20，上限 100"
+      },
+      {
+        "name": "file",
+        "description": "upload 模式必填：本地视频绝对路径（.mp4/.wmv/.mov/.avi/.m4v，≤500MB）",
+        "flag": "--file"
+      },
+      {
+        "name": "title",
+        "description": "upload 模式可选：视频标题（省略用文件名）",
+        "flag": "--title"
+      },
+      {
+        "name": "desc",
+        "description": "upload 模式可选：视频描述",
+        "flag": "--desc"
+      },
+      {
+        "name": "cover",
+        "description": "upload 模式可选：封面图本地路径",
+        "flag": "--cover"
+      },
+      {
+        "name": "goods_id",
+        "description": "upload 模式可选：绑定带货商品 ID",
+        "flag": "--goods-id"
+      },
+      {
+        "name": "video_id",
+        "description": "delete 模式必填：要删除的视频 ID",
+        "flag": "--video-id"
+      },
+      {
+        "name": "confirm",
+        "description": "写操作确认：upload/delete 必须带 true 才真正执行；省略只返回预览（L2 门禁）",
+        "flag": "--confirm"
       },
       {
         "name": "account",
