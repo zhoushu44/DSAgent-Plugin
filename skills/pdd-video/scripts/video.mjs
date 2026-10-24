@@ -550,6 +550,183 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
       }
     }
 
+    // ══════════════════ detail（单个视频数据）══════════════════
+    else if (mode === 'detail') {
+      // 单视频数据来源：POST /api/backbone/video/query
+      //   字段来自 chunk 3973-d417d75a06c76a22.js 的卡片组件：
+      //     {label:"点赞", key:"likes"}  {label:"评论", key:"comments"}
+      //     {label:"分享", key:"shares"}  {label:"播放量", key:"views"}
+      //     {label:"7日推荐有效vv", key:"vv"}
+      //   另有 feedId / feedType / coverUrl / mediaUrl / pictureUrls /
+      //        audioInfo / desc / title / isHotTag / publishTime / status / goodsList
+      const feedId = argOf('feed-id') || argOf('video-id') || argOf('id')
+      const end = Date.now()
+      const start = argOf('start') ? new Date(argOf('start')).getTime() : end - 90 * 86400000
+
+      // 不指定 feedId → 返回全部（让用户挑）
+      const status = argOf('status') != null ? Number(argOf('status')) : -1
+      const r = await api('/api/backbone/video/query', {
+        status, pageSize: Math.min(100, limit), page: 1, startTime: start, endTime: end,
+      })
+      const res = r.json?.result
+      const feeds = res?.feeds || []
+
+      // ★ 没有已发布视频时，兜底用待发布队列（至少有元数据）
+      let source = 'published'
+      let items = feeds
+      if (!items.length) {
+        const queue = await getQueue()
+        if (queue.length) {
+          source = 'queue'
+          items = queue.map(v => ({
+            feedId: v.vid,
+            vid: v.vid,
+            feedType: 1,
+            title: v.title || '',
+            desc: v.desc || '',
+            coverUrl: v.coverUrl || '',
+            mediaUrl: v.url || '',
+            isHotTag: false,
+            status: 0,                       // 0 = 待发布
+            publishTime: null,
+            likes: null, comments: null, shares: null, views: null, vv: null,
+            goodsList: (v.goodsItemList || []).map(g => ({ goodsId: g.goodsId, name: g.goodsName })),
+          }))
+        }
+      }
+      out.source = source
+
+      if (!items.length) {
+        out.ok = false; out.failureKind = 'api_error'
+        out.count = 0
+        out.text = [
+          '没有视频数据（已发布 + 待发布队列都是空）。',
+          '',
+          '店铺当前状态：',
+          '  · 带货/内容权限未开通 → 发布会被 2000000 拦截',
+          '',
+          '先上传一条：',
+          '  --mode upload --file x.mp4 --confirm true',
+        ].join('\n')
+        emit(out); process.exit(2)
+      }
+
+      // 指定了 feedId 就过滤
+      let target = feeds
+      if (feedId) {
+        target = items.filter(f => String(f.feedId ?? f.id ?? f.vid ?? '') === feedId)
+        if (!target.length) {
+          out.ok = false; out.failureKind = 'api_error'
+          out.text = `未找到 feedId=${feedId} 的视频。\n\n当前有 ${feeds.length} 个：\n` +
+            items.slice(0, 10).map((f, i) => `  [${i}] feedId=${f.feedId ?? f.id ?? '—'} ${String(f.desc || f.title || '').slice(0, 40)}`).join('\n')
+          emit(out); process.exit(2)
+        }
+      }
+
+      const fmt = (v) => {
+        if (v == null || v === '') return '—'
+        if (typeof v === 'number' && v >= 10000) return v.toLocaleString()
+        return String(v)
+      }
+      const fmtTime = (t) => {
+        if (!t) return '—'
+        try {
+          const d = new Date(typeof t === 'number' ? t : Number(t))
+          return isNaN(d.getTime()) ? String(t) : d.toLocaleString('zh-CN', { hour12: false })
+        } catch { return String(t) }
+      }
+
+      out.videos = target.map(f => ({
+        feedId: f.feedId ?? f.id ?? null,
+        vid: f.vid ?? null,
+        feedType: f.feedType ?? null,             // 1=视频 2=图文?
+        title: String(f.title ?? '').slice(0, 100),
+        desc: String(f.desc ?? '').slice(0, 300),
+        coverUrl: f.coverUrl ?? f.cover ?? '',
+        mediaUrl: f.mediaUrl ?? f.url ?? '',
+        pictureUrls: f.pictureUrls ?? null,
+        isHotTag: !!f.isHotTag,
+        status: f.status ?? null,
+        publishTime: f.publishTime ?? null,
+        // 互动数据（卡片字段）
+        likes: f.likes ?? null,
+        comments: f.comments ?? null,
+        shares: f.shares ?? null,
+        views: f.views ?? null,
+        vv: f.vv ?? null,
+        // 带货
+        goodsList: (f.goodsList || []).map(g => ({ goodsId: g.goodsId ?? g.id, name: g.goodsName ?? g.name })),
+        // 原始
+        raw: f,
+      }))
+
+      const L = []
+      if (feedId) {
+        const f = out.videos[0]
+        L.push('═'.repeat(78))
+        L.push('单个视频数据')
+        L.push('═'.repeat(78))
+        L.push('')
+        L.push(`  feedId       ${f.feedId ?? '—'}`)
+        L.push(`  vid          ${f.vid ?? '—'}`)
+        L.push(`  类型         ${f.feedType === 2 ? '图文' : '视频'}`)
+        L.push(`  标题/描述    ${f.desc || f.title || '(无)'}`)
+        L.push(`  封面         ${f.coverUrl ? f.coverUrl.slice(0, 80) : '—'}`)
+        L.push(`  视频地址     ${f.mediaUrl ? f.mediaUrl.slice(0, 80) : '—'}`)
+        L.push(`  热门标签     ${f.isHotTag ? '🔥 热门' : '—'}`)
+        L.push(`  状态         ${f.status ?? '—'}`)
+        L.push(`  发布时间     ${fmtTime(f.publishTime)}`)
+        L.push('')
+        L.push('  【互动数据】')
+        L.push(`    播放量            ${fmt(f.views)}`)
+        L.push(`    7日推荐有效 vv    ${fmt(f.vv)}`)
+        L.push(`    点赞              ${fmt(f.likes)}`)
+        L.push(`    评论              ${fmt(f.comments)}`)
+        L.push(`    分享              ${fmt(f.shares)}`)
+        // 派生
+        const v = Number(f.views) || 0
+        if (v > 0) {
+          const lk = Number(f.likes) || 0, cm = Number(f.comments) || 0, sh = Number(f.shares) || 0
+          L.push(`    点赞率            ${(lk / v * 100).toFixed(2)}%`)
+          L.push(`    互动率            ${((lk + cm + sh) / v * 100).toFixed(2)}%`)
+        }
+        L.push('')
+        if (f.goodsList.length) {
+          L.push('  【带货商品】')
+          f.goodsList.forEach((g, i) => L.push(`    ${i + 1}. [${g.goodsId}] ${g.name}`))
+        } else {
+          L.push('  【带货商品】无')
+        }
+        L.push('')
+        L.push('═'.repeat(78))
+      } else {
+        if (source === 'queue') {
+          L.push(`待发布队列 ${out.videos.length} 个（暂无已发布视频，以下只有元数据，无互动数据）：`)
+          L.push('')
+          for (const f of out.videos) {
+            L.push(`  [${String(f.feedId).slice(0, 50)}] ${(f.desc || f.title || '(无标题)').slice(0, 45)}`)
+            L.push(`     封面 ${f.coverUrl ? f.coverUrl.slice(0, 70) : '—'}`)
+            L.push(`     视频 ${f.mediaUrl ? f.mediaUrl.slice(0, 70) : '—'}`)
+            if (f.goodsList.length) L.push(`     商品 ${f.goodsList.length} 个`)
+          }
+          L.push('')
+          L.push('要拿互动数据（播放/点赞/评论），需先成功发布视频。')
+          L.push('当前发布被 2000000 拦截（带货/内容权限未开通）→ 用 --mode permission 查。')
+        } else {
+          L.push(`已发布视频 ${out.videos.length} 个（未指定 --feed-id，全部列出）：`)
+          L.push('')
+          for (const f of out.videos) {
+            L.push(`  [${f.feedId ?? '—'}] ${(f.desc || f.title || '(无标题)').slice(0, 50)}`)
+            L.push(`     播放=${fmt(f.views)} 点赞=${fmt(f.likes)} 评论=${fmt(f.comments)} 分享=${fmt(f.shares)} vv=${fmt(f.vv)}`)
+            L.push(`     发布=${fmtTime(f.publishTime)}${f.isHotTag ? ' 🔥热门' : ''}${f.goodsList.length ? ` 商品${f.goodsList.length}个` : ''}`)
+          }
+          L.push('')
+          L.push('用 --feed-id <id> 看单个视频完整数据。')
+        }
+      }
+      out.text = L.join('\n')
+    }
+
     else {
       out.ok = false; out.failureKind = 'api_error'
       out.text = `未知 mode：${mode}\n\n可用：\n  list        待发布队列\n  published   已发布视频\n  upload      上传视频（L2 写）\n  delete      删除视频（L2 写）\n  data        带货数据\n  permission  权限与流量卡奖励\n  anchor      主播信息\n  qualify     发布资格\n  topics      话题/内容声明`

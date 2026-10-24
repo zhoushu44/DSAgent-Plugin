@@ -17,6 +17,8 @@ metadata:
 ## 何时使用
 
 - 用户说「多多视频」「我的视频」「发了什么视频」→ `list`
+- 要看**单个视频的数据**（播放/点赞/评论/分享）→ `detail`
+- 要看店铺带货数据 → `data`
 - 要看主播/达人身份信息 → `anchor`
 - 要确认能不能发视频 → `qualify`
 - 要找话题标签 → `topics`
@@ -26,7 +28,9 @@ metadata:
 | 模式 | 类型 | 接口 | 说明 |
 |------|------|------|------|
 | `list` | 只读 | `POST /mms/amco/prePublish/query` | 待发布队列（视频 ID/URL/封面/裁剪点/商品） |
-| `published` | 只读 | `POST /api/backbone/video/query` | 已发布视频列表（播放/点赞/评论/商品） |
+| `published` | 只读 | `POST /api/backbone/video/query` | 已发布视频列表 |
+| `detail` | 只读 | `POST /api/backbone/video/query` | **单个视频数据**（播放/点赞/评论/分享/vv） |
+| `data` | 只读 | `stats/overview` + `stats/trend` + `weekly_report` + `diagnosis_and_suggest` | 带货数据总览 + 30 日趋势 + 周报 + 建议 |
 | `anchor` | 只读 | `GET /kiwi/obs/anchor/info` | 主播信息 |
 | `qualify` | 只读 | `POST /api/backbone/video/publish_qualification` | 发布资格 |
 | `permission` | 只读 | `signed_contract/query` + `video_flow_card/entrance` + `mall_promotion_config` | 带货/内容权限 + 流量卡奖励 |
@@ -235,12 +239,59 @@ feed 结构（chunk 2990-59211e1343c3e949.js 官方构造逻辑）：
 - 快捷发布：**用商品 id 命名视频文件**，上传后平台自动匹配商品
 - 激励：上传成功 + 添加有流量奖励的商品 + 审核通过 → 得大额流量卡
 
+## 单个视频数据（detail）
+
+```
+POST /api/backbone/video/query
+  {status, pageSize, page, startTime, endTime}
+```
+
+**字段来源**：chunk `3973-d417d75a06c76a22.js` 的卡片组件定义：
+
+```js
+{label:"点赞",           key:"likes"}
+{label:"评论",           key:"comments"}
+{label:"分享",           key:"shares"}
+{label:"播放量",         key:"views"}
+{label:"7日推荐有效vv",  key:"vv"}
+```
+
+完整字段：
+
+| 字段 | 说明 |
+|------|------|
+| `feedId` / `vid` | 视频 ID |
+| `feedType` | 1=视频，2=图文 |
+| `title` / `desc` | 标题 / 描述 |
+| `coverUrl` | 封面 |
+| `mediaUrl` | 视频地址 |
+| `pictureUrls` | 图文图片列表 |
+| `audioInfo` | 音频信息 |
+| `isHotTag` | 是否热门 |
+| `status` | 状态 |
+| `publishTime` | 发布时间 |
+| `likes` / `comments` / `shares` | 点赞 / 评论 / 分享 |
+| `views` | 播放量 |
+| `vv` | 7 日推荐有效 vv |
+| `goodsList` | 带货商品 |
+
+**status 取值**：`0~4` 有效（`5` 报 BAD_PARAMS），`-1` = 全部
+
+**派生指标**（脚本自动算）：
+```
+点赞率 = likes / views
+互动率 = (likes + comments + shares) / views
+```
+
+**没有已发布视频时**：自动兜底查待发布队列（`source: "queue"`），
+至少有 vid / 封面 / 视频地址 / 商品，但没有互动数据。
+
 ## 待挖（下一版）
 
-- 内容数据 / 带货数据（数据中心）
 - 视频流量卡 / 历史推广记录
 - 图文发布（`/api/backbone/video/pictures/publish`）
 - 已发布视频的删除接口
+- 单视频的「流量来源」拆分
 
 ## 用法
 
@@ -248,6 +299,20 @@ feed 结构（chunk 2990-59211e1343c3e949.js 官方构造逻辑）：
 # 读
 node scripts/video.mjs --mode list                        # 待发布队列
 node scripts/video.mjs --mode published                   # 已发布视频
+node scripts/video.mjs --mode detail                      # 单个视频数据（全部）
+node scripts/video.mjs --mode detail --feed-id 12345      # 指定视频
+node scripts/video.mjs --mode detail --status -1          # 全部状态
+node scripts/video.mjs --mode data                        # 带货数据
+node scripts/video.mjs --mode data --date-type 3          # 近30日
+node scripts/video.mjs --mode anchor                      # 主播信息
+node scripts/video.mjs --mode qualify                     # 发布资格
+node scripts/video.mjs --mode permission                  # 权限与流量卡奖励
+node scripts/video.mjs --mode topics                      # 话题/内容声明
+
+# 写（L2，两步：先预览，后 --confirm true）
+ 待发布队列
+node scripts/video.mjs --mode published                   # 已发布视频
+node scripts/video.mjs --mode detail                      # 单个视频数据（全部）
 node scripts/video.mjs --mode published --status -1       # 全部状态
 node scripts/video.mjs --mode anchor                      # 主播信息
 node scripts/video.mjs --mode qualify                     # 发布资格
