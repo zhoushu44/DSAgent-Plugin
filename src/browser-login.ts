@@ -4,7 +4,7 @@
  * 动态导入 puppeteer-core，连接本机 Chrome，导航到登录页，轮询关键 Cookie。
  */
 import { CredentialStore, keyCookies, credentialPlatform, isRiskPassCookie, type AccountEnv } from './services/credential-store.js'
-import { applyStealth } from './stealth-inject'
+import { applyStealth } from './stealth-inject.js'
 import { clearRiskCooldown, probePlatformPermission, invalidateGatewayCache, desktopUserAgent } from './gateway-proxy.js'
 import * as authOp from './services/auth-operation.js'
 import { cpSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync } from 'node:fs'
@@ -229,7 +229,18 @@ async function getAllDomainCookies(page: any, platform: string): Promise<{ name:
     pdd: ['https://mobile.yangkeduo.com', 'https://.yangkeduo.com', 'https://.pinduoduo.com'],
     // 拼多多商家后台：登录票据 PASS_ID 写在 mms.pinduoduo.com / .pinduoduo.com 域，
     // 与买家 H5（mobile.yangkeduo.com）不共享，必须显式列全。
-    pdd_mms: ['https://mms.pinduoduo.com', 'https://.pinduoduo.com'],
+    // ★ 2026-10-24 修复：推广域 yingxiao.pinduoduo.com 是**独立登录**，
+    //   账号连接器扫一次码只落到 mms 域，pdd-promo 打开商品推广仍要求单独登录。
+    //   这里把推广域也加进取数域，让扫码后 Cookie 一并入库。
+    //   注意：.pinduoduo.com 的通配符不覆盖 yingxiao 子域（Puppeteer 按精确 host 匹配），
+    //   所以必须显式列出。
+    pdd_mms: [
+      'https://mms.pinduoduo.com',
+      'https://.pinduoduo.com',
+      'https://yingxiao.pinduoduo.com',
+      'https://cashier.pinduoduo.com',
+      'https://mms-static.pddpic.com',
+    ],
     // 1688（阿里巴巴 B2B）：独立登录，Cookie 写在 .1688.com 域
     alibaba: ['https://.1688.com', 'https://work.1688.com', 'https://.taobao.com'],
     // ★ 抖店（抖音小店商家后台）：登录态来自抖音 SSO，但**发品必需的域 Cookie**
@@ -998,6 +1009,30 @@ export async function doBrowserLogin(
               console.log(`[dsagent-login] URL 已跳离登录页（${page.url()?.slice(0, 80)}），等待 Cookie 稳定…`)
               await new Promise(r => setTimeout(r, 2000))
               cookies = await getAllDomainCookies(page, platform)
+            }
+            // ★ 2026-10-24：PDD 商家后台扫码成功后，主动打通推广域（yingxiao）登录态。
+            //   yingxiao.pinduoduo.com 是**独立登录域**，扫码只写 mms 域的 Cookie，
+            //   不导航过去的话 pdd-promo 打开商品推广仍要求单独登录。
+            //   做法：用已登录的 mms 会话访问推广域首页，SSO 会自动换取票据。
+            if (platform === 'pdd_mms') {
+              try {
+                console.log('[dsagent-login] 打通推广域（yingxiao）登录态…')
+                await page.goto('https://yingxiao.pinduoduo.com/mains/promotionOverview', { waitUntil: 'domcontentloaded', timeout: 25000 })
+                await new Promise(r => setTimeout(r, 5000))
+                const yxUrl = page.url() || ''
+                if (/\/login|\/sso/i.test(yxUrl)) {
+                  // SSO 未自动通过 → 再等一会（可能还在跳转链中）
+                  await new Promise(r => setTimeout(r, 5000))
+                  await page.goto('https://yingxiao.pinduoduo.com/mains/promotionOverview', { waitUntil: 'domcontentloaded', timeout: 25000 }).catch(() => {})
+                  await new Promise(r => setTimeout(r, 5000))
+                }
+                const yxFinal = page.url() || ''
+                console.log(`[dsagent-login] 推广域状态：${/\/login|\/sso/i.test(yxFinal) ? '仍需单独登录' : '已打通'}（${yxFinal.slice(0, 70)}）`)
+                // 重新取一次全量 Cookie（含推广域）
+                cookies = await getAllDomainCookies(page, platform)
+              } catch (e) {
+                console.log(`[dsagent-login] 推广域打通失败（不影响 mms 登录）：${(e as Error).message?.slice(0, 80)}`)
+              }
             }
             loginSuccess = true
             break
