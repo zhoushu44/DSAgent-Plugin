@@ -72,16 +72,42 @@ def search_1688(gw: str, query: str, page_size: int = 30, sort: str = "booked"):
             "url": f"https://{MTOP_HOST}{API_PATH}",
             "headers": {"Referer": "https://s.1688.com/", "Origin": "https://s.1688.com"},
             "data": {"appId": APP_ID, "params": json.dumps(inner, ensure_ascii=False)}}
-    resp = gw_post(gw, body)
-    for _ in range(2):
-        ret = (resp.get("payload", {}).get("ret") or [""])[0]
+    # ★ 2026-10-25 补风控：Baxia(RGV587) / 429 / 令牌过期 三类分开处理
+    #   实测踩坑：verticalProductFlag="pcmarket" 触发 Baxia hold 60s + RGV587_ERROR
+    last_ret = ""
+    for attempt in range(4):
+        resp = gw_post(gw, body)
+        ret = ((resp.get("payload", {}).get("ret") or [""])[0]) or ""
+        last_ret = ret
+        # 令牌过期：轻症，等 1.5s 重试
         if re.search(r"TOKEN_EXOIRED|TOKEN_EMPTY", ret, re.I):
             time.sleep(1.5)
-            resp = gw_post(gw, body)
+            continue
+        # ★ Baxia 风控：重症，指数退避 15s/30s/60s，别硬刚
+        if re.search(r"RGV587|Baxia|FAIL_SYS_TRAFFIC_LIMIT|访问被拦截", ret, re.I):
+            wait = 15 * (2 ** attempt)
+            print(f"[风控] 命中 Baxia（{ret[:60]}），退避 {wait}s...", file=sys.stderr)
+            time.sleep(wait)
+            continue
+        # ★ 高频限流：退避 10s/20s/40s
+        if re.search(r"SYSTEM_FLOW_CONTROL| Too many |频繁", ret, re.I):
+            wait = 10 * (2 ** attempt)
+            print(f"[限流] 高频（{ret[:60]}），退避 {wait}s...", file=sys.stderr)
+            time.sleep(wait)
             continue
         break
+    resp_ret = last_ret
+    # 4 次全失败：明确报错，别静默返回空
+    if re.search(r"RGV587|Baxia|FAIL_SYS_TRAFFIC_LIMIT|SYSTEM_FLOW_CONTROL", resp_ret, re.I):
+        raise RuntimeError(
+            f"1688 搜索被风控拦截（{resp_ret[:80]}）。\n"
+            "处理：等 5~10 分钟再试；不要连续重试（会加重）。\n"
+            "若持续如此，打开 s.1688.com 手动过一次验证再重试。"
+        )
     items = (((resp.get("payload") or {}).get("data") or {}).get("data")
              or {}).get("OFFER", {}).get("items") or []
+    if not items and resp_ret:
+        print(f"[提示] 搜索无结果，ret={resp_ret[:80]}", file=sys.stderr)
     return items
 
 
@@ -154,9 +180,17 @@ def search_multi(gw, kw, origin_terms, page_size=30):
     """产地注入检索：大词单独搜会被外地卖家占据，必须用「产地+品类」组合词。"""
     queries = [f"{o} {kw}" for o in origin_terms[:2]] + [kw]
     merged, seen = [], set()
-    for q in queries:
+    for qi, q in enumerate(queries):
+        # ★ 2026-10-25 补节流：多词连搜最容易触发 Baxia。
+        #   每个词之间至少 5s（首个不等待）。
+        if qi > 0:
+            time.sleep(5)
         try:
             items = search_1688(gw, q, page_size)
+        except RuntimeError as e:
+            # 风控类错误：直接中断整个多词检索，别把账号往火坑里推
+            log(f"  搜索「{q}」被风控拦截，中止后续检索：{str(e).splitlines()[0]}")
+            break
         except Exception as e:
             log(f"  搜索「{q}」失败：{e}")
             continue

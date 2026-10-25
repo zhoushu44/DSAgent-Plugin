@@ -27,6 +27,33 @@ metadata:
 - **不臆造**：详情页接口不回传的字段（如结构化尺码表）一律留空，不推断不补全
 - 产地筛选靠厂家名/城市匹配，同名异地会被城市字段交叉校验掉
 
+## 风控策略（2026-10-25 补）
+
+1688 搜索走 mtop，**高频会被 Baxia 拦**（hold 60s + `RGV587_ERROR`）。
+
+### 触发过的坑
+
+```
+verticalProductFlag="pcmarket"  → 触发 Baxia hold 60s + RGV587_ERROR
+                                 （已从请求参数里去掉）
+多词连搜无间隔                 → 已加 5s 间隔
+```
+
+### 三类错误分开处理
+
+| 错误码 | 处理 |
+|---|---|
+| `TOKEN_EXOIRED` / `TOKEN_EMPTY` | 轻症，等 1.5s 重试 |
+| `RGV587` / `Baxia` / `FAIL_SYS_TRAFFIC_LIMIT` | **重症**，指数退避 15s→30s→60s |
+| `SYSTEM_FLOW_CONTROL` / 频繁 | 退避 10s→20s→40s |
+
+最多重试 4 次，仍失败则抛 `RuntimeError` 并提示用户等 5~10 分钟。
+
+### 多词检索风控即停
+
+`search_multi` 搜 3 个词（产地+品类 ×2 + 裸品类），**每个词间隔 5s**；
+一旦命中风控直接 `break`，不把账号往火坑里推。
+
 ## 执行
 
 ```bash
