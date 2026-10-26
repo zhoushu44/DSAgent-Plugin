@@ -78,6 +78,9 @@ export function ensureBrand(product) {
   if (!has) {
     attrs.unshift({ name: '品牌', value: DEFAULT_BRAND })
     console.log(`[pdd-publish-http] 品牌未指定 → 自动填「${DEFAULT_BRAND}」`)
+  } else {
+    const b = attrs.find(a => a && String(a.name || '').includes('品牌'))
+    console.log(`[pdd-publish-http] 品牌已指定 → 保留「${b.value}」`)
   }
   return { ...product, attributes: attrs }
 }
@@ -133,17 +136,19 @@ export function borrowSpecIds(product, pool) {
       notes.push(`维度「${dim.name}」无可用 spec_id（池里无对应维度）`)
       continue
     }
+    const values = (dim.values || []).filter(v => String(v.value || '').trim())
+    if (values.length > list.length) {
+      // 只在进入循环前告警一次，而不是每个越界值都刷一遍
+      notes.push(
+        `维度「${dim.name}」值数 ${values.length} 超过可借 id 数 ${list.length}，` +
+        `将循环复用 → 会被平台判「重复的规格Id」，必须先建 ${values.length - list.length} 个新规格`)
+    }
     let i = 0
-    for (const v of dim.values || []) {
+    for (const v of values) {
       const val = String(v.value || '').trim()
-      if (!val) continue
       const d = list[i % list.length]
       i++
-      // 记录映射：我们的显示名 → 借来的 spec_id
       specIds[val] = { spec_id: d.spec_id, parent_id: d.parent_id }
-      if (i > list.length) {
-        notes.push(`维度「${dim.name}」值数 ${dim.values.length} 超过可借 id 数 ${list.length}，已循环复用（会被平台判重复，需先建新规格）`)
-      }
     }
     notes.push(`维度「${dim.name}」借 ${Math.min(i, list.length)} 个 spec_id（源维度：${donorKey}）`)
   }

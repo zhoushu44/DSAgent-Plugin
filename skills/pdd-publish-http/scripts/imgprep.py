@@ -86,25 +86,58 @@ def pick_cut(var: np.ndarray, target: int, lo: int, hi: int, search: int = 90) -
 def slice_long(im: Image.Image, out_dir: Path, stem: str, max_h: int) -> list[Path]:
     """把超长图切成多张，每张高 ≤max_h，切线优先落在平坦行。
 
-    ★ 关键：切点只能落在 [起点+min_h, 起点+max_h] 之间 —— 上限必须是 max_h，
-      否则切出的段落会超过平台 1500px 上限（实测切到 1588 被驳回）。
+    三条硬约束：
+      ★ 每张高必须 ≤max_h（否则被平台驳回）
+      ★ 搜索区间限定在 (start+min_h, start+max_h]，保证不超限
+      ★ 不允许出现碎片：末段过矮就并入前一张，必要时整体减少张数均分
     """
     w, h = im.size
     var = quiet_cut_rows(im)
-    min_h = int(max_h * 0.55)
+    min_h = max_h // 2          # 单张最低高度：低于此视为碎片
+    frag_h = max_h // 4         # 低于此高度一定是碎片，必须并掉
+
     cuts = [0]
     while h - cuts[-1] > max_h:
         start = cuts[-1]
-        # 搜索区间严格限制在 (start+min_h, start+max_h]，保证切片不超限
         c = pick_cut(var, start + max_h, start + min_h, start + max_h - 1)
         if c <= start + min_h:
             c = start + max_h
         cuts.append(c)
     cuts.append(h)
 
+    # 末段过矮 → 并入前一张（若合并后超限，则前移切点重切）
+    while len(cuts) > 2 and (cuts[-1] - cuts[-2]) < frag_h:
+        tail = cuts[-1] - cuts[-2]
+        merged = tail + (cuts[-2] - cuts[-3])
+        if merged <= max_h:
+            # 直接并掉最后一段
+            cuts.pop(-2)
+        else:
+            # 前移切点，让末段变高
+            new_cut = cuts[-1] - min_h
+            if new_cut - cuts[-3] <= max_h and new_cut - cuts[-3] >= min_h:
+                cuts[-2] = new_cut
+            else:
+                cuts.pop(-2)
+        # 防死循环
+        if len(cuts) <= 2:
+            break
+
+    # 若因合并导致某段超限，退化为等分（保证一定合规）
+    if any(cuts[i + 1] - cuts[i] > max_h for i in range(len(cuts) - 1)):
+        n = -(-h // max_h)                  # ceil
+        step = h / n
+        cuts = [round(i * step) for i in range(n)] + [h]
+        # 等分后再检查碎片
+        if len(cuts) > 2 and (cuts[-1] - cuts[-2]) < frag_h and (cuts[-1] - cuts[-3]) <= max_h:
+            cuts.pop(-2)
+
     out = []
     for i in range(len(cuts) - 1):
-        seg = im.crop((0, cuts[i], w, cuts[i + 1]))
+        y0, y1 = cuts[i], cuts[i + 1]
+        if y1 - y0 < 8:            # 空片直接跳过
+            continue
+        seg = im.crop((0, y0, w, y1))
         p = out_dir / f"{stem}__s{i + 1}.jpg"
         seg.save(p, "JPEG", quality=92, optimize=True, progressive=True)
         out.append(p)
@@ -146,7 +179,9 @@ def fit_detail(p: Path, max_bytes: int, actions: list) -> list[Path]:
     # 3) 超高 → 区分「外部超长整图」与「略微超高」
     if h > DETAIL_H_MAX:
         ratio = h / w
-        if ratio > 2.0:
+        # 阈值 3.0：750x1800（比例 2.4）这种只是「一张偏高单图」，
+        # 缩到 1500 即可，不该被拆开丢掉构图；真正的详情长图比例通常在 3 以上。
+        if ratio > 3.0:
             # 外部来源的超长整图（如 1688 供应商详情长图）：
             # 直接传必被驳回，切分成多张合规单图 —— 这不是鼓励拼长图，
             # 而是把别人给的长图拆成平台要的单图形态。
