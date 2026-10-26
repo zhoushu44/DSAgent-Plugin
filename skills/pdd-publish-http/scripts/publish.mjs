@@ -224,7 +224,10 @@ try {
       if (domSpecs.length) {
         extra.domFillSpecs = async (page) => {
           console.log('[pdd-publish-http] DOM 填规格开始')
-          const result = await fillSpecsOnPage(page, domSpecs)
+          const result = await fillSpecsOnPage(page, domSpecs, {
+            price: parsed.price || '29.9',
+            stock: parsed.stock || '999',
+          })
           console.log('[pdd-publish-http] DOM 填规格结果: ' + result.message)
           return result
         }
