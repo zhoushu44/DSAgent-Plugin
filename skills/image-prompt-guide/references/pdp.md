@@ -236,8 +236,8 @@ Check the generated pack as a set, not image by image. Fix and regenerate the of
 - **Stitch**: Python PIL (or an equivalent local image library) vertical concatenation, screens in confirmed order 1..N → the long image. This is code, never `image_generate` / `image_edit` — and never generate the long image as one oversized AI call (a 750×10000px single generation collapses).
 - **Deliverables (in this order, always)**:
   1. **Numbered single screens** (`01..N`) — the pre-stitch outputs, ALWAYS delivered.
-  2. **Stitched long image** — ALWAYS delivered, in BOTH modes. Stitching is code, not an image call, so it costs nothing and is never withheld as "optional". Only PDP screens enter the column: main-image / listing outputs produced in the same run (the `platform-product-guidelines.md` layer) are NOT stitched in. Two exceptions only — the user explicitly said they do not want a long image, or N=1 (nothing to stitch).
-  3. **Slices — only on request**: cut per the platform adapter's module/slice specs, convert format and compress to the platform's size caps (e.g. iterate JPEG quality until ≤3M per slice), named in order.
+  2. **Stitched long image** — ALWAYS delivered, in BOTH modes. Stitching is code, not an image call, so it costs nothing and is never withheld as "optional". Only PDP screens enter the column: main-image / listing outputs produced in the same run (the `platform-product-guidelines.md` layer) are NOT stitched in. Three exceptions only — the user explicitly said they do not want a long image, N=1 (nothing to stitch), or **the platform does not accept long images (Pinduoduo: detail images are separate single images, 480–1200 × ≤1500 px each — a stitched long image is a rejected upload, so deliver the numbered singles only)**.
+  3. **Slices — only on request**: cut per the platform adapter's module/slice specs, convert format and compress to the platform's size caps (e.g. iterate JPEG quality until ≤3M per slice), named in order. **For Pinduoduo the slice set IS the deliverable** — export each screen at 480–1200 × ≤1500 px and upload in order.
 - **Output organization**: `screens/` (numbered singles), `long/` (stitched), `slices/` (when requested), `prompts/` (per-screen prompt log from Step 6.5). Save to the user-specified directory when given.
 
 ## Platform Adapters
@@ -266,10 +266,24 @@ Adapters shape the full-PDP plan (story arc, screen count, language) and the exp
 | Tone & avoid | benefit-led, evidence-backed, module-scoped; avoid unsupported superlatives, keyword stuffing, fabricated reviews |
 | Main-image linkage | `platform-product-guidelines.md` → Amazon row (pure-white L0 hero, no overlay) |
 
+### Pinduoduo (拼多多)
+
+| Field | Value |
+|---|---|
+| Language baseline | Simplified Chinese (zh-CN) |
+| Detail-page form | **separate single images uploaded in sequence — NOT a long image**. Each image 480–1200 px wide × ≤1500 px tall, ≤3 MB, JPG/PNG, ≤50 images |
+| Slice specs | the per-screen exports ARE the deliverable: width 750 px, height per screen ≤1500 px |
+| Story arc (typical 8–10 screens) | hero (product + strongest fact) → why-choose (3 verifiable points) → material/detail close-ups → colour range → wearing scene → craftsmanship → size chart → parameters → care/after-sales |
+| Numbers rule | size charts and parameter tables are drawn **in code** from sourced data — never let the image model render digits |
+| Tone & avoid | warm, concrete, evidence-backed; avoid unverifiable superlatives, fabricated certifications, and any claim not traceable to supplier attributes |
+| Main-image linkage | `platform-product-guidelines.md` → Pinduoduo row (1:1, Simplified Chinese in-image text) |
+
+> **Never stitch the screens into one long image for Pinduoduo.** A stitched 750×9240 page is rejected with "请重新上传第 1 张详情图，图片宽度应为 480-1200px，高度应为 1500px 以内". Export the numbered singles and upload them in order.
+
 ## Tool Invocation
 
 Per screen: `image_generate` (no reference) or `image_edit` (user uploaded product images — refined per Step 2) under the resolved mode from **Execution Mode Resolution**. When the user uploaded product images, ALL generated screens use `image_edit` against **the Step 2 identity source planned for that screen** (primary source for full-product screens, the matching angle source for angle/component screens) — `image_generate` is not an escape hatch for getting a different composition, and the primary source is not a default substitute for an angle the user actually photographed. Screens are standard scenes (product-fidelity) unless the screen is text-heavy (parameters, compliance, comparison) or a dense flat-lay/comparison layout — then dense-layout.
 
-Stitching & export: Python PIL (or an equivalent local image library) — code, never `image_generate` / `image_edit`, never a single oversized AI generation for the long image.
+Stitching & export: Python PIL (or an equivalent local image library) — code, never `image_generate` / `image_edit`, never a single oversized AI generation for the long image. **Pinduoduo is exempt from stitching** — export the per-screen singles at 480–1200 × ≤1500 px and upload them in order.
 
 > **`image_edit` anchoring pitfall (the main cause of monotonous packs)**: with a reference image plus identity-preservation blocks, an editing model's default behaviour is to keep the subject exactly as framed in the source and repaint only the surroundings. When the whole pack references one identity source, it inherits that one framing unless each prompt names its own concrete framing. The composition instruction must therefore be **prescriptive** ("three-quarter view at eye level, product in the right third at ~40% of frame height"), never **permissive** ("the camera angle may be changed freely"). This is a prompt-authoring requirement, not a tool-selection problem.

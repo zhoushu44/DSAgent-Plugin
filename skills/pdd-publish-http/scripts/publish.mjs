@@ -71,6 +71,29 @@ if (!parsed.title || !Array.isArray(parsed.images) || parsed.images.length === 0
   emit({ ok: false, failureKind: 'api_error', text: 'product 缺少必填字段：title 或 images（至少 1 张本地图片绝对路径）。' })
   process.exit(2)
 }
+
+// ─── 2.5 前置处理（图片规整 + 品牌默认 + spec_id 借位）───
+// ★ 2026-10-26 补：解决三类实测驳回/失败
+//    ① 详情图尺寸不合规 → 自动压缩；外部超长整图 → 拆成合规单图
+//    ② 品牌未指定 → 自动填「无」
+//    ③ 新规格值没有 spec_id → 借池里现成 id（显示名保持我们的）
+let pre = { main: parsed.images, detail: parsed.detailImages || [], spec: [], actions: [] }
+try {
+  const { prepImages, ensureBrand } = await import('./preflight.mjs')
+  parsed = ensureBrand(parsed)
+  pre = prepImages(parsed, { scriptDir: path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')) })
+  if (pre.actions.length) {
+    console.log(`[pdd-publish-http] 图片规整 ${pre.actions.length} 处：`)
+    for (const a of pre.actions) console.log(`  ${a.file}: ${a.action} ${a.before} → ${a.after}`)
+  }
+  // 用规整后的图片路径回填（切分后张数会变）
+  parsed.images = pre.main
+  if (parsed.detailImages) parsed.detailImages = pre.detail
+  // 规格预览图路径同步（切分不影响它们，但补白后路径不变）
+  raw = JSON.stringify(parsed)
+} catch (e) {
+  console.log(`[pdd-publish-http] 前置处理异常（继续）：${e?.message || e}`)
+}
 // 图片存在性 + 大小校验（≤3MB，与平台一致）
 for (const p of parsed.images) {
   // 绝对路径判定：Windows 盘符（C:\ 或 C:/）或 POSIX（/...）；两种斜杠都认
@@ -124,9 +147,11 @@ if (!confirm) {
     skuRows.length ? `SKU 组合：${skuRows.length} 行` : '',
     skuRows.length ? skuRows.slice(0, 8).map(r => `  - ${Object.entries(r.specs || {}).map(([k, v]) => `${k}=${v}`).join(' / ')}：拼单价 ${r.price ?? parsed.price ?? '—'} / 库存 ${r.stock ?? parsed.stock ?? '1000'}`).join('\n') : '',
     specPool ? `规格池：已加载（${Object.keys(specPool.pool || {}).reduce((n, k) => n + Object.keys(specPool.pool[k]).length, 0)} 个规格值）` : '规格池：未找到',
+    pre.actions.length ? `图片规整：${pre.actions.length} 处（${pre.actions.map(a => `${a.file}→${a.action}`).join('；')}）` : '图片规整：全部合规，无需处理',
+    (parsed.attributes || []).length ? `商品属性：${(parsed.attributes || []).map(a => `${a.name}=${a.value}`).join(' / ')}` : '',
     '',
-    '执行链路：HTTP 上传全部图片 → 拦截提交包改包（8 SKU + 预览图）→ 页面签名重放 → commit/submit 确认上架',
-    '品牌与商品资质不会被自动填写，需在弹出的浏览器窗口内人工补全。',
+    '执行链路：HTTP 上传全部图片 → 拦截提交包改包（SKU + 预览图）→ 页面签名重放 → commit/submit 确认上架',
+    '品牌已默认填「无」；商品资质仍需在弹出的浏览器窗口内人工补全。',
     '',
     '确认无误后请带 --confirm true 重新调用。注意：发布是不可撤销的真实操作（L2）。',
   ].filter(Boolean).join('\n')
@@ -154,15 +179,27 @@ try {
   const extra = { product: raw, confirm: true, mode2: true }
   if (account)
     extra.account = account
+  // ★ spec_id 借位：新花色名在店铺里没出现过 → 没有 spec_id → 全写 0 → 平台判「重复的规格Id」
+  //   做法：同一维度内，把池里现成的 spec_id 按顺序借给我们的规格值，显示名保持我们自己的。
   if (specPool?.pool) {
-    const specIds = {}
-    for (const vals of Object.values(specPool.pool)) {
-      for (const [v, rec] of Object.entries(vals)) {
-        specIds[v] = { spec_id: rec.spec_id, parent_id: rec.parent_spec_id }
+    try {
+      const { borrowSpecIds } = await import('./preflight.mjs')
+      const r = borrowSpecIds(parsed, specPool.pool)
+      for (const n of r.notes) console.log(`[pdd-publish-http] ${n}`)
+      if (Object.keys(r.specIds).length) {
+        extra.specIds = r.specIds
+        console.log(`[pdd-publish-http] 规格池借位注入 specIds：${Object.keys(r.specIds).length} 个值`)
       }
+    } catch (e) {
+      console.log(`[pdd-publish-http] spec_id 借位失败，回退直传：${e?.message || e}`)
+      const specIds = {}
+      for (const vals of Object.values(specPool.pool)) {
+        for (const [v, rec] of Object.entries(vals)) {
+          specIds[v] = { spec_id: rec.spec_id, parent_id: rec.parent_spec_id }
+        }
+      }
+      extra.specIds = specIds
     }
-    extra.specIds = specIds
-    console.log(`[pdd-publish-http] 规格池注入 specIds：${Object.keys(specIds).length} 个值`)
   }
   const result = await pddPublish2(
     new (await import(`file:///${PLUGIN_ROOT}/lib/services/credential-store.js`)).CredentialStore(

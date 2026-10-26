@@ -165,9 +165,9 @@ Shopify is a storefront, not a marketplace — there is no platform detail-page 
 
 ### 15. Pinduoduo (拼多多)
 
-1. **Upload**: width 720–750 px; long-image form recommended. No strict length limit, but keep within ~15 screens (~20000–25000 px) — longer pages depress browse completion. ≤2 MB per image, JPG and PNG; JPG compressed to ≤1 MB recommended for load speed.
+1. **Upload**: width 480–1200 px, height ≤1500 px **per image**. Detail images are uploaded as **separate single images in sequence** — do NOT stitch screens into one long image (a stitched 750×9240 page is rejected with "请重新上传第 1 张详情图"). ≤50 images, ≤3 MB each, JPG/PNG. Keep within ~15 screens total; longer pages depress browse completion.
 2. **Content rules**: product name, price, quantity, model, specs, dimensions, shipping promises, quality assurance, defects, and usage limitations must be accurate, complete, and reliable — never misleading. Images, SKU, and the actually delivered product must be consistent. No false or exaggerated promotion, infringing assets, banned content, or undeliverable service promises. Campaign prices, discounts, and gift descriptions must match the backend campaign settings.
-3. **Production notes**: use segmented slices highlighting core benefits, specs, scenes, details, usage instructions, packaging, and after-sales. Create a draft in the target category first and use the upload component's feedback to fix the final per-image size, dimensions, and count.
+3. **Production notes**: use segmented slices highlighting core benefits, specs, scenes, details, usage instructions, packaging, and after-sales — each slice exported as its own image at 480–1200 × ≤1500 px, then uploaded one by one in order. Create a draft in the target category first and use the upload component's feedback to fix the final per-image size, dimensions, and count.
 
 ---
 
