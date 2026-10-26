@@ -5,11 +5,16 @@ import COS from 'cos-nodejs-sdk-v5'
 import fs from 'node:fs'
 import path from 'node:path'
 
+// 凭据一律从环境变量读取，不硬编码（曾因硬编码被 GitHub 密钥扫描拦截推送）
 const COS_CONF = {
-  SecretId: '<COS_SECRET_ID>',
-  SecretKey: '<COS_SECRET_KEY>',
-  Bucket: 'sub2api-1318449123',
-  Region: 'ap-guangzhou',
+  SecretId: process.env.COS_SECRET_ID || '',
+  SecretKey: process.env.COS_SECRET_KEY || '',
+  Bucket: process.env.COS_BUCKET || 'sub2api-1318449123',
+  Region: process.env.COS_REGION || 'ap-guangzhou',
+}
+if (!COS_CONF.SecretId || !COS_CONF.SecretKey) {
+  console.error('缺少凭据：请设置环境变量 COS_SECRET_ID / COS_SECRET_KEY')
+  process.exit(1)
 }
 const PREFIX = 'backups/'
 const SRC = path.join('e:', '360MoveData', 'Users', 'Administrator', 'Desktop', 'DSAgent-Plugin', 'skills', 'pdd-link-matrix', 'assets', 'src')
