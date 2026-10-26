@@ -1,80 +1,31 @@
-# 依赖
-node_modules/
+# ── 凭据与调试产物：一律不入库 ──────────────────────────────
+# 真实登录态 / Cookie / 二维码 / 登录截图，任何形式都不进仓库
+# （dev/tmp-pdd-cookies.json 曾含 PASS_ID + JSESSIONID，属高危）
+dev/tmp-*.json
+dev/tmp-*.png
+dev/tmp-*.cjs
+dev/tmp-*.js
+dev/*cookies*.json
+dev/*cookie*.json
+**/tmp-*-cookies.json
+**/*cookie*.json
+!dev/portable/**
+*.pdd-cookies.json
 
-# Python 字节码缓存（随解释器版本全量变更，无提交价值）
-__pycache__/
-*.pyc
+# 多智能体协作的临时工作区与数据库
+.swarm*/
+.swarm*.db
 
-# 构建产物
-lib/
-dist/
+# 账号 / 商品 / 会话类本地数据
+dev/acc-product-*.json
+dsagent-accounts*.json
 
-# 绿色版打包的中间产物与产物
-# 仓库里只放「能重建出绿色包的脚本」（dev/portable/），产物一律不入库：
-#   · 完整包 ~1.2 GB，入库会让 clone/pull 变得不可用
-#   · 内含 DSH Desktop 程序与便携 Python，版权不属于本项目
-dist/DSAgent-Portable/
-dist/DSAgent-Portable.zip
-*.tgz
-
-# 敏感数据
-*.env
-.env*
-*.key
-*.pem
-**/dsagent-accounts*.json
-**/credentials*.json
-**/credentials*.yaml
-
-# IDE
-.trae/
-
-# 系统文件
-.DS_Store
-Thumbs.db
-
-# ── 逆向分析的临时解包目录 ──
-# 这些是 Electron 应用（app.asar）的解包产物，属第三方厂商代码：
-#   · 体积巨大，不该进仓库
-#   · 版权不属于本项目，入库有合规风险
-#   · 需要重读时用 dev/unpack-asar.mjs 重新解包即可
-.tmp-accio/
-_accio_probe/
-accio-app/
-accio_extracted/
-dev/accio-analysis/
-accio_files.txt
-analysis/
-.bitbrowser-extracted/
-.qiwork-extracted/
-
-# 分析与验证的落盘产物（每次运行都会重建）
-artifacts/
-*_payload_*.json
-.skill-stats.json
-.pitfall-memory.json
-
-# verify-commit-tree.mjs 的隔离 worktree 临时目录
-# 放在工作区内是刻意的：系统临时目录下 esbuild 写 bundle 会被拒（Access is denied）
-.commit-verify-*/
-
-# 其它会话的暂存目录
-kb-stage/
-accio-staging/
-
-# npm 本地缓存（某些环境会把 cache 落在仓库内）
-.npm-cache/
-
-# Chrome 测试 profile（登录调试残留）
-.chrome-profiles/
-
-# 临时优化文档（开发过程产物，已沉淀到代码注释和项目规则）
-anti-bot-optimization.md
-
-# ── 第三方安装包与下载产物（逆向分析原料，26GB+，不入库）──
-# 需要重做提取时按 skills/*/SOURCE.md 的「提取方法」重新准备
-电商软件/
-downloads/
-
-# 发布链路真机测试的失败截图（每次运行重建）
+# 截图与探针产物
 dev/.ui-shots/
+.tmp-accio/
+dev/accio-analysis/
+
+# 系统杂物
+Thumbs.db
+desktop.ini
+.DS_Store
