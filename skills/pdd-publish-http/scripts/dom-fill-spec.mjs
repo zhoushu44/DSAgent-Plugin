@@ -320,6 +320,28 @@ export async function fillSpecsOnPage(page, specs, defaults = {}) {
     log('  ⚠ 价格表未找到')
   }
 
+  // ★ 填参考价（商品参考价必须 > 单买价，否则 commit 报错）
+  const refPrice = parseFloat(price) + 20  // 参考价比拼单价高 20 元
+  const refOk = await page.evaluate((rp) => {
+    const inputs = [...document.querySelectorAll('input')]
+    for (const inp of inputs) {
+      const ph = inp.placeholder || ''
+      const r = inp.getBoundingClientRect()
+      if (r.y < 0 || r.width < 30) continue
+      if (/参考价|市场价|market|建议价/.test(ph) || /参考价/.test(inp.closest('div')?.innerText || '')) {
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+        setter.call(inp, String(rp))
+        inp.dispatchEvent(new Event('input', { bubbles: true }))
+        inp.dispatchEvent(new Event('change', { bubbles: true }))
+        inp.blur()
+        return true
+      }
+    }
+    return false
+  }, refPrice)
+  if (refOk) log('  参考价: ' + refPrice)
+  else log('  ⚠ 参考价输入框未找到')
+
   // 读 SKU 行数
   const skuRows = await page.evaluate(() => {
     for (const tb of document.querySelectorAll('table')) {
