@@ -179,27 +179,60 @@ try {
   const extra = { product: raw, confirm: true, mode2: true }
   if (account)
     extra.account = account
-  // ★ spec_id 借位：新花色名在店铺里没出现过 → 没有 spec_id → 全写 0 → 平台判「重复的规格Id」
-  //   做法：同一维度内，把池里现成的 spec_id 按顺序借给我们的规格值，显示名保持我们自己的。
-  if (specPool?.pool) {
-    try {
-      const { borrowSpecIds } = await import('./preflight.mjs')
-      const r = borrowSpecIds(parsed, specPool.pool)
-      for (const n of r.notes) console.log(`[pdd-publish-http] ${n}`)
-      if (Object.keys(r.specIds).length) {
-        extra.specIds = r.specIds
-        console.log(`[pdd-publish-http] 规格池借位注入 specIds：${Object.keys(r.specIds).length} 个值`)
-      }
-    } catch (e) {
-      console.log(`[pdd-publish-http] spec_id 借位失败，回退直传：${e?.message || e}`)
-      const specIds = {}
-      for (const vals of Object.values(specPool.pool)) {
-        for (const [v, rec] of Object.entries(vals)) {
-          specIds[v] = { spec_id: rec.spec_id, parent_id: rec.parent_spec_id }
-        }
-      }
-      extra.specIds = specIds
+  // ★ 规格解析 v3（2026-10-26）：自由维度 + 字典维度
+  //   自由维度（款式/型号/容量/尺寸等）→ 值原样提交，parent_spec_id 从 dim-parent.json 取
+  //   字典维度（颜色分类/参考分类）→ 必须命中 spec-pool，否则中止
+  //   ❌ 废弃：borrowSpecIds（借位会让平台按 id 还原成别人的名字）
+  try {
+    const { resolveSpecs } = await import('./spec-resolve.mjs')
+    const scriptDir = path.dirname(new URL(import.meta.url).pathname.replace(/^\//, ''))
+    const dimCache = JSON.parse(fs.readFileSync(
+      path.join(scriptDir, '..', 'assets', 'dim-parent.json'), 'utf8'))
+    const r = resolveSpecs(parsed, specPool?.pool || {})
+    for (const n of r.notes) console.log('[pdd-publish-http] ' + n)
+    if (!r.ok) {
+      const lines = r.missing.map(m => '  - ' + m.dim + ' = ' + m.value).join('\n')
+      emit({ ok: false, failureKind: 'api_error', shopKey: account || '',
+        text: 'spec resolve failed:\n' + lines + '\nuse free dim (style/model/size) or add to spec-pool first' })
+      process.exit(2)
     }
+    if (Object.keys(r.specIds).length) {
+      extra.specIds = r.specIds
+      console.log('[pdd-publish-http] dict specIds: ' + Object.keys(r.specIds).length)
+    }
+    if (r.freeValues.length) {
+      const parents = {}
+      for (const dim of (parsed.specs || [])) {
+        const name = dim?.name || ''
+        if (dimCache[name]) parents[name] = dimCache[name]
+      }
+      extra.dimParents = parents
+      console.log('[pdd-publish-http] dimParents: ' + Object.entries(parents).map(([k,v])=>k+'='+v).join(', '))
+      console.log('[pdd-publish-http] freeValues: ' + r.freeValues.join(' / '))
+
+      // ★ DOM 填规格：自由维度需要在页面上先建规格，让平台分配 spec_id
+      const { fillSpecsOnPage } = await import('./dom-fill-spec.mjs')
+      const domSpecs = (parsed.specs || [])
+        .filter(d => {
+          const FREE_DIM_RE = /款式|型号|规格|自定义|图案|样式|版型|风格|系列|口味|容量|净含量|器型|材质|适用人群|尺寸|花型|尺码|货号|组合|成份/
+          return FREE_DIM_RE.test(d.name)
+        })
+        .map(d => ({
+          name: d.name,
+          values: d.values.map(v => (v && typeof v === 'object') ? String(v.value ?? '').trim() : String(v ?? '').trim()).filter(Boolean)
+        }))
+      if (domSpecs.length) {
+        extra.domFillSpecs = async (page) => {
+          console.log('[pdd-publish-http] DOM 填规格开始')
+          const result = await fillSpecsOnPage(page, domSpecs)
+          console.log('[pdd-publish-http] DOM 填规格结果: ' + result.message)
+          return result
+        }
+        console.log('[pdd-publish-http] DOM 填规格已挂载: ' + domSpecs.length + ' 维度')
+      }
+    }
+  } catch (e) {
+    console.log('[pdd-publish-http] spec resolve error: ' + (e?.message || e))
   }
   const result = await pddPublish2(
     new (await import(`file:///${PLUGIN_ROOT}/lib/services/credential-store.js`)).CredentialStore(
