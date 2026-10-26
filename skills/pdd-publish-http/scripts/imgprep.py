@@ -7,17 +7,20 @@
   · 规格预览图：1:1，≥480×480。
   · 单张 ≤3MB。
 
-★ 重要前提：详情图就应该是**一张张独立单图按顺序传**，不要自己拼长图。
-  本脚本的「切分」不是鼓励你拼长图，而是兜住外部来源（1688/供应商详情长图）：
-  那种整张长图直接传必被驳回，切分成合规单图是最省事的处理。
+★ 详情图处理顺序（固定，不跳步）：
+    ① 宽度统一到 750
+       - 超宽（>750）→ 等比压缩到 750
+       - 过窄（<750）→ 等比放大到 750
+    ② 再看高度：高 > 1500 → **切分**（宽度始终 750，绝不缩窄）
+    ③ 高 ≤ 1500 → 直接用
 
-处理策略（对应「太长裁切、太宽太大压缩」）：
-  1. 超长（高 > 1500 且 高/宽 > 2） → 切分成多张单图，每张高 ≤1500
-     （切线落在平坦行，避免切断文字/人脸）
-  2. 偏长（高 > 1500 但比例 ≤2）     → 等比缩到高 1500
-  3. 太宽（宽 > 1200）               → 等比缩小到宽 1200
-  4. 过窄（宽 < 480）                → 放大到 480
-  5. 太大（>3MB）                    → JPEG 质量阶梯压缩，必要时再降分辨率
+★ 为什么不「压缩高度」：
+    750×1800 若按高度缩到 1500，宽度会跟着变成 625 —— 竖版图被压窄、比例失真。
+    平台要的是**宽度保持 750**，超高的唯一正确解法是切分。
+
+★ 切分用**均分**：n = ceil(高/1500)，每段高 ≈ 高/n。
+    均分后每段高度接近，既没有碎片，切点也固定不漂移，
+    上下段拼回去内容完全连贯（切片总高 == 原图高，不重叠不丢失）。
 
 用法：
   python imgprep.py --job job.json --report report.json
@@ -39,6 +42,7 @@ import numpy as np
 from PIL import Image
 
 DETAIL_W_MIN, DETAIL_W_MAX, DETAIL_H_MAX = 480, 1200, 1500
+DETAIL_TARGET_W = 750      # 详情图统一宽度（拼多多详情页标准宽度）
 MAIN_MIN = 800
 SPEC_MIN = 480
 MAX_BYTES_DEFAULT = 3 * 1024 * 1024
@@ -84,58 +88,51 @@ def pick_cut(var: np.ndarray, target: int, lo: int, hi: int, search: int = 90) -
 
 
 def slice_long(im: Image.Image, out_dir: Path, stem: str, max_h: int) -> list[Path]:
-    """把超长图切成多张，每张高 ≤max_h，切线优先落在平坦行。
+    """把超长图切成多张，每张高 ≤max_h，宽度不变。
 
-    三条硬约束：
-      ★ 每张高必须 ≤max_h（否则被平台驳回）
-      ★ 搜索区间限定在 (start+min_h, start+max_h]，保证不超限
-      ★ 不允许出现碎片：末段过矮就并入前一张，必要时整体减少张数均分
+    ★ 核心：**均分切割**
+      n = ceil(高 / max_h)，每段高 ≈ 高/n。
+      这样每段高度接近、无碎片、切点固定不漂移，上下段内容完全连贯
+      （切片总高 == 原图高，不重叠不丢失）。
+
+    ★ 不在切点附近做大范围搜索来「消除碎片」——挪动切点会让相邻两段内容错位，
+      拼回去时上下衔接不上。碎片的根源是不均分，均分之后自然没有碎片。
+
+    仅在均分点附近很小范围（±12% 段高）内微调，避开切断文字/人脸，
+    并强制每段 ≤max_h。
     """
     w, h = im.size
+    if h <= max_h:
+        seg = im
+        p = out_dir / f"{stem}__s1.jpg"
+        seg.save(p, "JPEG", quality=92, optimize=True, progressive=True)
+        return [p]
+
+    n = -(-h // max_h)                 # ceil：至少需要几张
+    base = h / n                       # 每段基准高度
     var = quiet_cut_rows(im)
-    min_h = max_h // 2          # 单张最低高度：低于此视为碎片
-    frag_h = max_h // 4         # 低于此高度一定是碎片，必须并掉
+    win = max(1, int(base * 0.12))     # 微调窗口，够避开一行文字/一张脸
 
     cuts = [0]
-    while h - cuts[-1] > max_h:
-        start = cuts[-1]
-        c = pick_cut(var, start + max_h, start + min_h, start + max_h - 1)
-        if c <= start + min_h:
-            c = start + max_h
+    for i in range(1, n):
+        target = round(i * base)
+        lo = max(cuts[-1] + 200, target - win)
+        hi = min(h - 200, target + win)
+        if hi <= lo:
+            c = target
+        else:
+            c = pick_cut(var, target, lo, hi)
+        # 硬约束：本段不超 max_h；且剩余部分还能被 (n-i) 段装下
+        c = min(c, cuts[-1] + max_h)
+        c = max(c, h - max_h * (n - i))
+        c = max(c, cuts[-1] + 200)
         cuts.append(c)
     cuts.append(h)
-
-    # 末段过矮 → 并入前一张（若合并后超限，则前移切点重切）
-    while len(cuts) > 2 and (cuts[-1] - cuts[-2]) < frag_h:
-        tail = cuts[-1] - cuts[-2]
-        merged = tail + (cuts[-2] - cuts[-3])
-        if merged <= max_h:
-            # 直接并掉最后一段
-            cuts.pop(-2)
-        else:
-            # 前移切点，让末段变高
-            new_cut = cuts[-1] - min_h
-            if new_cut - cuts[-3] <= max_h and new_cut - cuts[-3] >= min_h:
-                cuts[-2] = new_cut
-            else:
-                cuts.pop(-2)
-        # 防死循环
-        if len(cuts) <= 2:
-            break
-
-    # 若因合并导致某段超限，退化为等分（保证一定合规）
-    if any(cuts[i + 1] - cuts[i] > max_h for i in range(len(cuts) - 1)):
-        n = -(-h // max_h)                  # ceil
-        step = h / n
-        cuts = [round(i * step) for i in range(n)] + [h]
-        # 等分后再检查碎片
-        if len(cuts) > 2 and (cuts[-1] - cuts[-2]) < frag_h and (cuts[-1] - cuts[-3]) <= max_h:
-            cuts.pop(-2)
 
     out = []
     for i in range(len(cuts) - 1):
         y0, y1 = cuts[i], cuts[i + 1]
-        if y1 - y0 < 8:            # 空片直接跳过
+        if y1 - y0 < 8:
             continue
         seg = im.crop((0, y0, w, y1))
         p = out_dir / f"{stem}__s{i + 1}.jpg"
@@ -153,57 +150,55 @@ def cleanup_old_slices(out_dir: Path, stem: str) -> None:
 
 
 def fit_detail(p: Path, max_bytes: int, actions: list) -> list[Path]:
-    """详情图：太宽压缩、太高等比缩；外部来源的超长整图则切分成合规单图。"""
+    """详情图处理顺序（固定）：
+
+      ① 统一宽度到 DETAIL_TARGET_W(750)
+         - 宽 > 750 → 等比压到 750（不裁切，保持构图）
+         - 宽 < 750 → 等比放大到 750
+         - 宽 = 750 → 不动
+      ② 再看高度：高 > 1500 就**切分**（宽度始终 750，绝不缩窄）
+      ③ 高 ≤ 1500 → 直接用
+
+    ★ 不做「压缩高度」——高度超限一律切分，因为缩高会把 750 宽的竖版图
+      压得更窄（750×1800 缩到 625×1500 就变形了），而平台要的是宽度保持。
+    """
     im = load(p)
     w, h = im.size
     before = f"{w}x{h}"
 
-    # 1) 宽超限 → 等比缩到 1200
-    if w > DETAIL_W_MAX:
-        scale = DETAIL_W_MAX / w
-        im = im.resize((DETAIL_W_MAX, max(1, round(h * scale))), Image.LANCZOS)
+    # ① 宽度统一到 750
+    if w != DETAIL_TARGET_W:
+        scale = DETAIL_TARGET_W / w
+        im = im.resize((DETAIL_TARGET_W, max(1, round(h * scale))), Image.LANCZOS)
         w, h = im.size
-        actions.append({"file": p.name, "action": "压缩宽度", "before": before,
+        act = "压缩宽度至 750" if before.split("x")[0] != str(w) and scale < 1 else "放大宽度至 750"
+        actions.append({"file": p.name, "action": act, "before": before,
                         "after": f"{w}x{h}"})
         before = f"{w}x{h}"
 
-    # 2) 宽不足 480 → 放大到 480（宁可放大也不留不合规）
-    if w < DETAIL_W_MIN:
-        scale = DETAIL_W_MIN / w
-        im = im.resize((DETAIL_W_MIN, max(1, round(h * scale))), Image.LANCZOS)
-        w, h = im.size
-        actions.append({"file": p.name, "action": "放大宽度至下限", "before": before,
-                        "after": f"{w}x{h}"})
-        before = f"{w}x{h}"
-
-    # 3) 超高 → 区分「外部超长整图」与「略微超高」
+    # ② 高度超限 → 切分（宽度不变）
     if h > DETAIL_H_MAX:
-        ratio = h / w
-        # 阈值 3.0：750x1800（比例 2.4）这种只是「一张偏高单图」，
-        # 缩到 1500 即可，不该被拆开丢掉构图；真正的详情长图比例通常在 3 以上。
-        if ratio > 3.0:
-            # 外部来源的超长整图（如 1688 供应商详情长图）：
-            # 直接传必被驳回，切分成多张合规单图 —— 这不是鼓励拼长图，
-            # 而是把别人给的长图拆成平台要的单图形态。
-            cleanup_old_slices(p.parent, p.stem)
-            parts = slice_long(im, p.parent, p.stem, DETAIL_H_MAX)
-            try:
-                p.unlink()          # 原长图移出上传目录
-            except OSError:
-                pass
-            for q in parts:
-                save_jpeg(load(q), q, max_bytes)
-            actions.append({"file": p.name,
-                            "action": f"外部超长整图拆分为 {len(parts)} 张单图",
-                            "before": before,
-                            "after": ", ".join(f"{x.name}" for x in parts)})
-            return parts
-        # 略超高 → 等比缩到 1500
-        scale = DETAIL_H_MAX / h
-        im = im.resize((max(1, round(w * scale)), DETAIL_H_MAX), Image.LANCZOS)
-        actions.append({"file": p.name, "action": "压缩高度", "before": before,
-                        "after": f"{im.size[0]}x{im.size[1]}"})
+        cleanup_old_slices(p.parent, p.stem)
+        parts = slice_long(im, p.parent, p.stem, DETAIL_H_MAX)
+        try:
+            p.unlink()          # 原始整图移出上传目录
+        except OSError:
+            pass
+        for q in parts:
+            save_jpeg(load(q), q, max_bytes)
+        heights = []
+        widths = set()
+        for q in parts:
+            ww, hh = Image.open(q).size
+            heights.append(hh)
+            widths.add(ww)
+        actions.append({"file": p.name,
+                        "action": f"高度超限切分为 {len(parts)} 张（宽 {sorted(widths)[0]} 不变）",
+                        "before": before,
+                        "after": f"高 {'/'.join(map(str, heights))}"})
+        return parts
 
+    # ③ 合规
     save_jpeg(im, p, max_bytes)
     return [p]
 
