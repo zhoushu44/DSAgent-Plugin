@@ -115,16 +115,32 @@ async function scanDims(page) {
 
 /* ─────────── ② 维度名匹配（用户维度 → 页面维度） ─────────── */
 function matchDim(userDim, dims) {
-  let hit = dims.find(d => d.dim === userDim)
+  const u = String(userDim || '').trim()
+  if (!u) return null
+  // ① 精确同名
+  let hit = dims.find(d => d.dim === u)
   if (hit) return hit
-  hit = dims.find(d => d.dim.includes(userDim) || userDim.includes(d.dim))
+  // ② 包含关系（「颜色」↔「颜色分类」、「参考分类」↔「尺码」）
+  hit = dims.find(d => {
+    const p = d.dim
+    return (p.includes(u) || u.includes(p)) && Math.min(p.length, u.length) >= 2
+  })
   if (hit) return hit
-  const COLOR = /颜色|色|花色|配色/
-  const SIZE = /尺码|尺寸|身高|码|大小|参考分类/
-  const STYLE = /款式|型号|规格|样式|版型|风格|系列|口味|容量|重量/
-  const cat = n => COLOR.test(n) ? 'color' : SIZE.test(n) ? 'size' : STYLE.test(n) ? 'style' : 'other'
-  const uc = cat(userDim)
-  if (uc !== 'other') { hit = dims.find(d => cat(d.dim) === uc); if (hit) return hit }
+  // ③ 同类词映射（只认语义等价，不把「款式」匹配到「容量」）
+  const EQUIV = [
+    [/^(颜色|色彩|花色|配色|颜色分类)$/, ['颜色分类', '颜色', '色彩', '花色', '配色', '色号']],
+    [/^(尺码|尺寸|大小|码数|参考分类)$/, ['参考分类', '尺码', '尺寸', '大小', '身高']],
+    [/^(款式|样式|版型|风格|系列|外观)$/, ['款式', '样式', '版型', '风格', '系列', '花型']],
+    [/^(型号|规格|型号规格)$/, ['型号', '规格']],
+    [/^(容量|净含量|体积)$/, ['容量', '净含量', '重量']],
+    [/^(口味|味道|风味)$/, ['口味', '香型', '味道']],
+    [/^(材质|材料|面料)$/, ['材质', '材料', '面料']],
+  ]
+  for (const [re, names] of EQUIV) {
+    if (!re.test(u)) continue
+    hit = dims.find(d => names.includes(d.dim))
+    if (hit) return hit
+  }
   return null
 }
 
@@ -766,16 +782,14 @@ export async function fillSpecsOnPage(page, specs, defaults = {}) {
 
     let target = matchDim(userDim, info.dims)
 
-    // ★ 2026-10-27 策略调整：优先用预置维度
-    //   匹配不到时，按用户维度类别找预置的同类维度承载
-    //   （新建维度只有第 1 个值进 SKU 表，是平台行为，不可靠）
+    // ★ 2026-10-27：用户维度匹配不到预置时，只有「颜色类/尺码类」才改预置承载
+    //   「款式/型号/容量」等不该硬塞到预置维度（纸杯「款式」塞「容量」→ 值全乱）
+    //   匹配不上就 addDim 新建（走 AI 辅助填）
     if (!target) {
-      const COLOR = /颜色|色|花色|配色|款式|样式|版型|外观/
-      const SIZE = /尺码|尺寸|身高|码|大小|规格|型号|容量|重量|口味|味道/
-      const isColor = COLOR.test(userDim)
-      const isSize = SIZE.test(userDim)
-      if (isColor) target = info.dims.find(d => d.type === 'color-input')
-      if (!target && isSize) target = info.dims.find(d => d.type === 'checkbox')
+      const COLOR = /^(颜色|色彩|花色|配色|颜色分类)$/
+      const SIZE = /^(尺码|尺寸|大小|码数|参考分类)$/
+      if (COLOR.test(userDim)) target = info.dims.find(d => d.type === 'color-input')
+      if (!target && SIZE.test(userDim)) target = info.dims.find(d => d.type === 'checkbox')
       if (target) {
         log(`  预置没有「${userDim}」→ 改用预置「${target.dim}」承载`)
       }
@@ -837,7 +851,7 @@ export async function fillSpecsOnPage(page, specs, defaults = {}) {
         log(`  → AI 辅助填「${target.dim}」(${values.length} 值)`)
         try {
           const { aiFillDim } = await import('./ai-fill.mjs')
-          const r = await aiFillDim(page, target.idx, target.dim, values)
+          const r = await aiFillDim(page, target.dim, values, { dimIdx: target.idx })
           r.forEach(x => log(`    "${x.v}" → ${x.ok ? 'OK' : '失败'} (${x.via}${x.reason ? ': ' + x.reason : ''})`))
         } catch (e) {
           log(`  AI 填失败，回退普通填: ${e?.message || e}`)

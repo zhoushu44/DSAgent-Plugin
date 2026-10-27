@@ -103,24 +103,32 @@ async function dumpSpecDom(page) {
 /**
  * AI 判断该填哪个框。返回 boxIndex 或 null。
  */
-export async function aiPickBox(state, dimName, value) {
+export async function aiPickBox(state, dimName, value, dimIdx = -1) {
   if (!state.boxes.length) return null
 
-  const boxesText = state.boxes
-    .map((b, i) => `${i}. 维度=${b.dim} placeholder="${b.ph}" 当前值="${b.val}"`)
+  // ★ 只给目标维度的框（dimIdx 过滤），AI 只在这些里选
+  let boxes = state.boxes
+  let offset = 0
+  if (dimIdx >= 0) {
+    boxes = state.boxes.filter(b => b.dimIdx === dimIdx)
+    offset = state.boxes.indexOf(boxes[0])
+    if (offset < 0) offset = 0
+  }
+  if (!boxes.length) return null
+
+  const boxesText = boxes
+    .map((b, i) => `${i}. placeholder="${b.ph}" 当前值="${b.val}"`)
     .join('\n')
 
   const prompt = [
-    '拼多多商品规格区域，以下是所有输入框：',
+    `以下是「${dimName}」维度的规格值输入框列表：`,
     boxesText,
     '',
-    `任务：把「${value}」填进「${dimName}」维度的规格值输入框。`,
+    `任务：把「${value}」填进去。`,
     '规则：',
-    '1. 只选目标维度的输入框',
-    '2. 优先选当前值为空的',
-    '3. 不要选「规格类型」下拉框和备注框',
-    '4. 如果目标维度没有空框，选该维度最后一个输入框',
-    '5. 如果目标维度不在列表里，返回 -1',
+    '1. 优先选当前值为空的输入框',
+    '2. 不要选「规格类型」下拉框和备注框',
+    '3. 如果没有空框，选最后一个输入框',
     '',
     '只回复一个数字（输入框序号），不要任何解释。',
   ].join('\n')
@@ -130,11 +138,8 @@ export async function aiPickBox(state, dimName, value) {
     const m = txt.match(/-?\d+/)
     if (!m) return null
     const idx = parseInt(m[0], 10)
-    if (idx < 0 || idx >= state.boxes.length) return null
-    // 校验：AI 选的框必须属于目标维度
-    const box = state.boxes[idx]
-    if (box.dim !== dimName && !box.dim.includes(dimName) && !dimName.includes(box.dim)) return null
-    return idx
+    if (idx < 0 || idx >= boxes.length) return null
+    return offset + idx
   } catch (e) {
     console.log('[ai-fill] 文本模型调用失败: ' + (e?.message || e))
     return null
@@ -160,12 +165,13 @@ export async function clickAddSpecType(page) {
  */
 export async function aiFillDim(page, dimName, values, opts = {}) {
   const log = []
+  const dimIdx = opts.dimIdx ?? -1
   for (let i = 0; i < values.length; i++) {
     const val = values[i]
     const state = await dumpSpecDom(page)
     if (!state.boxes.length) { log.push({ v: val, ok: false, via: 'no-boxes' }); continue }
 
-    const idx = await aiPickBox(state, dimName, val)
+    const idx = await aiPickBox(state, dimName, val, dimIdx)
     if (idx === null) { log.push({ v: val, ok: false, via: 'ai-null' }); continue }
     const box = state.boxes[idx]
 
