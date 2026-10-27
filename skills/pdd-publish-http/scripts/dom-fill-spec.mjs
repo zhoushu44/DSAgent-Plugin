@@ -486,73 +486,164 @@ async function readSkuRowCount(page) {
   }).catch(() => 0)
 }
 
-/* ─────────── ⑥ 勾选 checkbox 值（不在列表则用自定义输入框） ─────────── */
+/* ─────────── ⑥ 勾选 checkbox 值（适配版：页面有就勾，没有就自定义添加） ─────────── */
 async function checkBoxes(page, dimIdx, values) {
   const log = []
   for (const v of values) {
-    // 先试 checkbox 列表匹配
-    const hit = await page.evaluate((sel, ci, val) => {
+    const clean = String(v).replace(/(cm|厘米|ml|mL|L|l|g|kg|G|KG)$/i, '').trim()
+
+    // ── ① 页面候选精确匹配（原值 或 去单位） ──
+    const hit = await page.evaluate((sel, ci, val, cleanV) => {
       const root = document.querySelector(sel)
       const c = [...root.querySelectorAll('.property-container-v2'), ...root.querySelectorAll('.goods-spec-row')][ci]
-      if (!c) return { found: false }
-      const clean = val.replace(/(cm|厘米|ml|mL|L|l|g|kg|G|KG)$/i, '').trim()
+      if (!c) return { found: false, cands: [] }
+      const cands = []
       for (const item of c.querySelectorAll('.package-item-container')) {
         const txt = item.querySelector('.check-wrapper')?.textContent?.trim() || ''
-        if (txt === val || txt === clean) {
+        if (!txt) continue
+        cands.push(txt)
+        if (txt === val || txt === cleanV) {
           const cb = item.querySelector('input[type="checkbox"]')
           if (cb && !cb.checked) item.querySelector('label')?.click()
-          return { found: true, txt }
+          return { found: true, txt, cands }
         }
       }
-      return { found: false }
-    }, SPEC_ROOT, dimIdx, v)
+      return { found: false, cands }
+    }, SPEC_ROOT, dimIdx, v, clean)
 
-    if (hit.found) { log.push({ v, ok: true, via: 'checkbox', txt: hit.txt }); await sleep(300); continue }
+    if (hit.found) { log.push({ v, ok: true, via: 'checkbox', txt: hit.txt }); await sleep(400); continue }
 
-    // checkbox 没有 → 填自定义输入框 → 等平台在 checkbox 列表新增 → 勾选它
-    const customOk = await page.evaluate((sel, ci, val) => {
+    // ── ② 页面候选语义匹配（含单位/区间的都算，如「110」→「110cm」「110-120」） ──
+    //   适配不同类目的尺码格式：数字/cm/码/区间/字母码
+    const semHit = await page.evaluate((sel, ci, val, cleanV) => {
       const root = document.querySelector(sel)
       const c = [...root.querySelectorAll('.property-container-v2'), ...root.querySelectorAll('.goods-spec-row')][ci]
-      if (!c) return false
-      const inp = [...c.querySelectorAll('input')].find(e => {
-        const ph = e.placeholder || ''
-        const r = e.getBoundingClientRect()
-        return ph.includes('自定义') && !ph.includes('排序') && r.y > 0 && r.width > 30
-      })
-      if (!inp) return false
-      inp.focus()
-      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
-      setter.call(inp, val)
-      inp.dispatchEvent(new Event('input', { bubbles: true }))
-      inp.dispatchEvent(new Event('change', { bubbles: true }))
-      inp.blur()
-      return true
-    }, SPEC_ROOT, dimIdx, v)
-
-    if (customOk) {
-      await sleep(1500)
-      // ★ 等平台在 checkbox 列表新增这个值，然后勾选它
-      const checkNew = await page.evaluate((sel, ci, val) => {
-        const root = document.querySelector(sel)
-        const c = [...root.querySelectorAll('.property-container-v2'), ...root.querySelectorAll('.goods-spec-row')][ci]
-        if (!c) return false
-        for (const item of c.querySelectorAll('.package-item-container')) {
-          const txt = item.querySelector('.check-wrapper')?.textContent?.trim() || ''
-          if (txt === val || txt === val.replace(/(cm|厘米|ml|mL|L|l|g|kg|G|KG)$/i, '').trim()) {
-            const cb = item.querySelector('input[type="checkbox"]')
-            if (cb && !cb.checked) item.querySelector('label')?.click()
-            return true
-          }
+      if (!c) return null
+      const num = cleanV.match(/\d+/)?.[0]
+      for (const item of c.querySelectorAll('.package-item-container')) {
+        const txt = item.querySelector('.check-wrapper')?.textContent?.trim() || ''
+        if (!txt) continue
+        // 「110」→「110cm」「110厘米」「110码」
+        if (num && txt.replace(/(cm|厘米|ml|mL|L|g|kg|码)$/i, '') === num) {
+          const cb = item.querySelector('input[type="checkbox"]')
+          if (cb && !cb.checked) item.querySelector('label')?.click()
+          return txt
         }
-        return false
-      }, SPEC_ROOT, dimIdx, v)
-      log.push({ v, ok: checkNew, via: 'custom-input' + (checkNew ? '+勾选' : '') })
-    } else {
-      log.push({ v, ok: false, via: 'none' })
-    }
-    await sleep(300)
+        // 「110」→ 区间「105-115」「110/120」
+        if (num && /[-~/]/.test(txt) && txt.includes(num)) {
+          const cb = item.querySelector('input[type="checkbox"]')
+          if (cb && !cb.checked) item.querySelector('label')?.click()
+          return txt
+        }
+        // 字母码等价（S↔小码 M↔中码 L↔大码）
+        const letterMap = { S: ['S', '小码', 's'], M: ['M', '中码', 'm'], L: ['L', '大码', 'l'], XL: ['XL', '加大', 'xl'] }
+        if (letterMap[val]?.includes(txt)) {
+          const cb = item.querySelector('input[type="checkbox"]')
+          if (cb && !cb.checked) item.querySelector('label')?.click()
+          return txt
+        }
+      }
+      return null
+    }, SPEC_ROOT, dimIdx, v, clean)
+
+    if (semHit) { log.push({ v, ok: true, via: 'semantic', txt: semHit }); await sleep(400); continue }
+
+    // ── ③ 页面没有 → 自定义输入框添加（真实键盘 + Enter + 等平台确认 + 勾选） ──
+    //   ★ 很多类目的尺码/规格支持「自定义」添加（页面有「自定义xxx」输入框）
+    //   JS setter 平台不注册 → 必须真实键盘键入 + Enter
+    const added = await addCustomCheckbox(page, dimIdx, v)
+    if (added) { log.push({ v, ok: true, via: 'custom-add', txt: added }); await sleep(400); continue }
+
+    // ── ④ 自定义框也没有 → 记录失败（调用方可知哪些值没上） ──
+    log.push({ v, ok: false, via: 'none', cands: (hit.cands || []).slice(0, 20) })
+    await sleep(200)
   }
   return log
+}
+
+/**
+ * 用自定义输入框添加一个 checkbox 值（真实键盘 + Enter + 等平台新增 + 勾选）。
+ * @returns 新增后勾上的文本 或 null
+ */
+async function addCustomCheckbox(page, dimIdx, value) {
+  const pos = await page.evaluate((sel, ci) => {
+    const root = document.querySelector(sel)
+    const c = [...root.querySelectorAll('.property-container-v2'), ...root.querySelectorAll('.goods-spec-row')][ci]
+    if (!c) return null
+    const inp = [...c.querySelectorAll('input')].find(e => {
+      const ph = e.placeholder || ''
+      const r = e.getBoundingClientRect()
+      return ph.includes('自定义') && !ph.includes('排序') && r.y > 0 && r.width > 30
+    })
+    if (!inp) return null
+    inp.scrollIntoView({ block: 'center' })
+    const r = inp.getBoundingClientRect()
+    return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }
+  }, SPEC_ROOT, dimIdx)
+  if (!pos) return null
+
+  // 真实键盘键入 + Enter（平台只认真实输入事件）
+  await sleep(300)
+  const pos2 = await page.evaluate((sel, ci) => {
+    const root = document.querySelector(sel)
+    const c = [...root.querySelectorAll('.property-container-v2'), ...root.querySelectorAll('.goods-spec-row')][ci]
+    if (!c) return null
+    const inp = [...c.querySelectorAll('input')].find(e => {
+      const ph = e.placeholder || ''
+      const r = e.getBoundingClientRect()
+      return ph.includes('自定义') && !ph.includes('排序') && r.y > 0 && r.width > 30
+    })
+    if (!inp) return null
+    const r = inp.getBoundingClientRect()
+    return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }
+  }, SPEC_ROOT, dimIdx)
+  if (!pos2) return null
+
+  await page.mouse.click(pos2.x, pos2.y)
+  await sleep(400)
+  await page.keyboard.type(value, { delay: 50 })
+  await sleep(200)
+  await page.keyboard.press('Enter')
+  await sleep(1500)
+
+  // 等平台在列表新增这个值（轮询），然后勾选它
+  const clean = String(value).replace(/(cm|厘米|ml|mL|L|l|g|kg|G|KG)$/i, '').trim()
+  for (let w = 0; w < 8; w++) {
+    await sleep(800)
+    const checked = await page.evaluate((sel, ci, val, cleanV) => {
+      const root = document.querySelector(sel)
+      const c = [...root.querySelectorAll('.property-container-v2'), ...root.querySelectorAll('.goods-spec-row')][ci]
+      if (!c) return null
+      for (const item of c.querySelectorAll('.package-item-container')) {
+        const txt = item.querySelector('.check-wrapper')?.textContent?.trim() || ''
+        if (txt === val || txt === cleanV) {
+          const cb = item.querySelector('input[type="checkbox"]')
+          if (cb && !cb.checked) item.querySelector('label')?.click()
+          return txt
+        }
+      }
+      return null
+    }, SPEC_ROOT, dimIdx, value, clean)
+    if (checked) return checked
+  }
+  // 平台没自动勾 → 再点一次空白处触发
+  await page.mouse.click(30, 300)
+  await sleep(1000)
+  const checked2 = await page.evaluate((sel, ci, val, cleanV) => {
+    const root = document.querySelector(sel)
+    const c = [...root.querySelectorAll('.property-container-v2'), ...root.querySelectorAll('.goods-spec-row')][ci]
+    if (!c) return null
+    for (const item of c.querySelectorAll('.package-item-container')) {
+      const txt = item.querySelector('.check-wrapper')?.textContent?.trim() || ''
+      if (txt === val || txt === cleanV) {
+        const cb = item.querySelector('input[type="checkbox"]')
+        if (cb && !cb.checked) item.querySelector('label')?.click()
+        return txt
+      }
+    }
+    return null
+  }, SPEC_ROOT, dimIdx, value, clean)
+  return checked2
 }
 
 /* ─────────── ⑦ 填 #sku 价格表（库存/拼单价/单买价） ─────────── */

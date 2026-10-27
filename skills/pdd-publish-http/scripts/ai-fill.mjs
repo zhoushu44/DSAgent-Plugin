@@ -161,6 +161,41 @@ export async function clickAddSpecType(page) {
 }
 
 /**
+ * AI 语义匹配 checkbox 值（「110」→ 列表里的「110cm」「110码」等）。
+ * @returns 匹配到的文本 或 null
+ */
+export async function matchCheckboxByAI(page, dimIdx, value) {
+  const cands = await page.evaluate((sel, ci) => {
+    const root = document.querySelector(sel)
+    const cs = [...root.querySelectorAll('.property-container-v2'), ...root.querySelectorAll('.goods-spec-row')]
+    const c = cs[ci]
+    if (!c) return []
+    return [...c.querySelectorAll('.package-item-container')]
+      .map(it => it.querySelector('.check-wrapper')?.textContent?.trim() || '')
+      .filter(Boolean)
+  }, SPEC_ROOT, dimIdx).catch(() => [])
+
+  if (!cands.length) return null
+
+  const prompt = [
+    `目标值：「${value}」`,
+    `候选列表：${cands.join('、')}`,
+    '',
+    '找出候选列表中与目标值语义相同的那一个（单位不同也算，如「110」=「110cm」=「110厘米」=「110码」）。',
+    '只回复候选列表中的原文，不要任何解释。如果没有相同的，回复「无」。',
+  ].join('\n')
+
+  try {
+    const txt = await askText(prompt)
+    const picked = txt.trim()
+    if (picked === '无' || !picked) return null
+    return cands.includes(picked) ? picked : null
+  } catch {
+    return null
+  }
+}
+
+/**
  * AI 辅助填一个维度的所有值。
  */
 export async function aiFillDim(page, dimName, values, opts = {}) {
