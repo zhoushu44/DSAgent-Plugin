@@ -146,7 +146,7 @@ async function addDim(page, dimName) {
   if (pos) { await page.mouse.click(pos.x, pos.y); await sleep(2500) }
 
   // 在下拉里找维度名（下拉选项渲染在 body 上）
-  const ok = await page.evaluate((name) => {
+  let ok = await page.evaluate((name) => {
     let cands = [...document.querySelectorAll('li, div, span, a')]
       .filter(e => (e.textContent || '').trim() === name && e.getBoundingClientRect().y > 300 && e.getBoundingClientRect().width > 10)
     if (!cands.length) {
@@ -161,7 +161,35 @@ async function addDim(page, dimName) {
     cands[cands.length - 1].click()
     return true
   }, dimName)
-  await sleep(2500)
+  await sleep(2000)
+
+  // ★ 校验：规格类型输入框是否已选中维度名
+  const val = await page.evaluate((sel) => {
+    const root = document.querySelector(sel)
+    const inputs = [...root.querySelectorAll('input')]
+      .filter(e => (e.placeholder || '').startsWith('规格类型') && e.getBoundingClientRect().y > 0)
+    return inputs[inputs.length - 1]?.value?.trim() || ''
+  }, SPEC_ROOT)
+  if (!val) {
+    // 下拉没选中 → 再点一次输入框重试
+    if (pos) { await page.mouse.click(pos.x, pos.y); await sleep(2000) }
+    ok = await page.evaluate((name) => {
+      let cands = [...document.querySelectorAll('li, div, span, a')]
+        .filter(e => (e.textContent || '').trim() === name && e.getBoundingClientRect().y > 300 && e.getBoundingClientRect().width > 10)
+      if (!cands.length) {
+        cands = [...document.querySelectorAll('li, div, span, a')]
+          .filter(e => {
+            const t = (e.textContent || '').trim()
+            const r = e.getBoundingClientRect()
+            return r.y > 300 && r.width > 10 && t.length <= 12 && (t.includes(name) || name.includes(t))
+          })
+      }
+      if (!cands.length) return false
+      cands[cands.length - 1].click()
+      return true
+    }, dimName)
+    await sleep(2000)
+  }
   return ok
 }
 
@@ -289,9 +317,9 @@ async function fillCustomInputs(page, dimIdx, phKeyword, values) {
     }
     if (!pos?.x) { log.push({ v: values[i], ok: false }); continue }
 
-    await page.mouse.click(pos.x, pos.y); await sleep(200)
-    await page.keyboard.down('Control'); await page.keyboard.press('KeyA'); await page.keyboard.up('Control')
-    await page.keyboard.press('Backspace'); await sleep(50)
+    await page.mouse.click(pos.x, pos.y); await sleep(400)
+    // ★ 直接键入（输入框默认空，不需要 Ctrl+A/Backspace；
+    //   且 Ctrl+A 在某些环境下不生效，反而不聚焦）
     await page.keyboard.type(values[i], { delay: 40 }); await sleep(150)
     await page.keyboard.press('Enter'); await sleep(600)
     await page.keyboard.press('Tab'); await sleep(250)
@@ -544,8 +572,10 @@ export async function fillSpecsOnPage(page, specs, defaults = {}) {
       const r = await fillColorInputs(page, target.idx, values)
       r.forEach(x => log(`    "${x.v}" → ${x.ok ? 'OK' : '失败'}`))
     } else {
-      // custom-input / spec-type：用维度名做 placeholder 关键词
-      const r = await fillCustomInputs(page, target.idx, target.dim, values)
+      // custom-input / spec-type：spec-type 用 idx 定位容器内第一个可编辑输入框
+      // （新建维度的 placeholder 是「请输入规格名称」之类，不含维度名）
+      const kw = target.type === 'spec-type' ? '' : target.dim
+      const r = await fillCustomInputs(page, target.idx, kw, values)
       r.forEach(x => log(`    "${x.v}" → ${x.ok ? 'OK' : '失败'}`))
     }
     await sleep(1500)
