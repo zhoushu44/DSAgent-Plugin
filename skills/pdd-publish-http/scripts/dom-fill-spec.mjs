@@ -647,12 +647,12 @@ async function disableSizeChart(page) {
   return true
 }
 
-/* ─────────── ⑩ 填 SKU 预览图（每行的 file input） ─────────── */
+/* ─────────── ⑩ 填 SKU 预览图（逐行传 + 行级验证 + 重试） ─────────── */
 async function fillSkuThumbs(page, thumbMap) {
   if (!thumbMap || !Object.keys(thumbMap).length) return { filled: 0, total: 0 }
 
-  // 读所有行（规格值文本 + 预览图列状态）
-  const rows = await page.evaluate(() => {
+  // 读所有行（规格值文本 + 预览图列是否已传）
+  const readRows = () => page.evaluate(() => {
     const out = []
     for (const tb of document.querySelectorAll('#sku table')) {
       const heads = [...tb.querySelectorAll('thead th')].map(th => th.textContent.trim())
@@ -661,58 +661,38 @@ async function fillSkuThumbs(page, thumbMap) {
       const trs = [...tb.querySelectorAll('tbody tr')]
       trs.forEach((tr, ri) => {
         const tds = [...tr.querySelectorAll('td')]
-        const specTd = tds[0]
-        const specText = specTd?.textContent?.trim() || ''
+        const specText = tds[0]?.textContent?.trim() || ''
         const thumbTd = thumbIdx >= 0 ? tds[thumbIdx] : null
         const thumbText = thumbTd?.textContent?.trim() || ''
-        // ★ 上传成功后「本地上传」文字消失（无 img 元素），以此判断是否已传
         const done = thumbIdx >= 0 && !/本地上传/.test(thumbText)
-        out.push({ row: ri, specText: specText.slice(0, 40), done, hasFile: !!thumbTd?.querySelector('input[type="file"]') })
+        out.push({ row: ri, specText: specText.slice(0, 40), done })
       })
       break
     }
     return out
   })
-  if (!rows.length) return { filled: 0, total: 0 }
+
+  const initial = await readRows()
+  if (!initial.length) return { filled: 0, total: 0 }
 
   let filled = 0
-  // ★ 两轮：先传一轮，等 3 秒复查，没传掉的补传（上传异步，首轮可能漏）
-  for (let round = 0; round < 2; round++) {
-    const cur = await page.evaluate(() => {
-      const out = []
-      for (const tb of document.querySelectorAll('#sku table')) {
-        const heads = [...tb.querySelectorAll('thead th')].map(th => th.textContent.trim())
-        if (!heads.some(h => /拼单价/.test(h))) continue
-        const thumbIdx = heads.findIndex(h => /预览图/.test(h))
-        const trs = [...tb.querySelectorAll('tbody tr')]
-        trs.forEach((tr, ri) => {
-          const tds = [...tr.querySelectorAll('td')]
-          const specText = tds[0]?.textContent?.trim() || ''
-          const thumbTd = thumbIdx >= 0 ? tds[thumbIdx] : null
-          const thumbText = thumbTd?.textContent?.trim() || ''
-          const done = thumbIdx >= 0 && !/本地上传/.test(thumbText)
-          out.push({ row: ri, specText: specText.slice(0, 40), done })
-        })
-        break
-      }
-      return out
-    })
-    const pending = cur.filter(r => !r.done)
-    if (!pending.length) break
-    if (round === 1) log(`  ${pending.length} 行仍未传掉`)
+  for (const r of initial) {
+    if (r.done) { filled++; continue }
+    const key = Object.keys(thumbMap).find(k => r.specText.includes(k))
+    if (!key) continue
+    const imgPath = thumbMap[key]
+    if (!imgPath || !fs.existsSync(imgPath)) continue
 
-    for (const r of pending) {
-      const key = Object.keys(thumbMap).find(k => r.specText.includes(k))
-      if (!key) continue
-      const imgPath = thumbMap[key]
-      if (!imgPath || !fs.existsSync(imgPath)) continue
-
+    // 该行最多重试 2 次（上传异步，首次可能没生效）
+    for (let attempt = 0; attempt < 2; attempt++) {
+      // 滚动到该行
       await page.evaluate(ri => {
         const trs = [...document.querySelectorAll('#sku table tbody tr')]
         trs[ri]?.scrollIntoView({ block: 'center' })
       }, r.row)
-      await sleep(300)
+      await sleep(400)
 
+      // 取该行预览图 td 的 file input（每次重新取，上传后 DOM 重建）
       const fileHandle = await page.evaluateHandle(ri => {
         const trs = [...document.querySelectorAll('#sku table tbody tr')]
         const tr = trs[ri]
@@ -725,15 +705,27 @@ async function fillSkuThumbs(page, thumbMap) {
       }, r.row).catch(() => null)
 
       const el = fileHandle?.asElement?.()
-      if (el) {
-        await el.uploadFile(imgPath).catch(() => {})
-        filled++
-        await sleep(3500)  // 等上传完成
+      if (!el) break
+
+      await el.uploadFile(imgPath).catch(() => {})
+      // 等上传完成（文字消失）
+      let ok = false
+      for (let w = 0; w < 10; w++) {
+        await sleep(1000)
+        const rows = await readRows()
+        const cur = rows.find(x => x.row === r.row)
+        if (cur?.done) { ok = true; break }
       }
+      if (ok) { filled++; break }
+      // 没生效 → 重试（DOM 已重建，重新取 file input）
     }
-    await sleep(2000)
   }
-  return { filled, total: rows.length }
+
+  // 最终验证
+  await sleep(2000)
+  const final = await readRows()
+  const doneCount = final.filter(r => r.done).length
+  return { filled: doneCount, total: initial.length }
 }
 
 /* ─────────── 主入口 ─────────── */

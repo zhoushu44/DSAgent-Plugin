@@ -215,8 +215,9 @@ try {
         const result = await fillSpecsOnPage(page, domSpecs, {
           price: parsed.price || '29.9',
           stock: parsed.stock || '999',
-          fillPriceTable: false,
-          fillRefPrice: false,
+          // ★ 价格/参考价也 DOM 填（平台提交前校验页面价格非空，只靠改包会被拦）
+          fillPriceTable: true,
+          fillRefPrice: true,
           thumbMap,
         })
         console.log('[pdd-publish-http] DOM 填规格结果: ' + result.message)
@@ -228,6 +229,13 @@ try {
     }
   } catch (e) {
     console.log('[pdd-publish-http] 规格解析异常（继续）：' + (e?.message || e))
+  }
+  // ★ 2026-10-27：DOM 已填全部（规格/价格/预览图/参考价）→ 关闭 mode2 改包
+  //   改包会和页面状态冲突（参考价被覆盖回商品 price），导致提交被拦/超时。
+  //   页面自己提交最稳（平台校验的就是页面状态）。
+  if (extra.domFillSpecs) {
+    extra.mode2 = false
+    console.log('[pdd-publish-http] DOM 全填 → 关闭 mode2 改包，走页面自然提交')
   }
   const result = await pddPublish2(
     new (await import(`file:///${PLUGIN_ROOT}/lib/services/credential-store.js`)).CredentialStore(
