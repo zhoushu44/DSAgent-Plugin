@@ -276,22 +276,12 @@ async function fillColorInputs(page, dimIdx, values) {
 async function fillCustomInputs(page, dimIdx, phKeyword, values) {
   const log = []
   for (let i = 0; i < values.length; i++) {
-    // ★ 2026-10-27 实测：新建维度第 2+ 个值必须先点「添加定制规格」补框
-    //   系统自动建的空框填了不生效（SKU 表不生成对应行）
-    //   第一个值填现有第一个空框即可
-    if (i > 0) {
-      await page.evaluate((sel, ci) => {
-        const root = document.querySelector(sel)
-        const cs = [...root.querySelectorAll('.property-container-v2'), ...root.querySelectorAll('.goods-spec-row')]
-        const c = cs[ci]
-        const links = [...c.querySelectorAll('a, span, button')]
-          .filter(e => (e.textContent || '').trim() === '添加定制规格' && e.getBoundingClientRect().width > 5)
-        links[0]?.click()
-      }, SPEC_ROOT, dimIdx)
-      await sleep(1500)
-    }
+    // ★ 2026-10-27 用户确认：原款输入，不新增框
+    //   系统建维度时自带 2~4 个空框，依次填「第一个空框」即可
+    //   每个填完点页面空白处（平台确认值 → 输入框清空 → 下一个）
 
-    let pos = await page.evaluate((sel, ci, ph, idx) => {
+    // 定位「第一个空框」
+    let pos = await page.evaluate((sel, ci, ph) => {
       const root = document.querySelector(sel)
       const cs = [...root.querySelectorAll('.property-container-v2'), ...root.querySelectorAll('.goods-spec-row')]
       const c = cs[ci]
@@ -301,12 +291,10 @@ async function fillCustomInputs(page, dimIdx, phKeyword, values) {
         const r = e.getBoundingClientRect()
         return p.includes('自定义') && !p.includes('排序') && r.y > 0 && r.width > 30
       })
-      // ★ 兜底：容器内除「规格类型」外的第一个可编辑文本输入框
-      //   ★ 收紧：必须排除参考价(大于)/折扣(~)/品牌/产地等非规格输入框
-      //     且只在容器内没有「自定义」输入框时才用
-      //   ★ 排除「规格类型」输入框（新建维度的维度名框，填了就覆盖维度名）
+      // ★ 兜底：容器内除「规格类型」外的可编辑文本输入框
+      //   排除参考价(大于)/折扣(~)/品牌/产地/规格类型
       if (!els.length) {
-        const fallback = [...c.querySelectorAll('input')].filter(e => {
+        els = [...c.querySelectorAll('input')].filter(e => {
           const p = e.placeholder || ''
           const r = e.getBoundingClientRect()
           return r.y > 0 && r.width > 30
@@ -314,17 +302,17 @@ async function fillCustomInputs(page, dimIdx, phKeyword, values) {
             && !/请输入品牌|请选择|大于|~|备注/.test(p)
             && (e.type === 'text' || !e.type)
         })
-        if (fallback.length) els = fallback
       }
-      if (els.length <= idx) return { needAdd: true }
-      els[idx].scrollIntoView({ block: 'center' })
-      // ★ 返回标记，由外部等滚动完成后再取坐标（scrollIntoView 是异步的）
+      const empty = els.find(e => !e.value)
+      const el = empty || els[els.length - 1]
+      if (!el) return null
+      el.scrollIntoView({ block: 'center' })
       return { scrollOnly: true }
-    }, SPEC_ROOT, dimIdx, phKeyword, i)
+    }, SPEC_ROOT, dimIdx, phKeyword)
 
     if (pos?.scrollOnly) {
       await sleep(400)
-      pos = await page.evaluate((sel, ci, ph, idx) => {
+      pos = await page.evaluate((sel, ci, ph) => {
         const root = document.querySelector(sel)
         const cs = [...root.querySelectorAll('.property-container-v2'), ...root.querySelectorAll('.goods-spec-row')]
         const c = cs[ci]
@@ -342,10 +330,12 @@ async function fillCustomInputs(page, dimIdx, phKeyword, values) {
               && !/请输入品牌|请选择|大于|~|备注/.test(p) && (e.type === 'text' || !e.type)
           })
         }
-        if (els.length <= idx) return null
-        const r = els[idx].getBoundingClientRect()
+        const empty = els.find(e => !e.value)
+        const el = empty || els[els.length - 1]
+        if (!el) return null
+        const r = el.getBoundingClientRect()
         return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }
-      }, SPEC_ROOT, dimIdx, phKeyword, i)
+      }, SPEC_ROOT, dimIdx, phKeyword)
     }
 
     if (pos?.needAdd) {
@@ -358,7 +348,7 @@ async function fillCustomInputs(page, dimIdx, phKeyword, values) {
         links[0]?.click()
       }, SPEC_ROOT, dimIdx)
       await sleep(1500)
-      pos = await page.evaluate((sel, ci, ph, idx) => {
+      pos = await page.evaluate((sel, ci, ph) => {
         const root = document.querySelector(sel)
         const cs = [...root.querySelectorAll('.property-container-v2'), ...root.querySelectorAll('.goods-spec-row')]
         const c = cs[ci]
@@ -372,14 +362,41 @@ async function fillCustomInputs(page, dimIdx, phKeyword, values) {
           els = [...c.querySelectorAll('input')].filter(e => {
             const p = e.placeholder || ''
             const r = e.getBoundingClientRect()
-            return r.y > 0 && r.width > 30 && !p.startsWith('规格类型') && (e.type === 'text' || !e.type)
+            return r.y > 0 && r.width > 30 && !p.startsWith('规格类型') && !/请输入品牌|请选择|大于|~|备注/.test(p) && (e.type === 'text' || !e.type)
           })
         }
-        if (els.length <= idx) return null
-        els[idx].scrollIntoView({ block: 'center' })
-        const r = els[idx].getBoundingClientRect()
-        return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }
-      }, SPEC_ROOT, dimIdx, phKeyword, i)
+        const empty = els.find(e => !e.value)
+        const el = empty || els[els.length - 1]
+        if (!el) return null
+        el.scrollIntoView({ block: 'center' })
+        return { scrollOnly: true }
+      }, SPEC_ROOT, dimIdx, phKeyword)
+      if (pos?.scrollOnly) {
+        await sleep(400)
+        pos = await page.evaluate((sel, ci, ph) => {
+          const root = document.querySelector(sel)
+          const cs = [...root.querySelectorAll('.property-container-v2'), ...root.querySelectorAll('.goods-spec-row')]
+          const c = cs[ci]
+          if (!c) return null
+          let els = [...c.querySelectorAll('input')].filter(e => {
+            const p = e.placeholder || ''
+            const r = e.getBoundingClientRect()
+            return p.includes('自定义') && !p.includes('排序') && r.y > 0 && r.width > 30
+          })
+          if (!els.length) {
+            els = [...c.querySelectorAll('input')].filter(e => {
+              const p = e.placeholder || ''
+              const r = e.getBoundingClientRect()
+              return r.y > 0 && r.width > 30 && !p.startsWith('规格类型') && !/请输入品牌|请选择|大于|~|备注/.test(p) && (e.type === 'text' || !e.type)
+            })
+          }
+          const empty = els.find(e => !e.value)
+          const el = empty || els[els.length - 1]
+          if (!el) return null
+          const r = el.getBoundingClientRect()
+          return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }
+        }, SPEC_ROOT, dimIdx, phKeyword)
+      }
     }
     if (!pos?.x) { log.push({ v: values[i], ok: false }); continue }
 
@@ -417,6 +434,12 @@ async function fillCustomInputs(page, dimIdx, phKeyword, values) {
       back = await readVal()
     }
     log.push({ v: values[i], ok: !!back })
+
+    // ★ 2026-10-27 关键修复：填完值必须点页面空白处失焦
+    //   不点空白 → 值留在输入框 → 下一次填串到别的维度（实测出现 2112/2121 脏值）
+    //   点空白 → 平台确认值 → 输入框清空变 chip
+    await page.mouse.click(30, 300)
+    await sleep(800)
 
     // ★ 2026-10-27 实测：新建维度每填一个值，等平台把它提交进 SKU 表
     //   轮询 SKU 行数，不涨就再按一次 Enter 触发
@@ -669,11 +692,36 @@ export async function fillSpecsOnPage(page, specs, defaults = {}) {
       }
       info = await scanDims(page)
       target = matchDim(userDim, info.dims) || info.dims[info.dims.length - 1]
+      // ★ 新建维度的「规格类型」value 可能还没渲染完，等 2 秒重扫
+      if (target && /^规格类型/.test(target.dim)) {
+        await sleep(2000)
+        info = await scanDims(page)
+        target = matchDim(userDim, info.dims) || info.dims[info.dims.length - 1]
+      }
       log(`  新建后维度: ${info.dims.map(d => d.dim).join(', ')}`)
     }
 
     if (!target) { log(`  ❌ 找不到目标维度`); continue }
     log(`  → 填到「${target.dim}」(${target.type})`)
+
+    // ★ 新建维度后等页面渲染完（规格值输入框出现）再填
+    if (target.type === 'spec-type') {
+      for (let w = 0; w < 8; w++) {
+        await sleep(1000)
+        const hasBox = await page.evaluate((sel, ci) => {
+          const root = document.querySelector(sel)
+          const cs = [...root.querySelectorAll('.property-container-v2'), ...root.querySelectorAll('.goods-spec-row')]
+          const c = cs[ci]
+          if (!c) return false
+          return [...c.querySelectorAll('input')].some(e => {
+            const ph = e.placeholder || ''
+            const r = e.getBoundingClientRect()
+            return r.y > 0 && r.width > 30 && !ph.startsWith('规格类型') && (e.type === 'text' || !e.type)
+          })
+        }, SPEC_ROOT, target.idx).catch(() => false)
+        if (hasBox) break
+      }
+    }
 
     if (target.type === 'checkbox') {
       // checkbox 型：先试勾选，没中用自定义输入框
@@ -683,11 +731,26 @@ export async function fillSpecsOnPage(page, specs, defaults = {}) {
       const r = await fillColorInputs(page, target.idx, values)
       r.forEach(x => log(`    "${x.v}" → ${x.ok ? 'OK' : '失败'}`))
     } else {
-      // custom-input / spec-type：spec-type 用 idx 定位容器内第一个可编辑输入框
-      // （新建维度的 placeholder 是「请输入规格名称」之类，不含维度名）
-      const kw = target.type === 'spec-type' ? '' : target.dim
-      const r = await fillCustomInputs(page, target.idx, kw, values)
-      r.forEach(x => log(`    "${x.v}" → ${x.ok ? 'OK' : '失败'}`))
+      // custom-input / spec-type
+      // ★ 2026-10-27：spec-type（新建维度）走 AI 视觉辅助选框
+      //   纯选择器搞不定：新建维度的空框/已填框混在一起、类目间结构有差异
+      if (target.type === 'spec-type' && defaults.useAi !== false) {
+        log(`  → AI 辅助填「${target.dim}」(${values.length} 值)`)
+        try {
+          const { aiFillDim } = await import('./ai-fill.mjs')
+          const r = await aiFillDim(page, target.idx, target.dim, values)
+          r.forEach(x => log(`    "${x.v}" → ${x.ok ? 'OK' : '失败'} (${x.via}${x.reason ? ': ' + x.reason : ''})`))
+        } catch (e) {
+          log(`  AI 填失败，回退普通填: ${e?.message || e}`)
+          const r = await fillCustomInputs(page, target.idx, '', values)
+          r.forEach(x => log(`    "${x.v}" → ${x.ok ? 'OK' : '失败'}`))
+        }
+      } else {
+        // custom-input：用维度名做 placeholder 关键词
+        const kw = target.dim
+        const r = await fillCustomInputs(page, target.idx, kw, values)
+        r.forEach(x => log(`    "${x.v}" → ${x.ok ? 'OK' : '失败'}`))
+      }
     }
     await sleep(1500)
   }
