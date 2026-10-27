@@ -357,6 +357,29 @@ async function fillRefPrice(page, refPrice) {
   }, SPEC_ROOT, refPrice)
 }
 
+/* ─────────── ⑨ 停用尺码表（勾选后占住 SKU 表，导致 rows=0） ─────────── */
+async function disableSizeChart(page) {
+  // 两种入口：a[data-tracking-impr-viewid="disable_size_chart"] / #sizeTable > div > a
+  const found = await page.evaluate(() => {
+    let link = document.querySelector('a[data-tracking-impr-viewid="disable_size_chart"]')
+    if (!link) {
+      const st = document.querySelector('#sizeTable')
+      if (st) link = st.querySelector('div a')
+    }
+    if (link) { link.click(); return true }
+    return false
+  }).catch(() => false)
+  if (!found) return false
+  await sleep(800)
+  // 确认弹窗
+  await page.evaluate(() => {
+    const btn = [...document.querySelectorAll('button')].find(b => /确认停用/.test(b.textContent || ''))
+    btn?.click()
+  }).catch(() => {})
+  await sleep(1000)
+  return true
+}
+
 /* ─────────── 主入口 ─────────── */
 export async function fillSpecsOnPage(page, specs, defaults = {}) {
   const log = (...a) => console.log('[dom-fill-spec] ' + new Date().toTimeString().slice(0, 8) + ' ' + a.join(' '))
@@ -371,6 +394,12 @@ export async function fillSpecsOnPage(page, specs, defaults = {}) {
     await sleep(2000)
     if (await page.evaluate(() => !!document.querySelector('#goods-spec-sku')).catch(() => false)) break
     if (i === 19) return { ok: false, skuRows: 0, message: '规格区超时' }
+  }
+
+  // ★ 先停用尺码表（勾选后会占住 SKU 表，导致 rows=0）
+  if (defaults.disableSizeChart !== false) {
+    const disabled = await disableSizeChart(page)
+    if (disabled) log('已停用尺码表')
   }
 
   // 逐维度处理
@@ -419,19 +448,33 @@ export async function fillSpecsOnPage(page, specs, defaults = {}) {
     await sleep(1500)
   }
 
-  // 填 SKU 价格表
-  log('填 #sku 价格表…')
-  const skuRes = await fillSkuTable(page, price, stock)
-  log(`  ${skuRes.rows} 行，填了 ${skuRes.filled} 格`)
+  // 填 SKU 价格表（默认跳过，由模式2改包注入 price/stock）
+  if (defaults.fillPriceTable) {
+    log('填 #sku 价格表…')
+    const skuRes = await fillSkuTable(page, price, stock)
+    log(`  ${skuRes.rows} 行，填了 ${skuRes.filled} 格`)
+  } else {
+    log('跳过价格表 DOM 填写（由模式2改包注入）')
+  }
 
-  // 参考价
-  const refPrice = (parseFloat(price) + 15).toFixed(1)
-  const refOk = await fillRefPrice(page, refPrice)
-  log(`参考价 ${refPrice} → ${refOk ? 'OK' : '未找到输入框'}`)
+  // 参考价（同理，改包会注入；但页面校验可能需要，留着可选）
+  if (defaults.fillRefPrice) {
+    const refPrice = (parseFloat(price) + 15).toFixed(1)
+    const refOk = await fillRefPrice(page, refPrice)
+    log(`参考价 ${refPrice} → ${refOk ? 'OK' : '未找到输入框'}`)
+  }
+
+  // 读 SKU 行数（验证规格是否建成功）
+  let skuRows = 0
+  for (let i = 0; i < 12; i++) {
+    await sleep(1000)
+    skuRows = await page.evaluate(() => document.querySelectorAll('#sku table tbody tr').length).catch(() => 0)
+    if (skuRows > 0) break
+  }
 
   return {
-    ok: skuRes.rows > 0,
-    skuRows: skuRes.rows,
-    message: `DOM 填规格完成：${skuRes.rows} 行 SKU，价格已填`,
+    ok: skuRows > 0,
+    skuRows,
+    message: `DOM 填规格完成：${skuRows} 行 SKU`,
   }
 }
