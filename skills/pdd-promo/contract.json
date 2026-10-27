@@ -9,7 +9,7 @@
     "args": [
       {
         "name": "mode",
-        "description": "overview=总览(默认)；groups=广告组；cost=日消耗；goods=商品维度报表；units=推广单元列表；diagnose=推广诊断(5类模块：出价竞争力/投放状态/竞争力下滑/创意素材/排名过低)；balance=推广平衡分析(打分+该加价/该降价/该保持+预算重分配)；pause/resume=暂停/开启单元(L2)；delete=删除商品推广(L2)；create=创建商品推广(L2)；maxcost=改日限额(L2)；roi=改投产比/出价(L2)"
+        "description": "overview=总览(默认)；groups=广告组；cost=日消耗；goods=商品维度报表；units=推广单元列表；item=单品推广诊断(一屏结论+商品数据+单元配置+平台标签+调参命令，配--goods-id或--ad-id)；diagnose=推广诊断(5类模块：出价竞争力/投放状态/竞争力下滑/创意素材/排名过低 + 平台 labelType 异常标签：1出价过低/2近期降价/3出价竞争力下滑/4曝光过低/5曝光掉量/6曝光竞争力下滑/7转化过低/8转化掉量/9转化竞争力下滑/10进入二阶段困难，其中1/4/7为error级)；balance=推广平衡分析(打分+该加价/该降价/该停投整改+预算重分配+平台建议汇总)；pause/resume=暂停/开启单元(L2)；delete=删除商品推广(L2)；create=创建商品推广(L2)；maxcost=改日限额(L2)；roi=改投产比/出价(L2)"
       },
       {
         "name": "ad_id",
