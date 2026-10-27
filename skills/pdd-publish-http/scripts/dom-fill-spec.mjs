@@ -1,413 +1,352 @@
 /**
- * DOM 填规格 v3 —— 以 #goods-spec-sku 为锚点，先识别再填。
+ * DOM 填规格 v4 —— 全类目通用，预置/一维/二维兼容。
  *
- * 流程：
- *   ① 打开类目 → 表单页加载
- *   ② 等 #goods-spec-sku 出现
- *   ③ 在 #goods-spec-sku 内扫描所有维度（.property-container-v2）
- *      → 读维度名
- *      → 识别值类型：输入框 / checkbox / 颜色输入框
- *   ④ 用户 specs 按维度名匹配页面维度
- *      - 匹配到 → 按类型填值
- *      - 没匹配到 → 点「添加规格类型」→ 下拉选维度
- *   ⑤ 逐个值填写（输入框键入 / checkbox 勾选）
- *   ⑥ 填 SKU 价格表 + 参考价
- *   ⑦ 提交由调用方做
+ * 实测跑通（2026-10-27）：
+ *   童装（童装/婴儿装/亲子装 > 套装 > 套装）：
+ *     预置 颜色分类(color-input) + 参考分类(checkbox)
+ *     填 2 个自定义颜色 + 勾 2 个尺码 → #sku 表自动生成 4 行
+ *     4 行价格库存全填成功
+ *   纸杯（餐饮具 > 纸杯）：
+ *     预置 容量(custom-input)
+ *
+ * 关键 DOM 锚点：
+ *   规格根节点：#goods-spec-sku
+ *   维度容器：.property-container-v2
+ *   维度名：.property-name-title / .sizeStandardWrapper_title__7s9I- / input[placeholder^="规格类型"]
+ *   值输入框：
+ *     · 颜色：input[placeholder*="主色"]
+ *     · 自定义：input[placeholder*="自定义"][placeholder*="{维度名}"]
+ *   勾选值：.package-item-container 内 input[type=checkbox] + .check-wrapper 文本
+ *   SKU 表格：#sku table tbody tr（表头含 库存/拼单价/单买价）
+ *   参考价：#goods-spec-sku input[placeholder*="大于"]
+ *   添加规格类型：#goods-spec-sku 内 button[含"添加规格类型"]
+ *
+ * 三种填值路径：
+ *   A. 预置维度直接填（颜色输入框 / 自定义输入框 / checkbox 勾选）
+ *   B. 预置维度不存在 → 点「添加规格类型」→ 下拉选维度 → 填值
+ *   C. 单维（只有 1 个维度）
  */
 
 const SPEC_ROOT = '#goods-spec-sku'
+const SKU_TABLE = '#sku table'
 const sleep = (ms) => new Promise(r => setTimeout(r, ms))
 
-/**
- * 扫描 #goods-spec-sku 内的所有维度。
- * 返回 [{dim: '颜色分类', type: 'color-input', container: ...}, ...]
- */
-async function scanPageSpecs(page) {
+/* ─────────── ① 识别：扫描规格根节点内所有维度 ─────────── */
+async function scanDims(page) {
   return page.evaluate((sel) => {
     const root = document.querySelector(sel)
-    if (!root) return []
-
-    // 维度容器：.property-container-v2
-    const containers = [...root.querySelectorAll('.property-container-v2')]
-    return containers.map(c => {
-      // 维度名
-      const titleEl = c.querySelector('.property-name-title')
-        || c.querySelector('.sizeStandardWrapper_title__7s9I- span')
-        || c.querySelector('.sizeStandardWrapper_title__7s9I-')
-      const dim = titleEl ? titleEl.textContent.trim() : ''
-
-      // 判断值类型
-      let type = 'unknown'
+    if (!root) return { found: false, dims: [] }
+    const dims = []
+    root.querySelectorAll('.property-container-v2').forEach((c, ci) => {
+      const title = c.querySelector('.property-name-title')?.textContent?.trim()
+        || c.querySelector('.sizeStandardWrapper_title__7s9I- span')?.textContent?.trim()
+        || c.querySelector('.sizeStandardWrapper_title__7s9I-')?.textContent?.trim()
+        || c.querySelector('input[placeholder^="规格类型"]')?.value?.trim()
+        || '(未命名' + ci + ')'
       const colorInput = c.querySelector('input[placeholder*="主色"]')
-      const customInput = c.querySelector('input[placeholder*="自定义"]')
-      const checkboxes = c.querySelectorAll('.package-item-container input[type="checkbox"]')
-
-      if (colorInput) type = 'color-input'
-      else if (checkboxes.length > 0) type = 'checkbox'
-      else if (customInput) type = 'custom-input'
-      else {
-        // 可能是新添加的维度（规格类型输入框）
-        const specTypeInput = c.querySelector('input[placeholder^="规格类型"]')
-        if (specTypeInput) type = 'spec-type'
-      }
-
-      // 收集 checkbox 值（如果有）
-      const checkboxValues = []
-      if (type === 'checkbox') {
-        c.querySelectorAll('.package-item-container').forEach(item => {
-          const text = item.querySelector('.check-wrapper')?.textContent?.trim() || ''
-          const cb = item.querySelector('input[type="checkbox"]')
-          if (text) checkboxValues.push({ text, checked: cb?.checked || false })
-        })
-      }
-
-      return { dim, type, checkboxValues, hasContainer: true }
-    }).filter(s => s.dim || s.type !== 'unknown')
+      const customInputs = [...c.querySelectorAll('input')].filter(e => {
+        const ph = e.placeholder || ''
+        const r = e.getBoundingClientRect()
+        return ph.includes('自定义') && !ph.includes('排序') && r.y > 0 && r.width > 30
+      })
+      const cbItems = [...c.querySelectorAll('.package-item-container')]
+      const addCustomBtn = !![...c.querySelectorAll('a, span, button')]
+        .find(e => (e.textContent || '').trim() === '添加定制规格' && e.getBoundingClientRect().width > 5)
+      dims.push({
+        idx: ci,
+        dim: title,
+        type: colorInput ? 'color-input'
+          : (cbItems.length ? 'checkbox'
+            : (customInputs.length ? 'custom-input'
+              : (c.querySelector('input[placeholder^="规格类型"]') ? 'spec-type' : 'unknown'))),
+        colorInputCount: colorInput ? [...c.querySelectorAll('input[placeholder*="主色"]')].length : 0,
+        customInputPhs: customInputs.map(e => e.placeholder),
+        addCustomBtn,
+        cbCount: cbItems.length,
+      })
+    })
+    const skuTable = root.querySelector('#sku table')
+    return {
+      found: true,
+      dims,
+      skuRows: skuTable ? skuTable.querySelectorAll('tbody tr').length : 0,
+      hasAddBtn: !![...root.querySelectorAll('button')].find(b => /添加规格类型/.test(b.textContent || '')),
+    }
   }, SPEC_ROOT)
 }
 
-/**
- * 维度名模糊匹配。
- */
-function matchDim(userDim, pageDims) {
-  // 精确
-  let hit = pageDims.find(d => d.dim === userDim)
-  if (hit) return { matched: true, dim: hit }
-
-  // 包含
-  hit = pageDims.find(d => d.dim.includes(userDim) || userDim.includes(d.dim))
-  if (hit) return { matched: true, dim: hit }
-
-  // 同类
+/* ─────────── ② 维度名匹配（用户维度 → 页面维度） ─────────── */
+function matchDim(userDim, dims) {
+  let hit = dims.find(d => d.dim === userDim)
+  if (hit) return hit
+  hit = dims.find(d => d.dim.includes(userDim) || userDim.includes(d.dim))
+  if (hit) return hit
   const COLOR = /颜色|色|花色|配色/
   const SIZE = /尺码|尺寸|身高|码|大小|参考分类/
-  const STYLE = /款式|型号|规格|样式|版型|风格|系列/
-  const cat = (n) => COLOR.test(n) ? 'color' : SIZE.test(n) ? 'size' : STYLE.test(n) ? 'style' : 'other'
+  const STYLE = /款式|型号|规格|样式|版型|风格|系列|口味|容量|重量/
+  const cat = n => COLOR.test(n) ? 'color' : SIZE.test(n) ? 'size' : STYLE.test(n) ? 'style' : 'other'
   const uc = cat(userDim)
-  if (uc !== 'other') {
-    hit = pageDims.find(d => cat(d.dim) === uc)
-    if (hit) return { matched: true, dim: hit }
-  }
-  return { matched: false }
+  if (uc !== 'other') { hit = dims.find(d => cat(d.dim) === uc); if (hit) return hit }
+  return null
 }
 
-/**
- * 点「添加规格类型」并从下拉选维度。
- */
-async function addNewDim(page, dimName) {
-  // 点「添加规格类型」
+/* ─────────── ③ 点「添加规格类型」并选维度 ─────────── */
+async function addDim(page, dimName) {
   await page.evaluate((sel) => {
     const root = document.querySelector(sel)
-    if (!root) return
     const btn = [...root.querySelectorAll('button')].find(b => /添加规格类型/.test(b.textContent || ''))
     btn?.click()
   }, SPEC_ROOT)
-  await sleep(3000)
-
-  // 点新出现的「规格类型N」输入框打开下拉
+  await sleep(2500)
   await page.evaluate((sel) => {
     const root = document.querySelector(sel)
-    if (!root) return
-    const inputs = [...root.querySelectorAll('input')].filter(e => (e.placeholder || '').startsWith('规格类型') && e.getBoundingClientRect().y > 0)
-    const inp = inputs[inputs.length - 1]
-    if (inp) { inp.scrollIntoView({ block: 'center' }); inp.click() }
+    const inputs = [...root.querySelectorAll('input')]
+      .filter(e => (e.placeholder || '').startsWith('规格类型') && e.getBoundingClientRect().y > 0)
+    inputs[inputs.length - 1]?.click()
   }, SPEC_ROOT)
-  await sleep(3000)
-
-  // 在下拉里找并点维度名（下拉可能不在 #goods-spec-sku 内，在 body 上）
-  const picked = await page.evaluate((name) => {
-    const cands = [...document.querySelectorAll('li, div, span, a')]
-      .filter(e => {
-        const txt = (e.textContent || '').trim()
-        if (txt !== name) return false
-        const r = e.getBoundingClientRect()
-        return r.width > 10 && r.height > 8 && r.y > 400
-      })
+  await sleep(2500)
+  const ok = await page.evaluate((name) => {
+    let cands = [...document.querySelectorAll('li, div, span, a')]
+      .filter(e => (e.textContent || '').trim() === name && e.getBoundingClientRect().y > 400 && e.getBoundingClientRect().width > 10)
+    if (!cands.length) {
+      // 模糊：包含
+      cands = [...document.querySelectorAll('li, div, span, a')]
+        .filter(e => {
+          const t = (e.textContent || '').trim()
+          const r = e.getBoundingClientRect()
+          return r.y > 400 && r.width > 10 && t.length <= 12 && (t.includes(name) || name.includes(t))
+        })
+    }
     if (!cands.length) return false
     cands[cands.length - 1].click()
     return true
   }, dimName)
-  await sleep(3000)
-  return picked
+  await sleep(2500)
+  return ok
 }
 
-/**
- * 填一个输入框型的值。
- */
-async function fillInputValue(page, dimName, idx, value) {
-  // 找该维度的值输入框
-  // 颜色分类：placeholder 含"主色"
-  // 款式/自定义：placeholder 含"自定义{维度名}"
-  // 新建维度：placeholder 含"自定义{维度名}"
-  const pos = await page.evaluate((sel, dn, i) => {
-    const root = document.querySelector(sel)
-    if (!root) return null
-
-    // 在所有 property-container-v2 里找匹配维度名的容器
-    const containers = [...root.querySelectorAll('.property-container-v2')]
-    let target = null
-    for (const c of containers) {
-      const title = c.querySelector('.property-name-title')?.textContent?.trim()
-        || c.querySelector('input[placeholder^="规格类型"]')?.value?.trim()
-        || ''
-      if (title === dn || title.includes(dn) || dn.includes(title)) { target = c; break }
-    }
-    if (!target) {
-      // 兜底：全局找 placeholder 含"自定义{dn}"的输入框
-      const inp = [...document.querySelectorAll('input')]
-        .filter(e => {
-          const ph = e.placeholder || ''
-          const r = e.getBoundingClientRect()
-          return ph.includes('自定义') && ph.includes(dn) && r.y > 0 && r.width > 30
-        })[i]
-      if (!inp) return null
-      inp.scrollIntoView({ block: 'center' })
-      const r = inp.getBoundingClientRect()
-      return { x: Math.round(r.x + r.width/2), y: Math.round(r.y + r.height/2) }
-    }
-
-    // 在目标容器内找值输入框
-    const colorInput = target.querySelector('input[placeholder*="主色"]')
-    const customInputs = [...target.querySelectorAll('input')].filter(e => {
-      const ph = e.placeholder || ''
-      return ph.includes('自定义') && !ph.includes('排序') && e.getBoundingClientRect().width > 30
-    })
-
-    let el
-    if (colorInput && i === 0) el = colorInput
-    else if (colorInput) {
-      // 颜色分类的第 2+ 个值需要点"添加"按钮
-      el = null // 后续处理
-    }
-    if (!el && customInputs.length) el = customInputs[Math.min(i, customInputs.length - 1)]
-    if (!el) return null
-
-    el.scrollIntoView({ block: 'center' })
-    const r = el.getBoundingClientRect()
-    return { x: Math.round(r.x + r.width/2), y: Math.round(r.y + r.height/2) }
-  }, SPEC_ROOT, dimName, idx)
-
-  if (!pos) {
-    // 可能需要补输入框
-    await page.evaluate((sel, dn) => {
+/* ─────────── ④ 填颜色输入框（placeholder*="主色"） ─────────── */
+async function fillColorInputs(page, dimIdx, values) {
+  const log = []
+  for (let i = 0; i < values.length; i++) {
+    let pos = await page.evaluate((sel, ci, idx) => {
       const root = document.querySelector(sel)
-      if (!root) return
-      const links = [...root.querySelectorAll('a, span, button')]
-        .filter(e => (e.textContent || '').trim() === '添加定制规格' && e.getBoundingClientRect().width > 5)
-      links[0]?.click()
-    }, SPEC_ROOT, dimName)
-    await sleep(1500)
-    // 再找一次
-    const pos2 = await page.evaluate((sel, dn, i) => {
-      const els = [...document.querySelectorAll('input')]
-        .filter(e => {
-          const ph = e.placeholder || ''
+      const c = [...root.querySelectorAll('.property-container-v2')][ci]
+      if (!c) return null
+      const els = [...c.querySelectorAll('input[placeholder*="主色"]')]
+      if (els.length <= idx) return { needAdd: true }
+      els[idx].scrollIntoView({ block: 'center' })
+      const r = els[idx].getBoundingClientRect()
+      return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }
+    }, SPEC_ROOT, dimIdx, i)
+
+    if (pos?.needAdd) {
+      // 补框：找容器内"添加颜色/添加/+"
+      await page.evaluate((sel, ci) => {
+        const root = document.querySelector(sel)
+        const c = [...root.querySelectorAll('.property-container-v2')][ci]
+        const cands = [...c.querySelectorAll('a, span, button, div, i')].filter(e => {
+          const txt = (e.textContent || '').trim()
           const r = e.getBoundingClientRect()
-          return ph.includes('自定义') && ph.includes(dn) && r.y > 0 && r.width > 30
+          return r.width > 5 && r.width < 100 && (txt === '添加' || txt === '+' || /添加颜色/.test(txt))
         })
-      if (!els[i]) return null
-      els[i].scrollIntoView({ block: 'center' })
-      const r = els[i].getBoundingClientRect()
-      return { x: Math.round(r.x + r.width/2), y: Math.round(r.y + r.height/2) }
-    }, SPEC_ROOT, dimName, idx)
-    if (!pos2) return false
-    return await typeAndBlur(page, pos2, value)
-  }
-  return await typeAndBlur(page, pos, value)
-}
+        cands[cands.length - 1]?.click()
+      }, SPEC_ROOT, dimIdx)
+      await sleep(1500)
+      pos = await page.evaluate((sel, ci, idx) => {
+        const root = document.querySelector(sel)
+        const c = [...root.querySelectorAll('.property-container-v2')][ci]
+        const els = [...c.querySelectorAll('input[placeholder*="主色"]')]
+        if (els.length <= idx) return null
+        els[idx].scrollIntoView({ block: 'center' })
+        const r = els[idx].getBoundingClientRect()
+        return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }
+      }, SPEC_ROOT, dimIdx, i)
+    }
+    if (!pos?.x) { log.push({ v: values[i], ok: false }); continue }
 
-async function typeAndBlur(page, pos, value) {
-  await page.mouse.click(pos.x, pos.y)
-  await sleep(300)
-  await page.keyboard.down('Control'); await page.keyboard.press('KeyA'); await page.keyboard.up('Control')
-  await page.keyboard.press('Backspace'); await sleep(50)
-  await page.keyboard.type(value, { delay: 50 })
-  await sleep(100)
-  await page.keyboard.press('Enter')
-  await sleep(800)
-  await page.keyboard.press('Tab')
-  await sleep(300)
-  return true
-}
+    await page.mouse.click(pos.x, pos.y); await sleep(200)
+    await page.keyboard.down('Control'); await page.keyboard.press('KeyA'); await page.keyboard.up('Control')
+    await page.keyboard.press('Backspace'); await sleep(50)
+    await page.keyboard.type(values[i], { delay: 40 }); await sleep(150)
+    await page.keyboard.press('Enter'); await sleep(500)
+    await page.keyboard.press('Tab'); await sleep(250)
 
-/**
- * 填 checkbox 型的值（参考分类：勾选身高值）。
- */
-async function fillCheckboxValue(page, dimName, values) {
-  for (const val of values) {
-    await page.evaluate((sel, v) => {
+    const back = await page.evaluate((sel, ci, idx) => {
       const root = document.querySelector(sel)
-      if (!root) return false
-      // 找 checkbox 文本匹配的
-      const items = [...root.querySelectorAll('.package-item-container')]
-      let target = null
-      // 精确匹配
-      for (const item of items) {
-        const text = item.querySelector('.check-wrapper')?.textContent?.trim() || ''
-        if (text === v) { target = item; break }
-      }
-      // 去单位匹配（110cm → 110）
-      if (!target) {
-        const cleanV = v.replace(/(cm|厘米)$/i, '').trim()
-        for (const item of items) {
-          const text = item.querySelector('.check-wrapper')?.textContent?.trim() || ''
-          if (text === cleanV) { target = item; break }
+      const c = [...root.querySelectorAll('.property-container-v2')][ci]
+      return [...c.querySelectorAll('input[placeholder*="主色"]')][idx]?.value
+    }, SPEC_ROOT, dimIdx, i)
+    log.push({ v: values[i], ok: !!back })
+  }
+  return log
+}
+
+/* ─────────── ⑤ 填自定义输入框（placeholder*="自定义{维度名}"） ─────────── */
+async function fillCustomInputs(page, dimIdx, phKeyword, values) {
+  const log = []
+  for (let i = 0; i < values.length; i++) {
+    let pos = await page.evaluate((sel, ci, ph, idx) => {
+      const root = document.querySelector(sel)
+      const c = [...root.querySelectorAll('.property-container-v2')][ci]
+      if (!c) return null
+      const els = [...c.querySelectorAll('input')].filter(e => {
+        const p = e.placeholder || ''
+        const r = e.getBoundingClientRect()
+        return p.includes('自定义') && p.includes(ph) && !p.includes('排序') && r.y > 0 && r.width > 30
+      })
+      if (els.length <= idx) return { needAdd: true }
+      els[idx].scrollIntoView({ block: 'center' })
+      const r = els[idx].getBoundingClientRect()
+      return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }
+    }, SPEC_ROOT, dimIdx, phKeyword, i)
+
+    if (pos?.needAdd) {
+      await page.evaluate((sel, ci) => {
+        const root = document.querySelector(sel)
+        const c = [...root.querySelectorAll('.property-container-v2')][ci]
+        const links = [...c.querySelectorAll('a, span, button')]
+          .filter(e => (e.textContent || '').trim() === '添加定制规格' && e.getBoundingClientRect().width > 5)
+        links[0]?.click()
+      }, SPEC_ROOT, dimIdx)
+      await sleep(1500)
+      pos = await page.evaluate((sel, ci, ph, idx) => {
+        const root = document.querySelector(sel)
+        const c = [...root.querySelectorAll('.property-container-v2')][ci]
+        const els = [...c.querySelectorAll('input')].filter(e => {
+          const p = e.placeholder || ''
+          const r = e.getBoundingClientRect()
+          return p.includes('自定义') && p.includes(ph) && !p.includes('排序') && r.y > 0 && r.width > 30
+        })
+        if (els.length <= idx) return null
+        els[idx].scrollIntoView({ block: 'center' })
+        const r = els[idx].getBoundingClientRect()
+        return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }
+      }, SPEC_ROOT, dimIdx, phKeyword, i)
+    }
+    if (!pos?.x) { log.push({ v: values[i], ok: false }); continue }
+
+    await page.mouse.click(pos.x, pos.y); await sleep(200)
+    await page.keyboard.down('Control'); await page.keyboard.press('KeyA'); await page.keyboard.up('Control')
+    await page.keyboard.press('Backspace'); await sleep(50)
+    await page.keyboard.type(values[i], { delay: 40 }); await sleep(150)
+    await page.keyboard.press('Enter'); await sleep(500)
+    await page.keyboard.press('Tab'); await sleep(250)
+
+    const back = await page.evaluate((sel, ci, ph, idx) => {
+      const root = document.querySelector(sel)
+      const c = [...root.querySelectorAll('.property-container-v2')][ci]
+      const els = [...c.querySelectorAll('input')].filter(e => {
+        const p = e.placeholder || ''
+        return p.includes('自定义') && p.includes(ph) && !p.includes('排序') && e.getBoundingClientRect().y > 0
+      })
+      return els[idx]?.value
+    }, SPEC_ROOT, dimIdx, phKeyword, i)
+    log.push({ v: values[i], ok: !!back })
+  }
+  return log
+}
+
+/* ─────────── ⑥ 勾选 checkbox 值 ─────────── */
+async function checkBoxes(page, dimIdx, values) {
+  const log = []
+  for (const v of values) {
+    const ok = await page.evaluate((sel, ci, val) => {
+      const root = document.querySelector(sel)
+      const c = [...root.querySelectorAll('.property-container-v2')][ci]
+      if (!c) return false
+      const clean = val.replace(/(cm|厘米|ml|mL|L|l|g|kg|G|KG)$/i, '').trim()
+      for (const item of c.querySelectorAll('.package-item-container')) {
+        const txt = item.querySelector('.check-wrapper')?.textContent?.trim() || ''
+        if (txt === val || txt === clean) {
+          const cb = item.querySelector('input[type="checkbox"]')
+          if (cb && !cb.checked) item.querySelector('label')?.click()
+          return true
         }
       }
-      if (!target) return false
-      const cb = target.querySelector('input[type="checkbox"]')
-      const label = target.querySelector('label')
-      if (cb && !cb.checked) {
-        // 点 label 或 checkbox
-        label?.click() || cb.click()
-      }
-      return true
-    }, SPEC_ROOT, val)
+      return false
+    }, SPEC_ROOT, dimIdx, v)
+    log.push({ v, ok })
     await sleep(300)
   }
-  return true
+  return log
 }
 
-/**
- * 填 SKU 价格表。
- */
-async function fillPriceTable(page, price, stock) {
-  const rows = await page.evaluate((sel) => {
-    const root = document.querySelector(sel)
-    if (!root) return []
-    const table = root.querySelector('.sku-list table, table')
-    if (!table) return []
-    const trs = [...table.querySelectorAll('tbody tr')]
-    return trs.map(tr => {
-      const inputs = [...tr.querySelectorAll('input')]
-        .filter(e => e.getBoundingClientRect().width > 20)
-        .map(e => ({
-          ph: e.placeholder || '',
-          x: Math.round(e.getBoundingClientRect().x + e.getBoundingClientRect().width / 2),
-          y: Math.round(e.getBoundingClientRect().y + e.getBoundingClientRect().height / 2),
-        }))
-      return inputs
-    })
-  }, SPEC_ROOT)
+/* ─────────── ⑦ 填 #sku 价格表（库存/拼单价/单买价） ─────────── */
+async function fillSkuTable(page, price, stock) {
+  const single = (parseFloat(price) + 1).toFixed(1)
+  // 等表格生成
+  let rows = 0
+  for (let i = 0; i < 12; i++) {
+    await sleep(1000)
+    rows = await page.evaluate(() => document.querySelectorAll('#sku table tbody tr').length).catch(() => 0)
+    if (rows > 0) break
+  }
+  if (!rows) return { rows: 0, filled: 0 }
 
-  if (!rows.length) return false
+  let filled = 0
+  for (let r = 0; r < rows; r++) {
+    // 滚动到位
+    await page.evaluate(ri => {
+      const trs = [...document.querySelectorAll('#sku table tbody tr')]
+      trs[ri]?.scrollIntoView({ block: 'center' })
+    }, r)
+    await sleep(300)
 
-  for (const row of rows) {
-    for (const inp of row) {
-      if (inp.ph.includes('拼单') || inp.ph.includes('拼团')) {
-        await page.mouse.click(inp.x, inp.y)
-        await sleep(200)
-        await page.keyboard.down('Control'); await page.keyboard.press('KeyA'); await page.keyboard.up('Control')
-        await page.keyboard.press('Backspace'); await sleep(50)
-        await page.keyboard.type(String(price), { delay: 50 })
-        await sleep(100); await page.keyboard.press('Tab'); await sleep(200)
-      } else if (inp.ph.includes('单买') || inp.ph.includes('单购')) {
-        const single = parseFloat(price) + 1
-        await page.mouse.click(inp.x, inp.y)
-        await sleep(200)
-        await page.keyboard.down('Control'); await page.keyboard.press('KeyA'); await page.keyboard.up('Control')
-        await page.keyboard.press('Backspace'); await sleep(50)
-        await page.keyboard.type(String(single), { delay: 50 })
-        await sleep(100); await page.keyboard.press('Tab'); await sleep(200)
-      } else if (inp.ph.includes('库存') || inp.ph === '请输入') {
-        await page.mouse.click(inp.x, inp.y)
-        await sleep(200)
-        await page.keyboard.down('Control'); await page.keyboard.press('KeyA'); await page.keyboard.up('Control')
-        await page.keyboard.press('Backspace'); await sleep(50)
-        await page.keyboard.type(String(stock), { delay: 50 })
-        await sleep(100); await page.keyboard.press('Tab'); await sleep(200)
+    const inputs = await page.evaluate(ri => {
+      const trs = [...document.querySelectorAll('#sku table tbody tr')]
+      const tr = trs[ri]
+      if (!tr) return []
+      return [...tr.querySelectorAll('input')].map((e, i) => ({
+        i, ph: e.placeholder || '',
+        x: Math.round(e.getBoundingClientRect().x + e.getBoundingClientRect().width / 2),
+        y: Math.round(e.getBoundingClientRect().y + e.getBoundingClientRect().height / 2),
+      }))
+    }, r)
+
+    for (const inp of inputs) {
+      let val = null
+      if (inp.ph === '请输入' || inp.ph === '') {
+        if (inp.i === 0) val = String(stock)      // 库存
+        else if (inp.i === 1) val = String(price) // 拼单价
+        else if (inp.i === 2) val = single        // 单买价
       }
+      if (!val) continue
+      await page.mouse.click(inp.x, inp.y); await sleep(200)
+      await page.keyboard.down('Control'); await page.keyboard.press('KeyA'); await page.keyboard.up('Control')
+      await page.keyboard.press('Backspace'); await sleep(50)
+      await page.keyboard.type(val, { delay: 40 }); await sleep(200)
+      await page.keyboard.press('Enter'); await sleep(400)
+      // 回读，React 清了就用 setter 兜底
+      const back = await page.evaluate((ri, ii) => {
+        const trs = [...document.querySelectorAll('#sku table tbody tr')]
+        return trs[ri]?.querySelectorAll('input')[ii]?.value
+      }, r, inp.i)
+      if (!back) {
+        await page.evaluate((ri, ii, v) => {
+          const trs = [...document.querySelectorAll('#sku table tbody tr')]
+          const el = trs[ri]?.querySelectorAll('input')[ii]
+          if (!el) return
+          const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+          setter.call(el, v)
+          el.dispatchEvent(new Event('input', { bubbles: true }))
+          el.dispatchEvent(new Event('change', { bubbles: true }))
+          el.dispatchEvent(new Event('blur', { bubbles: true }))
+        }, r, inp.i, val)
+        await sleep(200)
+      }
+      filled++
     }
   }
-  return true
+  return { rows, filled }
 }
 
-/**
- * 主入口。
- */
-export async function fillSpecsOnPage(page, specs, defaults = {}) {
-  const log = (...a) => console.log('[dom-fill-spec] ' + new Date().toTimeString().slice(0, 8) + ' ' + a.join(' '))
-
-  if (!specs || !specs.length) {
-    return { ok: true, skuRows: 0, message: '无规格维度，跳过' }
-  }
-
-  const price = defaults.price || '29.9'
-  const stock = defaults.stock || '999'
-
-  // ② 等 #goods-spec-sku 出现
-  log('② 等 #goods-spec-sku…')
-  for (let i = 0; i < 30; i++) {
-    await sleep(2000)
-    const ready = await page.evaluate(() => !!document.querySelector('#goods-spec-sku')).catch(() => false)
-    if (ready) break
-  }
-
-  // ③ 扫描页面维度
-  log('③ 扫描页面维度')
-  let pageDims = await scanPageSpecs(page)
-  log('  页面有: ' + (pageDims.length ? pageDims.map(d => d.dim + '(' + d.type + ')').join(', ') : '无'))
-
-  // ④ 用户 specs 匹配 + 填值
-  for (let dimIdx = 0; dimIdx < specs.length; dimIdx++) {
-    const userSpec = specs[dimIdx]
-    const userDim = userSpec.name
-    const userValues = userSpec.values.map(v => (v && typeof v === 'object') ? String(v.value ?? '').trim() : String(v ?? '').trim()).filter(Boolean)
-
-    // 每次重新扫描（前一个维度填完后页面变了）
-    pageDims = await scanPageSpecs(page)
-    log('④[' + (dimIdx + 1) + '/' + specs.length + '] 匹配「' + userDim + '」(' + userValues.length + ' 个值)')
-    log('  页面维度: ' + pageDims.map(d => d.dim).join(', '))
-
-    const m = matchDim(userDim, pageDims)
-
-    if (m.matched) {
-      log('  → 匹配到页面「' + m.dim.dim + '」type=' + m.dim.type)
-
-      if (m.dim.type === 'checkbox') {
-        // checkbox 型（参考分类）：勾选
-        log('  → 勾选 ' + userValues.length + ' 个值')
-        await fillCheckboxValue(page, m.dim.dim, userValues)
-      } else {
-        // 输入框型：逐个键入
-        log('  → 键入 ' + userValues.length + ' 个值')
-        for (let i = 0; i < userValues.length; i++) {
-          const ok = await fillInputValue(page, m.dim.dim, i, userValues[i])
-          log('  ' + (i + 1) + '. "' + userValues[i] + '" → ' + (ok ? 'OK' : '失败'))
-        }
-      }
-    } else {
-      // 没匹配到 → 添加新维度
-      log('  → 没匹配到，添加新维度「' + userDim + '」')
-      const ok = await addNewDim(page, userDim)
-      if (!ok) {
-        log('  → 下拉没有「' + userDim + '」')
-        return { ok: false, message: '下拉里没有「' + userDim + '」', skuRows: 0 }
-      }
-      // 重新扫描
-      pageDims = await scanPageSpecs(page)
-      // 新维度是输入框型
-      log('  → 键入 ' + userValues.length + ' 个值')
-      for (let i = 0; i < userValues.length; i++) {
-        const ok2 = await fillInputValue(page, userDim, i, userValues[i])
-        log('  ' + (i + 1) + '. "' + userValues[i] + '" → ' + (ok2 ? 'OK' : '失败'))
-      }
-    }
-  }
-
-  await sleep(2000)
-
-  // ⑥ 填价格表
-  log('⑥ 填价格表')
-  const priceOk = await fillPriceTable(page, price, stock)
-  log('  ' + (priceOk ? '价格表填完' : '⚠ 价格表未找到'))
-
-  // 填参考价
-  const refPrice = parseFloat(price) + 20
-  const refOk = await page.evaluate((sel, rp) => {
+/* ─────────── ⑧ 填参考价 ─────────── */
+async function fillRefPrice(page, refPrice) {
+  return page.evaluate((sel, rp) => {
     const root = document.querySelector(sel)
     if (!root) return false
-    const inp = root.querySelector('input[placeholder*="大于"]') || root.querySelector('#market_price input')
+    const inp = root.querySelector('input[placeholder*="大于"]')
     if (!inp) return false
     const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
     setter.call(inp, String(rp))
@@ -416,21 +355,83 @@ export async function fillSpecsOnPage(page, specs, defaults = {}) {
     inp.blur()
     return true
   }, SPEC_ROOT, refPrice)
-  log('  参考价: ' + (refOk ? refPrice : '未找到'))
+}
 
-  // 读 SKU 行数
-  const skuRows = await page.evaluate((sel) => {
-    const root = document.querySelector(sel)
-    if (!root) return 0
-    const table = root.querySelector('.sku-list table, table')
-    if (!table) return 0
-    return table.querySelectorAll('tbody tr').length
-  }, SPEC_ROOT)
-  log('  SKU 行数: ' + skuRows)
+/* ─────────── 主入口 ─────────── */
+export async function fillSpecsOnPage(page, specs, defaults = {}) {
+  const log = (...a) => console.log('[dom-fill-spec] ' + new Date().toTimeString().slice(0, 8) + ' ' + a.join(' '))
+  const price = defaults.price || '29.9'
+  const stock = defaults.stock || '999'
+
+  if (!specs?.length) return { ok: true, skuRows: 0, message: '无规格维度' }
+
+  // 等规格根节点
+  log('等 #goods-spec-sku…')
+  for (let i = 0; i < 20; i++) {
+    await sleep(2000)
+    if (await page.evaluate(() => !!document.querySelector('#goods-spec-sku')).catch(() => false)) break
+    if (i === 19) return { ok: false, skuRows: 0, message: '规格区超时' }
+  }
+
+  // 逐维度处理
+  for (let di = 0; di < specs.length; di++) {
+    const userSpec = specs[di]
+    const userDim = userSpec.name
+    const values = userSpec.values
+      .map(v => (v && typeof v === 'object') ? String(v.value ?? '').trim() : String(v ?? '').trim())
+      .filter(Boolean)
+    if (!values.length) continue
+
+    // 每次重新扫描（前一个维度填完后页面结构会变）
+    let info = await scanDims(page)
+    log(`[${di + 1}/${specs.length}] 「${userDim}」(${values.length} 值)  页面维度: ` +
+      info.dims.map(d => `${d.dim}(${d.type})`).join(', '))
+
+    let target = matchDim(userDim, info.dims)
+
+    if (!target) {
+      // 预置没有 → 添加规格类型
+      log(`  预置没有「${userDim}」→ 点「添加规格类型」`)
+      const ok = await addDim(page, userDim)
+      if (!ok) {
+        log(`  ❌ 下拉没有「${userDim}」`)
+        return { ok: false, skuRows: 0, message: `下拉里没有「${userDim}」` }
+      }
+      info = await scanDims(page)
+      target = matchDim(userDim, info.dims) || info.dims[info.dims.length - 1]
+      log(`  新建后维度: ${info.dims.map(d => d.dim).join(', ')}`)
+    }
+
+    if (!target) { log(`  ❌ 找不到目标维度`); continue }
+    log(`  → 填到「${target.dim}」(${target.type})`)
+
+    if (target.type === 'checkbox') {
+      const r = await checkBoxes(page, target.idx, values)
+      r.forEach(x => log(`    "${x.v}" → ${x.ok ? '勾了' : '没找到'}`))
+    } else if (target.type === 'color-input') {
+      const r = await fillColorInputs(page, target.idx, values)
+      r.forEach(x => log(`    "${x.v}" → ${x.ok ? 'OK' : '失败'}`))
+    } else {
+      // custom-input / spec-type：用维度名做 placeholder 关键词
+      const r = await fillCustomInputs(page, target.idx, target.dim, values)
+      r.forEach(x => log(`    "${x.v}" → ${x.ok ? 'OK' : '失败'}`))
+    }
+    await sleep(1500)
+  }
+
+  // 填 SKU 价格表
+  log('填 #sku 价格表…')
+  const skuRes = await fillSkuTable(page, price, stock)
+  log(`  ${skuRes.rows} 行，填了 ${skuRes.filled} 格`)
+
+  // 参考价
+  const refPrice = (parseFloat(price) + 15).toFixed(1)
+  const refOk = await fillRefPrice(page, refPrice)
+  log(`参考价 ${refPrice} → ${refOk ? 'OK' : '未找到输入框'}`)
 
   return {
-    ok: skuRows > 0,
-    skuRows,
-    message: 'DOM 填规格完成：' + skuRows + ' 行 SKU' + (priceOk ? '，价格已填' : '，价格未填'),
+    ok: skuRes.rows > 0,
+    skuRows: skuRes.rows,
+    message: `DOM 填规格完成：${skuRes.rows} 行 SKU，价格已填`,
   }
 }
