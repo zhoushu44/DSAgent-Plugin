@@ -22,7 +22,7 @@ import * as path from 'node:path'
 import { homedir } from 'node:os'
 import { createRequire } from 'node:module'
 import { getAntiString } from './pdd-antistring.mjs'
-import { decodePua, hasPua, RISK_SDK_INJECT } from './pdd-risksdk.mjs'
+import { decodePua, hasPua, buildPuaMap, RISK_SDK_INJECT } from './pdd-risksdk.mjs'
 import {
   reserveSlot, recordResult, canUse, getAccountState,
   ERR, THROTTLE, fmtRemain, backoffWait, clearCooldown,
@@ -506,19 +506,40 @@ export async function call(o) {
 
 /**
  * 解码接口返回里的所有 PUA 字段（原地替换）
+ *
+ * ★ 2026-10-27 修：先动态推导映射再解码。
+ *   拼多多的 PUA 码点是动态的（本次实测 E573->0，而静态表里 E515->6），
+ *   用静态表会把 goodsUv/goodsVcr 解成空串或 0%。
+ *   推导依据：同一响应里 <X>Ppr 是明文的较上周期值，与 <X> 等长同构。
+ *
+ * @param {object|Array} obj 接口返回的 json
+ * @param {Object} [opts] { listPath: 'result.goodsDetailList' } 指定承载 <X>/<X>Ppr 对的数组路径
  */
-export function decodeAllPua(obj) {
-  if (Array.isArray(obj)) return obj.map(decodeAllPua)
+export function decodeAllPua(obj, opts = {}) {
+  // 1) 先找列表，动态推导映射
+  let map = null
+  try {
+    const listPath = opts.listPath || 'result.goodsDetailList'
+    const list = listPath.split('.').reduce((o, k) => (o == null ? o : o[k]), obj)
+    if (Array.isArray(list) && list.length) {
+      map = buildPuaMap(list).map
+    }
+  } catch { /* 推导失败就用静态兜底 */ }
+  return _decodeAllPua(obj, map)
+}
+
+function _decodeAllPua(obj, map) {
+  if (Array.isArray(obj)) return obj.map(x => _decodeAllPua(x, map))
   if (!obj || typeof obj !== 'object') return obj
   const out = {}
   for (const [k, v] of Object.entries(obj)) {
     if (typeof v === 'string' && hasPua(v)) {
-      const dec = decodePua(v)
+      const dec = decodePua(v, map)
       // 保留原值
       out[k] = dec
       out[k + '_raw'] = v
     } else if (v && typeof v === 'object') {
-      out[k] = decodeAllPua(v)
+      out[k] = _decodeAllPua(v, map)
     } else {
       out[k] = v
     }
