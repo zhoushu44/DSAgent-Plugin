@@ -567,57 +567,74 @@ async function fillSkuTable(page, price, stock) {
   }
   if (!rows) return { rows: 0, filled: 0 }
 
+  // ★ 2026-10-28：JS setter 一次性填全表（比鼠标逐格快 10 倍）
+  //   价格/库存是纯数字输入，React setter + input 事件能更新状态。
+  //   逐格回读，setter 没生效的用真实键盘兜底。
   let filled = 0
   for (let r = 0; r < rows; r++) {
-    // 滚动到位
+    // 滚动到位（虚拟滚动需要）
     await page.evaluate(ri => {
       const trs = [...document.querySelectorAll('#sku table tbody tr')]
       trs[ri]?.scrollIntoView({ block: 'center' })
     }, r)
-    await sleep(300)
+    await sleep(150)
 
-    const inputs = await page.evaluate(ri => {
+    // ① JS setter 填该行前 3 格（库存/拼单价/单买价）
+    const setRes = await page.evaluate((ri, stockV, priceV, singleV) => {
       const trs = [...document.querySelectorAll('#sku table tbody tr')]
       const tr = trs[ri]
-      if (!tr) return []
-      return [...tr.querySelectorAll('input')].map((e, i) => ({
-        i, ph: e.placeholder || '',
-        x: Math.round(e.getBoundingClientRect().x + e.getBoundingClientRect().width / 2),
-        y: Math.round(e.getBoundingClientRect().y + e.getBoundingClientRect().height / 2),
-      }))
-    }, r)
+      if (!tr) return { total: 0, ok: 0 }
+      const inputs = [...tr.querySelectorAll('input')]
+      const vals = [stockV, priceV, singleV]
+      let ok = 0
+      inputs.forEach((el, i) => {
+        if (i > 2) return
+        const v = vals[i]
+        if (!v) return
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+        if (!setter) return
+        setter.call(el, String(v))
+        el.dispatchEvent(new Event('input', { bubbles: true }))
+        el.dispatchEvent(new Event('change', { bubbles: true }))
+        el.dispatchEvent(new Event('blur', { bubbles: true }))
+        ok++
+      })
+      return { total: Math.min(3, inputs.length), ok }
+    }, r, String(stock), String(price), single).catch(() => ({ total: 0, ok: 0 }))
+    await sleep(200)
 
-    for (const inp of inputs) {
-      let val = null
-      if (inp.ph === '请输入' || inp.ph === '') {
-        if (inp.i === 0) val = String(stock)      // 库存
-        else if (inp.i === 1) val = String(price) // 拼单价
-        else if (inp.i === 2) val = single        // 单买价
-      }
-      if (!val) continue
-      await page.mouse.click(inp.x, inp.y); await sleep(200)
+    // ② 回读，没生效的格子用真实键盘兜底
+    for (let i = 0; i < setRes.total; i++) {
+      const back = await page.evaluate((ri, ii) => {
+        const trs = [...document.querySelectorAll('#sku table tbody tr')]
+        return trs[ri]?.querySelectorAll('input')[ii]?.value
+      }, r, i).catch(() => '')
+      if (back) { filled++; continue }
+      // 键盘兜底
+      const pos = await page.evaluate((ri, ii) => {
+        const trs = [...document.querySelectorAll('#sku table tbody tr')]
+        const el = trs[ri]?.querySelectorAll('input')[ii]
+        if (!el) return null
+        el.scrollIntoView({ block: 'center' })
+        const r2 = el.getBoundingClientRect()
+        return { x: Math.round(r2.x + r2.width / 2), y: Math.round(r2.y + r2.height / 2) }
+      }, r, i).catch(() => null)
+      if (!pos) continue
+      await sleep(150)
+      const pos2 = await page.evaluate((ri, ii) => {
+        const trs = [...document.querySelectorAll('#sku table tbody tr')]
+        const el = trs[ri]?.querySelectorAll('input')[ii]
+        if (!el) return null
+        const r2 = el.getBoundingClientRect()
+        return { x: Math.round(r2.x + r2.width / 2), y: Math.round(r2.y + r2.height / 2) }
+      }, r, i).catch(() => null)
+      if (!pos2) continue
+      const val = i === 0 ? String(stock) : (i === 1 ? String(price) : single)
+      await page.mouse.click(pos2.x, pos2.y); await sleep(200)
       await page.keyboard.down('Control'); await page.keyboard.press('KeyA'); await page.keyboard.up('Control')
       await page.keyboard.press('Backspace'); await sleep(50)
       await page.keyboard.type(val, { delay: 40 }); await sleep(200)
       await page.keyboard.press('Enter'); await sleep(400)
-      // 回读，React 清了就用 setter 兜底
-      const back = await page.evaluate((ri, ii) => {
-        const trs = [...document.querySelectorAll('#sku table tbody tr')]
-        return trs[ri]?.querySelectorAll('input')[ii]?.value
-      }, r, inp.i)
-      if (!back) {
-        await page.evaluate((ri, ii, v) => {
-          const trs = [...document.querySelectorAll('#sku table tbody tr')]
-          const el = trs[ri]?.querySelectorAll('input')[ii]
-          if (!el) return
-          const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
-          setter.call(el, v)
-          el.dispatchEvent(new Event('input', { bubbles: true }))
-          el.dispatchEvent(new Event('change', { bubbles: true }))
-          el.dispatchEvent(new Event('blur', { bubbles: true }))
-        }, r, inp.i, val)
-        await sleep(200)
-      }
       filled++
     }
   }
