@@ -75,26 +75,30 @@ async function scanDims(page) {
         return ph.includes('自定义') && !ph.includes('排序') && r.y > 0 && r.width > 30
       })
       const cbItems = [...c.querySelectorAll('.package-item-container')]
+      // ★ checkbox 必须有值才算（纸杯「容量」有个空 .package-item-container，
+      //   实际靠「自定义容量」输入框填，不能算 checkbox）
+      const cbWithText = cbItems.filter(it => (it.querySelector('.check-wrapper')?.textContent?.trim() || ''))
       const addCustomBtn = !![...c.querySelectorAll('a, span, button')]
         .find(e => (e.textContent || '').trim() === '添加定制规格' && e.getBoundingClientRect().width > 5)
       dims.push({
         idx: ci,
         dim: title,
-        // ★ 2026-10-27 修正识别优先级：
-        //   有「主色」输入框 → color-input（最高优先）
-        //   有「自定义{维度名}」输入框 → custom-input（次优先，纸杯容量就是这种）
-        //   只有 checkbox 列表 → checkbox（连衣裙尺码这种纯勾选）
-        //   规格类型输入框 → spec-type（新建的维度）
+        // ★ 2026-10-27 识别优先级（实测修正）：
+        //   1. 有「主色」输入框 → color-input
+        //   2. 有 checkbox 列表 → checkbox（预置值勾选；用户值不在列表时用自定义输入框兜底）
+        //      ★ checkbox 必须优先于 custom-input：参考分类既有 checkbox 又有自定义输入框，
+        //        走输入框平台不注册 SKU，走勾选才生成行（实测 4 行 vs 2 行）
+        //   3. 有「自定义」输入框 → custom-input
+        //   4. 规格类型输入框 → spec-type（新建维度）
         type: colorInput ? 'color-input'
-          : (customInputs.length ? 'custom-input'
-            : (cbItems.length ? 'checkbox'
+          : (cbWithText.length ? 'checkbox'
+            : (customInputs.length ? 'custom-input'
               : (c.querySelector('input[placeholder^="规格类型"]') ? 'spec-type' : 'unknown'))),
         colorInputCount: colorInput ? [...c.querySelectorAll('input[placeholder*="主色"]')].length : 0,
         customInputPhs: customInputs.map(e => e.placeholder),
         addCustomBtn,
-        cbCount: cbItems.length,
-        // checkbox 值列表（供调用方判断用户值是否存在）
-        cbTexts: cbItems.map(it => it.querySelector('.check-wrapper')?.textContent?.trim() || ''),
+        cbCount: cbWithText.length,
+        cbTexts: cbWithText.map(it => it.querySelector('.check-wrapper')?.textContent?.trim() || ''),
       })
     })
     const skuTable = root.querySelector('#sku table')
@@ -123,6 +127,51 @@ function matchDim(userDim, dims) {
 }
 
 /* ─────────── ③ 点「添加规格类型」并选维度 ─────────── */
+
+/** 在下拉里选维度（精确 → 包含 → 同类替代） */
+async function pickDimFromDropdown(page, dimName) {
+  return page.evaluate((name) => {
+    const pick = (cands) => {
+      if (!cands.length) return { ok: false, picked: null }
+      const picked = cands[cands.length - 1].textContent.trim()
+      cands[cands.length - 1].click()
+      return { ok: true, picked }
+    }
+    // 精确
+    let cands = [...document.querySelectorAll('li, div, span, a')]
+      .filter(e => (e.textContent || '').trim() === name && e.getBoundingClientRect().y > 300 && e.getBoundingClientRect().width > 10)
+    if (cands.length) return pick(cands)
+    // 包含
+    cands = [...document.querySelectorAll('li, div, span, a')]
+      .filter(e => {
+        const t = (e.textContent || '').trim()
+        const r = e.getBoundingClientRect()
+        return r.y > 300 && r.width > 10 && t.length <= 12 && (t.includes(name) || name.includes(t))
+      })
+    if (cands.length) return pick(cands)
+    // ★ 同类替代（类目可用维度不同：手机壳没有「颜色分类」只有「色号/花型」）
+    const altMap = [
+      [/颜色|色|花色|配色/, ['色号', '花型', '颜色']],
+      [/款式|样式|版型/, ['型号', '款式', '规格', '类别']],
+      [/尺码|尺寸/, ['尺码', '尺寸']],
+      [/容量/, ['容量', '重量', '套餐']],
+      [/口味/, ['口味', '香型', '类别']],
+    ]
+    for (const [re, alts] of altMap) {
+      if (!re.test(name)) continue
+      for (const alt of alts) {
+        const hit = [...document.querySelectorAll('li, div, span, a')].find(e => {
+          const t = (e.textContent || '').trim()
+          const r = e.getBoundingClientRect()
+          return t === alt && r.y > 300 && r.width > 10
+        })
+        if (hit) return pick([hit])
+      }
+    }
+    return { ok: false, picked: null }
+  }, dimName)
+}
+
 async function addDim(page, dimName) {
   // 点「添加规格类型」
   await page.evaluate((sel) => {
@@ -145,52 +194,25 @@ async function addDim(page, dimName) {
   }, SPEC_ROOT)
   if (pos) { await page.mouse.click(pos.x, pos.y); await sleep(2500) }
 
-  // 在下拉里找维度名（下拉选项渲染在 body 上）
-  let ok = await page.evaluate((name) => {
-    let cands = [...document.querySelectorAll('li, div, span, a')]
-      .filter(e => (e.textContent || '').trim() === name && e.getBoundingClientRect().y > 300 && e.getBoundingClientRect().width > 10)
-    if (!cands.length) {
-      cands = [...document.querySelectorAll('li, div, span, a')]
-        .filter(e => {
-          const t = (e.textContent || '').trim()
-          const r = e.getBoundingClientRect()
-          return r.y > 300 && r.width > 10 && t.length <= 12 && (t.includes(name) || name.includes(t))
-        })
-    }
-    if (!cands.length) return false
-    cands[cands.length - 1].click()
-    return true
-  }, dimName)
+  let r = await pickDimFromDropdown(page, dimName)
+  if (r.ok && r.picked && r.picked !== dimName) {
+    console.log(`[dom-fill-spec] 下拉没有「${dimName}」，用了「${r.picked}」`)
+  }
   await sleep(2000)
 
-  // ★ 校验：规格类型输入框是否已选中维度名
+  // ★ 校验：规格类型输入框是否已选中维度名，为空则重试一次
   const val = await page.evaluate((sel) => {
     const root = document.querySelector(sel)
     const inputs = [...root.querySelectorAll('input')]
       .filter(e => (e.placeholder || '').startsWith('规格类型') && e.getBoundingClientRect().y > 0)
     return inputs[inputs.length - 1]?.value?.trim() || ''
   }, SPEC_ROOT)
-  if (!val) {
-    // 下拉没选中 → 再点一次输入框重试
+  if (!val && r.ok) {
     if (pos) { await page.mouse.click(pos.x, pos.y); await sleep(2000) }
-    ok = await page.evaluate((name) => {
-      let cands = [...document.querySelectorAll('li, div, span, a')]
-        .filter(e => (e.textContent || '').trim() === name && e.getBoundingClientRect().y > 300 && e.getBoundingClientRect().width > 10)
-      if (!cands.length) {
-        cands = [...document.querySelectorAll('li, div, span, a')]
-          .filter(e => {
-            const t = (e.textContent || '').trim()
-            const r = e.getBoundingClientRect()
-            return r.y > 300 && r.width > 10 && t.length <= 12 && (t.includes(name) || name.includes(t))
-          })
-      }
-      if (!cands.length) return false
-      cands[cands.length - 1].click()
-      return true
-    }, dimName)
+    r = await pickDimFromDropdown(page, dimName)
     await sleep(2000)
   }
-  return ok
+  return r.ok
 }
 
 /* ─────────── ④ 填颜色输入框（placeholder*="主色"） ─────────── */
@@ -254,6 +276,21 @@ async function fillColorInputs(page, dimIdx, values) {
 async function fillCustomInputs(page, dimIdx, phKeyword, values) {
   const log = []
   for (let i = 0; i < values.length; i++) {
+    // ★ 2026-10-27 实测：新建维度第 2+ 个值必须先点「添加定制规格」补框
+    //   系统自动建的空框填了不生效（SKU 表不生成对应行）
+    //   第一个值填现有第一个空框即可
+    if (i > 0) {
+      await page.evaluate((sel, ci) => {
+        const root = document.querySelector(sel)
+        const cs = [...root.querySelectorAll('.property-container-v2'), ...root.querySelectorAll('.goods-spec-row')]
+        const c = cs[ci]
+        const links = [...c.querySelectorAll('a, span, button')]
+          .filter(e => (e.textContent || '').trim() === '添加定制规格' && e.getBoundingClientRect().width > 5)
+        links[0]?.click()
+      }, SPEC_ROOT, dimIdx)
+      await sleep(1500)
+    }
+
     let pos = await page.evaluate((sel, ci, ph, idx) => {
       const root = document.querySelector(sel)
       const cs = [...root.querySelectorAll('.property-container-v2'), ...root.querySelectorAll('.goods-spec-row')]
@@ -266,7 +303,8 @@ async function fillCustomInputs(page, dimIdx, phKeyword, values) {
       })
       // ★ 兜底：容器内除「规格类型」外的第一个可编辑文本输入框
       //   ★ 收紧：必须排除参考价(大于)/折扣(~)/品牌/产地等非规格输入框
-      //     且只在容器内没有「自定义」输入框时才用（纸杯容量有「自定义容量」就不会走兜底）
+      //     且只在容器内没有「自定义」输入框时才用
+      //   ★ 排除「规格类型」输入框（新建维度的维度名框，填了就覆盖维度名）
       if (!els.length) {
         const fallback = [...c.querySelectorAll('input')].filter(e => {
           const p = e.placeholder || ''
@@ -346,15 +384,12 @@ async function fillCustomInputs(page, dimIdx, phKeyword, values) {
     if (!pos?.x) { log.push({ v: values[i], ok: false }); continue }
 
     // ★ 真实键盘键入（平台只认真实输入事件才注册 spec_id）
-    //   ❌ 不用 JS setter —— setter 写得进值但平台不注册，SKU 行不生成（实测 0/6）
-    //   ❌ 不用 Enter/Tab —— 会触发 React blur 把值清掉
+    //   流程：键入 → 按 Enter 触发平台注册 → 读值 → 被清则重键入
     await page.mouse.click(pos.x, pos.y); await sleep(500)
-    await page.keyboard.type(values[i], { delay: 40 }); await sleep(600)
-    // 点下方空白失焦，触发平台注册
-    await page.mouse.click(pos.x, pos.y + 60)
-    await sleep(600)
+    await page.keyboard.type(values[i], { delay: 40 }); await sleep(400)
+    await page.keyboard.press('Enter'); await sleep(1200)
 
-    const back = await page.evaluate((sel, ci, idx) => {
+    const readVal = () => page.evaluate((sel, ci, idx) => {
       const root = document.querySelector(sel)
       const cs = [...root.querySelectorAll('.property-container-v2'), ...root.querySelectorAll('.goods-spec-row')]
       const c = cs[ci]
@@ -373,9 +408,41 @@ async function fillCustomInputs(page, dimIdx, phKeyword, values) {
       }
       return els[idx]?.value
     }, SPEC_ROOT, dimIdx, i)
+
+    let back = await readVal()
+    if (!back) {
+      // React 清了 → 重键入（不按 Enter，这次只保值）
+      await page.mouse.click(pos.x, pos.y); await sleep(400)
+      await page.keyboard.type(values[i], { delay: 40 }); await sleep(700)
+      back = await readVal()
+    }
     log.push({ v: values[i], ok: !!back })
+
+    // ★ 2026-10-27 实测：新建维度每填一个值，等平台把它提交进 SKU 表
+    //   轮询 SKU 行数，不涨就再按一次 Enter 触发
+    const before = await readSkuRowCount(page)
+    for (let k = 0; k < 6; k++) {
+      await sleep(1000)
+      const now = await readSkuRowCount(page)
+      if (now > before) break
+      if (k === 2 || k === 5) {
+        await page.mouse.click(pos.x, pos.y); await sleep(300)
+        await page.keyboard.press('Enter'); await sleep(1200)
+      }
+    }
   }
   return log
+}
+
+/** 读 SKU 表行数（表头含「拼单价」的那个 table） */
+async function readSkuRowCount(page) {
+  return page.evaluate(() => {
+    for (const tb of document.querySelectorAll('#sku table')) {
+      const heads = [...tb.querySelectorAll('thead th')].map(th => th.textContent.trim())
+      if (heads.some(h => /拼单价|库存/.test(h))) return tb.querySelectorAll('tbody tr').length
+    }
+    return 0
+  }).catch(() => 0)
 }
 
 /* ─────────── ⑥ 勾选 checkbox 值（不在列表则用自定义输入框） ─────────── */
@@ -627,11 +694,22 @@ export async function fillSpecsOnPage(page, specs, defaults = {}) {
   }
 
   // 读 SKU 行数（验证规格是否建成功）
+  // ★ 必须读表头含「拼单价」的那个 table（#sku 内可能有多个 table）
+  const readSkuRows = () => page.evaluate(() => {
+    for (const tb of document.querySelectorAll('#sku table')) {
+      const heads = [...tb.querySelectorAll('thead th')].map(th => th.textContent.trim())
+      if (heads.some(h => /拼单价|库存/.test(h))) {
+        return tb.querySelectorAll('tbody tr').length
+      }
+    }
+    return 0
+  }).catch(() => 0)
+
   let skuRows = 0
-  for (let i = 0; i < 12; i++) {
+  for (let i = 0; i < 20; i++) {
     await sleep(1000)
-    skuRows = await page.evaluate(() => document.querySelectorAll('#sku table tbody tr').length).catch(() => 0)
-    if (skuRows > 0) break
+    skuRows = await readSkuRows()
+    if (skuRows > 1) break
   }
 
   return {
