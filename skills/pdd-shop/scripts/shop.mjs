@@ -32,14 +32,45 @@ const emit = (obj) => { process.stdout.write('__DSAGENT_RESULT__' + JSON.stringi
 
 const mode = argOf('mode') || 'overview'
 const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 20))
-const TRANSPORT = argOf('transport') || 'http'   // ★ 默认纯 Node
+// ★ 2026-10-27 修：goods 模式默认走 browser transport。
+//   原因：http/t3 通道的 PUA 解码用的是 pdd-risksdk.mjs 里的**静态** PUA_MAP，
+//   而拼多多的码点是动态的（本次实测 E573→0，静态表里是 E515→6），
+//   导致 goodsUv/goodsVcr 全部解成空串或 0%。
+//   browser transport 有「DOM 明文优先 + 动态 PUA 映射推导」两重兜底。
+const TRANSPORT = argOf('transport') || (mode === 'goods' ? 'browser' : 'http')
 
 ;(async () => {
   const puppeteer = require('puppeteer-core')
   const { CredentialStore } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/lib/services/credential-store.js`)
   const { checkCooldown, detectSlider, autoSolveSlider, fmtRemain, tryAcquireAccountLock, releaseAccountLock, heartbeatAccountLock, throttleRequest } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-risk.mjs`)
   const store = new CredentialStore(path.join(homedir(), '.dsh', 'dsagent-accounts.json'))
-  const SHOP = argOf('account') || store.findByPlatform('pdd_mms')?.shop_key
+  // ★ 2026-10-27 修：账号解析三级兜底
+  //   ① --account 显式传入 shopKey（最准）
+  //   ② --shop-name 按店铺名模糊匹配（多账号时避免 findByPlatform 选错号）
+  //   ③ findByPlatform 兜底（单账号场景）
+  const resolveShop = () => {
+    const explicit = argOf('account')
+    if (explicit) return explicit
+    const all = store.listAccounts().filter(a => a.platform === 'pdd_mms')
+    const wantName = (argOf('shop-name') || argOf('shopName') || '').trim()
+    if (wantName && all.length) {
+      const hit = all.find(a =>
+        (a.display_label || '').includes(wantName) || wantName.includes(a.display_label || '')
+        || (a.shop_key || '').includes(wantName))
+      if (hit) return hit.shop_key
+      // 没匹配到就报清楚，别静默选错号
+      emit({
+        ok: false, failureKind: 'need_account_choice',
+        text: `未找到店铺名含「${wantName}」的拼多多商家后台账号。可用账号：\n`
+          + all.map(a => `  · ${a.display_label}（${a.shop_key}）`).join('\n')
+          + '\n请用 --account 指定 shopKey，或到「账号连接」页面绑定。',
+        accounts: all.map(a => ({ shop_key: a.shop_key, label: a.display_label })),
+      })
+      process.exit(2)
+    }
+    return store.findByPlatform('pdd_mms')?.shop_key
+  }
+  const SHOP = resolveShop()
   if (!SHOP) { emit({ ok: false, failureKind: 'not_bound', text: '未绑定拼多多商家后台账号，请到「账号连接」添加。' }); process.exit(2) }
 
   // ★ 风控 L4：冷却期内直接拒绝
@@ -83,7 +114,9 @@ const TRANSPORT = argOf('transport') || 'http'   // ★ 默认纯 Node
 
       console.error('[pdd-shop] goods 使用 t3 通道（真签名 + webSpiderRule + CDP Cookie）...')
       const { call: callT3, createSession } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-client.mjs`)
-      const { decodePua } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-risksdk.mjs`)
+      // ★ 2026-10-27 修：用 buildPuaMap 动态推导映射，不再用静态表
+      //   （静态表码点已过期，会把 goodsUv/goodsVcr 解成空串或 0%）
+      const { buildPuaMap, decodePua } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-risksdk.mjs`)
 
       let sess = null
       try {
@@ -117,8 +150,18 @@ const TRANSPORT = argOf('transport') || 'http'   // ★ 默认纯 Node
         }
 
         const rawList = r.json.result?.goodsDetailList || []
-        const isPua = (c) => { const p = c.codePointAt(0); return p >= 0xE000 && p <= 0xF8FF }
-        const dec = (v) => (typeof v === 'string' && [...v].some(isPua)) ? decodePua(v) : v
+        // ★ 2026-10-27 修：先用整表动态推导 PUA 映射，再逐字段解码
+        const pua = buildPuaMap(rawList)
+        const dec = (v) => {
+          if (typeof v !== 'string') return v
+          const cp = v.codePointAt(0)
+          if (cp < 0xE000 || cp > 0xF8FF) return v
+          return decodePua(v, pua.map)
+        }
+        if (pua.coverage.total > 0) {
+          console.error(`[pdd-shop] PUA 映射动态推导：${pua.coverage.agreed}/${pua.coverage.total} 码点`
+            + (pua.conflicts.length ? `，${pua.conflicts.length} 个码点有冲突票` : ''))
+        }
 
         const items = rawList.map(g => ({
           goodsId: g.goodsId,
@@ -144,6 +187,15 @@ const TRANSPORT = argOf('transport') || 'http'   // ★ 默认纯 Node
           },
           cate: [g.cate1Id, g.cate2Id, g.cate3Id].filter(Boolean),
           status: g.goodsStatus,
+          // ★ 2026-10-27 补：行业对比字段（三级类目基准）
+          //   cate3AvgGoodsVcr = 三级类目平均转化率（本店判「高于行业均值」的基准）
+          //   cate3IsPgvAbove = 平台标记是否高于同级类目（综合算法，非纯转化率）
+          industry: {
+            cate3AvgVcr: dec(g.cate3AvgGoodsVcr),
+            cate3PctVcr: dec(g.cate3PctGoodsVcr),
+            isAboveFlag: g.cate3IsPgvAbove,
+            vcrRised: g.goodsVcrRised,
+          },
         }))
 
         const tot = items.reduce((s, x) => ({
@@ -183,6 +235,41 @@ const TRANSPORT = argOf('transport') || 'http'   // ★ 默认纯 Node
         if (!hasCur) {
           L.push('')
           L.push('ℹ️ 当前值字段为空（今日数据未生成），已自动改用「上期值」')
+        }
+
+        // ★ 2026-10-27 补：行业均值对比段
+        //   判据：本店转化率数值 > 三级类目平均转化率（cate3AvgGoodsVcr）
+        const n = (v) => { const s = String(v ?? '').replace(/[^\d.\-]/g, ''); return s === '' ? null : Number(s) }
+        const withInd = items.filter(x => x.industry?.cate3AvgVcr != null)
+        const avgSample = withInd.map(x => n(x.industry.cate3AvgVcr)).filter(v => v != null)
+        const avgVcr = avgSample.length ? Math.max(...avgSample) : null
+        const curVcr = (x) => n(x.cur.vcr) ?? n(x.prev.vcr) ?? x.prev.vcrCalc ?? null
+        const above = withInd.filter(x => { const v = curVcr(x); return v != null && avgVcr != null && v > avgVcr })
+        if (avgVcr != null) {
+          L.push('')
+          L.push(`★ 行业均值对比（三级类目平均转化率 ${avgVcr}%）：`)
+          if (above.length) {
+            for (const x of above.sort((a, b) => curVcr(b) - curVcr(a))) {
+              const v = curVcr(x)
+              const lead = avgVcr > 0 ? ((v / avgVcr - 1) * 100).toFixed(0) : '?'
+              L.push(`  [${x.goodsId}] ${String(x.name || '').slice(0, 26)}｜转化率 ${v}%｜高出 ${lead}%`
+                + `｜访客 ${x.cur.uv ?? x.prev.uv ?? '—'}｜订单 ${x.cur.payCnt ?? x.prev.payCnt ?? '—'}`
+                + `｜金额 ¥${x.cur.payAmt ?? x.prev.payAmt ?? '—'}`
+                + (x.industry.isAboveFlag === 1 ? '｜平台标记:高于同级' : ''))
+            }
+            L.push(`  → 共 ${above.length} 个宝贝转化率高于行业均值`)
+          } else {
+            L.push('  （无转化率高于行业均值的宝贝）')
+          }
+          const flagOnly = withInd.filter(x => x.industry.isAboveFlag === 1 && !above.includes(x))
+          if (flagOnly.length) {
+            L.push('')
+            L.push(`ℹ️ 另有 ${flagOnly.length} 个被平台标记「高于同级类目」但转化率数值未超均值`
+              + '（该标记为综合算法，含成交额/UV 等多维，非纯转化率比对）：')
+            for (const x of flagOnly) {
+              L.push(`    [${x.goodsId}] ${String(x.name || '').slice(0, 24)}｜转化率 ${curVcr(x) ?? '—'}%｜均值 ${avgVcr}%`)
+            }
+          }
         }
         out.text = L.join('\n')
 
@@ -453,29 +540,38 @@ const TRANSPORT = argOf('transport') || 'http'   // ★ 默认纯 Node
   const mallLevel = byApi.mallLevel || null
 
   // ══════════════════════════════════════════════════════════════════════
-  // ★★★ DOM 明文优先（2026-10-23 新增）★★★
-  //
-  // 为什么需要：sycm 用 PUA 字符混淆数字，但实测发现**映射不是全局固定的**
-  //   —— 同一码点在不同字段代表不同数字（"每个字段独立偏移"）。
-  //   证据：cate3AvgGoodsVcr 的 U+E6EA 对应 0，但 goodsVcr 的 U+E6EA 对应 1。
-  //
-  // 既然页面能正常显示 26.07% / 124 这些明文（前端解过码），
-  // 最可靠的办法是**直接读 DOM 渲染出来的数字**，而不是自己逆向 PUA。
-  //
-  // 策略：DOM 优先（真实值）→ 接口 PUA 解码兜底（近似值）
   // ══════════════════════════════════════════════════════════════════════
-  let domGoods = []
-  if (mode === 'goods' || mode === 'overview') {
+  // DOM 明文抓取（2026-10-23 新增，2026-10-27 改为默认关闭）
+  //
+  // 历史背景：原设计认为 PUA 映射「每个字段独立偏移」不可全局推导，
+  //            所以改从 DOM 读前端渲染出的明文数字。
+  //
+  // 2026-10-27 推翻该前提：实测 PUA 映射是**响应级全局统一**的，
+  //   用 <X> <-> <X>Ppr 等长对齐 + 投票取众数可 10/10 全覆盖，
+  //   且与明文字段交叉验证完全一致（goodsUv 解码值 == goodsUvPpr，10/10 条命中）。
+  //
+  // 同时发现 DOM 方案有两个硬伤：
+  //   1) sycm goods_effect 是 div 布局，div 抓取只能拿到「商品名+ID」的
+  //      整行文本，无法分列 -> domNum 模糊匹配会把别的字段/别的行的值
+  //      错配到商品上（实测 uv 67 被覆盖成 77）。
+  //   2) querySelectorAll('div,span') 全页遍历极慢，会把整个 evaluate 拖死，
+  //      连 API hook 都收不到响应（表现为「接口未返回」）。
+  //
+  // -> 默认完全跳过 DOM 抓取，数据一律用接口 PUA 动态解码。
+  //    确需启用时传 --dom-first（仅 table 方案；拿不到分列表头则自动回落）。
+  // ══════════════════════════════════════════════════════════════════════
+  const DOM_FIRST = process.argv.includes('--dom-first')
+  let domGoods = { headers: [], rows: [], via: 'skipped' }
+  if (DOM_FIRST && (mode === 'goods' || mode === 'overview')) {
     domGoods = await safeEval(() => {
-      // sycm 的商品表格可能是 div 布局（不是 table），两种都试
+      // 只做 table 方案（div 方案已证实不可靠且会拖死页面）
       const out = []
       let headers = []
-
-      // ── 方案 1：标准 table ──
       for (const tb of document.querySelectorAll('table')) {
         const headText = (tb.querySelector('thead')?.innerText || '').slice(0, 400)
         if (!/曝光|访客|浏览量|支付|商品/.test(headText)) continue
         headers = Array.from(tb.querySelectorAll('thead th')).map(th => (th.innerText || '').trim().replace(/\s+/g, ''))
+        if (headers.length < 4) continue          // 表头不完整则跳过，防错配
         for (const tr of tb.querySelectorAll('tbody tr')) {
           const tds = Array.from(tr.querySelectorAll('td'))
           if (tds.length < 3) continue
@@ -487,118 +583,46 @@ const TRANSPORT = argOf('transport') || 'http'   // ★ 默认纯 Node
         }
         if (out.length) return { headers, rows: out, via: 'table' }
       }
-
-      // ── 方案 2：div 布局（找「行」容器：含商品ID 且 含多个数字单元）──
-      // 思路：先找所有含 11-14 位商品ID 的元素，再往上找共同父级，读其文本
-      const idNodes = []
-      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT)
-      while (walker.nextNode()) {
-        const t = walker.currentNode.nodeValue || ''
-        const m = t.match(/\b(\d{11,14})\b/)
-        if (m) {
-          let el = walker.currentNode.parentElement
-          for (let i = 0; i < 6 && el; i++) {
-            // 找到含足够多数字的祖先（一行数据）
-            const txt = (el.innerText || '').replace(/\s+/g, ' ')
-            if (txt.length > 30 && (txt.match(/\d/g) || []).length > 8) { idNodes.push({ el, gid: m[1], txt }); break }
-            el = el.parentElement
-          }
-        }
-      }
-      if (idNodes.length) {
-        // 用第一个元素的文本推断列（按 空格/tab 切）
-        return { headers: [], rows: idNodes.map(x => ({ __goodsId: x.gid, __raw: x.txt })), via: 'div' }
-      }
-
-      // ── 方案 3：整页文本（最后兜底，让 Node 侧解析）──
-      const bodyTxt = (document.body?.innerText || '').slice(0, 20000)
-      return { headers: [], rows: [], via: 'text', bodyText: bodyTxt }
+      return { headers: [], rows: [], via: 'none' }
     }).catch(() => ({ headers: [], rows: [], via: 'error' }))
-    console.error(`[pdd-shop] DOM 抓取：via=${domGoods?.via} rows=${domGoods?.rows?.length || 0} headers=${domGoods?.headers?.length || 0}`)
-    if (domGoods?.rows?.length) {
-      console.error(`[pdd-shop] DOM 明文读取成功（${domGoods.via}）：${domGoods.rows.length} 行`)
-      if (domGoods.headers?.length) console.error(`  表头: ${domGoods.headers.slice(0, 12).join(' | ')}`)
-      console.error(`  首行: ${JSON.stringify(domGoods.rows[0]).slice(0, 300)}`)
-    } else if (domGoods?.bodyText) {
-      // 存整页文本供分析
-      console.error(`[pdd-shop] DOM 未读到结构化行，但拿到整页文本 ${domGoods.bodyText.length} 字`)
-      try { fs.writeFileSync(path.join(process.cwd(), 'artifacts', 'pdd-shop-page.txt'), domGoods.bodyText, 'utf8') } catch { /* ignore */ }
-    }
+    console.error(`[pdd-shop] DOM 抓取（--dom-first）：via=${domGoods?.via} rows=${domGoods?.rows?.length || 0} headers=${domGoods?.headers?.length || 0}`)
+  } else {
+    console.error('[pdd-shop] DOM 抓取已跳过（默认；PUA 动态解码已验证 10/10 覆盖）。需要时加 --dom-first')
   }
 
   // ── PUA 数字混淆解码器 ──────────────────────────────────────────
   // 拼多多 sycm 对数字字段用 PUA 私用区字符（U+E000~U+F8FF）混淆反采集，
-  // 且码点每次动态变化。但同一响应里 `*Ppr` 字段是明文的「较上周期差值」，
-  // 与被混淆字段等长同构 —— 用 (字段, 字段Ppr) 逐字符对齐反推映射。
+  // 且码点是**动态**的（不是全局固定）。
   //
-  // ★ 2026-10-23：保留原 12 组 PAIRS 为主（实测该批字段覆盖最可靠），
-  //   额外加「同名前缀扫描」补漏：凡 <X>Ppr 明文字段存在且与 <X> 等长，
-  //   都参与对齐（不限 12 组）。不做跨语义交叉（Ytd↔base 会引入错票）。
-  const PUASET_RE = /[\uE000-\uF8FF]/
-  const PAIRS = [
-    ['goodsUv', 'goodsUvPpr'], ['goodsPv', 'goodsPvPpr'], ['payOrdrCnt', 'payOrdrCntPpr'],
-    ['goodsFavCnt', 'goodsFavCntPpr'], ['payOrdrAmt', 'payOrdrAmtPpr'], ['cfmOrdrCnt', 'cfmOrdrCntPpr'],
-    ['imprUsrCnt', 'imprUsrCntPpr'], ['ordrCrtUsrCnt', 'ordrCrtUsrCntPpr'], ['cnsltUsrQty', 'cnsltUsrQtyPpr'],
-    ['payOrdrGoodsQty', 'payOrdrGoodsQtyPpr'], ['payOrdrUsrCnt', 'payOrdrUsrCntPpr'], ['cfmOrdrGoodsQty', 'cfmOrdrGoodsQtyPpr'],
-  ]
-  /**
-   * 构建 PUA 映射。
-   * @param list goodsDetailList
-   * @returns { map, coverage }
-   */
-  const buildPuaMap = (list) => {
-    const map = {}
-    const bump = (pc, ch) => {
-      if (pc < 0xE000 || pc > 0xF8FF) return
-      if (!ch || !/\S/.test(ch)) return          // ★ 挡空格/空串
-      if (!(pc in map)) map[pc] = ch
-    }
-    const addPair = (pua, plain) => {
-      if (!pua || !plain || pua.length !== plain.length) return
-      for (let i = 0; i < pua.length; i++) {
-        const pc = pua.codePointAt(i)
-        if (pc >= 0xE000 && pc <= 0xF8FF) bump(pc, plain[i])
-      }
-    }
-    // ① 12 组核心 PAIRS（先建立最可靠的映射）
-    for (const g of list) {
-      for (const [f, pf] of PAIRS) addPair(String(g[f] ?? ''), String(g[pf] ?? ''))
-    }
-    // ② 补漏：同名前缀 <X> ↔ <X>Ppr 等长对齐（如 goodsPtHelpRate、ordrVstrRto）
-    for (const g of list) {
-      for (const k of Object.keys(g)) {
-        if (!k.endsWith('Ppr')) continue
-        const base = k.slice(0, -3)
-        const bv = g[base]
-        if (typeof bv === 'string' && PUASET_RE.test(bv)) addPair(bv, String(g[k] ?? ''))
-      }
-    }
-    return { map, coverage: { total: Object.keys(map).length } }
-  }
-  const decodePua = (val, map) => {
-    if (val == null) return val
-    const s = String(val)
-    if (!PUASET_RE.test(s)) return s            // 明文，原样返回
-    let out = ''
-    for (const c of s) {
-      const p = c.codePointAt(0)
-      out += (p >= 0xE000 && p <= 0xF8FF) ? (map[p] ?? c) : c
-    }
-    return out
-  }
+  // ★ 2026-10-27 修：改用共享模块 buildPuaMap（投票取众数），
+  //   替换本文件原有的局部实现（首次出现即锁定，会漏码点/被错票带偏）。
+  //   推导依据：同一响应里 <X>Ppr 是明文的较上周期值，与 <X> 等长同构。
+  const { buildPuaMap, decodePua } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-risksdk.mjs`)
 
   const pua = buildPuaMap(gList)
   const map = pua.map
-  // ★ DOM 明文索引（按 goodsId），用于覆盖 PUA 解码结果
+  // ★ DOM 明文索引（按 goodsId）
+  //
+  // ★ 2026-10-27 修：默认**不启用** DOM 覆盖。
+  //   原因：sycm goods_effect 页是 div 布局，DOM 抓取只能拿到
+  //   「商品名 + ID」的整行文本（headers 为空、无分列数字），
+  //   domNum 的模糊匹配会从 __raw 里抓到**别的字段/别的行**的数字，
+  //   造成 uv/payAmt 与接口 PUA 解码值不一致（实测 uv 67 被覆盖成 77）。
+  //   PUA 动态映射已验证 10/10 覆盖且解码正确，所以直接用接口值。
+  //   需要启用时传 --dom-first，且仅当 headers 非空（真拿到分列表头）才覆盖。
+  const domUsable = DOM_FIRST && Array.isArray(domGoods?.headers) && domGoods.headers.length >= 3
   const domById = new Map()
   for (const r of (domGoods?.rows || [])) {
     if (r.__goodsId) domById.set(String(r.__goodsId), r)
+  }
+  if (domGoods?.rows?.length && !domUsable) {
+    console.error(`[pdd-shop] DOM 行数=${domGoods.rows.length} 但表头为空/不足，已跳过 DOM 覆盖（用接口 PUA 解码值）；需要强制启用加 --dom-first`)
   }
   /** 从 DOM 行里按「表头关键词」取数字（表头名各账号略有差异，用模糊匹配） */
   const domNum = (rec, kws) => {
     if (!rec) return null
     for (const [k, v] of Object.entries(rec)) {
-      if (k === '__goodsId') continue
+      if (k === '__goodsId' || k === '__raw') continue   // ★ 排除整行文本，防错配
       if (kws.some(kw => k.includes(kw))) {
         // 去掉 % , 空格，取数字
         const m = String(v).replace(/[,%\s]/g, '').match(/-?\d+(\.\d+)?/)
@@ -610,9 +634,10 @@ const TRANSPORT = argOf('transport') || 'http'   // ★ 默认纯 Node
   const goodsItems = gList.slice(0, limit).map(g => {
     // 先用整表推映射，再逐字段解码（映射对该响应全局有效）
     const d = (v) => decodePua(v, map)
-    const dom = domById.get(String(g.goodsId))
-    // ★ DOM 明文优先；取不到才用 PUA 解码
+    const dom = domUsable ? domById.get(String(g.goodsId)) : null
+    // ★ DOM 明文优先（仅 --dom-first 且表头完整时）；否则一律用 PUA 解码
     const pick = (kws, puaVal) => {
+      if (!dom) return puaVal
       const dv = domNum(dom, kws)
       return dv != null ? dv : puaVal
     }
@@ -653,8 +678,41 @@ const TRANSPORT = argOf('transport') || 'http'   // ★ 默认纯 Node
       cate3AvgVcr: d(g.cate3AvgGoodsVcr),
       goodsStatus: g.goodsStatus,
       cate1Id: g.cate1Id, cate2Id: g.cate2Id, cate3Id: g.cate3Id,
+      // ★ 2026-10-27 补：行业对比（与 t3 分支同构）
+      industry: {
+        cate3AvgVcr: d(g.cate3AvgGoodsVcr),
+        cate3PctVcr: d(g.cate3PctGoodsVcr),
+        isAboveFlag: g.cate3IsPgvAbove,
+        vcrRised: g.goodsVcrRised,
+      },
     }
   })
+
+  // ══════════════════════════════════════════════════════════════════════
+  // ★ 2026-10-27 结论：自然曝光量 sycm 拿不到（不是解码问题）
+  //
+  //   核查了 4 次历史抓包存档，imprUsrCnt 全是单个 PUA 字符（=0），
+  //   imprUsrCntDetail 全部 false：
+  //     · sycm-goods-scan.json   10-22  7 个商品  0/7  非零
+  //     · goods-detail-raw.json  10-23  10 个商品 0/10 非零
+  //     · goods-raw.json         10-27  31 个商品 0/31 非零
+  //     · hunt-...ForMMS.json    10-27  10 个商品 0/10 非零
+  //
+  //   同一次响应里 goodsUv/goodsVcr/payOrdrAmt 全部正常解出（映射 10/10 覆盖），
+  //   所以**不是 PUA 解码失败**，是接口本身不返回自然曝光值。
+  //   imprUsrCntDetail=false 即「该商品未开放曝光明细」——拼多多按店铺等级
+  //   开放 sycm 数据模块，本店没开到曝光层。
+  //
+  //   另扫过 sycm 全部 7 个页面（goods_effect / stores_data / evaluation /
+  //   search_data / fans / goods_quality×2）共 20+ 接口，无任何自然曝光来源。
+  //
+  //   → 自然端只有店铺级 uv/pv/成交（mallFlow），无曝光无点击。
+  //   → **曝光量和点击率请用 pdd-promo 技能**（poseidon 广告口径），
+  //     那边 impression/click/ctr 都是真值，与 sycm 权限无关。
+  //
+  //   ⚠️ 历史脚本 nature_vs_paid_ctr.mjs / dual_ctr.mjs 里写的
+  //      「imprUsrCnt PUA 解不出」是错误归因，真实原因就是没权限。
+  // ══════════════════════════════════════════════════════════════════════
 
   // ══════════════════════════════════════════════════════════════════════
   // ★ 派生指标（真实点击率等）—— 只有拿到 DOM 明文曝光时才算得准
@@ -712,7 +770,16 @@ const TRANSPORT = argOf('transport') || 'http'   // ★ 默认纯 Node
     out.items = goodsItems
     if (mode === 'goods') {
       out.puaCoverage = pua.coverage
-      out.text = goodsItems.length
+      // ★ 2026-10-27 补：行业均值对比段（转化率 > 三级类目均值）
+      const n = (v) => { const s = String(v ?? '').replace(/[^\d.\-]/g, ''); return s === '' ? null : Number(s) }
+      const withInd = goodsItems.filter(x => n(x.industry?.cate3AvgVcr) != null)
+      const avgVals = withInd.map(x => n(x.industry.cate3AvgVcr))
+      const avgVcr = avgVals.length ? Math.max(...avgVals) : null
+      const curVcr = (x) => n(x.vcr)
+      const above = withInd.filter(x => { const v = curVcr(x); return v != null && avgVcr != null && v > avgVcr })
+      out.industry = { avgVcr, aboveCount: above.length, aboveIds: above.map(x => x.goodsId) }
+
+      let txt = goodsItems.length
         ? `商品数据明细（${goodsItems.length} 个商品，${goodsItems[0]?.date || '今日'}；PUA 解码覆盖 ${pua.coverage.agreed}/${pua.coverage.total} 码点）：\n` + goodsItems.map((g, i) =>
             `  ${i + 1}. [${g.goodsId}] ${String(g.name).slice(0, 24)}`
             + `\n     ★曝光访客=${g.imprUsrCnt ?? '—'}（昨日 ${g.imprUsrCntYtd ?? '—'}）`
@@ -723,6 +790,31 @@ const TRANSPORT = argOf('transport') || 'http'   // ★ 默认纯 Node
             + (g.ordrVstrRto ? ` 下单访客率=${g.ordrVstrRto}` : '')
           ).join('\n')
         : '商品数据：暂无明细（接口未返回或页面未加载完）'
+
+      if (avgVcr != null) {
+        txt += `\n\n★ 行业均值对比（三级类目平均转化率 ${avgVcr}%）：`
+        if (above.length) {
+          for (const x of above.sort((a, b) => curVcr(b) - curVcr(a))) {
+            const v = curVcr(x)
+            const lead = avgVcr > 0 ? ((v / avgVcr - 1) * 100).toFixed(0) : '?'
+            txt += `\n  [${x.goodsId}] ${String(x.name || '').slice(0, 26)}｜转化率 ${v}%｜高出 ${lead}%`
+              + `｜访客 ${x.uv ?? '—'}｜订单 ${x.payCnt ?? '—'}｜金额 ¥${x.payAmt ?? '—'}`
+              + (x.industry.isAboveFlag === 1 ? '｜平台标记:高于同级' : '')
+          }
+          txt += `\n  → 共 ${above.length} 个宝贝转化率高于行业均值`
+        } else {
+          txt += '\n  （无转化率高于行业均值的宝贝）'
+        }
+        const flagOnly = withInd.filter(x => x.industry.isAboveFlag === 1 && !above.includes(x))
+        if (flagOnly.length) {
+          txt += `\n\nℹ️ 另有 ${flagOnly.length} 个被平台标记「高于同级类目」但转化率数值未超均值`
+            + '（该标记为综合算法，含成交额/UV 等多维，非纯转化率比对）：'
+          for (const x of flagOnly) {
+            txt += `\n    [${x.goodsId}] ${String(x.name || '').slice(0, 24)}｜转化率 ${curVcr(x) ?? '—'}%｜均值 ${avgVcr}%`
+          }
+        }
+      }
+      out.text = txt
     }
   }
 
