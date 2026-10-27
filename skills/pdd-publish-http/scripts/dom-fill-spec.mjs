@@ -491,7 +491,7 @@ async function checkBoxes(page, dimIdx, values) {
 
     if (hit.found) { log.push({ v, ok: true, via: 'checkbox', txt: hit.txt }); await sleep(300); continue }
 
-    // checkbox 没有 → 用自定义输入框（placeholder 含"自定义"）
+    // checkbox 没有 → 填自定义输入框 → 等平台在 checkbox 列表新增 → 勾选它
     const customOk = await page.evaluate((sel, ci, val) => {
       const root = document.querySelector(sel)
       const c = [...root.querySelectorAll('.property-container-v2'), ...root.querySelectorAll('.goods-spec-row')][ci]
@@ -507,15 +507,31 @@ async function checkBoxes(page, dimIdx, values) {
       setter.call(inp, val)
       inp.dispatchEvent(new Event('input', { bubbles: true }))
       inp.dispatchEvent(new Event('change', { bubbles: true }))
-      inp.dispatchEvent(new Event('keydown', { bubbles: true, key: 'Enter' }))
-      inp.dispatchEvent(new Event('keyup', { bubbles: true, key: 'Enter' }))
       inp.blur()
       return true
     }, SPEC_ROOT, dimIdx, v)
 
-    if (customOk) { log.push({ v, ok: true, via: 'custom-input' }); await sleep(800); continue }
-
-    log.push({ v, ok: false, via: 'none' })
+    if (customOk) {
+      await sleep(1500)
+      // ★ 等平台在 checkbox 列表新增这个值，然后勾选它
+      const checkNew = await page.evaluate((sel, ci, val) => {
+        const root = document.querySelector(sel)
+        const c = [...root.querySelectorAll('.property-container-v2'), ...root.querySelectorAll('.goods-spec-row')][ci]
+        if (!c) return false
+        for (const item of c.querySelectorAll('.package-item-container')) {
+          const txt = item.querySelector('.check-wrapper')?.textContent?.trim() || ''
+          if (txt === val || txt === val.replace(/(cm|厘米|ml|mL|L|l|g|kg|G|KG)$/i, '').trim()) {
+            const cb = item.querySelector('input[type="checkbox"]')
+            if (cb && !cb.checked) item.querySelector('label')?.click()
+            return true
+          }
+        }
+        return false
+      }, SPEC_ROOT, dimIdx, v)
+      log.push({ v, ok: checkNew, via: 'custom-input' + (checkNew ? '+勾选' : '') })
+    } else {
+      log.push({ v, ok: false, via: 'none' })
+    }
     await sleep(300)
   }
   return log
