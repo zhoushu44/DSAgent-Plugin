@@ -27,6 +27,8 @@
  *   C. 单维（只有 1 个维度）
  */
 
+import * as fs from 'node:fs'
+
 const SPEC_ROOT = '#goods-spec-sku'
 const SKU_TABLE = '#sku table'
 const sleep = (ms) => new Promise(r => setTimeout(r, ms))
@@ -645,6 +647,95 @@ async function disableSizeChart(page) {
   return true
 }
 
+/* ─────────── ⑩ 填 SKU 预览图（每行的 file input） ─────────── */
+async function fillSkuThumbs(page, thumbMap) {
+  if (!thumbMap || !Object.keys(thumbMap).length) return { filled: 0, total: 0 }
+
+  // 读所有行（规格值文本 + 预览图列状态）
+  const rows = await page.evaluate(() => {
+    const out = []
+    for (const tb of document.querySelectorAll('#sku table')) {
+      const heads = [...tb.querySelectorAll('thead th')].map(th => th.textContent.trim())
+      if (!heads.some(h => /拼单价/.test(h))) continue
+      const thumbIdx = heads.findIndex(h => /预览图/.test(h))
+      const trs = [...tb.querySelectorAll('tbody tr')]
+      trs.forEach((tr, ri) => {
+        const tds = [...tr.querySelectorAll('td')]
+        const specTd = tds[0]
+        const specText = specTd?.textContent?.trim() || ''
+        const thumbTd = thumbIdx >= 0 ? tds[thumbIdx] : null
+        const thumbText = thumbTd?.textContent?.trim() || ''
+        // ★ 上传成功后「本地上传」文字消失（无 img 元素），以此判断是否已传
+        const done = thumbIdx >= 0 && !/本地上传/.test(thumbText)
+        out.push({ row: ri, specText: specText.slice(0, 40), done, hasFile: !!thumbTd?.querySelector('input[type="file"]') })
+      })
+      break
+    }
+    return out
+  })
+  if (!rows.length) return { filled: 0, total: 0 }
+
+  let filled = 0
+  // ★ 两轮：先传一轮，等 3 秒复查，没传掉的补传（上传异步，首轮可能漏）
+  for (let round = 0; round < 2; round++) {
+    const cur = await page.evaluate(() => {
+      const out = []
+      for (const tb of document.querySelectorAll('#sku table')) {
+        const heads = [...tb.querySelectorAll('thead th')].map(th => th.textContent.trim())
+        if (!heads.some(h => /拼单价/.test(h))) continue
+        const thumbIdx = heads.findIndex(h => /预览图/.test(h))
+        const trs = [...tb.querySelectorAll('tbody tr')]
+        trs.forEach((tr, ri) => {
+          const tds = [...tr.querySelectorAll('td')]
+          const specText = tds[0]?.textContent?.trim() || ''
+          const thumbTd = thumbIdx >= 0 ? tds[thumbIdx] : null
+          const thumbText = thumbTd?.textContent?.trim() || ''
+          const done = thumbIdx >= 0 && !/本地上传/.test(thumbText)
+          out.push({ row: ri, specText: specText.slice(0, 40), done })
+        })
+        break
+      }
+      return out
+    })
+    const pending = cur.filter(r => !r.done)
+    if (!pending.length) break
+    if (round === 1) log(`  ${pending.length} 行仍未传掉`)
+
+    for (const r of pending) {
+      const key = Object.keys(thumbMap).find(k => r.specText.includes(k))
+      if (!key) continue
+      const imgPath = thumbMap[key]
+      if (!imgPath || !fs.existsSync(imgPath)) continue
+
+      await page.evaluate(ri => {
+        const trs = [...document.querySelectorAll('#sku table tbody tr')]
+        trs[ri]?.scrollIntoView({ block: 'center' })
+      }, r.row)
+      await sleep(300)
+
+      const fileHandle = await page.evaluateHandle(ri => {
+        const trs = [...document.querySelectorAll('#sku table tbody tr')]
+        const tr = trs[ri]
+        if (!tr) return null
+        const heads = [...document.querySelectorAll('#sku table thead th')].map(th => th.textContent.trim())
+        const thumbIdx = heads.findIndex(h => /预览图/.test(h))
+        const tds = [...tr.querySelectorAll('td')]
+        const td = thumbIdx >= 0 ? tds[thumbIdx] : null
+        return td?.querySelector('input[type="file"]') || null
+      }, r.row).catch(() => null)
+
+      const el = fileHandle?.asElement?.()
+      if (el) {
+        await el.uploadFile(imgPath).catch(() => {})
+        filled++
+        await sleep(3500)  // 等上传完成
+      }
+    }
+    await sleep(2000)
+  }
+  return { filled, total: rows.length }
+}
+
 /* ─────────── 主入口 ─────────── */
 export async function fillSpecsOnPage(page, specs, defaults = {}) {
   const log = (...a) => console.log('[dom-fill-spec] ' + new Date().toTimeString().slice(0, 8) + ' ' + a.join(' '))
@@ -804,6 +895,13 @@ export async function fillSpecsOnPage(page, specs, defaults = {}) {
     await sleep(1000)
     skuRows = await readSkuRows()
     if (skuRows > 1) break
+  }
+
+  // ★ 填 SKU 预览图（不传 → 平台报「请上传第1行规格的预览图」拦提交）
+  if (defaults.thumbMap && Object.keys(defaults.thumbMap).length) {
+    log('填 SKU 预览图…')
+    const thumbRes = await fillSkuThumbs(page, defaults.thumbMap)
+    log(`  预览图: ${thumbRes.filled}/${thumbRes.total} 行`)
   }
 
   return {

@@ -201,20 +201,30 @@ try {
       }))
       .filter(d => d.values.length)
     if (domSpecs.length) {
+      // ★ 构建预览图映射：规格值 → 本地图片路径（从商品 JSON 的 specs[].values[].image）
+      const thumbMap = {}
+      for (const d of (parsed.specs || [])) {
+        for (const v of (d.values || [])) {
+          const val = (v && typeof v === 'object') ? String(v.value ?? '').trim() : String(v ?? '').trim()
+          const img = (v && typeof v === 'object') ? v.image : null
+          if (val && img && typeof img === 'string' && fs.existsSync(img)) thumbMap[val] = img
+        }
+      }
       extra.domFillSpecs = async (page) => {
         console.log('[pdd-publish-http] DOM 填规格开始')
         const result = await fillSpecsOnPage(page, domSpecs, {
           price: parsed.price || '29.9',
           stock: parsed.stock || '999',
-          // ★ 价格/库存/参考价交给模式2改包注入，DOM 只负责建规格
           fillPriceTable: false,
           fillRefPrice: false,
+          thumbMap,
         })
         console.log('[pdd-publish-http] DOM 填规格结果: ' + result.message)
         return result
       }
       console.log('[pdd-publish-http] DOM 填规格已挂载: ' + domSpecs.length + ' 维度 → ' +
-        domSpecs.map(d => d.name + '(' + d.values.length + ')').join(', ') + '（价格由改包注入）')
+        domSpecs.map(d => d.name + '(' + d.values.length + ')').join(', ') +
+        (Object.keys(thumbMap).length ? '，预览图 ' + Object.keys(thumbMap).length + ' 个' : '（无预览图）'))
     }
   } catch (e) {
     console.log('[pdd-publish-http] 规格解析异常（继续）：' + (e?.message || e))
