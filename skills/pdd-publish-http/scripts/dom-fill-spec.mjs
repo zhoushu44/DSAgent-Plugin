@@ -264,23 +264,51 @@ async function fillCustomInputs(page, dimIdx, phKeyword, values) {
         const r = e.getBoundingClientRect()
         return p.includes('自定义') && !p.includes('排序') && r.y > 0 && r.width > 30
       })
-      // ★ 兜底：宽松匹配 —— 容器内除「规格类型」外的第一个可编辑文本输入框
-      if (!els.length || els.length <= idx) {
+      // ★ 兜底：容器内除「规格类型」外的第一个可编辑文本输入框
+      //   ★ 收紧：必须排除参考价(大于)/折扣(~)/品牌/产地等非规格输入框
+      //     且只在容器内没有「自定义」输入框时才用（纸杯容量有「自定义容量」就不会走兜底）
+      if (!els.length) {
         const fallback = [...c.querySelectorAll('input')].filter(e => {
           const p = e.placeholder || ''
           const r = e.getBoundingClientRect()
           return r.y > 0 && r.width > 30
             && !p.startsWith('规格类型')
-            && !/请输入品牌|请选择|大于|~/.test(p)
+            && !/请输入品牌|请选择|大于|~|备注/.test(p)
             && (e.type === 'text' || !e.type)
         })
-        if (fallback.length > els.length) els = fallback
+        if (fallback.length) els = fallback
       }
       if (els.length <= idx) return { needAdd: true }
       els[idx].scrollIntoView({ block: 'center' })
-      const r = els[idx].getBoundingClientRect()
-      return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }
+      // ★ 返回标记，由外部等滚动完成后再取坐标（scrollIntoView 是异步的）
+      return { scrollOnly: true }
     }, SPEC_ROOT, dimIdx, phKeyword, i)
+
+    if (pos?.scrollOnly) {
+      await sleep(400)
+      pos = await page.evaluate((sel, ci, ph, idx) => {
+        const root = document.querySelector(sel)
+        const cs = [...root.querySelectorAll('.property-container-v2'), ...root.querySelectorAll('.goods-spec-row')]
+        const c = cs[ci]
+        if (!c) return null
+        let els = [...c.querySelectorAll('input')].filter(e => {
+          const p = e.placeholder || ''
+          const r = e.getBoundingClientRect()
+          return p.includes('自定义') && !p.includes('排序') && r.y > 0 && r.width > 30
+        })
+        if (!els.length) {
+          els = [...c.querySelectorAll('input')].filter(e => {
+            const p = e.placeholder || ''
+            const r = e.getBoundingClientRect()
+            return r.y > 0 && r.width > 30 && !p.startsWith('规格类型')
+              && !/请输入品牌|请选择|大于|~|备注/.test(p) && (e.type === 'text' || !e.type)
+          })
+        }
+        if (els.length <= idx) return null
+        const r = els[idx].getBoundingClientRect()
+        return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }
+      }, SPEC_ROOT, dimIdx, phKeyword, i)
+    }
 
     if (pos?.needAdd) {
       await page.evaluate((sel, ci) => {
@@ -317,15 +345,16 @@ async function fillCustomInputs(page, dimIdx, phKeyword, values) {
     }
     if (!pos?.x) { log.push({ v: values[i], ok: false }); continue }
 
-    await page.mouse.click(pos.x, pos.y); await sleep(400)
-    // ★ 直接键入（输入框默认空，不需要 Ctrl+A/Backspace；
-    //   且 Ctrl+A 在某些环境下不生效，反而不聚焦）
-    await page.keyboard.type(values[i], { delay: 40 }); await sleep(150)
-    await page.keyboard.press('Enter'); await sleep(600)
-    await page.keyboard.press('Tab'); await sleep(250)
+    // ★ 真实键盘键入（平台只认真实输入事件才注册 spec_id）
+    //   ❌ 不用 JS setter —— setter 写得进值但平台不注册，SKU 行不生成（实测 0/6）
+    //   ❌ 不用 Enter/Tab —— 会触发 React blur 把值清掉
+    await page.mouse.click(pos.x, pos.y); await sleep(500)
+    await page.keyboard.type(values[i], { delay: 40 }); await sleep(600)
+    // 点下方空白失焦，触发平台注册
+    await page.mouse.click(pos.x, pos.y + 60)
+    await sleep(600)
 
-    // 回读
-    const back = await page.evaluate((sel, ci, ph, idx) => {
+    const back = await page.evaluate((sel, ci, idx) => {
       const root = document.querySelector(sel)
       const cs = [...root.querySelectorAll('.property-container-v2'), ...root.querySelectorAll('.goods-spec-row')]
       const c = cs[ci]
@@ -339,11 +368,11 @@ async function fillCustomInputs(page, dimIdx, phKeyword, values) {
         els = [...c.querySelectorAll('input')].filter(e => {
           const p = e.placeholder || ''
           const r = e.getBoundingClientRect()
-          return r.y > 0 && r.width > 30 && !p.startsWith('规格类型') && (e.type === 'text' || !e.type)
+          return r.y > 0 && r.width > 30 && !p.startsWith('规格类型') && !/请输入品牌|请选择|大于|~|备注/.test(p) && (e.type === 'text' || !e.type)
         })
       }
       return els[idx]?.value
-    }, SPEC_ROOT, dimIdx, phKeyword, i)
+    }, SPEC_ROOT, dimIdx, i)
     log.push({ v: values[i], ok: !!back })
   }
   return log
