@@ -644,8 +644,23 @@ export async function fillSpecsOnPage(page, specs, defaults = {}) {
 
     let target = matchDim(userDim, info.dims)
 
+    // ★ 2026-10-27 策略调整：优先用预置维度
+    //   匹配不到时，按用户维度类别找预置的同类维度承载
+    //   （新建维度只有第 1 个值进 SKU 表，是平台行为，不可靠）
     if (!target) {
-      // 预置没有 → 添加规格类型
+      const COLOR = /颜色|色|花色|配色|款式|样式|版型|外观/
+      const SIZE = /尺码|尺寸|身高|码|大小|规格|型号|容量|重量|口味|味道/
+      const isColor = COLOR.test(userDim)
+      const isSize = SIZE.test(userDim)
+      if (isColor) target = info.dims.find(d => d.type === 'color-input')
+      if (!target && isSize) target = info.dims.find(d => d.type === 'checkbox')
+      if (target) {
+        log(`  预置没有「${userDim}」→ 改用预置「${target.dim}」承载`)
+      }
+    }
+
+    if (!target) {
+      // 预置确实没有 → 才新建规格类型
       log(`  预置没有「${userDim}」→ 点「添加规格类型」`)
       const ok = await addDim(page, userDim)
       if (!ok) {
