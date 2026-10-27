@@ -47,12 +47,27 @@ async function scanDims(page) {
     const seen = new Set()
     containers.forEach(c => { if (!seen.has(c)) seen.add(c) })
     ;[...seen].forEach((c, ci) => {
-      const title = c.querySelector('.property-name-title')?.textContent?.trim()
-        || c.querySelector('.sizeStandardWrapper_title__7s9I- span')?.textContent?.trim()
-        || c.querySelector('.sizeStandardWrapper_title__7s9I-')?.textContent?.trim()
-        || c.querySelector('.goods-spec-row-title')?.textContent?.trim()
-        || c.querySelector('input[placeholder^="规格类型"]')?.value?.trim()
-        || '(未命名' + ci + ')'
+      // ★ 维度名解析优先级：
+      //   1. 「规格类型」输入框的 value（新建维度最可靠）
+      //   2. .property-name-title / .sizeStandardWrapper_title 纯文本
+      //   3. .goods-spec-row-title 的**第一个文本节点**（避免混入"添加图片/删除规格类型"按钮文本）
+      const specTypeVal = c.querySelector('input[placeholder^="规格类型"]')?.value?.trim()
+      let title = specTypeVal
+      if (!title) {
+        const t1 = c.querySelector('.property-name-title')
+        const t2 = c.querySelector('.sizeStandardWrapper_title__7s9I-')
+        const t3 = c.querySelector('.goods-spec-row-title')
+        for (const el of [t1, t2, t3]) {
+          if (!el) continue
+          // 只取直接文本节点，跳过子元素（按钮）
+          for (const n of el.childNodes) {
+            if (n.nodeType === 3 && n.textContent.trim()) { title = n.textContent.trim(); break }
+          }
+          if (!title) title = el.textContent?.replace(/添加图片|删除规格类型/g, '').trim()
+          if (title) break
+        }
+      }
+      if (!title) title = '(未命名' + ci + ')'
       const colorInput = c.querySelector('input[placeholder*="主色"]')
       const customInputs = [...c.querySelectorAll('input')].filter(e => {
         const ph = e.placeholder || ''
@@ -207,19 +222,32 @@ async function fillColorInputs(page, dimIdx, values) {
   return log
 }
 
-/* ─────────── ⑤ 填自定义输入框（placeholder*="自定义{维度名}"） ─────────── */
+/* ─────────── ⑤ 填自定义输入框 ─────────── */
 async function fillCustomInputs(page, dimIdx, phKeyword, values) {
   const log = []
   for (let i = 0; i < values.length; i++) {
     let pos = await page.evaluate((sel, ci, ph, idx) => {
       const root = document.querySelector(sel)
-      const c = [...root.querySelectorAll('.property-container-v2'), ...root.querySelectorAll('.goods-spec-row')][ci]
+      const cs = [...root.querySelectorAll('.property-container-v2'), ...root.querySelectorAll('.goods-spec-row')]
+      const c = cs[ci]
       if (!c) return null
-      const els = [...c.querySelectorAll('input')].filter(e => {
+      let els = [...c.querySelectorAll('input')].filter(e => {
         const p = e.placeholder || ''
         const r = e.getBoundingClientRect()
-        return p.includes('自定义') && p.includes(ph) && !p.includes('排序') && r.y > 0 && r.width > 30
+        return p.includes('自定义') && !p.includes('排序') && r.y > 0 && r.width > 30
       })
+      // ★ 兜底：宽松匹配 —— 容器内除「规格类型」外的第一个可编辑文本输入框
+      if (!els.length || els.length <= idx) {
+        const fallback = [...c.querySelectorAll('input')].filter(e => {
+          const p = e.placeholder || ''
+          const r = e.getBoundingClientRect()
+          return r.y > 0 && r.width > 30
+            && !p.startsWith('规格类型')
+            && !/请输入品牌|请选择|大于|~/.test(p)
+            && (e.type === 'text' || !e.type)
+        })
+        if (fallback.length > els.length) els = fallback
+      }
       if (els.length <= idx) return { needAdd: true }
       els[idx].scrollIntoView({ block: 'center' })
       const r = els[idx].getBoundingClientRect()
@@ -229,7 +257,8 @@ async function fillCustomInputs(page, dimIdx, phKeyword, values) {
     if (pos?.needAdd) {
       await page.evaluate((sel, ci) => {
         const root = document.querySelector(sel)
-        const c = [...root.querySelectorAll('.property-container-v2'), ...root.querySelectorAll('.goods-spec-row')][ci]
+        const cs = [...root.querySelectorAll('.property-container-v2'), ...root.querySelectorAll('.goods-spec-row')]
+        const c = cs[ci]
         const links = [...c.querySelectorAll('a, span, button')]
           .filter(e => (e.textContent || '').trim() === '添加定制规格' && e.getBoundingClientRect().width > 5)
         links[0]?.click()
@@ -237,12 +266,21 @@ async function fillCustomInputs(page, dimIdx, phKeyword, values) {
       await sleep(1500)
       pos = await page.evaluate((sel, ci, ph, idx) => {
         const root = document.querySelector(sel)
-        const c = [...root.querySelectorAll('.property-container-v2'), ...root.querySelectorAll('.goods-spec-row')][ci]
-        const els = [...c.querySelectorAll('input')].filter(e => {
+        const cs = [...root.querySelectorAll('.property-container-v2'), ...root.querySelectorAll('.goods-spec-row')]
+        const c = cs[ci]
+        if (!c) return null
+        let els = [...c.querySelectorAll('input')].filter(e => {
           const p = e.placeholder || ''
           const r = e.getBoundingClientRect()
-          return p.includes('自定义') && p.includes(ph) && !p.includes('排序') && r.y > 0 && r.width > 30
+          return p.includes('自定义') && !p.includes('排序') && r.y > 0 && r.width > 30
         })
+        if (!els.length) {
+          els = [...c.querySelectorAll('input')].filter(e => {
+            const p = e.placeholder || ''
+            const r = e.getBoundingClientRect()
+            return r.y > 0 && r.width > 30 && !p.startsWith('规格类型') && (e.type === 'text' || !e.type)
+          })
+        }
         if (els.length <= idx) return null
         els[idx].scrollIntoView({ block: 'center' })
         const r = els[idx].getBoundingClientRect()
@@ -255,16 +293,27 @@ async function fillCustomInputs(page, dimIdx, phKeyword, values) {
     await page.keyboard.down('Control'); await page.keyboard.press('KeyA'); await page.keyboard.up('Control')
     await page.keyboard.press('Backspace'); await sleep(50)
     await page.keyboard.type(values[i], { delay: 40 }); await sleep(150)
-    await page.keyboard.press('Enter'); await sleep(500)
+    await page.keyboard.press('Enter'); await sleep(600)
     await page.keyboard.press('Tab'); await sleep(250)
 
+    // 回读
     const back = await page.evaluate((sel, ci, ph, idx) => {
       const root = document.querySelector(sel)
-      const c = [...root.querySelectorAll('.property-container-v2'), ...root.querySelectorAll('.goods-spec-row')][ci]
-      const els = [...c.querySelectorAll('input')].filter(e => {
+      const cs = [...root.querySelectorAll('.property-container-v2'), ...root.querySelectorAll('.goods-spec-row')]
+      const c = cs[ci]
+      if (!c) return ''
+      let els = [...c.querySelectorAll('input')].filter(e => {
         const p = e.placeholder || ''
-        return p.includes('自定义') && p.includes(ph) && !p.includes('排序') && e.getBoundingClientRect().y > 0
+        const r = e.getBoundingClientRect()
+        return p.includes('自定义') && !p.includes('排序') && r.y > 0 && r.width > 30
       })
+      if (!els.length) {
+        els = [...c.querySelectorAll('input')].filter(e => {
+          const p = e.placeholder || ''
+          const r = e.getBoundingClientRect()
+          return r.y > 0 && r.width > 30 && !p.startsWith('规格类型') && (e.type === 'text' || !e.type)
+        })
+      }
       return els[idx]?.value
     }, SPEC_ROOT, dimIdx, phKeyword, i)
     log.push({ v: values[i], ok: !!back })
