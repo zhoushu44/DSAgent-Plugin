@@ -30,6 +30,32 @@
 import * as fs from 'node:fs'
 
 const SPEC_ROOT = '#goods-spec-sku'
+
+/** ★ 2026-10-29：全部点击改用 JS click（elementFromPoint），不再用鼠标坐标 */
+async function jsClick(page, x, y) {
+  await page.evaluate((px, py) => {
+    const el = document.elementFromPoint(px, py)
+    if (!el) return false
+    // 往上找可点的（input/label/button/a）
+    let t = el
+    for (let i = 0; i < 5 && t; i++) {
+      const tag = t.tagName
+      if (tag === 'INPUT' || tag === 'LABEL' || tag === 'BUTTON' || tag === 'A') break
+      t = t.parentElement
+    }
+    ;(t || el).click()
+    try { (t || el).focus?.() } catch { /* ignore */ }
+    return true
+  }, x, y).catch(() => {})
+}
+
+/** 点空白失焦：直接 blur 当前焦点元素 */
+async function jsBlur(page) {
+  await page.evaluate(() => {
+    if (document.activeElement && document.activeElement.blur) document.activeElement.blur()
+    document.body.click()
+  }).catch(() => {})
+}
 const SKU_TABLE = '#sku table'
 const sleep = (ms) => new Promise(r => setTimeout(r, ms))
 
@@ -210,7 +236,7 @@ async function addDim(page, dimName) {
     const r = inp.getBoundingClientRect()
     return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }
   }, SPEC_ROOT)
-  if (pos) { await page.mouse.click(pos.x, pos.y); await sleep(2500) }
+  if (pos) { await jsClick(page, pos.x, pos.y); await sleep(2500) }
 
   let r = await pickDimFromDropdown(page, dimName)
   if (r.ok && r.picked && r.picked !== dimName) {
@@ -226,7 +252,7 @@ async function addDim(page, dimName) {
     return inputs[inputs.length - 1]?.value?.trim() || ''
   }, SPEC_ROOT)
   if (!val && r.ok) {
-    if (pos) { await page.mouse.click(pos.x, pos.y); await sleep(2000) }
+    if (pos) { await jsClick(page, pos.x, pos.y); await sleep(2000) }
     r = await pickDimFromDropdown(page, dimName)
     await sleep(2000)
   }
@@ -273,7 +299,7 @@ async function fillColorInputs(page, dimIdx, values) {
     }
     if (!pos?.x) { log.push({ v: values[i], ok: false }); continue }
 
-    await page.mouse.click(pos.x, pos.y); await sleep(200)
+    await jsClick(page, pos.x, pos.y); await sleep(200)
     await page.keyboard.down('Control'); await page.keyboard.press('KeyA'); await page.keyboard.up('Control')
     await page.keyboard.press('Backspace'); await sleep(50)
     await page.keyboard.type(values[i], { delay: 40 }); await sleep(150)
@@ -360,7 +386,7 @@ async function fillCustomInputs(page, dimIdx, phKeyword, values) {
 
     // ★ 真实键盘键入（平台只认真实输入事件才注册 spec_id）
     //   流程：键入 → 按 Enter 触发平台注册 → 读值 → 被清则重键入
-    await page.mouse.click(pos.x, pos.y); await sleep(500)
+    await jsClick(page, pos.x, pos.y); await sleep(500)
     await page.keyboard.type(values[i], { delay: 40 }); await sleep(400)
     await page.keyboard.press('Enter'); await sleep(1200)
 
@@ -387,7 +413,7 @@ async function fillCustomInputs(page, dimIdx, phKeyword, values) {
     let back = await readVal()
     if (!back) {
       // React 清了 → 重键入（不按 Enter，这次只保值）
-      await page.mouse.click(pos.x, pos.y); await sleep(400)
+      await jsClick(page, pos.x, pos.y); await sleep(400)
       await page.keyboard.type(values[i], { delay: 40 }); await sleep(700)
       back = await readVal()
     }
@@ -396,7 +422,7 @@ async function fillCustomInputs(page, dimIdx, phKeyword, values) {
     // ★ 2026-10-27 关键修复：填完值必须点页面空白处失焦
     //   不点空白 → 值留在输入框 → 下一次填串到别的维度（实测出现 2112/2121 脏值）
     //   点空白 → 平台确认值 → 输入框清空变 chip
-    await page.mouse.click(30, 300)
+    await jsBlur(page)
     await sleep(800)
 
     // ★ 2026-10-27 实测：新建维度每填一个值，等平台把它提交进 SKU 表
@@ -407,7 +433,7 @@ async function fillCustomInputs(page, dimIdx, phKeyword, values) {
       const now = await readSkuRowCount(page)
       if (now > before) break
       if (k === 2 || k === 5) {
-        await page.mouse.click(pos.x, pos.y); await sleep(300)
+        await jsClick(page, pos.x, pos.y); await sleep(300)
         await page.keyboard.press('Enter'); await sleep(1200)
       }
     }
@@ -469,7 +495,7 @@ async function ensureCustomBox(page, dimIdx, value) {
   }, SPEC_ROOT, dimIdx).catch(() => null)
   if (!pos2) return false
 
-  await page.mouse.click(pos2.x, pos2.y)
+  await jsClick(page, pos2.x, pos2.y)
   await sleep(1500)
 
   // 验证新框出现
@@ -512,12 +538,12 @@ async function fillCustomSize(page, dimIdx, value) {
   if (!pos) return false
 
   // 真实键盘键入
-  await page.mouse.click(pos.x, pos.y)
+  await jsClick(page, pos.x, pos.y)
   await sleep(400)
   await page.keyboard.type(String(value), { delay: 50 })
   await sleep(300)
   // ★ 点页面空白处失焦（用户：输入完成点空白）
-  await page.mouse.click(30, 300)
+  await jsBlur(page)
   await sleep(1500)
 
   // 回读确认值进了输入框（任一输入框有值就算成功）
@@ -662,7 +688,7 @@ async function addCustomCheckbox(page, dimIdx, value) {
   }, SPEC_ROOT, dimIdx)
   if (!pos2) return null
 
-  await page.mouse.click(pos2.x, pos2.y)
+  await jsClick(page, pos2.x, pos2.y)
   await sleep(400)
   await page.keyboard.type(value, { delay: 50 })
   await sleep(200)
@@ -690,7 +716,7 @@ async function addCustomCheckbox(page, dimIdx, value) {
     if (checked) return checked
   }
   // 平台没自动勾 → 再点一次空白处触发
-  await page.mouse.click(30, 300)
+  await jsBlur(page)
   await sleep(1000)
   const checked2 = await page.evaluate((sel, ci, val, cleanV) => {
     const root = document.querySelector(sel)
@@ -784,7 +810,7 @@ async function fillSkuTable(page, price, stock) {
       }, r, i).catch(() => null)
       if (!pos2) continue
       const val = i === 0 ? String(stock) : (i === 1 ? String(price) : single)
-      await page.mouse.click(pos2.x, pos2.y); await sleep(200)
+      await jsClick(page, pos2.x, pos2.y); await sleep(200)
       await page.keyboard.down('Control'); await page.keyboard.press('KeyA'); await page.keyboard.up('Control')
       await page.keyboard.press('Backspace'); await sleep(50)
       await page.keyboard.type(val, { delay: 40 }); await sleep(200)

@@ -109,14 +109,17 @@ function buildProductFromPack(packDir, genDir, opts = {}) {
   }
   console.log(`[from-pack] 属性 ${attributes.length} 条`)
 
+  // ★ 2026-10-29：SKU 预览图按颜色分配（第 i 个颜色用第 i 张主图），不全用同一张
+  const colorThumb = {}
+  finalColors.forEach((c, ci) => { colorThumb[c] = mainImgs[ci] || thumb })
   const specs = [
-    { name: '颜色分类', values: finalColors.map(c => ({ value: c, image: thumb })) },
+    { name: '颜色分类', values: finalColors.map(c => ({ value: c, image: colorThumb[c] || thumb })) },
     { name: '参考分类', values: finalSizes.map(s => ({ value: s })) },
   ]
   const skus = finalRows.map(r => ({
     specs: { '颜色分类': r.color, '参考分类': r.size },
     price: r.price, stock: r.stock || '300',
-    image: thumb,
+    image: colorThumb[r.color] || thumb,
   }))
   return JSON.stringify({
     title: (product.title || categoryKw).slice(0, 60),

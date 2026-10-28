@@ -125,10 +125,20 @@ def main():
         {"name": "颜色分类", "values": [{"value": c, "image": thumb} for c in final_colors]},
         {"name": "参考分类", "values": [{"value": s} for s in final_sizes]},
     ]
+    # ★ 2026-10-29（用户指出）：SKU 预览图不能全用同一张。
+    #   按「颜色 → 主图」建立映射：第 i 个颜色优先用第 i 张主图（main_1..5），
+    #   不够时回落到 main_1。这样不同颜色 SKU 的预览图不同。
+    color_thumb = {}
+    for ci, c in enumerate(final_colors):
+        color_thumb[c] = main_imgs[ci] if ci < len(main_imgs) else thumb
     skus = [
-        {"specs": {"颜色分类": r["color"], "参考分类": r["size"]}, "price": r["price"], "stock": r["stock"], "image": thumb}
+        {"specs": {"颜色分类": r["color"], "参考分类": r["size"]},
+         "price": r["price"], "stock": r["stock"],
+         "image": color_thumb.get(r["color"], thumb)}
         for r in rows
     ]
+    # 规格值预览图也跟着按颜色分配
+    specs[0]["values"] = [{"value": c, "image": color_thumb.get(c, thumb)} for c in final_colors]
 
     payload = {
         "title": str(product.get("title") or a.category)[:60],
