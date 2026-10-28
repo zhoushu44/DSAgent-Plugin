@@ -321,10 +321,7 @@ async function fillCustomInputs(page, dimIdx, phKeyword, values) {
             && (e.type === 'text' || !e.type)
         })
       }
-      // ★ 没有空框 → 需要点「添加定制规格」补框
-      //   （新建维度只自动创建 1 个空框，第 2+ 个值必须补）
       const empty = els.find(e => !e.value)
-      if (!empty && els.length) return { needAdd: true }
       const el = empty || els[els.length - 1]
       if (!el) return null
       el.scrollIntoView({ block: 'center' })
@@ -359,66 +356,6 @@ async function fillCustomInputs(page, dimIdx, phKeyword, values) {
       }, SPEC_ROOT, dimIdx, phKeyword)
     }
 
-    if (pos?.needAdd) {
-      await page.evaluate((sel, ci) => {
-        const root = document.querySelector(sel)
-        const cs = [...root.querySelectorAll('.property-container-v2'), ...root.querySelectorAll('.goods-spec-row')]
-        const c = cs[ci]
-        const links = [...c.querySelectorAll('a, span, button')]
-          .filter(e => (e.textContent || '').trim() === '添加定制规格' && e.getBoundingClientRect().width > 5)
-        links[0]?.click()
-      }, SPEC_ROOT, dimIdx)
-      await sleep(1500)
-      pos = await page.evaluate((sel, ci, ph) => {
-        const root = document.querySelector(sel)
-        const cs = [...root.querySelectorAll('.property-container-v2'), ...root.querySelectorAll('.goods-spec-row')]
-        const c = cs[ci]
-        if (!c) return null
-        let els = [...c.querySelectorAll('input')].filter(e => {
-          const p = e.placeholder || ''
-          const r = e.getBoundingClientRect()
-          return p.includes('自定义') && !p.includes('排序') && r.y > 0 && r.width > 30
-        })
-        if (!els.length) {
-          els = [...c.querySelectorAll('input')].filter(e => {
-            const p = e.placeholder || ''
-            const r = e.getBoundingClientRect()
-            return r.y > 0 && r.width > 30 && !p.startsWith('规格类型') && !/请输入品牌|请选择|大于|~|备注/.test(p) && (e.type === 'text' || !e.type)
-          })
-        }
-        const empty = els.find(e => !e.value)
-        const el = empty || els[els.length - 1]
-        if (!el) return null
-        el.scrollIntoView({ block: 'center' })
-        return { scrollOnly: true }
-      }, SPEC_ROOT, dimIdx, phKeyword)
-      if (pos?.scrollOnly) {
-        await sleep(400)
-        pos = await page.evaluate((sel, ci, ph) => {
-          const root = document.querySelector(sel)
-          const cs = [...root.querySelectorAll('.property-container-v2'), ...root.querySelectorAll('.goods-spec-row')]
-          const c = cs[ci]
-          if (!c) return null
-          let els = [...c.querySelectorAll('input')].filter(e => {
-            const p = e.placeholder || ''
-            const r = e.getBoundingClientRect()
-            return p.includes('自定义') && !p.includes('排序') && r.y > 0 && r.width > 30
-          })
-          if (!els.length) {
-            els = [...c.querySelectorAll('input')].filter(e => {
-              const p = e.placeholder || ''
-              const r = e.getBoundingClientRect()
-              return r.y > 0 && r.width > 30 && !p.startsWith('规格类型') && !/请输入品牌|请选择|大于|~|备注/.test(p) && (e.type === 'text' || !e.type)
-            })
-          }
-          const empty = els.find(e => !e.value)
-          const el = empty || els[els.length - 1]
-          if (!el) return null
-          const r = el.getBoundingClientRect()
-          return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }
-        }, SPEC_ROOT, dimIdx, phKeyword)
-      }
-    }
     if (!pos?.x) { log.push({ v: values[i], ok: false }); continue }
 
     // ★ 真实键盘键入（平台只认真实输入事件才注册 spec_id）
