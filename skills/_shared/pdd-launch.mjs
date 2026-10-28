@@ -139,7 +139,10 @@ export function launchOptions(shopKey, extra = {}) {
   //   浏览器对同名 Cookie 优先发更具体的域 → 推广域拿到子域旧 SUB_PASS_ID，
   //   而不是父域新值 → 「推广域反复掉登录、mms 主域正常」，重扫码也治不好。
   //   这里删掉子域重名项，让浏览器回落到父域新值。幂等；跳过用 --no-cookie-clean。
-  if (!process.argv.includes('--no-cookie-clean')) {
+  // ⚠️ 2026-10-28 撤回：子域 SUB_PASS_ID 是**持久 Cookie（过期 11-06）**，
+  //    父域的是**会话 Cookie（关闭浏览器即失效）**。删子域 = 删掉唯一能长期
+  //    保持登录的那份，反而把用户登出。默认关闭，需要时用 --cookie-clean 显式开启。
+  if (process.argv.includes('--cookie-clean')) {
     try {
       const cleaned = cleanCookiePollutionSync(profile)
       if (cleaned > 0) console.warn(`[pdd-launch] ✅ 清理 ${cleaned} 条域污染 Cookie`)

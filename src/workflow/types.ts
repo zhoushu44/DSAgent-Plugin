@@ -57,6 +57,118 @@ export interface WorkflowTemplate {
   description?: string
   inputs?: WorkflowInputDef[]
   steps: WorkflowStep[]
+  /** ★ 定期执行配置（可选）；不配则只能手动触发 */
+  schedule?: WorkflowSchedule
+}
+
+/**
+ * ★ 定期执行配置（只需间隔分钟数）
+ *
+ * 每 N 分钟触发一次。
+ * 时段开始/结束等业务参数由模板 inputs 传给技能，调度器不管。
+ */
+export interface WorkflowSchedule {
+  /** 是否启用 */
+  enabled: boolean
+  /** 间隔分钟数（最小 5，默认 60） */
+  intervalMinutes?: number
+  /** 只读：上次触发时间（运行时回写） */
+  lastRunAt?: string
+  /** 只读：下次计划触发时间（运行时回写） */
+  nextRunAt?: string
+}
+
+export interface WorkflowTemplate {
+  name: string
+  /** 内容发布 / 视频生成 / 数据采集 / 店铺经营 / 自定义 */
+  category?: string
+  mode: WorkflowMode
+  /** batch 模式下引用哪个输入变量作为循环次数 */
+  count_input?: string
+  description?: string
+  inputs?: WorkflowInputDef[]
+  steps: WorkflowStep[]
+  /** ★ 定期执行配置（可选）；不配则只能手动触发 */
+  schedule?: WorkflowSchedule
+}
+
+/**
+ * ★ 定期执行配置（按间隔）
+ *
+ * 只有一种模式：每 N 分钟触发一次。
+ * 时段开始/结束是业务参数，由模板 inputs 传给技能（--start-hour / --target-hour），
+ * 调度器只负责「多久触发一次」。
+ *
+ * 示例：
+ *   每 2 小时：       { enabled: true, intervalMinutes: 120 }
+ *   一天 5 次(≈2.4h)：{ enabled: true, intervalMinutes: 144 }
+ */
+export interface WorkflowSchedule {
+  /** 是否启用 */
+  enabled: boolean
+  /** 间隔分钟数（最小 5，默认 60） */
+  intervalMinutes?: number
+  /** 可选：限定星期（0=周日 … 6=周六），不填=每天 */
+  weekdays?: number[]
+  /** 可选：执行时的输入变量覆盖 */
+  inputs?: Record<string, string>
+  /** 可选：是否自动确认 L2 写操作（默认 false，即只预览不执行） */
+  autoConfirm?: boolean
+  /** 只读：上次触发时间（运行时回写） */
+  lastRunAt?: string
+  /** 只读：下次计划触发时间（运行时回写） */
+  nextRunAt?: string
+}
+
+export interface WorkflowTemplate {
+  name: string
+  /** 内容发布 / 视频生成 / 数据采集 / 店铺经营 / 自定义 */
+  category?: string
+  mode: WorkflowMode
+  /** batch 模式下引用哪个输入变量作为循环次数 */
+  count_input?: string
+  description?: string
+  inputs?: WorkflowInputDef[]
+  steps: WorkflowStep[]
+  /** ★ 定期执行配置（可选）；不配则只能手动触发 */
+  schedule?: WorkflowSchedule
+}
+
+/**
+ * ★ 定期执行配置
+ *
+ * 两种模式：
+ *   daily    —— 每天在固定时刻跑（times 数组，24 小时制 "HH:mm"）
+ *   interval —— 每隔 N 分钟跑一次（可配 window 限定时段）
+ *
+ * 示例：
+ *   每天 10/12/14/16/18 点跑：
+ *     { enabled: true, mode: 'daily', times: ['10:00','12:00','14:00','16:00','18:00'] }
+ *   工作日 9:00-18:00 每 2 小时跑：
+ *     { enabled: true, mode: 'interval', intervalMinutes: 120,
+ *       window: { start: '09:00', end: '18:00' }, weekdays: [1,2,3,4,5] }
+ */
+export interface WorkflowSchedule {
+  /** 是否启用 */
+  enabled: boolean
+  /** 调度模式，默认 daily */
+  mode?: 'daily' | 'interval'
+  /** daily 模式：每天触发时刻，24 小时制 "HH:mm" */
+  times?: string[]
+  /** interval 模式：间隔分钟数（最小 5） */
+  intervalMinutes?: number
+  /** 可选：限定在此时段内触发（"HH:mm"） */
+  window?: { start?: string; end?: string }
+  /** 可选：限定星期（0=周日 … 6=周六），不填=每天 */
+  weekdays?: number[]
+  /** 可选：执行时的输入变量覆盖 */
+  inputs?: Record<string, string>
+  /** 可选：是否自动确认 L2 写操作（默认 false，即只预览不执行） */
+  autoConfirm?: boolean
+  /** 只读：上次触发时间（运行时回写） */
+  lastRunAt?: string
+  /** 只读：下次计划触发时间（运行时回写） */
+  nextRunAt?: string
 }
 
 /** 模板摘要（listWorkflowTemplates 返回，供下拉/列表用） */
@@ -67,6 +179,12 @@ export interface WorkflowTemplateSummary {
   description: string
   /** 输入变量个数（编排页列表的辅助信息） */
   inputCount: number
+  /** ★ 是否启用了定期执行 */
+  scheduleEnabled?: boolean
+  /** ★ 定时间隔（分钟） */
+  scheduleInterval?: number | null
+  /** ★ 下次计划触发时间（ISO 字符串） */
+  nextRunAt?: string
   /** 步骤数 */
   stepCount: number
 }

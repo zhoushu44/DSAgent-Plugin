@@ -14,6 +14,7 @@ import { parse, stringify } from 'yaml'
 import { detectEntry, parseArgString, type SkillRow } from '../services/skill-service.js'
 import { loadContract, buildContractArgv, type SkillContract } from '../services/arguments.js'
 import type {
+  WorkflowSchedule,
   WorkflowInputDef,
   WorkflowStep,
   WorkflowTemplate,
@@ -133,6 +134,15 @@ function parseTemplateYaml(text: string): WorkflowTemplate {
   if (obj.category != null) t.category = String(obj.category)
   if (obj.count_input != null) t.count_input = String(obj.count_input)
   if (obj.description != null) t.description = String(obj.description)
+  // ★ 定期执行配置（只需间隔分钟数）
+  if (obj.schedule && typeof obj.schedule === 'object' && !Array.isArray(obj.schedule)) {
+    const sc = obj.schedule as Record<string, unknown>
+    const out: WorkflowSchedule = { enabled: Boolean(sc.enabled) }
+    if (sc.intervalMinutes !== undefined) out.intervalMinutes = Number(sc.intervalMinutes)
+    if (sc.lastRunAt != null) out.lastRunAt = String(sc.lastRunAt)
+    if (sc.nextRunAt != null) out.nextRunAt = String(sc.nextRunAt)
+    t.schedule = out
+  }
   if (Array.isArray(obj.inputs)) {
     t.inputs = (obj.inputs as Record<string, unknown>[]).map((it) => {
       const d = { key: String(it.key ?? ''), label: String(it.label ?? ''), type: 'text' as const }
@@ -331,6 +341,9 @@ export function createWorkflowService(deps: WorkflowServiceDeps) {
           description: t.description || '',
           inputCount: (t.inputs ?? []).length,
           stepCount: t.steps.length,
+          scheduleEnabled: Boolean(t.schedule?.enabled),
+          scheduleInterval: t.schedule?.intervalMinutes ?? null,
+          nextRunAt: t.schedule?.nextRunAt,
         })
       } catch (e) {
         // 单个坏文件不拖垮整个列表；编排页仍能看到文件名并修复
@@ -397,6 +410,7 @@ export function createWorkflowService(deps: WorkflowServiceDeps) {
       mode: t.mode,
       count_input: t.count_input,
       description: t.description,
+      schedule: t.schedule,
       inputs: t.inputs,
       steps: t.steps,
     }
@@ -743,6 +757,7 @@ export function createWorkflowService(deps: WorkflowServiceDeps) {
       failureKind = isWatchdogTimeout(result) ? 'time_out' : 'skill_error'
     }
     const payload = result?.payload
+
     const fields: Record<string, string> | null =
       payload != null && typeof payload === 'object' && !Array.isArray(payload) && (payload as Record<string, unknown>).mode !== 'instructions'
         ? Object.fromEntries(Object.entries(payload as Record<string, unknown>).map(([k, v]) => [k, typeof v === 'object' && v !== null ? JSON.stringify(v) : String(v)]))
@@ -752,10 +767,39 @@ export function createWorkflowService(deps: WorkflowServiceDeps) {
       ok,
       error: ok ? '' : `[${failureKind}] ${failText}`,
       envFailure: !ok && ENV_FAILURE_KINDS.has(failureKind),
-      raw: ok ? String(result?.text ?? '') : failText,
+      // ★ 日志优先用「人类可读结论」而不是整包 JSON
+      //   技能返回的 payload 里通常有 text 字段（一屏结论/表格）
+      //   没有 text 时回退到 result.text（可能是整包 JSON 字符串）
+      raw: ok ? pickReadableText(payload, result?.text) : failText,
       fields,
       data: payload ?? null,
     }
+  }
+
+  /**
+   * ★ 从 payload 里取「人类可读结论」用于日志展示
+   *
+   *   技能脚本的 payload 形状不统一：
+   *     · 有的直接 { ok, mode, text: '一屏结论...' }
+   *     · 有的是整包 JSON 序列化进 result.text
+   *   这里按优先级取：payload.text → payload.message → 解析 result.text 里的 .text → 原始文本
+   */
+  function pickReadableText(payload: unknown, fallback: unknown): string {
+    const p = payload as Record<string, unknown> | null | undefined
+    if (p && typeof p === 'object') {
+      const t = p.text ?? p.message ?? p.summaryText
+      if (typeof t === 'string' && t.trim()) return t
+    }
+    // fallback 可能是整包 JSON 字符串，尝试解析出 .text
+    const raw = String(fallback ?? '')
+    if (raw.startsWith('{')) {
+      try {
+        const j = JSON.parse(raw) as Record<string, unknown>
+        const t = j.text ?? j.message
+        if (typeof t === 'string' && t.trim()) return t
+      } catch { /* 不是 JSON，原样返回 */ }
+    }
+    return raw
   }
 
   /** 引擎级超时判定：executeSkillCore 底层 skill.run 看门狗消息含「超时」/「idle 超时」/英文 timeout */
@@ -979,6 +1023,20 @@ export function createWorkflowService(deps: WorkflowServiceDeps) {
     return out
   }
 
+  /**
+   * ★ 按模板名直接创建并启动一个任务（供调度器/自动化调用）
+   */
+  async function runTemplate(
+    name: string,
+    inputs: Record<string, string> = {},
+    opts: { shop?: string } = {},
+  ): Promise<{ taskId: string }> {
+    const task = await createTask({ workflowName: name, inputs, ...(opts.shop ? { shop: opts.shop } : {}) })
+    const taskId = (task as { id?: string; taskId?: string })?.id ?? (task as { taskId?: string })?.taskId
+    if (!taskId) throw new Error('创建任务失败：未返回 taskId')
+    void runTask(taskId).catch(() => {})
+    return { taskId }
+  }
   return {
     listTemplates,
     getTemplate,
@@ -991,6 +1049,7 @@ export function createWorkflowService(deps: WorkflowServiceDeps) {
     createTask,
     stopTask,
     runTask,
+    runTemplate,
     reconcile,
     listStepSkills,
   }

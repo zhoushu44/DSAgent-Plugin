@@ -474,7 +474,7 @@ const TRANSPORT = argOf('transport') || (mode === 'goods' ? 'browser' : 'http')
   //   .pinduoduo.com / mms.pinduoduo.com / yingxiao.pinduoduo.com 时，
   //   浏览器优先发子域旧值 → 推广域反复掉登录。删子域同名项即恢复。
   //   跳过：--no-cookie-clean
-  if (!process.argv.includes('--no-cookie-clean')) {
+  if (process.argv.includes('--cookie-clean')) {
     try {
       const { cleanCookiePollution } = await import(pathToFileURL('e:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/pdd-promo/scripts/cookie-clean.mjs').href)
       const r = await cleanCookiePollution(profile, { log: (m) => console.warn('[pdd] ' + m) })

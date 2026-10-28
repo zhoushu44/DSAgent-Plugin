@@ -33,7 +33,15 @@ export interface WorkflowApi {
   handleAction: (action: string, payload: Record<string, unknown>) => Promise<Record<string, unknown>>
 }
 
-export function registerWorkflowApi(deps: { service: WorkflowService }): WorkflowApi {
+export function registerWorkflowApi(deps: {
+  service: WorkflowService
+  scheduler?: {
+    list: () => Promise<Array<{ name: string; file: string; schedule: unknown; nextRunAt: string | null }>>
+    runNow: (name: string, inputs?: Record<string, string>) => Promise<{ taskId: string }>
+    start?: () => void
+    stop?: () => void
+  }
+}): WorkflowApi {
   const { service } = deps
 
   async function handleAction(
@@ -123,7 +131,22 @@ export function registerWorkflowApi(deps: { service: WorkflowService }): Workflo
 
       // 编排页辅助 action（不在 7.3 八表内）：技能下拉数据源。
       // 浏览器半区拿不到技能 body，无法自行过滤 instructions 型，由 host 侧下发。
-      case 'workflow_list_step_skills': {
+      case 'workflow_list_schedules': {
+      // ★ 查所有已配置定期执行的模板 + 下次触发时间
+      if (!deps.scheduler) return { ok: false, error: '调度器未启用' }
+      const list = await deps.scheduler.list()
+      return { ok: true, schedules: list }
+    }
+    case 'workflow_run_schedule_now': {
+      // ★ 立刻按计划配置跑一次（调试/补跑用）
+      const name = str('name')
+      if (!name) return { ok: false, error: '缺少 name' }
+      if (!deps.scheduler) return { ok: false, error: '调度器未启用' }
+      const inputs = (payload.inputs && typeof payload.inputs === 'object' ? payload.inputs : {}) as Record<string, string>
+      const r = await deps.scheduler.runNow(name, inputs)
+      return { ok: true, ...r }
+    }
+    case 'workflow_list_step_skills': {
         const skills = await service.listStepSkills()
         return { ok: true, skills }
       }

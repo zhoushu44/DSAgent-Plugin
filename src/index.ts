@@ -32,6 +32,7 @@ import { requiredPlatform, guidedPlatform, guidedPlatformExtra } from './binding
 import { buildSystemPromptText } from './prompt.js'
 import { createWorkflowService } from './workflow/service.js'
 import { registerWorkflowApi, buildWorkflowTool } from './workflow/api.js'
+import { createWorkflowScheduler } from './workflow/scheduler.js'
 import { runKeepaliveSweep } from './services/session-keepalive.js'
 import { defineTool, renderToolOutput, agentIdOf, spillPayload } from './tool-runtime.js'
 import { buildPlatformTools } from './tools-platform.js'
@@ -262,7 +263,13 @@ export function apply(ctx: Context, cfg: Config = config) {
     workflowDir,
     tasksPath: workflowTasksPath,
   })
-  const workflowApi = registerWorkflowApi({ service: workflowService })
+  // ★ 定期执行调度器（读模板里的 schedule 配置，到点自动跑）
+  const workflowScheduler = createWorkflowScheduler({
+    workflowService,
+    workflowDir,
+    log: (msg: string) => { try { console.error(msg) } catch { /* ignore */ } },
+  })
+  const workflowApi = registerWorkflowApi({ service: workflowService, scheduler: workflowScheduler })
 
   /* ─────────────── 0. 扫描技能清单，注入系统提示词 ─────────────── */
   // 有 contract.json 的技能已作为「独立工具」注册（一技能一工具、参数表由契约生成），
@@ -685,7 +692,29 @@ export function apply(ctx: Context, cfg: Config = config) {
     const payloadStr = isInstructions ? rawPayload : spillPayload(skillId, rawPayload)
 
     const supportsReport = await skill.supportsReport(skillId)
-    const textParts: string[] = [`技能「${skillId}」执行成功。\n\n${payloadStr}`]
+
+    // ★ 优先展示 payload.text（技能自带的「人类可读结论」/一屏总结/表格），
+    //   整包 JSON 放到后面。否则工作流日志只保留 JSON 前半段，
+    //   真正的结论（如「待执行/受控/不动」表格）被挤没。
+    //   指令型技能（mode=instructions）必须原样直传，不适用。
+    let readableText = ""
+    {
+      // payload 可能是对象，也可能是 JSON 字符串（脚本 stdout 直出），两种都试
+      let pj: Record<string, unknown> | null = null
+      if (result.payload) {
+        if (typeof result.payload === "object") pj = result.payload as Record<string, unknown>
+        else if (typeof result.payload === "string") {
+          try { pj = JSON.parse(result.payload) as Record<string, unknown> } catch { pj = null }
+        }
+      }
+      if (!isInstructions && pj) {
+        const pt = pj.text
+        if (typeof pt === "string" && pt.trim()) readableText = pt
+      }
+    }
+    const textParts: string[] = readableText
+      ? [`技能「${skillId}」执行成功。\n\n${readableText}\n\n---\n数据（JSON）：\n${payloadStr}`]
+      : [`技能「${skillId}」执行成功。\n\n${payloadStr}`]
     if (reportPath) textParts.push(`\n\n📊 HTML 报告已生成：${reportPath}`)
     if (csvPath) textParts.push(`\n📎 CSV：${csvPath}`)
     if (supportsReport && !reportPath) textParts.push(`\n\n💡 该技能支持生成 HTML 报告，请基于数据撰写洞察后调用 dsagent_generate_report。`)
@@ -865,7 +894,16 @@ export function apply(ctx: Context, cfg: Config = config) {
       // 工作流任务重启对账：把上次中断的 running 任务恢复为 failed
       try {
         await workflowService.reconcile()
-      } catch { /* 对账失败不阻断巡检 */ }
+      }
+      catch { /* 对账失败不阻断巡检 */ }
+      // ★ 启动定期执行调度器
+      try {
+        workflowScheduler.start()
+      }
+      catch (e) {
+        console.error('[schedule] 调度器启动失败：' + (e instanceof Error ? e.message : String(e)))
+      }
+
       // 阿里系 SSO：淘宝账号存在时自动派生闲鱼账号，避免用户重复扫码
       await ensureXianyuFromTaobao(store)
       // 生意参谋系：补齐 csrfId/loginPointId（万相台、达摩盘技能依赖）

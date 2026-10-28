@@ -52,6 +52,18 @@ interface EditorState {
   selectedTemplate: string | null
   selectedStepIndex: number
   varEditIndex: number
+  /** ★ 定期执行配置 */
+  schedule: EdSchedule
+}
+
+/** ★ 定期执行（编辑态，只需分钟数） */
+interface EdSchedule {
+  enabled: boolean
+  /** 间隔分钟数 */
+  intervalMinutes: string
+  /** 只读展示 */
+  lastRunAt: string
+  nextRunAt: string
 }
 
 interface AccountRow {
@@ -222,6 +234,29 @@ select.dsa-ctl{cursor:pointer}
 .dsa-prop-bd{flex:1;max-height:640px;overflow:auto;padding:14px}
 .dsa-prop-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:60px 16px;color:#8b93a7;font-size:12.5px;text-align:center;gap:6px}
 .dsa-prop-empty .ico{font-size:26px;opacity:.6}
+/* ── 任务标签的定时面板 ── */
+.dsa-sched-panel{border:1px solid #e3e8f0;border-radius:8px;margin-top:14px;overflow:hidden}
+.dsa-sched-panel.on{border-color:#2f6fdd;background:#f7faff}
+.dsa-sched-panel-hd{padding:9px 12px;font-size:13px;font-weight:600;color:#1f2330;background:#fafbfd;border-bottom:1px solid #eef1f6;display:flex;align-items:center;gap:8px}
+.dsa-sched-panel.on .dsa-sched-panel-hd{background:#eef4ff}
+.dsa-sched-panel-bd{padding:12px}
+.dsa-sched-badge{font-size:10.5px;padding:2px 7px;border-radius:10px;font-weight:500}
+.dsa-sched-badge.on{background:#dcfce7;color:#15803d}
+.dsa-sched-badge.off{background:#f1f3f7;color:#8b93a7}
+.dsa-sched-next{font-size:12.5px;color:#2f6fdd;font-weight:500;margin-bottom:10px}
+.dsa-sched-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+
+/* ── 定期执行 ── */
+.dsa-sched{border:1px solid #e3e8f0;border-radius:8px;padding:10px 12px;margin:8px 0 12px;background:#fafbfd}
+.dsa-sched-toggle{display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px}
+.dsa-sched-status{font-size:12.5px;margin:6px 0 2px;color:#2f6fdd;font-weight:500}
+.dsa-sched-sub{font-size:11.5px;color:#8b93a7;margin-bottom:4px}
+.dsa-sched-body{margin-top:10px;padding-top:10px;border-top:1px dashed #e3e8f0}
+.dsa-sched-hint{font-size:11px;color:#8b93a7;margin:-4px 0 8px 118px;line-height:1.4}
+.dsa-sched-warn{font-size:11.5px;color:#c2410c;background:#fff7ed;border:1px solid #fed7aa;border-radius:6px;padding:6px 8px;margin:6px 0}
+.dsa-sched-presets{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
+.dsa-sched-presets .dsa-btn{font-size:11.5px;padding:4px 8px}
+
 /* 分区标题（属性面板内） */
 .dsa-sec{font-size:12px;font-weight:600;color:#8b93a7;margin:14px 0 8px;padding-bottom:5px;border-bottom:1px solid #f2f4f9}
 /* 返回模板设置 */
@@ -290,6 +325,8 @@ export function workflowPage(deps: { config: Config }) {
   let accounts: AccountRow[] = []
   let stepSkills: StepSkillInfo[] = []
   let selectedTemplateName = ''
+  /** ★ 任务标签里的定时间隔（分钟） */
+  let taskScheduleInterval = '120'
   let currentInputs: WorkflowInputDef[] = []
   let filterStatus = ''
   let filterShop = ''
@@ -312,6 +349,12 @@ export function workflowPage(deps: { config: Config }) {
       selectedTemplate: null,
       selectedStepIndex: -1,
       varEditIndex: -1,
+      schedule: {
+        enabled: false,
+        intervalMinutes: '120',
+        lastRunAt: '',
+        nextRunAt: '',
+      },
     }
   }
 
@@ -346,6 +389,12 @@ export function workflowPage(deps: { config: Config }) {
       const data = await api('workflow_list_templates')
       if (data && data.ok && Array.isArray(data.templates)) {
         templates = data.templates as WorkflowTemplateSummary[]
+        // ★ 首次加载且没选中过 → 默认选第一个，避免定时面板一直是空状态
+        if (!selectedTemplateName && templates.length) {
+          selectedTemplateName = templates[0].name
+          const tp0 = templates[0]
+          taskScheduleInterval = String(tp0?.scheduleInterval ?? 120)
+        }
       }
     } catch { /* 静默 */ }
   }
@@ -376,6 +425,27 @@ export function workflowPage(deps: { config: Config }) {
   /* ── YAML 解析（轻量逐行，不依赖 yaml 库——浏览器半区无 node 依赖） ── */
 
   /** 从 YAML 文本解析 inputs 数组（宽松解析，字段对齐 types.ts） */
+  /** ★ 从 YAML 解析 schedule（只认 enabled / intervalMinutes / 时间戳） */
+  function parseScheduleFromYaml(yamlText: string): void {
+    const lines = yamlText.split('\n')
+    const sch = editorState.schedule
+    let inSchedule = false
+    for (const raw of lines) {
+      const line = raw.replace(/\r$/, '')
+      if (/^schedule:\s*$/.test(line)) { inSchedule = true; continue }
+      if (inSchedule && /^[a-zA-Z_]/.test(line)) break
+      if (!inSchedule) continue
+      const kv = line.match(/^\s{2}(\w+):\s*(.*)$/)
+      if (!kv) continue
+      const [, k, vRaw] = kv
+      const v = vRaw.trim().replace(/^["']|["']$/g, '')
+      if (k === 'enabled') sch.enabled = v === 'true'
+      else if (k === 'intervalMinutes') sch.intervalMinutes = v
+      else if (k === 'lastRunAt') sch.lastRunAt = v
+      else if (k === 'nextRunAt') sch.nextRunAt = v
+    }
+  }
+
   function parseInputsFromYaml(yamlText: string): WorkflowInputDef[] {
     const lines = yamlText.split('\n')
     const result: WorkflowInputDef[] = []
@@ -588,9 +658,74 @@ export function workflowPage(deps: { config: Config }) {
       <div class="dsa-form-row"><label>目标账号</label>${renderShopSelect()}</div>
       <div data-wf-inputs>${renderInputs()}</div>
       <div class="dsa-form-row" style="margin-top:12px"><label></label><button class="dsa-btn dsa-btn-primary" data-act="run-task">开始批量运行</button></div>
+      ${renderSchedulePanel()}
     </div>
     ${renderFilterBar()}
     <div data-wf-task-list>${renderTaskTable()}</div>`
+  }
+
+  /** 读取模板 YAML 原文 */
+  async function getTemplateYamlText(name: string): Promise<string | null> {
+    try {
+      const data = await api('workflow_get_template', { name })
+      if (data && data.ok && typeof data.yaml === 'string') return data.yaml
+      return null
+    } catch { return null }
+  }
+
+  /** 在 YAML 文本里设置/更新/移除 schedule 段（保留其余内容） */
+  function setScheduleInYaml(yaml: string, opts: { enabled: boolean; intervalMinutes?: number }): string {
+    const lines = yaml.split('\n')
+    // 先删掉已有的 schedule 段（从 schedule: 到下一个顶层 key）
+    const out: string[] = []
+    let skipping = false
+    for (const line of lines) {
+      if (/^schedule:\s*$/.test(line)) { skipping = true; continue }
+      if (skipping) {
+        if (/^[a-zA-Z_]/.test(line)) skipping = false
+        else continue
+      }
+      out.push(line)
+    }
+    if (!opts.enabled) return out.join('\n')
+    // 找到插入点：inputs: 之前，或 steps: 之前，或文件末尾
+    const iv = opts.intervalMinutes && opts.intervalMinutes >= 5 ? Math.floor(opts.intervalMinutes) : 120
+    const schedLines = ['schedule:', '  enabled: true', `  intervalMinutes: ${iv}`]
+    const idxInputs = out.findIndex(l => /^inputs:/.test(l))
+    const idxSteps = out.findIndex(l => /^steps:/.test(l))
+    const insertAt = idxInputs >= 0 ? idxInputs : (idxSteps >= 0 ? idxSteps : out.length)
+    out.splice(insertAt, 0, ...schedLines)
+    return out.join('\n')
+  }
+
+  /** ★ 任务标签里的「定时执行」面板（针对当前选中的模板） */
+  function renderSchedulePanel(): string {
+    const name = (selectedTemplateName || '').trim()
+    if (!name) {
+      return `<div class="dsa-sched-panel">
+        <div class="dsa-sched-panel-hd">⏰ 定时执行</div>
+        <div class="dsa-sched-panel-bd dsa-dim">先选择模板，即可设置定时</div>
+      </div>`
+    }
+    const tpl = templates.find(x => x.name === name)
+    const enabled = Boolean(tpl?.scheduleEnabled)
+    const nextAt = tpl?.nextRunAt ?? ''
+
+    return `<div class="dsa-sched-panel${enabled ? ' on' : ''}">
+      <div class="dsa-sched-panel-hd">⏰ 定时执行 <span class="dsa-sched-badge ${enabled ? 'on' : 'off'}">${enabled ? '已启用' : '未启用'}</span></div>
+      <div class="dsa-sched-panel-bd">
+        <div class="dsa-form-row" style="margin-bottom:8px"><label>间隔(分钟)</label>
+          <input type="number" class="dsa-ctl" data-tasks-sch-interval value="${esc(taskScheduleInterval)}" min="5" step="5" placeholder="120">
+        </div>
+        ${enabled && nextAt ? `<div class="dsa-sched-next">下次触发：${esc(fmtLocal(nextAt))}</div>` : ''}
+        ${enabled ? `<div class="dsa-dim" style="font-size:11.5px;margin-bottom:8px">填写分钟数后点右侧按钮即可修改</div>` : ''}
+        <div class="dsa-sched-actions">
+          <button class="dsa-btn dsa-btn-primary" data-act="sched-save">${enabled ? '保存间隔' : '开启定时'}</button>
+          ${enabled ? `<button class="dsa-btn" data-act="sched-run-now">立即跑一次</button>
+          <button class="dsa-btn" data-act="sched-quick-off">关闭定时</button>` : ''}
+        </div>
+      </div>
+    </div>`
   }
 
   /* ─────────────── 渲染函数（编排标签） ─────────────── */
@@ -704,8 +839,60 @@ export function workflowPage(deps: { config: Config }) {
       </select></div>
       <div class="dsa-form-row"${s.mode === 'single' ? ' style="display:none"' : ''}><label>数量字段</label><select class="dsa-ctl" data-ed-countinput>${s.inputs.map(i => `<option value="${esc(i.key)}"${s.count_input === i.key ? ' selected' : ''}>${esc(i.key)}（${esc(i.label)}）</option>`).join('')}</select></div>
       <div class="dsa-form-row"><label>描述</label><input type="text" class="dsa-ctl" data-ed-desc value="${esc(s.description)}" placeholder="模板说明"></div>
+      <div class="dsa-sec">定期执行</div>
+      ${renderScheduleForm()}
       <div class="dsa-sec">输入变量</div>
       ${renderEditorVars()}`
+  }
+
+  /** ★ 定期执行配置表单（只需填分钟数） */
+  function renderScheduleForm(): string {
+    const sc = editorState.schedule
+    const iv = Number(sc.intervalMinutes) || 0
+    // 全天 24h 的触发次数（供参考）
+    const perDay = iv > 0 ? (24 * 60) / iv : 0
+    const perDayText = perDay >= 1
+      ? `全天 ${perDay % 1 === 0 ? perDay : perDay.toFixed(1)} 次`
+      : ''
+
+    const statusLine = sc.enabled
+      ? (sc.nextRunAt
+          ? `<div class="dsa-sched-status">⏰ 每 ${esc(sc.intervalMinutes)} 分钟${perDayText ? '｜' + perDayText : ''}｜下次 ${esc(fmtLocal(sc.nextRunAt))}</div>`
+          : `<div class="dsa-sched-status">⏰ 每 ${esc(sc.intervalMinutes)} 分钟${perDayText ? '｜' + perDayText : ''}</div>`)
+      : `<div class="dsa-sched-status dsa-dim">⏸ 未启用（仅手动运行）</div>`
+    const lastLine = sc.lastRunAt
+      ? `<div class="dsa-sched-sub">上次：${esc(fmtLocal(sc.lastRunAt))}</div>`
+      : ''
+
+    return `<div class="dsa-sched">
+      <div class="dsa-form-row"><label>启用</label>
+        <label class="dsa-sched-toggle"><input type="checkbox" data-sch-enabled${sc.enabled ? ' checked' : ''}> <span>${sc.enabled ? '已开启定期执行' : '关闭'}</span></label>
+      </div>
+      ${statusLine}${lastLine}
+      <div class="dsa-sched-body"${sc.enabled ? '' : ' style="display:none"'}>
+        <div class="dsa-form-row"><label>间隔(分钟)</label>
+          <input type="number" class="dsa-ctl" data-sch-interval value="${esc(sc.intervalMinutes)}" min="5" step="5" placeholder="120">
+        </div>
+        <div class="dsa-sched-presets">
+          <button class="dsa-btn" data-sch-preset="60">60</button>
+          <button class="dsa-btn" data-sch-preset="120">120</button>
+          <button class="dsa-btn" data-sch-preset="144">144</button>
+          <button class="dsa-btn" data-sch-preset="240">240</button>
+          <button class="dsa-btn" data-sch-preset="1440">1440</button>
+        </div>
+      </div>
+    </div>`
+  }
+
+  /** 时间戳 → 本地可读 */
+  function fmtLocal(iso: string): string {
+    if (!iso) return ''
+    try {
+      const d = new Date(iso)
+      if (Number.isNaN(d.getTime())) return iso
+      const p = (n: number) => String(n).padStart(2, '0')
+      return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+    } catch { return iso }
   }
 
   function renderVarEditForm(idx: number): string {
@@ -808,6 +995,15 @@ export function workflowPage(deps: { config: Config }) {
     lines.push(`mode: ${s.mode}`)
     if (s.mode === 'batch' && s.count_input) lines.push(`count_input: ${yamlQuote(s.count_input)}`)
     if (s.description) lines.push(`description: ${yamlQuote(s.description)}`)
+    // ★ 定期执行（按间隔）
+    const sch = s.schedule
+    if (sch.enabled) {
+      const iv = Number(sch.intervalMinutes)
+      const safeIv = Number.isFinite(iv) && iv >= 5 ? Math.floor(iv) : 60
+      lines.push('schedule:')
+      lines.push('  enabled: true')
+      lines.push(`  intervalMinutes: ${safeIv}`)
+    }
     if (s.inputs.length) {
       lines.push('inputs:')
       for (const inp of s.inputs) {
@@ -846,6 +1042,12 @@ export function workflowPage(deps: { config: Config }) {
       const yamlText: string = data.yaml
       // 轻量逐行解析
       const lines = yamlText.split('\n')
+      // ★ 重置 schedule（每次加载模板都从文件重建）
+      editorState.schedule = {
+        enabled: false, intervalMinutes: '120',
+        lastRunAt: '', nextRunAt: '',
+      }
+      parseScheduleFromYaml(yamlText)
       const s = newTemplateState()
       // newTemplateState 自带 1 个默认输入和 1 个默认空步骤，解析前清空，避免残留成“幽灵步骤”
       s.inputs = []
@@ -1096,6 +1298,11 @@ export function workflowPage(deps: { config: Config }) {
       }
 
       function repaintBody(): void {
+        // ★ 渲染前先从现有 DOM 同步模板选择（避免首次渲染时变量为空）
+        try {
+          const sel = q<HTMLSelectElement>('[data-wf-template]')
+          if (sel && sel.value) selectedTemplateName = sel.value
+        } catch { /* 首次渲染时下拉框还不存在 */ }
         q('[data-wf-body]').innerHTML = renderBody()
         // 更新子标签高亮
         root.querySelectorAll('.dsa-subtab').forEach(el => {
@@ -1106,6 +1313,15 @@ export function workflowPage(deps: { config: Config }) {
 
       /** 从 DOM 同步编辑器状态（input/change 事件触发） */
       function syncEditorFromDom(): void {
+    // ★ 定期执行
+    {
+      const sc = editorState.schedule
+      const en = q<HTMLInputElement>('[data-sch-enabled]')
+      if (en) sc.enabled = en.checked
+      const iv = q<HTMLInputElement>('[data-sch-interval]')
+      if (iv) sc.intervalMinutes = iv.value
+    }
+
         const s = editorState
         // 模板基本信息（属性面板 - 模板设置态）
         const nameEl = q<HTMLInputElement>('[data-ed-name]')
@@ -1211,6 +1427,67 @@ export function workflowPage(deps: { config: Config }) {
         }
 
         // 开始运行任务
+        // ★ 定时：保存间隔（同时开启）
+        const schedSaveEl = t.closest('[data-act="sched-save"]') as HTMLElement | null
+        if (schedSaveEl) {
+          const tplName = (selectedTemplateName || '').trim()
+          if (!tplName) { say('请先选择模板'); return }
+          const ivEl = q<HTMLInputElement>('[data-tasks-sch-interval]')
+          const iv = Number(ivEl?.value ?? taskScheduleInterval)
+          if (!Number.isFinite(iv) || iv < 5) { say('间隔必须 ≥ 5 分钟'); return }
+          taskScheduleInterval = String(Math.floor(iv))
+          try {
+            const yaml = await getTemplateYamlText(tplName)
+            if (!yaml) { say('读取模板失败'); return }
+            const updated = setScheduleInYaml(yaml, { enabled: true, intervalMinutes: Math.floor(iv) })
+            const r = await api('workflow_save_template', { yaml: updated, originalName: tplName })
+            if (r && r.ok) {
+              say(`已设置定时：每 ${Math.floor(iv)} 分钟`)
+              await loadTemplates()
+              repaintBody()
+            } else { say('保存失败：' + (r?.error ?? (Array.isArray(r?.issues) ? r.issues.join('; ') : ''))) }
+          } catch (err) { say('出错：' + (err as Error).message) }
+          return
+        }
+        // ★ 定时：关闭
+        const schedOffEl = t.closest('[data-act="sched-quick-off"]') as HTMLElement | null
+        if (schedOffEl) {
+          const tplName3 = (selectedTemplateName || '').trim()
+          if (!tplName3) return
+          try {
+            const yaml = await getTemplateYamlText(tplName3)
+            if (!yaml) { say('读取模板失败'); return }
+            const updated = setScheduleInYaml(yaml, { enabled: false })
+            const r = await api('workflow_save_template', { yaml: updated, originalName: tplName3 })
+            if (r && r.ok) {
+              say('已关闭定时')
+              await loadTemplates()
+              repaintBody()
+            } else { say('保存失败：' + (r?.error ?? (Array.isArray(r?.issues) ? r.issues.join('; ') : ''))) }
+          } catch (err) { say('出错：' + (err as Error).message) }
+          return
+        }
+        // ★ 定时：立即跑一次
+        const schedRunEl = t.closest('[data-act="sched-run-now"]') as HTMLElement | null
+        if (schedRunEl) {
+          const tplName4 = (selectedTemplateName || '').trim()
+          if (!tplName4) return
+          try {
+            const inputs: Record<string, string> = {}
+            for (const inp of currentInputs) {
+              const el = q<HTMLInputElement>(`[data-input="${inp.key}"]`)
+              if (el) inputs[inp.key] = el.value
+            }
+            const r = await api('workflow_run_schedule_now', { name: tplName4, inputs })
+            if (r && r.ok) {
+              say(`已提交运行（任务 ${r.taskId ?? ''}）`)
+              await loadTasks()
+              repaintBody()
+            } else { say('提交失败：' + (r?.error ?? '未知')) }
+          } catch (e) { say('出错：' + (e as Error).message) }
+          return
+        }
+
         const runEl = t.closest('[data-act="run-task"]') as HTMLElement | null
         if (runEl) {
           if (!selectedTemplateName) { say('请先选择工作流模板'); return }
@@ -1349,6 +1626,25 @@ export function workflowPage(deps: { config: Config }) {
           editorState.selectedTemplate = name
           const ok = await loadYamlToEditor(name)
           if (ok) repaintBody()
+          return
+        }
+
+        // ★ 定期执行：开关
+        const schEnabledEl = t.closest('[data-sch-enabled]') as HTMLElement | null
+        if (schEnabledEl) {
+          const cb = schEnabledEl as HTMLInputElement
+          editorState.schedule.enabled = cb.checked
+          repaintBody()
+          return
+        }
+        // ★ 定期执行：间隔预设
+        const schPresetEl = t.closest('[data-sch-preset]') as HTMLElement | null
+        if (schPresetEl) {
+          syncEditorFromDom()
+          const iv = schPresetEl.dataset.schPreset as string
+          editorState.schedule.intervalMinutes = iv
+          if (!editorState.schedule.enabled) editorState.schedule.enabled = true
+          repaintBody()
           return
         }
 
@@ -1612,6 +1908,11 @@ export function workflowPage(deps: { config: Config }) {
         const tplSelEl = t.closest('[data-wf-template]') as HTMLSelectElement | null
         if (tplSelEl) {
           selectedTemplateName = tplSelEl.value
+        // ★ 回填该模板的定时间隔
+        {
+          const tp = templates.find(x => x.name === selectedTemplateName)
+          taskScheduleInterval = String(tp?.scheduleInterval ?? 120)
+        }
           if (selectedTemplateName) {
             try {
               const data = await api('workflow_get_template', { name: selectedTemplateName })

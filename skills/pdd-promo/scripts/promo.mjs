@@ -100,7 +100,7 @@ const mode = argOf('mode') || 'overview'
   //   浏览器优先发子域旧值 → 推广域反复掉登录。
   //   这里删掉子域同名项，让浏览器回落到父域的新值。
   //   跳过：--no-cookie-clean
-  if (!process.argv.includes('--no-cookie-clean')) {
+  if (process.argv.includes('--cookie-clean')) {
     try {
       const { cleanCookiePollution } = await import(pathToFileURL(path.join(HERE, 'cookie-clean.mjs')).href)
       const r = await cleanCookiePollution(profile, { log: (m) => console.warn('[pdd-promo] ' + m) })

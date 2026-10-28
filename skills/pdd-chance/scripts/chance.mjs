@@ -119,7 +119,7 @@ const PRICE_LABEL_NAMES = { 0: '品质档', 1: '主流档', 2: '引流档' }
 
   //   跳过：--no-cookie-clean
 
-  if (!process.argv.includes('--no-cookie-clean')) {
+  if (process.argv.includes('--cookie-clean')) {
 
     try {
 
