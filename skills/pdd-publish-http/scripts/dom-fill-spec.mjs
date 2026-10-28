@@ -576,12 +576,9 @@ async function fillCustomSize(page, dimIdx, value) {
   await sleep(400)
   await page.keyboard.type(String(value), { delay: 50 })
   await sleep(300)
-  // ★ 点页面空白处失焦
+  // ★ 点页面空白处失焦（用户：输入完成点空白）
   await page.mouse.click(30, 300)
-  await sleep(1000)
-  // ★ 再点一次空白（用户：在自定义输入空白点一下）
-  await page.mouse.click(30, 300)
-  await sleep(1200)
+  await sleep(1500)
 
   // 回读确认值进了输入框（任一输入框有值就算成功）
   const back = await page.evaluate((sel, ci, val) => {
@@ -911,11 +908,13 @@ async function fillSkuThumbs(page, thumbMap) {
       const trs = [...tb.querySelectorAll('tbody tr')]
       trs.forEach((tr, ri) => {
         const tds = [...tr.querySelectorAll('td')]
-        const specText = tds[0]?.textContent?.trim() || ''
+        // ★ 整行文本（颜色+尺码都在），不是只取第一列
+        const specText = tds.slice(0, 2).map(td => td.textContent?.trim() || '').join(' ')
         const thumbTd = thumbIdx >= 0 ? tds[thumbIdx] : null
         const thumbText = thumbTd?.textContent?.trim() || ''
-        const done = thumbIdx >= 0 && !/本地上传/.test(thumbText)
-        out.push({ row: ri, specText: specText.slice(0, 40), done })
+        // ★ 上传成功判断：「本地上传」文字消失 或 有 img
+        const done = thumbIdx >= 0 && (!/本地上传/.test(thumbText) || !!thumbTd?.querySelector('img'))
+        out.push({ row: ri, specText: specText.slice(0, 60), done })
       })
       break
     }
