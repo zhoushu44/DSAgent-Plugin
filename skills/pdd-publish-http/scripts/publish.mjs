@@ -106,6 +106,33 @@ try {
   // 用规整后的图片路径回填（切分后张数会变）
   parsed.images = pre.main
   if (parsed.detailImages) parsed.detailImages = pre.detail
+  // ★ 2026-10-28：中文长路径会导致 puppeteer uploadFile 静默失败（报「商品轮播图不能为空」），
+  //   复制到短英文路径的临时目录再上传（实测有效）。
+  {
+    const shortDir = path.join(tmpdir(), 'pddupl')
+    fs.mkdirSync(shortDir, { recursive: true })
+    let n = 0
+    const toShort = (p) => {
+      if (typeof p !== 'string' || !fs.existsSync(p)) return p
+      // 路径短且纯 ASCII 就不动
+      if (p.length <= 40 && /^[\x20-\x7E]+$/.test(p)) return p
+      n++
+      const dst = path.join(shortDir, `i${n}.jpg`)
+      fs.copyFileSync(p, dst)
+      return dst
+    }
+    parsed.images = parsed.images.map(toShort)
+    if (parsed.detailImages) parsed.detailImages = parsed.detailImages.map(toShort)
+    for (const d of (parsed.specs || [])) {
+      for (const v of (d.values || [])) {
+        if (v && typeof v === 'object' && v.image) v.image = toShort(v.image)
+      }
+    }
+    for (const s of (parsed.skus || [])) {
+      if (s && s.image) s.image = toShort(s.image)
+    }
+    if (n) console.log(`[pdd-publish-http] ${n} 张图已复制到短路径（中文长路径 uploadFile 会静默失败）`)
+  }
   // 规格预览图路径同步（切分不影响它们，但补白后路径不变）
   raw = JSON.stringify(parsed)
 } catch (e) {
