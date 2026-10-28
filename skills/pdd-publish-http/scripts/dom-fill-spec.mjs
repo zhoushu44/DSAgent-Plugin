@@ -894,11 +894,13 @@ async function disableSizeChart(page) {
   return true
 }
 
-/* ─────────── ⑩ 填 SKU 预览图（逐行传 + 行级验证 + 重试） ─────────── */
-async function fillSkuThumbs(page, thumbMap) {
-  if (!thumbMap || !Object.keys(thumbMap).length) return { filled: 0, total: 0 }
+/* ─────────── ⑩ 填 SKU 预览图（SKU级优先 → 值级兜底 → 按行补全） ─────────── */
+async function fillSkuThumbs(page, thumbMap, thumbMapSku = {}) {
+  const valMap = thumbMap || {}
+  const skuMap = thumbMapSku || {}
+  if (!Object.keys(valMap).length && !Object.keys(skuMap).length) return { filled: 0, total: 0 }
 
-  // 读所有行（规格值文本 + 预览图列是否已传）
+  // 读所有行（整行文本 + 预览图列是否已传）
   const readRows = () => page.evaluate(() => {
     const out = []
     for (const tb of document.querySelectorAll('#sku table')) {
@@ -908,11 +910,10 @@ async function fillSkuThumbs(page, thumbMap) {
       const trs = [...tb.querySelectorAll('tbody tr')]
       trs.forEach((tr, ri) => {
         const tds = [...tr.querySelectorAll('td')]
-        // ★ 整行文本（颜色+尺码都在），不是只取第一列
+        // 整行文本（前 2 列 = 两个维度值）
         const specText = tds.slice(0, 2).map(td => td.textContent?.trim() || '').join(' ')
         const thumbTd = thumbIdx >= 0 ? tds[thumbIdx] : null
         const thumbText = thumbTd?.textContent?.trim() || ''
-        // ★ 上传成功判断：「本地上传」文字消失 或 有 img
         const done = thumbIdx >= 0 && (!/本地上传/.test(thumbText) || !!thumbTd?.querySelector('img'))
         out.push({ row: ri, specText: specText.slice(0, 60), done })
       })
@@ -921,19 +922,34 @@ async function fillSkuThumbs(page, thumbMap) {
     return out
   })
 
-  const initial = await readRows()
-  if (!initial.length) return { filled: 0, total: 0 }
+  /**
+   * 给一行找图：SKU 级优先（行文本含该组合的所有维度值），值级兜底（含任一维度值）
+   */
+  const findImg = (specText) => {
+    // ① SKU 级：行文本包含该 SKU 的所有维度值
+    for (const [key, img] of Object.entries(skuMap)) {
+      const vals = key.split('|').map(kv => kv.split('=')[1]).filter(Boolean)
+      if (vals.length && vals.every(v => specText.includes(v))) return img
+    }
+    // ② 值级：行文本包含任一维度值
+    for (const [val, img] of Object.entries(valMap)) {
+      if (specText.includes(val)) return img
+    }
+    return null
+  }
 
-  let filled = 0
-  for (const r of initial) {
-    if (r.done) { filled++; continue }
-    const key = Object.keys(thumbMap).find(k => r.specText.includes(k))
-    if (!key) continue
-    const imgPath = thumbMap[key]
-    if (!imgPath || !fs.existsSync(imgPath)) continue
+  let total = 0
+  // ★ 多轮补全（每轮重读行状态，不用陈旧索引）
+  for (let round = 0; round < 3; round++) {
+    const rows = await readRows()
+    total = rows.length
+    const pending = rows.filter(r => !r.done)
+    if (!pending.length) break
 
-    // 该行最多重试 2 次（上传异步，首次可能没生效）
-    for (let attempt = 0; attempt < 2; attempt++) {
+    for (const r of pending) {
+      const imgPath = findImg(r.specText)
+      if (!imgPath || !fs.existsSync(imgPath)) continue
+
       // 滚动到该行
       await page.evaluate(ri => {
         const trs = [...document.querySelectorAll('#sku table tbody tr')]
@@ -941,8 +957,8 @@ async function fillSkuThumbs(page, thumbMap) {
       }, r.row)
       await sleep(400)
 
-      // 取该行预览图 td 的 file input（每次重新取，上传后 DOM 重建）
-      const fileHandle = await page.evaluateHandle(ri => {
+      // 取该行预览图 td 的 file input（实时取，不用缓存）
+      const el = await page.evaluateHandle(ri => {
         const trs = [...document.querySelectorAll('#sku table tbody tr')]
         const tr = trs[ri]
         if (!tr) return null
@@ -951,30 +967,22 @@ async function fillSkuThumbs(page, thumbMap) {
         const tds = [...tr.querySelectorAll('td')]
         const td = thumbIdx >= 0 ? tds[thumbIdx] : null
         return td?.querySelector('input[type="file"]') || null
-      }, r.row).catch(() => null)
-
-      const el = fileHandle?.asElement?.()
-      if (!el) break
+      }, r.row).then(h => h.asElement()).catch(() => null)
+      if (!el) continue
 
       await el.uploadFile(imgPath).catch(() => {})
-      // 等上传完成（文字消失）
-      let ok = false
-      for (let w = 0; w < 10; w++) {
+      // 等上传完成（最多 8 秒）
+      for (let w = 0; w < 8; w++) {
         await sleep(1000)
-        const rows = await readRows()
-        const cur = rows.find(x => x.row === r.row)
-        if (cur?.done) { ok = true; break }
+        const cur = (await readRows()).find(x => x.row === r.row)
+        if (cur?.done) break
       }
-      if (ok) { filled++; break }
-      // 没生效 → 重试（DOM 已重建，重新取 file input）
     }
+    await sleep(1500)
   }
 
-  // 最终验证
-  await sleep(2000)
   const final = await readRows()
-  const doneCount = final.filter(r => r.done).length
-  return { filled: doneCount, total: initial.length }
+  return { filled: final.filter(r => r.done).length, total }
 }
 
 /* ─────────── 主入口 ─────────── */
@@ -1157,7 +1165,7 @@ export async function fillSpecsOnPage(page, specs, defaults = {}) {
   // ★ 填 SKU 预览图（不传 → 平台报「请上传第1行规格的预览图」拦提交）
   if (defaults.thumbMap && Object.keys(defaults.thumbMap).length) {
     log('填 SKU 预览图…')
-    const thumbRes = await fillSkuThumbs(page, defaults.thumbMap)
+    const thumbRes = await fillSkuThumbs(page, defaults.thumbMap, defaults.thumbMapSku)
     log(`  预览图: ${thumbRes.filled}/${thumbRes.total} 行`)
   }
 

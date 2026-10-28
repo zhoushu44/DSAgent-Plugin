@@ -8,6 +8,15 @@ import { fileURLToPath } from 'node:url'
 // ★ 路径推导（替代原硬编码绝对路径）：本文件在 skills/<name>/scripts/ 下，上推三层到插件根
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const PLUGIN_ROOT = path.resolve(HERE, '..', '..', '..')
+
+/** SKU 组合 key：维度值按维度名排序拼接（与维度顺序无关，便于页面行文本匹配） */
+function skuKey(specs) {
+  if (!specs || typeof specs !== 'object') return ''
+  return Object.keys(specs)
+    .sort()
+    .map(k => `${k}=${String(specs[k]).trim()}`)
+    .join('|')
+}
 const PKG_BASE = [
   path.join(PLUGIN_ROOT, 'package.json'),
   path.join(HERE, 'package.json'),
@@ -248,7 +257,11 @@ try {
       }))
       .filter(d => d.values.length)
     if (domSpecs.length) {
-      // ★ 构建预览图映射：规格值 → 本地图片路径（从商品 JSON 的 specs[].values[].image）
+      // ★ 构建预览图映射（两级）：
+      //   ① thumbMap：规格值 → 图（单维度匹配，同值复用一张图）
+      //   ② thumbMapSku：SKU 组合 → 图（组合级匹配，每个 SKU 一张不同图）
+      //      key = 所有维度值按维度名排序后拼接（如「尺寸=40cm|款式=方款」），
+      //      匹配时也按这个格式生成，与维度顺序无关。
       const thumbMap = {}
       for (const d of (parsed.specs || [])) {
         for (const v of (d.values || [])) {
@@ -256,6 +269,15 @@ try {
           const img = (v && typeof v === 'object') ? v.image : null
           if (val && img && typeof img === 'string' && fs.existsSync(img)) thumbMap[val] = img
         }
+      }
+      // SKU 级：从 skus[].image 取（每个 SKU 组合一张图）
+      const thumbMapSku = {}
+      for (const s of (parsed.skus || [])) {
+        const specs = s?.specs
+        const img = s?.image
+        if (!specs || !img || typeof img !== 'string' || !fs.existsSync(img)) continue
+        const key = skuKey(specs)
+        if (key) thumbMapSku[key] = img
       }
       extra.domFillSpecs = async (page) => {
         console.log('[pdd-publish-http] DOM 填规格开始')
@@ -266,13 +288,15 @@ try {
           fillPriceTable: true,
           fillRefPrice: true,
           thumbMap,
+          thumbMapSku,
         })
         console.log('[pdd-publish-http] DOM 填规格结果: ' + result.message)
         return result
       }
       console.log('[pdd-publish-http] DOM 填规格已挂载: ' + domSpecs.length + ' 维度 → ' +
         domSpecs.map(d => d.name + '(' + d.values.length + ')').join(', ') +
-        (Object.keys(thumbMap).length ? '，预览图 ' + Object.keys(thumbMap).length + ' 个' : '（无预览图）'))
+        (Object.keys(thumbMap).length ? '，预览图(值级) ' + Object.keys(thumbMap).length + ' 个' : '（无预览图）') +
+        (Object.keys(thumbMapSku).length ? '，预览图(SKU级) ' + Object.keys(thumbMapSku).length + ' 个' : ''))
     }
   } catch (e) {
     console.log('[pdd-publish-http] 规格解析异常（继续）：' + (e?.message || e))
