@@ -1377,7 +1377,13 @@ async function fillAttrText(page: any, propId: string, value: string, maxlength 
         || document.getElementById('sell-field-' + id.replace(/^struct-/, ''))
     }
     if (!field) return null
-    const inp = field.querySelector('input, textarea') as HTMLInputElement | null
+    // ★★ 2026-10-28：必须挑**文本型** input，不能要 select 的只读 input。
+    //   实测「型号」属性项容器里同时有 select 的只读 input（placeholder「请选择」）
+    //   和真正的文本 input（placeholder「请输入」），取第一个会命中只读的那个，
+    //   于是把型号值键入到了错误位置（表现为「型号」显示成了品牌的值）。
+    const inps = Array.from(field.querySelectorAll('input, textarea') as NodeListOf<HTMLInputElement>)
+      .filter(i => i.offsetParent !== null && !i.readOnly && !/^请选择/.test(i.getAttribute('placeholder') || ''))
+    const inp = inps[inps.length - 1] || (field.querySelector('input, textarea') as HTMLInputElement | null)
     if (!inp || inp.offsetParent === null) return null
     try { inp.scrollIntoView({ block: 'center' }) } catch { /* 忽略 */ }
     const r = inp.getBoundingClientRect()
@@ -1399,10 +1405,31 @@ async function fillAttrText(page: any, propId: string, value: string, maxlength 
   await sleep(400)
 
   return await page.evaluate((id: string, want: string) => {
-    const field = document.getElementById(id)
-      || document.getElementById('sell-field-' + id.replace(/^struct-/, ''))
-    const inp = field?.querySelector('input, textarea') as HTMLInputElement | null
-    return !!inp && (inp.value || '').trim() === want.trim()
+    const w = String(want || '').trim()
+    // label: 形态走反查（getElementById 拿不到这种 id）
+    const readBox = (sid: string): HTMLElement | null => {
+      if (!sid.startsWith('label:')) {
+        return document.getElementById(sid) || document.getElementById('sell-field-' + sid.replace(/^struct-/, ''))
+      }
+      const name = sid.slice(6)
+      for (const l of Array.from(document.querySelectorAll('label')) as HTMLElement[]) {
+        const t = (l.innerText || '').replace(/[*＊]/g, '').replace(/\s+/g, '')
+        if (t !== name) continue
+        let b: HTMLElement | null = l
+        for (let i = 0; i < 6 && b; i++) {
+          const cand = b.closest('.sell-catProp-item-common, .sell-catProp-item, [id^="struct-p-"]') as HTMLElement | null
+          if (cand && cand.querySelector('input, textarea')) return cand
+          b = b.parentElement
+        }
+      }
+      return null
+    }
+    const field = readBox(id)
+    if (!field) return false
+    const inps = Array.from(field.querySelectorAll('input, textarea') as NodeListOf<HTMLInputElement>)
+      .filter(i => i.offsetParent !== null && !i.readOnly && !/^请选择/.test(i.getAttribute('placeholder') || ''))
+    const inp = inps[inps.length - 1] || (field.querySelector('input, textarea') as HTMLInputElement | null)
+    return !!inp && (inp.value || '').trim() === w
   }, propId, v).catch(() => false) as boolean
 }
 
@@ -1785,6 +1812,18 @@ async function readCatPropItems(page: any): Promise<TbCatPropItem[]> {
       const t = (l.innerText || '').trim()
       if (t && t.length <= 12 && l.closest('[class*="catProp"], [id^="struct-p-"]')) labelSet.add(l)
     }
+    // ★★ 2026-10-28 补第四路兜底：**直接枚举属性项容器**。
+    //   实测 catId=50013618（儿童裤子）页面有 8 个必填属性，label 反查只读到 7 个 ——
+    //   「型号」的 label 不在 catProp/struct-p-* 容器里，被前三条规则全漏掉，
+    //   于是它从没进待填清单，提交一直卡在「7/8」。
+    //   这里按 .sell-catProp-item-common / .sell-catProp-item 正向枚举，
+    //   每个容器里找 label 文本当属性名，补上前三路漏掉的项。
+    for (const item of Array.from(document.querySelectorAll('.sell-catProp-item-common, .sell-catProp-item')) as HTMLElement[]) {
+      if (item.offsetParent === null) continue
+      const lb = Array.from(item.querySelectorAll('label') as NodeListOf<HTMLElement>).find(l => (l.innerText || '').trim())
+      if (!lb) continue
+      labelSet.add(lb)
+    }
 
     for (const labelEl of labelSet) {
       const name = (labelEl.innerText || '').replace(/[*＊]/g, '').replace(/\s+/g, '')
@@ -2023,10 +2062,13 @@ async function fillComboboxProp(page: any, id: string, text: string): Promise<bo
       const panel = panels[panels.length - 1]
       if (!panel) return false
       const nodes = Array.from(
-        panel.querySelectorAll('.options-item, li, .next-menu-item, [role="option"], [class*="option"]'),
+        panel.querySelectorAll('.options-item, li, .next-menu-item, [role="option"]'),
       ) as HTMLElement[]
       const vis = nodes.filter(n => n.offsetParent !== null)
       const norm = (s: string) => (s || '').replace(/\s+/g, ' ').trim()
+      // ★ 只认 .options-item（真机实测）：[class*="option"] 会命中
+      //   .sell-o-select-options / .options-content 这类**容器**（文本含全部候选），
+      //   点到容器上不选中任何值，还会让「确认，下一步」永远不解禁。
       const hit = vis.find(n => norm(n.getAttribute('title') || n.innerText) === val)
         || vis.find(n => norm(n.innerText).includes(val))
       if (!hit) return false
@@ -2062,6 +2104,207 @@ async function fillComboboxProp(page: any, id: string, text: string): Promise<bo
     }, id, t).catch(() => false) as boolean
   }
   return true
+}
+
+/**
+ * 填「材质成分」这类**行式复合属性**（按钮 + 就地增行 + 每行一个下拉）。
+ *
+ * ★ 2026-10-28 真机实测（catId=50013618 儿童裤子）：
+ *   - 「材质成分」容器 `struct-p-149422948`，**不是普通下拉**：它有「添加材质成分」按钮，
+ *     点了**就地新增一行**（不是弹窗），每行一个 `input[请选择材质]` 下拉 + 「删除」。
+ *   - 此前 readCatPropItems 因容器里有 .next-select 就判成 kind='select'，
+ *     于是去点下拉 → 填不进表格 → 提交仍报「类目属性 必填项未填」。
+ *   - 提示文案：「您最多可填写7种材质…若不填写【含量】，请按照【材质】的重要程度从高到低填写」
+ *     → **含量可空**，只选材质即可过校验。
+ *
+ * @param id 属性项 id（struct-p-XXXX 或 label:名称）
+ * @param value 材质名（如「棉」「纯棉」）
+ */
+async function fillMaterialRows(page: any, id: string, value: string): Promise<boolean> {
+  const v = String(value || '').trim()
+  if (!v) return false
+
+  // ① 若已有一行且已填，直接算成功
+  const already = await page.evaluate((sid: string) => {
+    let box: HTMLElement | null = null
+    if (sid.startsWith('label:')) {
+      const want = sid.slice(6)
+      for (const l of Array.from(document.querySelectorAll('label')) as HTMLElement[]) {
+        const name = (l.innerText || '').replace(/[*＊]/g, '').replace(/\s+/g, '')
+        if (name !== want) continue
+        let b: HTMLElement | null = l
+        for (let i = 0; i < 6 && b; i++) {
+          const cand = b.closest('.sell-catProp-item-common, .sell-catProp-item, [id^="struct-p-"]') as HTMLElement | null
+          if (cand && cand.querySelector('.next-select, input, button')) { box = cand; break }
+          b = b.parentElement
+        }
+        if (box) break
+      }
+    } else {
+      box = document.getElementById(sid)
+    }
+    if (!box) return false
+    const shown = ((box.querySelector('.next-select-values') as HTMLElement | null)?.innerText || '').trim()
+    const inp = box.querySelector('input[placeholder*="材质"]') as HTMLInputElement | null
+    return !!(shown && shown !== '请选择') || !!(inp && inp.value && inp.value !== '请选择')
+  }, id).catch(() => false) as boolean
+  if (already) return true
+
+  // ② 没有已填行 → 点「添加材质成分」就地增一行（真实鼠标点击）
+  const addBtn = await page.evaluate((sid: string) => {
+    let box: HTMLElement | null = null
+    if (sid.startsWith('label:')) {
+      const want = sid.slice(6)
+      for (const l of Array.from(document.querySelectorAll('label')) as HTMLElement[]) {
+        const name = (l.innerText || '').replace(/[*＊]/g, '').replace(/\s+/g, '')
+        if (name !== want) continue
+        let b: HTMLElement | null = l
+        for (let i = 0; i < 6 && b; i++) {
+          const cand = b.closest('.sell-catProp-item-common, .sell-catProp-item, [id^="struct-p-"]') as HTMLElement | null
+          if (cand && cand.querySelector('.next-select, input, button')) { box = cand; break }
+          b = b.parentElement
+        }
+        if (box) break
+      }
+    } else {
+      box = document.getElementById(sid)
+    }
+    if (!box) return null
+    const btn = Array.from(box.querySelectorAll('button, .next-btn') as NodeListOf<HTMLElement>)
+      .find(b => /添加材质成分/.test((b.textContent || '').trim()) && b.offsetParent !== null)
+    if (!btn) return null
+    btn.scrollIntoView({ block: 'center' })
+    const r = btn.getBoundingClientRect()
+    return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }
+  }, id).catch(() => null) as { x: number; y: number } | null
+  if (addBtn) {
+    await page.mouse.move(addBtn.x, addBtn.y).catch(() => {})
+    await sleep(200)
+    await page.mouse.click(addBtn.x, addBtn.y).catch(() => {})
+    await sleep(1500)
+  }
+
+  // ③ 在新增的「请选择材质」行里选值
+  //    先尝试直接点该行的 trigger 展开下拉；展开后用面板搜索过滤（同品牌）
+  const openedRow = await page.evaluate((sid: string) => {
+    let box: HTMLElement | null = null
+    if (sid.startsWith('label:')) {
+      const want = sid.slice(6)
+      for (const l of Array.from(document.querySelectorAll('label')) as HTMLElement[]) {
+        const name = (l.innerText || '').replace(/[*＊]/g, '').replace(/\s+/g, '')
+        if (name !== want) continue
+        let b: HTMLElement | null = l
+        for (let i = 0; i < 6 && b; i++) {
+          const cand = b.closest('.sell-catProp-item-common, .sell-catProp-item, [id^="struct-p-"]') as HTMLElement | null
+          if (cand && cand.querySelector('.next-select, input, button')) { box = cand; break }
+          b = b.parentElement
+        }
+        if (box) break
+      }
+    } else {
+      box = document.getElementById(sid)
+    }
+    if (!box) return null
+    // 取**最后一个**未填的「请选择材质」行（刚增的那行）
+    const inps = Array.from(box.querySelectorAll('input[placeholder*="材质"]')) as HTMLInputElement[]
+    const empty = inps.filter(i => !i.value || i.value === '请选择材质')
+    const target = empty[empty.length - 1] || inps[inps.length - 1]
+    if (!target) return null
+    target.scrollIntoView({ block: 'center' })
+    const r = target.getBoundingClientRect()
+    return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }
+  }, id).catch(() => null) as { x: number; y: number } | null
+
+  if (!openedRow) return false
+  await page.mouse.move(openedRow.x, openedRow.y).catch(() => {})
+  await sleep(200)
+  await page.mouse.click(openedRow.x, openedRow.y).catch(() => {})
+  await sleep(1200)
+
+  // ④ 读候选 → 搜索过滤 → 点中
+  let options = await readPropOptions(page)
+  const normOpt = (s: string) => String(s || '').replace(/\s+/g, ' ').trim()
+  const hit = (arr: string[]) => {
+    const exact = arr.find(o => normOpt(o) === v)
+    if (exact) return exact
+    const cands = arr.filter(o => normOpt(o).includes(v) || v.includes(normOpt(o)))
+    // 最短优先（「棉」应命中「棉」而非「棉混纺」）
+    return cands.sort((x, y) => normOpt(x).length - normOpt(y).length)[0] || null
+  }
+  let target = hit(options)
+  if (!target) {
+    const filtered = await searchInOpenSelect(page, v)
+    if (filtered.length) {
+      options = filtered
+      target = hit(filtered)
+    }
+  }
+  if (!target) {
+    await closePropDropdown(page)
+    return false
+  }
+  const ok = await clickPropOption(page, target)
+  await sleep(600)
+  return ok
+}
+
+/**
+ * 在**已展开**的下拉面板里用隐藏搜索框过滤候选，返回过滤后的选项。
+ *
+ * ★ 为什么需要（2026-10-28 真机实测）：淘宝 next-select 候选常只渲染首屏
+ *   （类目「品牌」实测 16 项，`Uniqlo/优衣库` 排在 U 段不在首屏），
+ *   而面板里有个隐藏 search input（`input[type="search"]` / `.next-select-search input`），
+ *   键入即过滤。没有这一步，显式品牌值永远匹配不上，只能掉进必填兜底。
+ *
+ * 返回过滤后的候选数组；无搜索框 / 无结果返回空数组（调用方保持原 options）。
+ */
+async function searchInOpenSelect(page: any, keyword: string): Promise<string[]> {
+  const kw = String(keyword || '').trim()
+  if (!kw) return []
+  // ① 定位搜索框并键入（React 受控：走原生 value setter）
+  const typed = await page.evaluate((k: string) => {
+    const panels = (Array.from(document.querySelectorAll('.next-overlay-wrapper.opened')) as HTMLElement[])
+      .filter(p => p.offsetParent !== null)
+    const p = panels[panels.length - 1]
+    if (!p) return false
+    const s = (p.querySelector('input[type="search"], .next-select-search input, input:not([readonly])')
+      || p.parentElement?.querySelector('input[type="search"], .next-select-search input, input:not([readonly])')) as HTMLInputElement | null
+    if (!s) return false
+    const desc = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(s), 'value')
+      || Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')
+    s.focus()
+    if (desc?.set) desc.set.call(s, k); else s.value = k
+    s.dispatchEvent(new Event('input', { bubbles: true }))
+    s.dispatchEvent(new Event('change', { bubbles: true }))
+    return true
+  }, kw).catch(() => false) as boolean
+  if (!typed) return []
+  // ② 等候选真的被过滤（轮询到「候选数 < 键入前的数量」或 2.5s 超时）
+  //   ★ 不能只等面板存在：面板本来就在，键入后候选是异步过滤的。
+  //     早先版本只 waitForPropPanel → 读到的还是未过滤的完整列表，
+  //     日志显示「命中 14 项」但候选仍是 0-3/007/00后...，搜索形同没做。
+  const beforeCount = await readPropOptions(page).catch(() => []) as string[]
+  const deadline = Date.now() + 2500
+  let out: string[] = []
+  while (Date.now() < deadline) {
+    await sleep(250)
+    out = await readPropOptions(page).catch(() => []) as string[]
+    if (out.length && (beforeCount.length === 0 || out.length < beforeCount.length)) break
+  }
+  // ③ 读过滤后的候选
+  if (!out.length) out = await readPropOptions(page).catch(() => []) as string[]
+  // ④ 清空搜索词，避免污染下一次读取
+  await page.evaluate(() => {
+    const panels = (Array.from(document.querySelectorAll('.next-overlay-wrapper.opened')) as HTMLElement[]).filter(p => p.offsetParent !== null)
+    const p = panels[panels.length - 1]
+    const s = p?.querySelector('input[type="search"], .next-select-search input, input:not([readonly])') as HTMLInputElement | null
+    if (!s) return
+    const desc = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(s), 'value')
+      || Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')
+    if (desc?.set) desc.set.call(s, ''); else s.value = ''
+    s.dispatchEvent(new Event('input', { bubbles: true }))
+  }).catch(() => { })
+  return out
 }
 
 /** 点选后回读属性项，确认值确实落到了控件上（选中值可能写在 input.value 或 .next-select-values 文本里） */
@@ -2302,6 +2545,8 @@ async function fillCategoryAttrs(
      *   仍只在页面真实候选里命中才填，命中不了只记 missed，绝不编造品牌。
      */
     brand?: string
+    /** 用户声明的「型号」文本（填「型号」这一必填文本属性用；与 model 句柄是两回事） */
+    modelText?: string
   },
 ): Promise<{ filled: string[]; missed: string[]; confirmed: Record<string, string>; schemaNames: string[]; schemaFp: string; profile: CategoryProfile | null }> {
   const filled: string[] = []
@@ -2377,10 +2622,49 @@ async function fillCategoryAttrs(
       + `${brandOptIn ? `（品牌按显式声明「${brandOptIn}」参与匹配）` : '（品牌默认跳过：授权风险，未显式声明不填）'}`)
   }
 
-  for (const it of todo) {
+  // ★★ 2026-10-29：属性列表必须**边填边重扫**。
+  //   实测 catId=50013618：初始扫描读到 7 项，填完品牌后页面才**动态渲染出「型号」**
+  //   （引擎注释早记过「型号字段在品牌选定后才渲染」），于是它从没进待填清单，
+  //   提交一直卡「7/8」。这里改成索引循环 + 每轮重读属性列表，新出现的项自动补上。
+  let idx = 0
+  let guard = 0
+  const doneNames = new Set<string>()
+  while (guard++ < 40) {
+    const current = await readCatPropItems(page).catch(() => [])
+    // 新出现且未处理过的项
+    const it = current.find(i => i.name && !doneNames.has(i.name) && !isSkipped(i.name))
+    if (!it) break
+    doneNames.add(it.name)
+    console.log(`[dsagent-taobao-publish] 处理属性「${it.name}」（第 ${guard} 轮，当前页面共 ${current.length} 项，kind=${it.kind}, id=${it.id}, filled=${it.filled}）`)
+
+    // ── 材质成分：行式复合属性（按钮增行 + 每行下拉），必须单独处理 ──
+    //   ★ 2026-10-28 真机实测：它有「添加材质成分」按钮，点了就地增一行（非弹窗），
+    //     容器里也有 .next-select 所以 readCatPropItems 会误判成 kind='select'，
+    //     走普通下拉路径填不进表格，提交仍报「类目属性 必填项未填」。
+    if (/材质成分|面料成分|主面料成分/.test(it.name)) {
+      const matVal = explicitMap.get(it.name)
+        || explicitMap.get('材质') || explicitMap.get('主面料成分') || explicitMap.get('面料成分')
+      if (!matVal) {
+        missed.push(`${it.name}（行式复合属性，未给值；用 --attrs="${it.name}=棉" 指定）`)
+        continue
+      }
+      const done = await fillMaterialRows(page, it.id, matVal)
+      if (done) {
+        filled.push(`${it.name}=${matVal}（行式复合）`)
+        confirmedAttrs[it.name] = matVal
+      } else {
+        missed.push(`${it.name}=${matVal}（行式填写失败：未能增行或在「请选择材质」里选中）`)
+      }
+      continue
+    }
+
     // ── 文本型属性（input/textarea，无下拉）──
     if (it.kind === 'text') {
-      const explicitVal = explicitMap.get(it.name)
+      // ★ 2026-10-28：「型号」是常见必填文本项，用户传的 model 参数应优先于占位「无」。
+      //   此前只认 explicitMap / 占位，导致 dev 脚本传了 --model=X1 也没填上，
+      //   页面一直卡「7/8」。
+      const modelOptIn = /^型号$/.test(it.name) ? String(ctx.modelText || '').trim() : ''
+      const explicitVal = explicitMap.get(it.name) || modelOptIn
       // 必填文本项：显式值优先，否则给一个占位（避免必填拦截），并记入 missed 提醒人工核对
       const val = explicitVal || (it.required ? '无' : '')
       if (!val) { missed.push(`${it.name}（文本型，未给值）`); continue }
@@ -2397,7 +2681,12 @@ async function fillCategoryAttrs(
 
     // ── combobox 型属性（如「品牌」：键入 → 选中，click 选项无效）──
     if (it.kind === 'combobox') {
-      const explicitVal = explicitMap.get(it.name) || brandOptIn
+      // ★ 只有「品牌」才用 brandOptIn 兜底。
+      //   实测「型号」也是 combobox（id=struct-p-20000-13583604），此前无条件用
+      //   brandOptIn 兜底 → 把型号填成了品牌的值（「型号=巴拉巴拉」）。
+      const explicitVal = explicitMap.get(it.name)
+        || (it.name === '品牌' ? brandOptIn : '')
+        || (/^型号$/.test(it.name) ? String(ctx.modelText || '').trim() : '')
       if (!explicitVal) {
         missed.push(`${it.name}（combobox，未给值；品牌类请用 brand 参数显式声明）`)
         continue
@@ -2415,26 +2704,116 @@ async function fillCategoryAttrs(
     const opened = await openPropDropdown(page, it.id)
     if (!opened) { missed.push(`${it.name}（未能展开下拉）`); continue }
     await waitForPropPanel(page, ATTR_DROPDOWN_WAIT_MS)
-    const options = await readPropOptions(page)
+    let options = await readPropOptions(page)
+    // ★★ 2026-10-28 防护：选项归属校验。
+    //   readPropOptions 取「最后一个可见面板」。若上一个属性的面板没关干净、
+    //   或多个面板同时存在，读到的就是**别的属性**的候选 —— 实测连衣裙类目
+    //   因此把「适用年龄」的候选「0-3」当成了品牌的候选，误填成「品牌=0-3」。
+    //   这里用「当前属性项是否处于激活态」交叉验证：激活态说明刚展开的面板
+    //   确实属于它；不激活则关掉面板重开一次再读。
+    if (options.length) {
+      const ownerOk = await page.evaluate((sid: string) => {
+        let box: HTMLElement | null = null
+        if (sid.startsWith('label:')) {
+          const want = sid.slice(6)
+          for (const l of Array.from(document.querySelectorAll('label')) as HTMLElement[]) {
+            const name = (l.innerText || '').replace(/[*＊]/g, '').replace(/\s+/g, '')
+            if (name !== want) continue
+            let b: HTMLElement | null = l
+            for (let i = 0; i < 6 && b; i++) {
+              const cand = b.closest('.sell-catProp-item-common, .sell-catProp-item, [id^="struct-p-"]') as HTMLElement | null
+              if (cand && cand.querySelector('.next-select, input')) { box = cand; break }
+              b = b.parentElement
+            }
+            if (box) break
+          }
+        } else {
+          box = document.getElementById(sid)
+        }
+        if (!box) return false
+        // 激活态：属性项自身带 next-active，或其内部 input 是 document.activeElement
+        if (/next-active/.test(String(box.className || ''))) return true
+        const inp = box.querySelector('input')
+        return !!inp && document.activeElement === inp
+      }, it.id).catch(() => false) as boolean
+      if (!ownerOk) {
+        console.log(`[dsagent-taobao-publish] 属性「${it.name}」展开的面板可能不归属它，关掉重开后重读`)
+        await closePropDropdown(page)
+        await sleep(400)
+        await openPropDropdown(page, it.id).catch(() => {})
+        await waitForPropPanel(page, ATTR_DROPDOWN_WAIT_MS)
+        const re = await readPropOptions(page)
+        if (re.length) options = re
+      }
+    }
     if (!options.length) {
       await closePropDropdown(page)
       missed.push(`${it.name}（下拉未读到选项）`)
       continue
     }
 
+    // ★★ 2026-10-28（真机实测）：淘宝 next-select 的候选常**只渲染首屏**
+    //   （品牌 16 项，`Uniqlo/优衣库` 排在 U 段根本不在首屏），且面板内有隐藏搜索框。
+    //   显式值不在首屏候选里时，用面板搜索框过滤后再匹配 —— 否则品牌永远填不上，
+    //   只能掉进「必填兜底」。搜索命中后 options 同步更新为过滤结果。
+    //   品牌在部分类目是**纯 select**（只读 input + 下拉点选，无 .next-select-auto-complete），
+    //   此前只在 combobox 分支认 brandOptIn，导致 select 型品牌掉进必填兜底取首项，
+    //   实测连衣裙类目填出「品牌=0-3」（淘宝真有个叫 0-3 的童装品牌，它是候选首项）。
+    const explicitVal = explicitMap.get(it.name) || (it.name === '品牌' ? brandOptIn : '')
+    if (explicitVal && !options.includes(explicitVal)) {
+      const filtered = await searchInOpenSelect(page, explicitVal)
+      if (filtered.length) {
+        console.log(`[dsagent-taobao-publish] 属性「${it.name}」显式值不在首屏，搜索「${explicitVal}」后命中 ${filtered.length} 项：${filtered.slice(0, 4).join('/')}`)
+        options = filtered
+      }
+    }
+
     let pick: { value: string; hesitated: boolean; candidates: number } | null = null
     let source = ''
 
     // ── ① 显式值优先（精确匹配页面真实候选）──
-    const explicitVal = explicitMap.get(it.name)
-    if (explicitVal && options.includes(explicitVal)) {
-      pick = { value: explicitVal, hesitated: false, candidates: options.length }
-      source = '显式'
+    // ★★ 空值必须直接跳过：模糊匹配用 `''` 会恒真（x.includes('') === true），
+    //   把**任意**属性误判成「显式命中」，实测把「裙型」填成了最短候选「纱裙」。
+    const normOpt = (s: string) => String(s || '').replace(/\s+/g, ' ').trim()
+    const wantOpt = normOpt(explicitVal)
+    const exact = wantOpt ? options.find(o => normOpt(o) === wantOpt) : undefined
+    const fuzzy = exact || (wantOpt ? options
+      .filter(o => {
+        const a = normOpt(o)
+        return a.includes(wantOpt) || wantOpt.includes(a)
+      })
+      // ★ 优先取**最接近用户原意**的，不是最短：
+      //   实测「优衣库」的候选是 `Uniqlo/优衣库` 与 `优衣库种草社`，
+      //   「取最短」会选中衍生词「种草社」（6 字 < 11 字），而正主是前者。
+      //   排序规则：① 不含衍生词后缀（店/社/旗/专营/分销/代理/直销/定制）优先
+      //            ② 候选以目标值结尾优先（Uniqlo/优衣库 正是 /优衣库 结尾）
+      //            ③ 仍同分则取更短（更接近原词）
+      .sort((x, y) => {
+        const a = normOpt(x)
+        const b = normOpt(y)
+        const DERIV = /(店|社|旗|专营|分销|代理|直销|定制|工厂|实业)$/
+        const da = DERIV.test(a) ? 1 : 0
+        const db = DERIV.test(b) ? 1 : 0
+        if (da !== db) return da - db
+        const ea = a.endsWith(wantOpt) ? 0 : 1
+        const eb = b.endsWith(wantOpt) ? 0 : 1
+        if (ea !== eb) return ea - eb
+        return a.length - b.length
+      })[0] : undefined)
+    if (fuzzy) {
+      pick = { value: fuzzy, hesitated: false, candidates: options.length }
+      source = exact ? '显式' : '显式(模糊)'
     }
 
     // ── ② 类目档案（g5）：平台+catId 档案里上次生效的值，仍在当前候选里就直接用 ──
     //    ★ 命中即验证：不在候选 → 降级走 ③模型（新值生效后随成功写回 = 自动修复）。
-    if (!pick && profile) {
+    //    ★★ 2026-10-28 防护（真机踩坑）：品牌/型号这类**身份型**属性的档案值不可信 ——
+    //       实测 catId=121452038（连衣裙）时，品牌被读成 select 型、readPropOptions 又读到了
+    //       别的属性（适用年龄）的候选「0-3」，而旧档案里恰有 `0-3`，于是误命中成「品牌=0-3」。
+    //       这类值一旦写入就会污染后续所有同类目发布。故身份型属性一律跳过档案，
+    //       只认显式声明 / 页面真实候选。
+    const isIdentityProp = /^(品牌|型号|货号|条形码|barcode)$/i.test(it.name)
+    if (!pick && profile && !isIdentityProp) {
       const profileVal = profile.attributes[it.name]
       if (profileVal && options.includes(profileVal)) {
         pick = { value: profileVal, hesitated: false, candidates: options.length }
@@ -2479,9 +2858,23 @@ async function fillCategoryAttrs(
         pick = { value: matched, hesitated: true, candidates: options.length }
         console.log(`[dsagent-taobao-publish] 属性「${it.name}」标题词匹配命中「${matched}」`)
       } else if (it.required) {
-        const chosen = options[0]
-        pick = { value: chosen, hesitated: true, candidates: options.length }
-        console.log(`[dsagent-taobao-publish] 属性「${it.name}」必填且无匹配，只能取首项「${chosen}」（建议人工核对；候选：${options.slice(0, 6).join('/')}）`)
+        // ★★ 2026-10-28 收口（真机踩坑，比 pdd 侧更严一档）：
+        //   连衣裙类目实测，必填兜底取首项填出「面料=PVC（童装裙）、适用年龄=15（女童裙）」。
+        //   淘宝的候选顺序**不是按常用度**（品牌首项是「0-3」这个真品牌名），
+        //   所以「取首项」在淘宝侧比拼多多侧更危险。
+        //   新规则：仅当首项是**语义中性值**时才允许兜底（不影响商品真实描述）；
+        //   否则宁可留空并明确报 missed —— 提交会被拦，但拦下来让用户填对的值，
+        //   好过一个把商品描述成另一种东西的已发布商品（下架/违规/流量损失都不可逆）。
+        const NEUTRAL_RE = /^(无|否|没有|其他|其它|不适用|不含|不涉及|无品牌|无内衬|无弹|不开裆|非定制|不支持|不限|均可以|都可以|通用|未知|待定)$/
+        const chosen = options.find(o => NEUTRAL_RE.test(o.trim()))
+        if (chosen) {
+          pick = { value: chosen, hesitated: true, candidates: options.length }
+          console.log(`[dsagent-taobao-publish] 属性「${it.name}」必填且无匹配，取语义中性值「${chosen}」`)
+        } else {
+          await closePropDropdown(page)
+          missed.push(`${it.name}（必填，但无标题词匹配、候选中也无语义中性值，不盲选；候选：${options.slice(0, 8).join('/')}）`)
+          continue
+        }
       } else {
         await closePropDropdown(page)
         missed.push(`${it.name}（选填项，无匹配候选故留空；候选：${options.slice(0, 8).join('/')}）`)
@@ -2509,6 +2902,8 @@ async function fillCategoryAttrs(
     } else {
       missed.push(`${it.name}（点选「${pick.value}」${ok ? '后未确认到值' : '失败'}）`)
     }
+    // 每处理完一项，等页面稳定再重扫（动态渲染的「型号」等要靠这个窗口出现）
+    await sleep(400)
   }
 
   // ── 档案快照（g5）：本次页面确认生效的全部属性值 = 页面预填值（含一键采纳推荐值）
@@ -3772,6 +4167,8 @@ export async function taobaoPublish(
     if (adopted) filled.push('一键采纳推荐值')
     const attrs = await fillCategoryAttrs(page, {
       title, model: attrModel, explicit: attributes,
+      // 用户声明的「型号」文本（填「型号」这一必填文本属性用；与 model 句柄是两回事）
+      modelText: model,
       catId: publishCatId, platform: channelKey,
       // 用户显式声明的品牌（见 fillCategoryAttrs 的品牌例外说明）
       brand,

@@ -63,12 +63,33 @@ const result = await taobaoPublish(store, {
   images: [IMG],
   directPublishUrl,
   brand: argOf('brand'),
+  model: argOf('model'),
+  // --skus="黑色|110cm|59|100,白色|120cm|59|100"  → 引擎 fillSkus 会把维度1值键入、
+  //    其余维度点尺码弹层勾选（优先 100cm），故这里只需给出各 SKU 行的颜色值
+  skus: (() => {
+    const raw = argOf('skus')
+    if (!raw) return []
+    return raw.split(/[,，]/).map(s => s.trim()).filter(Boolean).map(row => {
+      const p = row.split('|').map(x => x.trim())
+      return p.length >= 3
+        ? { name: p[0], price: p[2], stock: p[3] || '100' }
+        : null
+    }).filter(Boolean)
+  })(),
   account,
   confirm: CONFIRM,
-  attributes: [
-    { name: '材质', value: 'ABS' },
-    { name: '适用场景', value: '桌面' },
-  ],
+  // --attrs="裙型=碎花裙,面料=全棉,适用年龄=3岁,适用季节=夏季,适用性别=女"
+  attributes: (() => {
+    const raw = argOf('attrs')
+    if (!raw) return [
+      { name: '材质', value: 'ABS' },
+      { name: '适用场景', value: '桌面' },
+    ]
+    return raw.split(/[,，]/).map(s => s.trim()).filter(Boolean).map(pair => {
+      const i = pair.indexOf('=')
+      return i > 0 ? { name: pair.slice(0, i).trim(), value: pair.slice(i + 1).trim() } : null
+    }).filter(Boolean)
+  })(),
 })
 
 console.log(`\n===== 结果（confirm=${CONFIRM}，catId=${catId}） =====`)
