@@ -97,7 +97,7 @@ python3 {baseDir}/scripts/gen.py --mode generate --prompt-file ./p1.txt --out ./
 
 | 参数 | 说明 |
 |---|---|
-| `--mode` | `generate` / `edit` / `batch` / `probe` |
+| `--mode` | `generate` / `edit` / `batch` / `probe` / `from-pack` |
 | `--prompt` / `--prompt-file` | 二选一；长提示词用文件 |
 | `--ref` | 参考图路径，可多次（= 多图参考） |
 | `--size` | `1024x1024` / `1536x1024` / `1024x1536` / `2048x2048` / `auto`；非 16 倍数或面积越界会自动等比修正并回报 |
@@ -106,7 +106,37 @@ python3 {baseDir}/scripts/gen.py --mode generate --prompt-file ./p1.txt --out ./
 | `--background` | `transparent`（自动补出 `*-alpha.png`）/ `opaque` / `auto` |
 | `--out` | 输出目录，默认 `./image-gen-out` |
 | `--name` | 文件名前缀，自动加时间戳与序号 |
+| `--workers` | batch / from-pack 并发线程数，默认 8 |
+| `--pack` | **from-pack**：1688 素材包目录（含 `product.json` + `src/`） |
+| `--category` | **from-pack**：品类名（拼进 prompt），默认 `儿童睡衣` |
 | `--base` / `--key` | 覆盖配置文件 |
+
+## from-pack 模式（1688 素材包 → 整套 15 张）
+
+```bash
+python3 scripts/gen.py from-pack --pack <素材包> --out <输出目录> --workers 8 --category 儿童睡衣
+```
+
+**自动做的事**：
+
+1. 读素材包 `product.json` + `src/` 原图
+2. 组装 15 条 prompt：**主图 5 张**（白底/模特/面料/做工/多色）+ **详情 10 张**（参考布局：竖排大字标题 + 副题、模特居中、左下细节小图、底部英文卖点）
+3. **双参考**：`src` 第 1 张锁款式配色 + 第 2 张锁模特脸部发型年龄（不人工挑，自动取）
+4. 8 线程并发跑（15 张约 90 秒）
+5. **顺手生成 `product.json`**（调 `build_product.py`，1688 真实 SKU + 属性别名 + 价格×系数），供 `pdd-publish-http --product-file` 直接上架
+
+**batch 模式并发**：`--workers` 默认 8，15 张从串行 8 分钟降到 74 秒。
+
+### batch 计划格式补充
+
+```jsonc
+{ "items": [
+  { "out": "main_1.jpg", "refs": ["商品图.jpg", "模特图.jpg"], "prompt": "..." },
+  { "out": "detail_1.jpg", "refs": ["...", "..."], "size": "1000x1849", "prompt": "..." }
+]}
+```
+
+`refs` 传多张 = 多图参考（第 1 张锁商品、第 2 张锁模特）。
 
 ## 凭据配置
 

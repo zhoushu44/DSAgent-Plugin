@@ -138,10 +138,37 @@ metadata:
 
 | 参数 | 类型 | 必需 | 说明 |
 |------|------|------|------|
-| `--product-file` | string | 是* | 统一商品数据 JSON 文件路径（*与 `--product` 二选一） |
+| `--product-file` | string | 是* | 统一商品数据 JSON 文件路径（*与 `--product`/`--from-pack` 三选一） |
 | `--product` | string | 是* | 统一商品数据 JSON 字符串 |
+| `--from-pack` | string | 是* | **1688 素材包目录**（含 `product.json` + `src/`）：自动组装商品并上架 |
+| `--gen` | string | 否 | AI 生图输出目录（含 `main_1..5` / `detail_1..10`）；`--from-pack` 时必填 |
+| `--price-factor` | number | 否 | 价格系数（1688 均价 × 该系数），默认 `2` |
+| `--max-colors` | number | 否 | 最多取几个颜色，默认 `3` |
+| `--max-sizes` | number | 否 | 最多取几个尺码，默认 `3` |
+| `--category` | string | 否 | 拼多多类目搜索词，`--from-pack` 时用于组装，默认 `儿童睡衣` |
 | `--confirm` | flag | 否 | 省略 → **只返回预览，不产生任何写操作**；带 `true` → 真正上架 |
 | `--account` | string | 否 | 账号 shopKey；多账号未绑定时先向用户确认 |
+
+### `--from-pack` 模式（1688 抓货 → AI 生图 → 上架 一条龙）
+
+```bash
+node scripts/publish.mjs \
+  --from-pack "<1688素材包目录>" \
+  --gen "<AI生图输出目录>" \
+  --category 儿童睡衣 --price-factor 2 \
+  --account <shopKey> --confirm true
+```
+
+组装规则（全自动，无需手写 product.json）：
+
+| 字段 | 来源 |
+|---|---|
+| 颜色 / 尺码 / SKU 行（价格+库存） | **1688 真实 `skus[]`** 命中筛选，不造假 |
+| 标题 | 1688 `product.title`（截 60 字） |
+| 主图 5 + 详情 10 | AI 生图目录 `main_1..5` / `detail_1..10` |
+| 规格/SKU 预览图 | **按颜色分配**（第 i 个颜色用第 i 张主图） |
+| 价格 | 1688 均价 × `--price-factor` + `.9` 尾数 |
+| 属性 | 1688 原始属性名直传 → `fillAttributes` 里 `ATTR_ALIAS` 21 组别名映射 |
 
 ### `product` 统一结构
 
@@ -251,12 +278,48 @@ metadata:
 ② 本地 规格池查表       规格值 → spec_id（assets/spec-pool.json；空池自动跳过）
 ③ 页面 点「发布新商品」  → URL 拿 goods_commit_id / goods_id
 ④ 页面 选类目并确认     （会话注册）
-⑤ 页面 DOM 石填         标题 + 1 张主图（过「轮播图不能为空」校验）
+⑤ 页面 DOM 逐张传主图   全部主图（最多 5 张），每张 CDP 兜底
 ⑥ 页面 DOM 填规格       有 specs 时：建/填维度 → 预览图 → 价格表 → 参考价
    （无 specs 则跳过，改由 mode2 改包注入 gallery/skus）
-⑦ 页面 点提交 → 拦截    abort 原请求 → 页面 fetch 带 Anti-Content 重放（HTTP）
-⑧ 页面 fetch 调 commit/submit → 确认上架（HTTP）
+⑦ 页面 点提交           有 DOM 全填 → mode2 关闭，走页面自然提交
+   （无 DOM 填 → mode2 改包：拦截 + 页面 fetch 重放）
+⑧ 页面 fetch 调 commit/submit → 确认上架
 ```
+
+### 全类目通用适配（2026-10-29 定稿）
+
+**规格维度按页面结构自动适配，不假设固定名字：**
+
+| 页面有什么 | 怎么填 |
+|---|---|
+| `input[placeholder*="主色"]` | 颜色输入框：真实键盘键入 → blur |
+| `input[placeholder="自定义尺码"]` | 尺码：走自定义输入（不勾预设 S/M），取最后一个空框 → 键入 → blur |
+| 待勾 checkbox `.package-item-container` | 精确匹配 → 语义匹配（110↔110cm/110-120）→ 自定义输入添加 |
+| 都没有（新维度） | 点「添加规格类型」→ 下拉选词 → 输入框填值 |
+
+**关键约束（改代码前先读）**
+
+1. **规格值必须 `page.keyboard.type`** —— 平台只认真实键盘事件才注册 spec_id。JS setter 写入值但**不生成 SKU 行**（实测 0/6）。
+2. **点击一律用 `jsClick`**（`document.elementFromPoint(x,y).click()`），不用 `page.mouse.click`；blur 用 `jsBlur`（`document.activeElement.blur()`）。
+3. **价格/库存用 JS setter**（纯数字，React setter + input/change 事件足够）。
+4. **图片路径必须短 ASCII** —— 中文长路径会让 `uploadFile` 静默失败（报「商品轮播图不能为空」）。`publish.mjs` 已自动复制到 `tmpdir/pddupl/`。
+5. **主图 input 是隐藏控件** —— `uploadFile` 可能不生效（计数 `0/N`），必须读计数并 CDP `DOM.setFileInputFiles` 兜底。
+6. **属性先填、规格后填** —— 属性下拉重渲染会把规格勾选/预览图状态冲掉。
+7. **材质成分是 IngredientList** —— 按钮「添加材质成分(N/7)」+ 弹窗多选 + 「确定(N/7)」，不是下拉也不是输入框。
+8. **尺码表要停用两次** —— 填规格前一次（如已存在）、填完尺码后一次（尺码值填完才生成）。
+
+### 多类目实测结果（2026-10-29）
+
+| 类目 | 结果 |
+|---|---|
+| 童装/儿童家居服 | ✅ 9 SKU（3 色 × 3 码） |
+| 纸杯 | ✅ 1 维度 |
+| 手机壳 | ✅ 2 个新建维度（色号 × 型号） |
+| 连衣裙 | ✅ 4 SKU（颜色 + 尺码自定义输入） |
+| 保温杯 / 零食 / 蓝牙耳机 / 抱枕 | ✅ 各 2-4 SKU |
+
+**连续批量**：10 个不同款式全自动上架，成功率 10/10（单批 ~4 分钟/款）。
+
 
 ## 平台硬规则（实测踩坑记录，回答用户时可引用）
 
