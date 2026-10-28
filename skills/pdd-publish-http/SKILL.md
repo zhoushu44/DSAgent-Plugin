@@ -11,6 +11,48 @@ metadata:
 
 # 拼多多 · HTTP 逆向上架
 
+<!-- RISK-CHEATSHEET:START（由 dev/inject-risk-cheatsheet.mjs 注入，请勿手改） -->
+
+## ⚠ 风控速查（先读这里再排查）
+
+> 完整机制与历史踩坑记录在**知识库**，遇到风控问题**先查库**：
+> ```
+> dsagent_wiki_search(keyword="风控")            # 两页都列出来
+> dsagent_wiki_search(path="平台/entities/拼多多风控机制与应对.md")
+> ```
+
+### 错误码 → 处置
+
+| 错误码 | failureKind | 含义 | 正确处置 |
+|---|---|---|---|
+| `54001` | `risk_control` | 操作太过频繁（风控） | **可自愈**：清旧 token → 提新票 → 重放。失败则人工过一次滑块，通过后有 10 分钟通行证。**不要**重新登录 |
+| `40002` | `rate_limit` | 高频限流（**接口级**） | **不可本地修复**，重试无效、只会延长封禁。等待冷却，或降级（如 search → feed） |
+| `100001` | `rate_limit` | 活动写操作频控（请 2 小时后重试） | **不可本地修复**。等待 2 小时或换时间段 |
+| `43001` | `token_expired` | 会话过期（**不是风控**） | 重新扫码登录。注意凭证库快照可能是旧票，优先用浏览器当前 Cookie |
+| `40001` | `token_expired` | 未登录 | 重新扫码登录 |
+| `40010` | `no_permission` | 无权限 | 可能是账号类型不对（需诚信通/实力商家），或换主店号 |
+| `2000000` | `no_permission` | 账号不适合发布 | 权限问题，换号或到后台查违规记录 |
+| `48143` | `api_error` | 非法请求 | 该接口依赖页面 SDK 的请求上下文，需让页面自己发请求（DOM 触发） |
+| `3000000` | `api_error` | 参数错误或灰度未开放 | 检查入参（日期/页码/queryType 等） |
+| HTTP `430` | `rate_limit` | 网关级频率惩罚（Cookie 有效） | 等 15~30s 重试。**不要**误判成 session_expired |
+| `detached Frame` / `Target closed` | `risk_control` | 平台主动关掉页面 | 等 3~5 分钟再试，别连续重试 |
+
+### 三条铁律
+
+1. **不要把 54001 当 token_expired** —— 前者需要过一次滑块，后者才需要重新登录。误判会让用户反复登录，每次登录还刷新一次风控基线。
+2. **不要重试 40002** —— 它是接口级持久限流，实测冷却 240s 零请求后仍空。
+3. **不要在冷却期内连续调用** —— 拼多多按「累计行为分数」延长封禁，越打越久。
+
+### 其他已知坑
+
+- **两个登录态不通用**：`pdd`（H5 买家态，`.yangkeduo.com`）与 `pdd_mms`（商家后台态，`mms.pinduoduo.com`）是两套独立账号，各跑一套风控评分。
+- **`Failed to launch the browser process!`** 大概率是 Profile 被孤儿 Chrome 占用（SingletonLock 残留），不是 Chrome 坏了。清理：`~/.dsh/pdd-account-locks` 无关，要杀占用该 Profile 的 chrome 进程 + 删 `SingletonLock`。
+- **账号级并发**：两个任务同时打同一个号会显著提高被封概率，`_shared/pdd-risk.mjs` 的账号锁会拦住，看到「正被其他任务占用」就等等。
+
+<!-- RISK-CHEATSHEET:END -->
+
+
+
 > **重要:** 上架是**不可撤销的真实操作（L2）**。必须两步走：先拿「上架预览」给用户看，用户**明确同意**后才真正提交。
 > 绝不要在一次调用里直接传 `--confirm true`。
 
@@ -81,7 +123,18 @@ metadata:
 
 ## 输入
 
-脚本入口 `{baseDir}/scripts/publish.mjs`，对话内也可直接调 host 工具 `dsagent_pdd_publish2` 加 `mode2=true`。
+脚本入口 `{baseDir}/scripts/publish.mjs`，对话内也可直接调 host 工具 `dsagent_pdd_publish2`。
+
+★ **2026-10-28：`mode2` 改包不再是默认路径。** `publish.mjs` 按"商品是否有规格维度"
+自动决定提交模式：
+
+| 商品形态 | 提交模式 | 说明 |
+|---|---|---|
+| 有 `specs`（颜色/尺码等） | **DOM 全填，mode2 关闭** | 规格/价格/预览图/参考价全部由页面填，走页面自然提交 |
+| 无 `specs`（单 SKU） | **mode2 改包** | 注入 gallery/skus，无需建规格 |
+
+原因：改包会和页面状态冲突（参考价被覆盖回商品 price）导致提交被拦/超时，
+而平台校验的就是页面状态。所以带规格的商品一律走 DOM 路线。
 
 | 参数 | 类型 | 必需 | 说明 |
 |------|------|------|------|
@@ -195,13 +248,14 @@ metadata:
 
 ```
 ① HTTP  图片预上传      主图/详情图/预览图 → CDN URL（0.8s/张）
-② 本地 规格池查表       规格值 → spec_id（assets/spec-pool.json）
+② 本地 规格池查表       规格值 → spec_id（assets/spec-pool.json；空池自动跳过）
 ③ 页面 点「发布新商品」  → URL 拿 goods_commit_id / goods_id
 ④ 页面 选类目并确认     （会话注册）
 ⑤ 页面 DOM 石填         标题 + 1 张主图（过「轮播图不能为空」校验）
-⑥ 页面 点提交 → 拦截    abort 原请求 → 改包（gallery/skus/spec_id/预览图/价格/属性）
-                        → 页面 fetch 带 Anti-Content 重放（HTTP）
-⑦ 页面 fetch 调 commit/submit → 确认上架（HTTP）
+⑥ 页面 DOM 填规格       有 specs 时：建/填维度 → 预览图 → 价格表 → 参考价
+   （无 specs 则跳过，改由 mode2 改包注入 gallery/skus）
+⑦ 页面 点提交 → 拦截    abort 原请求 → 页面 fetch 带 Anti-Content 重放（HTTP）
+⑧ 页面 fetch 调 commit/submit → 确认上架（HTTP）
 ```
 
 ## 平台硬规则（实测踩坑记录，回答用户时可引用）
@@ -217,8 +271,7 @@ metadata:
 | anti_content 会失效 | 连续复用同一签名后续请求被拒；每次请求前重新生成 |
 | 两种签名不可混用 | `upload_sign`（~620字符）只给 `store_image` 表单字段；`Anti-Content`（~500字符）只给请求头 |
 | **详情图尺寸** | **宽 480~1200px，高 ≤1500px，逐张单图按顺序传**。**绝对不要自己拼长图** —— 把 9 屏拼成 750×9240 再传必被驳回「请重新上传第1张详情图」 |
-| **新规格值必须借 spec_id** | 值在店铺没出现过 → 无 spec_id → 全写 0 → 报「存在重复的规格Id」。不是 bug，是平台要求先「登记」 |
-| **同维度 spec_id 不能重复** | 借用时值数超过池内 id 数会被判重复，必须先建新规格 |
+| **新规格值直接键入即可** | 2026-10-27 实测：往页面「主色/自定义」输入框键入任意新值（如「清紫梅花」）平台直接接受，**不需要 spec_id、不需要借位**。借位反而会让平台按 id 还原成别人的名字 |
 
 ## 详情图正确做法
 
@@ -287,6 +340,12 @@ metadata:
 1. `<workspace>/artifacts/pdd-re/spec-pool.json`（优先）
 2. `{baseDir}/assets/spec-pool.json`（技能自带兜底）
 
+**★ 2026-10-28 修：空池不再遮蔽兜底池。**
+`publish.mjs` 以前"找到第一个文件就用"，而 workspace 里那份常是采集失败留下的
+空壳（`pool:{}` / `goodsScanned:0`），会把 `assets/spec-pool.json` 里有货的池
+整个盖住，导致运行时永远拿到空池。现在按"有货"判定：`pool` 里至少 1 个维度、
+1 个带 `spec_id` 的值；空文件会被跳过并打印 `规格池无货，跳过：…`。
+
 **采集方式**（推荐，一条命令）：
 
 ```bash
@@ -296,26 +355,13 @@ node {baseDir}/../pdd-works/scripts/query.mjs --mode spec-pool
 它遍历店铺全部历史商品，拉 SKU 详情抽出 `{颜色分类: {格蕾灰: {spec_id, parent_spec_id}}, 参考分类: {110: {...}}}`。
 **新增颜色/尺码时**：先把带新规格的商品发布一次，再重跑采集，池子就更新了。
 
-### spec_id 借位（新规格值没 id 时）
+### spec_id 借位（已废弃）
 
-**实测结论：查不到 spec_id 留 0 会被平台判「存在重复的规格Id」，上架必失败。** 走借位：
+**实测结论：DOM 填规格路线下「值写什么就是什么」，借位会让平台按 id 还原成别人的名字。**
 
-```
-同一维度内，把池里已有的 spec_id 按顺序借给我们的规格值，显示名保持自己的
-```
-
-例（实测通过）：
-
-| 显示名（买家看到） | 借用的 spec_id | 借自池里的 |
-|---|---|---|
-| 清紫梅花 | 7470835633 | 格蕾灰 |
-| 紫格彩花 | 71504023 | 奶油黄 |
-| 满紫嫣然 | 91380611 | 迷雾紫 |
-
-**硬约束**：某维度的值数 **不能超过** 池里该维度的 spec_id 个数。
-池里只有 6 个颜色 id → 最多上 6 个花色；要上 13 个花色，必须先在后台建出 7 个新颜色规格再采集。
-
-`scripts/preflight.mjs → borrowSpecIds()` 已自动实现，并在预览里打印借位明细。
+- ❌ 2026-10-27 起 `borrowSpecIds` 已从 `preflight.mjs` 删除，不再自动借位。
+- ❌ 不要再教用户"借 spec_id 让新花色过审"——那会把商品显示成别人的花色。
+- ✅ 新规格值直接键入，平台会按文本自行注册。
 
 ## 三层查一复用（发布加速）
 

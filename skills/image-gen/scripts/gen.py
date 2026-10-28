@@ -413,6 +413,26 @@ def run_from_pack(pack_dir, out_dir, model, base, key, workers=8, category="儿�
     plan_path.parent.mkdir(parents=True, exist_ok=True)
     plan_path.write_text(json.dumps({"items": items}, ensure_ascii=False), encoding="utf-8")
     print(f"[from-pack] {len(items)} 张计划已生成 -> {plan_path}", file=sys.stderr)
+
+    # ★ 顺手生成 product.json（供后续 pdd-publish-http --product-file 直接上架）
+    #   工作流只需串：ali1688-pick → image-gen(from-pack) → pdd-publish-http(product_file)
+    try:
+        import subprocess as _sp
+        prod_out = Path(out_dir) / "product.json"
+        env2 = dict(os.environ, PYTHONIOENCODING="utf-8")
+        r = _sp.run([
+            sys.executable, str(Path(__file__).with_name("build_product.py")),
+            "--pack", str(pack), "--gen", str(out_dir), "--out", str(prod_out),
+            "--category", category,
+        ], capture_output=True, text=True, timeout=60,
+           encoding="utf-8", errors="replace", env=env2)
+        if r.returncode == 0:
+            print(f"[from-pack] 商品 JSON 已生成 -> {prod_out}", file=sys.stderr)
+        else:
+            print(f"[from-pack] 商品 JSON 生成失败：{(r.stderr or '')[:300]}", file=sys.stderr)
+    except Exception as e:
+        print(f"[from-pack] 商品 JSON 生成异常：{e}", file=sys.stderr)
+
     return run_batch(str(plan_path), out_dir, model, base, key, workers=workers)
 
 
