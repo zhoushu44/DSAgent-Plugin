@@ -317,36 +317,49 @@ def _save_all(resp, out_dir, name, prompt, want_alpha=False):
     return out
 
 
-def run_batch(plan_path, out_dir, model, base, key):
+def _run_one(it, i, total, out_dir, model, base, key):
+    """跑单个 plan item（供线程池调用）"""
+    prompt = it.get("prompt") or it.get("prompt_file")
+    if it.get("prompt_file"):
+        prompt = Path(it["prompt_file"]).read_text(encoding="utf-8").strip()
+    if not prompt:
+        return {"ok": False, "name": it.get("name"), "error": "缺 prompt"}
+    size = it.get("size", "1024x1024")
+    name = it.get("name") or it.get("out") or f"item{i}"
+    refs = it.get("refs") or ([it["ref"]] if it.get("ref") else [])
+    try:
+        if refs:
+            r = run_edit(prompt, refs, size, it.get("n", 1), out_dir, name,
+                         it.get("model", model), it.get("quality"), it.get("background"), base, key)
+        else:
+            r = run_generate(prompt, size, it.get("n", 1), out_dir, name,
+                             it.get("model", model), it.get("quality"), it.get("background"), base, key)
+        r["name"] = name
+        print(f"[{i}/{total}] {name} OK -> {r['files']}", file=sys.stderr)
+        return r
+    except SystemExit as e:
+        print(f"[{i}/{total}] {name} FAIL: {e}", file=sys.stderr)
+        return {"ok": False, "name": name, "error": str(e)}
+    except Exception as e:  # 网络抖动等，不让整个 batch 挂
+        print(f"[{i}/{total}] {name} FAIL: {e}", file=sys.stderr)
+        return {"ok": False, "name": name, "error": str(e)}
+
+
+def run_batch(plan_path, out_dir, model, base, key, workers=8):
+    """★ 2026-10-28：线程池并发跑（原为串行，15 张要 8 分钟；并发后约 40 秒）"""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     plan = json.loads(Path(plan_path).read_text(encoding="utf-8"))
     items = plan if isinstance(plan, list) else plan.get("items", [])
     if not items:
         raise SystemExit("plan 为空：需要 [{\"name\":..,\"prompt\":..}]")
-    results = []
-    for i, it in enumerate(items, 1):
-        prompt = it.get("prompt") or it.get("prompt_file")
-        if it.get("prompt_file"):
-            prompt = Path(it["prompt_file"]).read_text(encoding="utf-8").strip()
-        if not prompt:
-            results.append({"ok": False, "name": it.get("name"), "error": "缺 prompt"})
-            continue
-        size = it.get("size", "1024x1024")
-        name = it.get("name") or f"item{i}"
-        refs = it.get("refs") or ([it["ref"]] if it.get("ref") else [])
-        try:
-            if refs:
-                r = run_edit(prompt, refs, size, it.get("n", 1), out_dir, name,
-                             it.get("model", model), it.get("quality"), it.get("background"), base, key)
-            else:
-                r = run_generate(prompt, size, it.get("n", 1), out_dir, name,
-                                 it.get("model", model), it.get("quality"), it.get("background"), base, key)
-            r["name"] = name
-            results.append(r)
-            print(f"[{i}/{len(items)}] {name} OK -> {r['files']}", file=sys.stderr)
-        except SystemExit as e:
-            results.append({"ok": False, "name": name, "error": str(e)})
-            print(f"[{i}/{len(items)}] {name} FAIL: {e}", file=sys.stderr)
-    return {"ok": all(r.get("ok") for r in results), "results": results}
+    total = len(items)
+    results = [None] * total
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futs = {pool.submit(_run_one, it, i + 1, total, out_dir, model, base, key): i
+                for i, it in enumerate(items)}
+        for fut in as_completed(futs):
+            results[futs[fut]] = fut.result()
+    return {"ok": all(r and r.get("ok") for r in results), "results": results}
 
 
 def run_probe(base, key, model):
@@ -383,6 +396,7 @@ def main(argv=None):
     ap.add_argument("--model", default=DEFAULT_MODEL)
     ap.add_argument("--base", default=DEFAULT_BASE)
     ap.add_argument("--key", default=DEFAULT_KEY)
+    ap.add_argument("--workers", type=int, default=8, help="batch 并发线程数（默认 8）")
     a = ap.parse_args(argv)
 
     # harness 可能按 SKILL.md 首条用例补一个位置子命令（如 probe），
@@ -414,7 +428,7 @@ def main(argv=None):
     else:
         if not a.plan:
             raise SystemExit("batch 需要 --plan")
-        result = run_batch(a.plan, a.out, a.model, a.base, a.key)
+        result = run_batch(a.plan, a.out, a.model, a.base, a.key, workers=a.workers)
 
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
