@@ -1,0 +1,58 @@
+name: 拼多多推广自动调参
+category: 推广运营
+mode: single
+description: |
+  按「速率倍数 + 保本线」自动调推广：提日限额 + 提净目标投产比。
+
+  ★ 时段内置：8:00 - 18:00（10 小时），无需配置
+    设置速率 = 日限额 / 10
+    真实速率 = 单品今日已花 / 已过小时数（从 8:00 起算）
+    倍数     = 真实速率 / 设置速率（= 消耗进度 / 时间进度）
+
+  ★ 两阶段
+    前期（净实际投产比 < 保本线）：倍数 ≥ 1.2× → 日限额 ×1.2 + 净目标投产比 +0.2
+    后期（连续 2 天 ≥ 保本线）：倍数 ≥ 1.2× → 日限额 ×1.1 + 净目标投产比 +0.1
+
+  ★ 四条刹车
+    ① 连续 3 次调整后倍数仍 < 1.0× → 停调参，转商品侧
+    ② 倍数 ≥ 1.2× 但净ROI 连续 2 天下降 → 回滚
+    ③ 平台 error 级标签（labelType 1/4/7）→ 停投整改
+    ④ 当天达频率上限 → 次日再调
+
+  ★ 定时执行
+    在「工作流任务」页填写间隔分钟数即可（如 120 = 每 2 小时）
+
+  ★ 安全
+    confirm=false 时只出计划（dry-run）；true 才真调（L2 写操作）
+    调整日志落盘 artifacts/pdd-promo-auto/adjust-log.jsonl
+
+schedule:
+  enabled: false
+  intervalMinutes: 120
+
+inputs:
+  - key: account
+    label: 店铺账号 shopKey
+    type: text
+    required: false
+    default: "pdd_mms_8c6fb2fb86cba80aa44925710036d3df"
+  - key: breakeven
+    label: 保本线（商品ID:ROI，逗号分隔）
+    type: text
+    required: true
+    default: ""
+  - key: confirm
+    label: 是否真正执行（false=只预览）
+    type: text
+    required: false
+    default: "false"
+
+steps:
+  - name: 自动调参
+    skill: pdd-promo
+    args:
+      mode: auto
+      account: "{{account}}"
+      breakeven: "{{breakeven}}"
+      confirm: "{{confirm}}"
+    output: autoResult
