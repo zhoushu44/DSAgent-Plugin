@@ -939,7 +939,7 @@ async function fillSkuThumbs(page, thumbMap, thumbMapSku = {}) {
   }
 
   let total = 0
-  // ★ 多轮补全（每轮重读行状态，不用陈旧索引）
+  // ★ 多轮补全（每轮重读行状态）
   for (let round = 0; round < 3; round++) {
     const rows = await readRows()
     total = rows.length
@@ -950,14 +950,26 @@ async function fillSkuThumbs(page, thumbMap, thumbMapSku = {}) {
       const imgPath = findImg(r.specText)
       if (!imgPath || !fs.existsSync(imgPath)) continue
 
+      // ★ 按行文本定位（不用行索引——上传后 DOM 重建会错位）
+      const rowIdx = await page.evaluate((specText) => {
+        const trs = [...document.querySelectorAll('#sku table tbody tr')]
+        for (let i = 0; i < trs.length; i++) {
+          const tds = [...trs[i].querySelectorAll('td')]
+          const txt = tds.slice(0, 2).map(td => td.textContent?.trim() || '').join(' ')
+          if (txt === specText) return i
+        }
+        return -1
+      }, r.specText).catch(() => -1)
+      if (rowIdx < 0) continue
+
       // 滚动到该行
       await page.evaluate(ri => {
         const trs = [...document.querySelectorAll('#sku table tbody tr')]
         trs[ri]?.scrollIntoView({ block: 'center' })
-      }, r.row)
+      }, rowIdx)
       await sleep(400)
 
-      // 取该行预览图 td 的 file input（实时取，不用缓存）
+      // 取该行预览图 td 的 file input
       const el = await page.evaluateHandle(ri => {
         const trs = [...document.querySelectorAll('#sku table tbody tr')]
         const tr = trs[ri]
@@ -967,15 +979,28 @@ async function fillSkuThumbs(page, thumbMap, thumbMapSku = {}) {
         const tds = [...tr.querySelectorAll('td')]
         const td = thumbIdx >= 0 ? tds[thumbIdx] : null
         return td?.querySelector('input[type="file"]') || null
-      }, r.row).then(h => h.asElement()).catch(() => null)
+      }, rowIdx).then(h => h.asElement()).catch(() => null)
       if (!el) continue
 
       await el.uploadFile(imgPath).catch(() => {})
-      // 等上传完成（最多 8 秒）
+      // 等上传完成（最多 8 秒）—— 用行文本判断，不用索引
       for (let w = 0; w < 8; w++) {
         await sleep(1000)
-        const cur = (await readRows()).find(x => x.row === r.row)
-        if (cur?.done) break
+        const done = await page.evaluate((specText) => {
+          const trs = [...document.querySelectorAll('#sku table tbody tr')]
+          for (const tr of trs) {
+            const tds = [...tr.querySelectorAll('td')]
+            const txt = tds.slice(0, 2).map(td => td.textContent?.trim() || '').join(' ')
+            if (txt !== specText) continue
+            const heads = [...document.querySelectorAll('#sku table thead th')].map(th => th.textContent.trim())
+            const thumbIdx = heads.findIndex(h => /预览图/.test(h))
+            const thumbTd = tds[thumbIdx]
+            const thumbText = thumbTd?.textContent?.trim() || ''
+            return !/本地上传/.test(thumbText) || !!thumbTd?.querySelector('img')
+          }
+          return false
+        }, r.specText).catch(() => false)
+        if (done) break
       }
     }
     await sleep(1500)
