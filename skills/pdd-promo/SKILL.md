@@ -1,6 +1,6 @@
 ---
 name: pdd-promo
-description: "拼多多推广数据、推广诊断与推广操作：读——推广总览（资金账户/日消耗/广告组/场景）、商品维度报表（每商品花费/GMV/订单/ROI/点击/CTR/收藏）、推广单元列表、**推广诊断（出价竞争力/排名/建议出价/竞争力下滑/创意素材/排名过低 + 平台 labelType 异常标签官方枚举 10 种）**、**推广平衡分析（一屏结论 + 健康度 + 该加价/该降价/该停投整改 + 预算重分配 + 平台建议汇总）**；写（L2）——创建推广、暂停/开启推广、删除推广、改日限额、改投产比。触发：拼多多推广、推广数据、推广报表、商品推广数据、广告组、推广单元、推广计划、消耗、ROI、**推广诊断、优化建议、出价建议、竞争力、排名、推广平衡、该加价还是降价、预算分配、平台建议、平台诊断、异常标签、转化过低、曝光过低**、开启推广、暂停推广、删除推广、创建推广、投产比、拼多多招财、pdd promo。排除：拼多多商品上架（用 pdd-publish-http）、商品查询/下架（用 pdd-works）、商品采集（用 pdd-crawl）。需绑定「拼多多商家后台」账号。"
+description: "拼多多推广数据、诊断与操作：推广总览（资金/日消耗/广告组）、商品维度报表（花费/GMV/ROI/CTR）、推广单元列表、推广诊断（出价竞争力/排名/建议出价/创意素材/异常标签）、推广平衡分析（该加价/该降价/该停投 + 预算重分配）；写（L2）——创建/暂停/开启/删除推广、改日限额、改投产比。触发：拼多多推广、推广数据、推广报表、推广计划、消耗、ROI、推广诊断、优化建议、出价建议、竞争力、排名、推广平衡、预算分配、投产比、pdd promo。排除：商品上架（pdd-publish-http）、商品查询（pdd-works）、商品采集（pdd-crawl）。需绑定「拼多多商家后台」账号。"
 metadata:
   builtin_skill_version: "1.6"
   dsagent:
@@ -10,6 +10,48 @@ metadata:
 ---
 
 # 拼多多 · 推广数据与操作
+
+<!-- RISK-CHEATSHEET:START（由 dev/inject-risk-cheatsheet.mjs 注入，请勿手改） -->
+
+## ⚠ 风控速查（先读这里再排查）
+
+> 完整机制与历史踩坑记录在**知识库**，遇到风控问题**先查库**：
+> ```
+> dsagent_wiki_search(keyword="风控")            # 两页都列出来
+> dsagent_wiki_search(path="平台/entities/拼多多风控机制与应对.md")
+> ```
+
+### 错误码 → 处置
+
+| 错误码 | failureKind | 含义 | 正确处置 |
+|---|---|---|---|
+| `54001` | `risk_control` | 操作太过频繁（风控） | **可自愈**：清旧 token → 提新票 → 重放。失败则人工过一次滑块，通过后有 10 分钟通行证。**不要**重新登录 |
+| `40002` | `rate_limit` | 高频限流（**接口级**） | **不可本地修复**，重试无效、只会延长封禁。等待冷却，或降级（如 search → feed） |
+| `100001` | `rate_limit` | 活动写操作频控（请 2 小时后重试） | **不可本地修复**。等待 2 小时或换时间段 |
+| `43001` | `token_expired` | 会话过期（**不是风控**） | 重新扫码登录。注意凭证库快照可能是旧票，优先用浏览器当前 Cookie |
+| `40001` | `token_expired` | 未登录 | 重新扫码登录 |
+| `40010` | `no_permission` | 无权限 | 可能是账号类型不对（需诚信通/实力商家），或换主店号 |
+| `2000000` | `no_permission` | 账号不适合发布 | 权限问题，换号或到后台查违规记录 |
+| `48143` | `api_error` | 非法请求 | 该接口依赖页面 SDK 的请求上下文，需让页面自己发请求（DOM 触发） |
+| `3000000` | `api_error` | 参数错误或灰度未开放 | 检查入参（日期/页码/queryType 等） |
+| HTTP `430` | `rate_limit` | 网关级频率惩罚（Cookie 有效） | 等 15~30s 重试。**不要**误判成 session_expired |
+| `detached Frame` / `Target closed` | `risk_control` | 平台主动关掉页面 | 等 3~5 分钟再试，别连续重试 |
+
+### 三条铁律
+
+1. **不要把 54001 当 token_expired** —— 前者需要过一次滑块，后者才需要重新登录。误判会让用户反复登录，每次登录还刷新一次风控基线。
+2. **不要重试 40002** —— 它是接口级持久限流，实测冷却 240s 零请求后仍空。
+3. **不要在冷却期内连续调用** —— 拼多多按「累计行为分数」延长封禁，越打越久。
+
+### 其他已知坑
+
+- **两个登录态不通用**：`pdd`（H5 买家态，`.yangkeduo.com`）与 `pdd_mms`（商家后台态，`mms.pinduoduo.com`）是两套独立账号，各跑一套风控评分。
+- **`Failed to launch the browser process!`** 大概率是 Profile 被孤儿 Chrome 占用（SingletonLock 残留），不是 Chrome 坏了。清理：`~/.dsh/pdd-account-locks` 无关，要杀占用该 Profile 的 chrome 进程 + 删 `SingletonLock`。
+- **账号级并发**：两个任务同时打同一个号会显著提高被封概率，`_shared/pdd-risk.mjs` 的账号锁会拦住，看到「正被其他任务占用」就等等。
+
+<!-- RISK-CHEATSHEET:END -->
+
+
 
 > **读模式**（overview/groups/cost/goods/units）无任何平台副作用。
 > **写模式**（pause/resume/delete/create）是**不可撤销的真实操作（L2）**：必须两步走——
@@ -34,6 +76,7 @@ metadata:
 | `cost` | 只读 | 每日消耗明细（`getAdvertiserDailyCosts`） |
 | `goods` | 只读 | **商品维度报表**（`poseidon/api/report/queryEntityReport`）：每商品 花费/GMV/订单/ROI/点击/CTR/收藏 |
 | `units` | 只读 | 推广单元列表（`goods/promotion/v3/list`：adInfos + totalAdNum） |
+| **`auto`** | **L2 写** | **★ 自动化调参**：按速率倍数 + 保本线分阶段调整。默认 dry-run 只出计划，`--confirm true` 才执行。前期（倍数≥1.2→限额×1.2/投产+0.2/5次/90分间隔）、后期（倍数≥1.2→限额×1.1/投产+0.1/1次）+ 4 条刹车 |
 | **`rates`** | **只读** | **全店速率表**：所有在投单元的 设置速率/真实速率/倍数/今日花费/日限额 |
 | **`item`** | **只读** | **★ 单品推广诊断**（2026-10-28 新增）：一屏结论 + 商品数据 + 单元配置 + **烧钱速率（当天速率/速率比/预计烧完时间/近 7 天柱状图）** + 平台 labelType 标签 + 提醒 + 调参命令。入参 `--goods-id` 或 `--ad-id` |
 | **`diagnose`** | **只读** | **★ 推广诊断**（`smartTool/diagnosis/queryStableCostAdDiagnosis`）：5 类诊断模块 — 出价竞争力/投放状态/竞争力下滑/创意素材/排名过低；含竞争等级、排名、建议出价、效果预估；**+ 平台 labelType 异常标签（10 种官方枚举，1/4/7 为 error 级）+ 平台官方原文** |
@@ -242,6 +285,85 @@ node scripts/promo.mjs --mode balance --limit 20
 平台异常标签  labelType 官方名 + 维度 + 平台原文
 调参命令    提日限额 / 提投产比（error 级时给暂停命令）
 ```
+
+## `auto` 自动化调参（2026-10-28 新增）
+
+### 核心逻辑
+
+```
+阶段判定：
+  前期 = 净实际投产比 < 保本线（该商品）
+  后期 = 连续 2 天 净实际投产比 >= 保本线
+
+前期：倍数 >= 1.2× → 日限额 × 1.2 + 净目标投产比 + 0.2
+      一天最多 5 次，最小间隔 90 分钟
+
+后期：倍数 >= 1.2× → 日限额 × 1.1 + 净目标投产比 + 0.1
+      一天最多 1 次
+
+倍数 = 真实速率 / 设置速率 = 消耗进度 / 时间进度（两者等价）
+```
+
+### 四条刹车
+
+| # | 条件 | 处置 |
+|---|---|---|
+| ① | 连续 3 次调整后倍数仍 < 1.0× | 停调参，转商品侧 |
+| ② | 倍数 ≥ 1.2× 但净ROI 连续 2 天下降 | 回滚 |
+| ③ | 平台 error 级标签（1/4/7） | 停投整改 |
+| ④ | 当天达频率上限 | 次日再调 |
+
+### 用法
+
+```bash
+# 预览（默认 dry-run，只出计划不执行）
+node scripts/promo.mjs --mode auto --breakeven "824693746830:2.5,930630868294:2.8"
+
+# 全店统一保本线
+node scripts/promo.mjs --mode auto --breakeven-all 2.5
+
+# 用 JSON 文件
+node scripts/promo.mjs --mode auto --breakeven-file ./breakeven.json
+
+# 真正执行（L2）
+node scripts/promo.mjs --mode auto --breakeven "824693746830:2.5" --confirm true
+
+# 自定义时段
+node scripts/promo.mjs --mode auto --start-hour 8 --target-hour 18 --breakeven "..."
+```
+
+### 输出
+
+```
+自动化调参（预览模式）
+时段 8:00-18:00｜已过 4.4h｜在投 27 个
+可调整 2 个｜受控 1 个｜不动 24 个
+
+═══ 待执行 ═══
+adId        倍数   净ROI  保本线  阶段  限额        投产         原因
+🟡1.36×    8412766219      2.10   2.50   前期  ¥100→¥120    +0.2→2.30   倍数 1.36× ≥1.2×｜前期
+
+═══ 受控（不执行）═══
+  [limit] 7746631196 爱绿森茶叶杯 — 今日已调 1 次，达上限
+```
+
+### 调整日志
+
+落盘到 `artifacts/pdd-promo-auto/adjust-log.jsonl`，每次调整一行：
+
+```json
+{"ts":"2026-10-27T10:00:00+08:00","adId":"8412766219","phase":"early","trigger":{"ratio":1.32,"netRoi":2.1,"breakeven":2.5},"before":{"maxCost":100},"after":{"maxCost":120,"targetRoi":2.3},"afterRatio":1.32,"roi":2.1,"seqToday":1,"result":null}
+```
+
+用于：判断连续无效次数（刹车①）、连续过保本线天数（阶段判定）、回滚依据。
+
+### 三个注意
+
+1. **默认 dry-run**，必须 `--confirm true` 才真调
+2. **保本线按商品分开配**（不同品类毛利不同），用 `--breakeven "goodsId:roi,..."`
+3. **时段未开始/已结束会提示跳过**，倍数只在时段内有意义
+
+---
 
 ### ★ 速率表（goods / item / rates 共用）
 

@@ -1,3 +1,18 @@
+import { createRequire } from 'node:module'
+import * as fs from 'node:fs'
+import * as path from 'node:path'
+import { homedir } from 'node:os'
+import { tmpdir } from 'node:os'
+import { fileURLToPath } from 'node:url'
+import { pathToFileURL } from 'node:url'
+
+// ★ 路径推导（替代原硬编码绝对路径）：本文件在 skills/<name>/scripts/ 下，上推三层到插件根
+const HERE = path.dirname(fileURLToPath(import.meta.url))
+const PLUGIN_ROOT = path.resolve(HERE, '..', '..', '..')
+const PKG_BASE = [
+  path.join(PLUGIN_ROOT, 'package.json'),
+  path.join(HERE, 'package.json'),
+].find(p => fs.existsSync(p)) || path.join(tmpdir(), 'pdd-script-base.json')
 /**
  * 拼多多店铺经营数据（pdd-shop）—— 只读
  *
@@ -19,13 +34,9 @@
  * 用法：node scripts/shop.mjs --mode overview
  *       node scripts/shop.mjs --mode goods --transport browser
  */
-import { createRequire } from 'node:module'
-const { CHROME_PATH, STEALTH_ARGS, STEALTH_SCRIPT } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-launch.mjs`)
-import * as fs from 'node:fs'
-import * as path from 'node:path'
-import { homedir } from 'node:os'
+const { CHROME_PATH, STEALTH_ARGS, STEALTH_SCRIPT } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-launch.mjs')))
 
-const require = createRequire('E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/package.json')
+const require = createRequire(PKG_BASE)
 
 const argOf = (n) => { const i = process.argv.indexOf(`--${n}`); return i >= 0 && i + 1 < process.argv.length ? process.argv[i + 1] : undefined }
 const emit = (obj) => { process.stdout.write('__DSAGENT_RESULT__' + JSON.stringify(obj) + '\n') }
@@ -41,8 +52,8 @@ const TRANSPORT = argOf('transport') || (mode === 'goods' ? 'browser' : 'http')
 
 ;(async () => {
   const puppeteer = require('puppeteer-core')
-  const { CredentialStore } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/lib/services/credential-store.js`)
-  const { checkCooldown, detectSlider, autoSolveSlider, fmtRemain, tryAcquireAccountLock, releaseAccountLock, heartbeatAccountLock, throttleRequest } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-risk.mjs`)
+  const { CredentialStore } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/lib/services/credential-store.js')))
+  const { checkCooldown, detectSlider, autoSolveSlider, fmtRemain, tryAcquireAccountLock, releaseAccountLock, heartbeatAccountLock, throttleRequest } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-risk.mjs')))
   const store = new CredentialStore(path.join(homedir(), '.dsh', 'dsagent-accounts.json'))
   // ★ 2026-10-27 修：账号解析三级兜底
   //   ① --account 显式传入 shopKey（最准）
@@ -102,7 +113,7 @@ const TRANSPORT = argOf('transport') || (mode === 'goods' ? 'browser' : 'http')
   // ══════════════════════════════════════════════════════════════════════
   if (TRANSPORT === 'http') {
     // ★ t1 通道：简化签名 + 凭证库 Cookie
-    const { call: callT1, cookiesOf } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-http.mjs`)
+    const { call: callT1, cookiesOf } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-http.mjs')))
     const R = 'https://mms.pinduoduo.com/sydney/api'
 
     // ── goods 模式：走 t3 通道（真签名 + webSpiderRule + CDP Cookie），不依赖凭证库 ──
@@ -113,10 +124,10 @@ const TRANSPORT = argOf('transport') || (mode === 'goods' ? 'browser' : 'http')
       const dateArg = argOf('date') || TODAY
 
       console.error('[pdd-shop] goods 使用 t3 通道（真签名 + webSpiderRule + CDP Cookie）...')
-      const { call: callT3, createSession } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-client.mjs`)
+      const { call: callT3, createSession } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-client.mjs')))
       // ★ 2026-10-27 修：用 buildPuaMap 动态推导映射，不再用静态表
       //   （静态表码点已过期，会把 goodsUv/goodsVcr 解成空串或 0%）
-      const { buildPuaMap, decodePua } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-risksdk.mjs`)
+      const { buildPuaMap, decodePua } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-risksdk.mjs')))
 
       let sess = null
       try {
@@ -137,8 +148,8 @@ const TRANSPORT = argOf('transport') || (mode === 'goods' ? 'browser' : 'http')
 
         if (!r.ok) {
           // ★ 错误码分级 + 账号健康分（2026-10-24 补）：t3 通道最容易踩 54001
-          const { checkCooldown, fmtRemain } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-risk.mjs`).catch(() => ({}))
-          const { normalizeWithCooldown, recordToAntiban } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-error.mjs`)
+          const { checkCooldown, fmtRemain } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-risk.mjs'))).catch(() => ({}))
+          const { normalizeWithCooldown, recordToAntiban } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-error.mjs')))
           const n = normalizeWithCooldown(r, '商品明细取数（t3 通道）', SHOP, { checkCooldown, fmtRemain })
           await recordToAntiban(SHOP, r.ec, r.kind).catch(() => {})
           emit({
@@ -275,7 +286,7 @@ const TRANSPORT = argOf('transport') || (mode === 'goods' ? 'browser' : 'http')
 
         // ★ 趋势分析（--trend 或默认附加）
         try {
-          const { analyze, report } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-trend.mjs`)
+          const { analyze, report } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-trend.mjs')))
           const trend = analyze(rawList)
           out.trend = trend
           out.text += '\n\n' + report(trend)
@@ -305,7 +316,7 @@ const TRANSPORT = argOf('transport') || (mode === 'goods' ? 'browser' : 'http')
     let COOKIES = cookiesOf(acc)
 
     /** 统一调用 + 错误归一（★ 2026-10-24 改用共享 pdd-error） */
-    const { normalize } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-error.mjs`)
+    const { normalize } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-error.mjs')))
     // ★ 2026-10-24：43001 时用浏览器 Profile 的 Cookie 兜底
     //   凭证库快照可能是几天前的旧票，而 Profile 里的是新的（Chrome 自己刷新/用户刚登录）
     let browserCookies = null
@@ -313,11 +324,11 @@ const TRANSPORT = argOf('transport') || (mode === 'goods' ? 'browser' : 'http')
       if (browserCookies) return browserCookies
       // ★ 遍历所有候选 profile 目录（shopKey 自己的可能是过期票，
       //   display_label 对应的才是有效的）
-      const { profileCandidates } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-launch.mjs`)
+      const { profileCandidates } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-launch.mjs')))
       const cands = profileCandidates(SHOP)
       for (const dir of cands) {
         try {
-          const { createSession } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-client.mjs`)
+          const { createSession } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-client.mjs')))
           const s = await createSession(dir)
           await s.goto('https://mms.pinduoduo.com/home', 10000)
           const c = await s.cookieStr()
@@ -327,7 +338,7 @@ const TRANSPORT = argOf('transport') || (mode === 'goods' ? 'browser' : 'http')
             const test = await callT1({
               shopKey: SHOP, cookies: c.str,
               url: `${R}/mallScore/queryMallFlowData`, body: {},
-              referer: 'https://mms.pinduuduo.com/sycm/evaluation'.replace('pinduuduo', 'pinduoduo'),
+              referer: 'https://mms.pinduoduo.com/sycm/evaluation',
             })
             if (test.ok) { browserCookies = c.str; return browserCookies }
           }
@@ -337,6 +348,11 @@ const TRANSPORT = argOf('transport') || (mode === 'goods' ? 'browser' : 'http')
     }
 
     const get = async (url, body, referer) => {
+      // ★ 2026-10-27 接入 throttleRequest（此前 import 了但从未调用，是死代码）。
+      //   管「频率上限」（strict 20 次/分钟）；与 pdd-http 内部 reserveSlot 的
+      //   「最小间隔」是不同维度，实测叠加几乎不增加等待。
+      //   ★ /sydney/api 是经营域（宽松），goods 明细走 t3 时更需克制 → 都按 strict。
+      await throttleRequest(SHOP, 'strict')
       let r = await callT1({ shopKey: SHOP, cookies: COOKIES, url, body, referer })
       // ★ 2026-10-25：只有**真的** session_expired（body 43001 且 http 200）才切 Cookie。
       //   HTTP 430 是网关级频率惩罚，切 Cookie 没用，pdd-http 内部已重试。
@@ -358,7 +374,7 @@ const TRANSPORT = argOf('transport') || (mode === 'goods' ? 'browser' : 'http')
     // ★ 2026-10-25 注：queryMallScoreOverView 报的 43001 实为 **HTTP 430 网关级
     //   频率惩罚**（edge 层限流），不是会话过期。已在 pdd-http.mjs 分开处理：
     //   HTTP 430 → rate_limit + 15s/30s 退避；body 43001 → session_expired。
-    const flowR = await get(`${R}/mallScore/queryMallFlowData`, {}, 'https://mms.pinduuduo.com/sycm/evaluation'.replace('pinduuduo', 'pinduoduo'))
+    const flowR = await get(`${R}/mallScore/queryMallFlowData`, {}, 'https://mms.pinduoduo.com/sycm/evaluation')
     if (flowR.ok) out.flow = {
       uv: flowR.data.uv, pv: flowR.data.pv, fans: flowR.data.totalFansCnt,
       srchIndex: flowR.data.srchIndex, orderIndex: flowR.data.orderIndex,
@@ -366,13 +382,21 @@ const TRANSPORT = argOf('transport') || (mode === 'goods' ? 'browser' : 'http')
     }
 
     // ── goodsOverview（今日/昨日）──
-    const ovR = await get(`${R}/goodsDataShow/queryGoodsPageOverviewForMms`, {}, 'https://mms.pinduuduo.com/sycm/goods_effect'.replace('pinduuduo', 'pinduoduo'))
+    const ovR = await get(`${R}/goodsDataShow/queryGoodsPageOverviewForMms`, {}, 'https://mms.pinduoduo.com/sycm/goods_effect')
     if (ovR.ok) out.goodsOverview = { today: ovR.data.todayData, yesterday: ovR.data.yesterdayData }
 
     // ── score ──
     let scR = null
     if (mode === 'score' || mode === 'overview') {
-      scR = await get(`${R}/mallScore/queryMallScoreOverView`, {}, 'https://mms.pinduuduo.com/sycm/evaluation'.replace('pinduuduo', 'pinduoduo'))
+      scR = await get(`${R}/mallScore/queryMallScoreOverView`, {}, 'https://mms.pinduoduo.com/sycm/evaluation')
+      // ★ 2026-10-27 修：http 通道漏了把 scR 解析成 out.score。
+      //   请求发了、错误也判了（下方 flowR.err || scR?.err），但成功的 scR
+      //   从未赋值给 out.score → 下方 `if (out.score && ...)` 恒为 false
+      //   → score 模式必然报「取数失败：unknown」，尽管接口其实返回了完整数据。
+      //   （browser 通道在 L758 有赋值，只有 http 通道漏了。）
+      //   实测结构：result.{serviceDataVO, dealDataVO, goodsDataVO}，
+      //   与 L398-414 的解析代码完全对应。
+      if (scR?.ok && scR.data) out.score = scR.data
     }
 
     // ── 汇总文本（★ 2026-10-24 修：按 mode 只输出对应数据，
@@ -445,6 +469,19 @@ const TRANSPORT = argOf('transport') || (mode === 'goods' ? 'browser' : 'http')
   let profile = path.join(homedir(), '.dsh', 'browser-profiles', 'accounts', SHOP)
   if (!fs.existsSync(profile)) {
     profile = path.join(homedir(), '.dsh', 'browser-profiles', 'accounts', 'pdd_mms_de55c3e159072dfb5297b234eaa487c3')
+  }
+  // ★ 自动清理 Cookie 域污染（2026-10-28）：同名 Cookie 分散在
+  //   .pinduoduo.com / mms.pinduoduo.com / yingxiao.pinduoduo.com 时，
+  //   浏览器优先发子域旧值 → 推广域反复掉登录。删子域同名项即恢复。
+  //   跳过：--no-cookie-clean
+  if (!process.argv.includes('--no-cookie-clean')) {
+    try {
+      const { cleanCookiePollution } = await import(pathToFileURL('e:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/pdd-promo/scripts/cookie-clean.mjs').href)
+      const r = await cleanCookiePollution(profile, { log: (m) => console.warn('[pdd] ' + m) })
+      if (r.ok && r.deleted > 0) console.warn('[pdd] ✅ 清理 ' + r.deleted + ' 条域污染 Cookie')
+    } catch (e) {
+      console.warn('[pdd] Cookie 清理跳过：' + String(e.message).slice(0, 60))
+    }
   }
   const browser = await puppeteer.launch({
     executablePath: CHROME_PATH,
@@ -597,7 +634,7 @@ const TRANSPORT = argOf('transport') || (mode === 'goods' ? 'browser' : 'http')
   // ★ 2026-10-27 修：改用共享模块 buildPuaMap（投票取众数），
   //   替换本文件原有的局部实现（首次出现即锁定，会漏码点/被错票带偏）。
   //   推导依据：同一响应里 <X>Ppr 是明文的较上周期值，与 <X> 等长同构。
-  const { buildPuaMap, decodePua } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-risksdk.mjs`)
+  const { buildPuaMap, decodePua } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-risksdk.mjs')))
 
   const pua = buildPuaMap(gList)
   const map = pua.map
@@ -845,7 +882,7 @@ const TRANSPORT = argOf('transport') || (mode === 'goods' ? 'browser' : 'http')
   await browser.close()
 })().catch(async (e) => {
   // ★ 风控异常 → 友好提示
-  const { checkCooldown, fmtRemain } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-risk.mjs`).catch(() => ({}))
+  const { checkCooldown, fmtRemain } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-risk.mjs'))).catch(() => ({}))
   if (e?.riskCode && checkCooldown) {
     const cd = checkCooldown(SHOP)
     emit({

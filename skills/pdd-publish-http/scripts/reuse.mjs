@@ -1,3 +1,17 @@
+import { createRequire } from 'node:module'
+import * as fs from 'node:fs'
+import * as path from 'node:path'
+import { homedir } from 'node:os'
+import { tmpdir } from 'node:os'
+import { fileURLToPath } from 'node:url'
+
+// ★ 路径推导（替代原硬编码绝对路径）：本文件在 skills/<name>/scripts/ 下，上推三层到插件根
+const HERE = path.dirname(fileURLToPath(import.meta.url))
+const PLUGIN_ROOT = path.resolve(HERE, '..', '..', '..')
+const PKG_BASE = [
+  path.join(PLUGIN_ROOT, 'package.json'),
+  path.join(HERE, 'package.json'),
+].find(p => fs.existsSync(p)) || path.join(tmpdir(), 'pdd-script-base.json')
 /**
  * 三层查一复用（Three-Layer Reuse）—— 拼多多上架的「数据先知」层
  *
@@ -19,14 +33,8 @@
  *   node scripts/reuse.mjs --category "儿童家居服 家居服套装"
  *   node scripts/reuse.mjs --goods-id 1018902684648 --dump
  */
-import { createRequire } from 'node:module'
-import * as fs from 'node:fs'
-import * as path from 'node:path'
-import { homedir } from 'node:os'
 
-const require = createRequire('E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/package.json')
-const PLUGIN_ROOT = 'E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin'
-
+const require = createRequire(PKG_BASE)
 const argOf = (n) => { const i = process.argv.indexOf(`--${n}`); return i >= 0 && i + 1 < process.argv.length ? process.argv[i + 1] : undefined }
 const hasFlag = (n) => process.argv.includes(`--${n}`)
 
@@ -193,6 +201,19 @@ if (process.argv[1] && process.argv[1].includes('reuse.mjs')) {
   ;(async () => {
     const puppeteer = require('puppeteer-core')
     const profile = path.join(homedir(), '.dsh', 'browser-profiles', 'accounts', `pdd_mms_de55c3e159072dfb5297b234eaa487c3`)
+    // ★ 自动清理 Cookie 域污染（2026-10-28）：同名 Cookie 分散在
+    //   .pinduoduo.com / mms.pinduoduo.com / yingxiao.pinduoduo.com 时，
+    //   浏览器优先发子域旧值 → 推广域反复掉登录。删子域同名项即恢复。
+    //   跳过：--no-cookie-clean
+    if (!process.argv.includes('--no-cookie-clean')) {
+      try {
+        const { cleanCookiePollution } = await import(pathToFileURL('e:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/pdd-promo/scripts/cookie-clean.mjs').href)
+        const r = await cleanCookiePollution(profile, { log: (m) => console.warn('[pdd] ' + m) })
+        if (r.ok && r.deleted > 0) console.warn('[pdd] ✅ 清理 ' + r.deleted + ' 条域污染 Cookie')
+      } catch (e) {
+        console.warn('[pdd] Cookie 清理跳过：' + String(e.message).slice(0, 60))
+      }
+    }
     const browser = await puppeteer.launch({ executablePath: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe', userDataDir: profile, headless: false, defaultViewport: { width: 1400, height: 900 }, args: ['--no-sandbox', '--disable-blink-features=AutomationControlled'] })
     const page = (await browser.pages())[0] || await browser.newPage()
     await page.goto('https://mms.pinduoduo.com/goods/goods_list', { waitUntil: 'domcontentloaded', timeout: 60000 })

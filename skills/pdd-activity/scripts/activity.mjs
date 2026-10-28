@@ -1,3 +1,18 @@
+import { createRequire } from 'node:module'
+import * as fs from 'node:fs'
+import * as path from 'node:path'
+import { homedir } from 'node:os'
+import { tmpdir } from 'node:os'
+import { fileURLToPath } from 'node:url'
+import { pathToFileURL } from 'node:url'
+
+// ★ 路径推导（替代原硬编码绝对路径）：本文件在 skills/<name>/scripts/ 下，上推三层到插件根
+const HERE = path.dirname(fileURLToPath(import.meta.url))
+const PLUGIN_ROOT = path.resolve(HERE, '..', '..', '..')
+const PKG_BASE = [
+  path.join(PLUGIN_ROOT, 'package.json'),
+  path.join(HERE, 'package.json'),
+].find(p => fs.existsSync(p)) || path.join(tmpdir(), 'pdd-script-base.json')
 /**
  * 拼多多活动报名（pdd-activity）
  *
@@ -15,12 +30,8 @@
  *
  * 用法：node scripts/activity.mjs --mode overview
  */
-import { createRequire } from 'node:module'
-import * as fs from 'node:fs'
-import * as path from 'node:path'
-import { homedir } from 'node:os'
 
-const require = createRequire('E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/package.json')
+const require = createRequire(PKG_BASE)
 
 const argOf = (n) => { const i = process.argv.indexOf(`--${n}`); return i >= 0 && i + 1 < process.argv.length ? process.argv[i + 1] : undefined }
 const emit = (obj) => { process.stdout.write('__DSAGENT_RESULT__' + JSON.stringify(obj) + '\n') }
@@ -29,9 +40,9 @@ const mode = argOf('mode') || 'overview'
 
 ;(async () => {
   const puppeteer = require('puppeteer-core')
-  const { CredentialStore } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/lib/services/credential-store.js`)
+  const { CredentialStore } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/lib/services/credential-store.js')))
   const store = new CredentialStore(path.join(homedir(), '.dsh', 'dsagent-accounts.json'))
-  const { checkCooldown, detectSlider, autoSolveSlider, fmtRemain, tryAcquireAccountLock, releaseAccountLock, heartbeatAccountLock, throttleRequest } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-risk.mjs`)
+  const { checkCooldown, detectSlider, autoSolveSlider, fmtRemain, tryAcquireAccountLock, releaseAccountLock, heartbeatAccountLock, throttleRequest } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-risk.mjs')))
   const SHOP = argOf('account') || store.findByPlatform('pdd_mms')?.shop_key
   if (!SHOP) { emit({ ok: false, failureKind: 'not_bound', text: '未绑定拼多多商家后台账号，请到「账号连接」添加。' }); process.exit(2) }
 
@@ -64,6 +75,19 @@ const mode = argOf('mode') || 'overview'
     const dir = path.join(homedir(), '.dsh', 'browser-profiles', 'accounts')
     const alt = fs.readdirSync(dir).find(d => d.startsWith('pdd_mms_'))
     if (alt) profile = path.join(dir, alt)
+  }
+  // ★ 自动清理 Cookie 域污染（2026-10-28）：同名 Cookie 分散在
+  //   .pinduoduo.com / mms.pinduoduo.com / yingxiao.pinduoduo.com 时，
+  //   浏览器优先发子域旧值 → 推广域反复掉登录。删子域同名项即恢复。
+  //   跳过：--no-cookie-clean
+  if (!process.argv.includes('--no-cookie-clean')) {
+    try {
+      const { cleanCookiePollution } = await import(pathToFileURL('e:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/pdd-promo/scripts/cookie-clean.mjs').href)
+      const r = await cleanCookiePollution(profile, { log: (m) => console.warn('[pdd] ' + m) })
+      if (r.ok && r.deleted > 0) console.warn('[pdd] ✅ 清理 ' + r.deleted + ' 条域污染 Cookie')
+    } catch (e) {
+      console.warn('[pdd] Cookie 清理跳过：' + String(e.message).slice(0, 60))
+    }
   }
   const browser = await puppeteer.launch({
     executablePath: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
@@ -443,7 +467,7 @@ const mode = argOf('mode') || 'overview'
     const sig = await page.evaluate(() => window.__sigPair || null).catch(() => null)
     const mallId0 = await page.evaluate(() => window.__mallId || null).catch(() => null)
     // ★ 2026-10-24 补：captcha 通行证（54001 时不用人工过滑块）
-    const { getCaptchaToken: getTok, extractCaptchaToken: exTok, saveCaptchaToken: saveTok } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-captcha.mjs`).catch(() => ({}))
+    const { getCaptchaToken: getTok, extractCaptchaToken: exTok, saveCaptchaToken: saveTok } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-captcha.mjs'))).catch(() => ({}))
     const vtk = getTok ? getTok(SHOP) : null
     const variants = [
       ['全参', { activity_goods_id: Number(agid), activity_id: aid ? Number(aid) : undefined, goods_id: gid ? Number(gid) : undefined }],
@@ -455,7 +479,7 @@ const mode = argOf('mode') || 'overview'
       const r = await page.evaluate(async (bd, s, mall, vt) => {
         const payload = s ? { ...bd, crawlerInfo: s.crawlerInfo } : bd
         try {
-          const resp = await fetch('https://mms.pinduuduo.com/lakemms/activityGoods/cancelEnroll'.replace('pinduuduo', 'pinduoduo'), {
+          const resp = await fetch('https://mms.pinduoduo.com/lakemms/activityGoods/cancelEnroll', {
             method: 'POST', credentials: 'include',
             headers: { 'Content-Type': 'application/json', ...(s ? { 'Anti-Content': s.anti } : {}), ...(vt ? { VerifyAuthToken: vt } : {}) },
             body: JSON.stringify(payload),
@@ -506,6 +530,10 @@ const mode = argOf('mode') || 'overview'
       if (sig) headers['Anti-Content'] = sig.anti
 
       const call = async (path, body) => {
+        // ★ 2026-10-27 接入 throttleRequest（此前 import 了但从未调用，是死代码）。
+        //   管「频率上限」（strict 20 次/分钟）；与 reserveSlot 的「最小间隔」
+        //   是不同维度，实测叠加几乎不增加等待（详见 pdd-works 同处注释）。
+        await throttleRequest(SHOP, 'strict')
         const payload = sig ? { ...body, crawlerInfo: sig.crawlerInfo } : body
         const resp = await fetch('https://mms.pinduoduo.com' + path, {
           method: 'POST', credentials: 'include', headers, body: JSON.stringify(payload),
@@ -577,7 +605,7 @@ const mode = argOf('mode') || 'overview'
   await browser.close()
 })().catch(async (e) => {
   // ★ 风控异常 → 友好提示
-  const { checkCooldown, fmtRemain } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-risk.mjs`).catch(() => ({}))
+  const { checkCooldown, fmtRemain } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-risk.mjs'))).catch(() => ({}))
   if (e?.riskCode && checkCooldown) {
     const cd = checkCooldown(SHOP)
     emit({
@@ -587,10 +615,10 @@ const mode = argOf('mode') || 'overview'
     process.exit(2)
   }
   // ★ 2026-10-24 补：detached Frame / 页面关闭 → 风控关页面
-  const { normalizeError } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-error.mjs`).catch(() => ({}))
+  const { normalizeError } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-error.mjs'))).catch(() => ({}))
   const n = normalizeError ? normalizeError(e, '活动报名') : null
   if (n) {
-    const { recordToAntiban } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-error.mjs`).catch(() => ({}))
+    const { recordToAntiban } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-error.mjs'))).catch(() => ({}))
     if (recordToAntiban) await recordToAntiban(SHOP, null, n.failureKind === 'risk_control' ? 'captcha' : null).catch(() => {})
   }
   if (n) {

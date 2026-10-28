@@ -1,3 +1,18 @@
+import { createRequire } from 'node:module'
+import * as fs from 'node:fs'
+import * as path from 'node:path'
+import { homedir } from 'node:os'
+import { tmpdir } from 'node:os'
+import { fileURLToPath } from 'node:url'
+import { pathToFileURL } from 'node:url'
+
+// ★ 路径推导（替代原硬编码绝对路径）：本文件在 skills/<name>/scripts/ 下，上推三层到插件根
+const HERE = path.dirname(fileURLToPath(import.meta.url))
+const PLUGIN_ROOT = path.resolve(HERE, '..', '..', '..')
+const PKG_BASE = [
+  path.join(PLUGIN_ROOT, 'package.json'),
+  path.join(HERE, 'package.json'),
+].find(p => fs.existsSync(p)) || path.join(tmpdir(), 'pdd-script-base.json')
 /**
  * 拼多多机会商品（chance-goods）数据采集
  *
@@ -31,12 +46,8 @@
  *   实测：只有 `cat_id_1` 参数生效（cate_id_1/category_id/opt_id 都无效，会返回默认池）。
  *   已开放机会池的一级类目共 19 个（用 --mode cates 看），未开放的返回 total=0。
  */
-import { createRequire } from 'node:module'
-const { CHROME_PATH, STEALTH_ARGS, STEALTH_SCRIPT } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-launch.mjs`)
-import * as fs from 'node:fs'
-import * as path from 'node:path'
-import { homedir } from 'node:os'
-const require = createRequire('E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/package.json')
+const { CHROME_PATH, STEALTH_ARGS, STEALTH_SCRIPT } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-launch.mjs')))
+const require = createRequire(PKG_BASE)
 
 const argOf = (n) => { const i = process.argv.indexOf(`--${n}`); return i >= 0 && i + 1 < process.argv.length ? process.argv[i + 1] : undefined }
 const emit = (obj) => { process.stdout.write('__DSAGENT_RESULT__' + JSON.stringify(obj) + '\n') }
@@ -58,8 +69,8 @@ const PRICE_LABEL_NAMES = { 0: '品质档', 1: '主流档', 2: '引流档' }
 
 ;(async () => {
   const puppeteer = require('puppeteer-core')
-  const { CredentialStore } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/lib/services/credential-store.js`)
-  const { checkCooldown, detectSlider, autoSolveSlider, fmtRemain, getCaptchaToken, saveCaptchaToken, extractCaptchaToken } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-risk.mjs`)
+  const { CredentialStore } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/lib/services/credential-store.js')))
+  const { checkCooldown, detectSlider, autoSolveSlider, fmtRemain, getCaptchaToken, saveCaptchaToken, extractCaptchaToken, tryAcquireAccountLock, releaseAccountLock, heartbeatAccountLock } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-risk.mjs')))
   const getTok = getCaptchaToken, saveTok = saveCaptchaToken, extractTok = extractCaptchaToken
   const store = new CredentialStore(path.join(homedir(), '.dsh', 'dsagent-accounts.json'))
   const SHOP = argOf('account') || store.findByPlatform('pdd_mms')?.shop_key
@@ -71,6 +82,25 @@ const PRICE_LABEL_NAMES = { 0: '品质档', 1: '主流档', 2: '引流档' }
     process.exit(2)
   }
 
+  // ★ 2026-10-27 补：账号级并发锁（pdd-chance 此前缺，属共性缺口）。
+  //   opportunity-goods 域虽不在官方风控 SDK 白名单（较宽松），
+  //   但采集时仍会打开浏览器打多个接口，与其他任务并发会推高账号出口频率。
+  {
+    const lock = await tryAcquireAccountLock(SHOP, 'pdd-chance', 300_000)
+    if (!lock.ok) {
+      emit({
+        ok: false, failureKind: 'rate_limit',
+        text: `账号 ${SHOP} 正被其他拼多多任务占用${lock.holder ? `（${lock.holder}）` : ''}，请稍后再试。`,
+      })
+      process.exit(2)
+    }
+    const release = () => { try { releaseAccountLock(SHOP) } catch { /* ignore */ } }
+    process.on('exit', release)
+    process.on('SIGINT', () => { release(); process.exit(130) })
+    process.on('SIGTERM', () => { release(); process.exit(143) })
+    setInterval(() => { try { heartbeatAccountLock(SHOP, 'pdd-chance') } catch { /* ignore */ } }, 180_000)
+  }
+
   let profile = path.join(homedir(), '.dsh', 'browser-profiles', 'accounts', SHOP)
   if (!fs.existsSync(profile)) profile = path.join(homedir(), '.dsh', 'browser-profiles', 'accounts', 'pdd_mms_de55c3e159072dfb5297b234eaa487c3')
 
@@ -80,6 +110,32 @@ const PRICE_LABEL_NAMES = { 0: '品质档', 1: '主流档', 2: '引流档' }
   //   解法：先用凭证库 Cookie 覆盖注入（见下方 page.setCookie）。
   const storeAcc = store.listAccounts().find(a => a.shop_key === SHOP)
   const storePid = storeAcc?.cookies?.['PASS_ID']
+
+  // ★ 自动清理 Cookie 域污染（2026-10-28）：同名 Cookie 分散在
+
+  //   .pinduoduo.com / mms.pinduoduo.com / yingxiao.pinduoduo.com 时，
+
+  //   浏览器优先发子域旧值 → 推广域反复掉登录。删子域同名项即恢复。
+
+  //   跳过：--no-cookie-clean
+
+  if (!process.argv.includes('--no-cookie-clean')) {
+
+    try {
+
+      const { cleanCookiePollution } = await import(pathToFileURL('e:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/pdd-promo/scripts/cookie-clean.mjs').href)
+
+      const r = await cleanCookiePollution(profile, { log: (m) => console.warn('[pdd] ' + m) })
+
+      if (r.ok && r.deleted > 0) console.warn('[pdd] ✅ 清理 ' + r.deleted + ' 条域污染 Cookie')
+
+    } catch (e) {
+
+      console.warn('[pdd] Cookie 清理跳过：' + String(e.message).slice(0, 60))
+
+    }
+
+  }
 
   const browser = await puppeteer.launch({
     executablePath: CHROME_PATH,
@@ -99,7 +155,7 @@ const PRICE_LABEL_NAMES = { 0: '品质档', 1: '主流档', 2: '引流档' }
       const jar = Object.entries(storeAcc.cookies).filter(([, v]) => v !== '' && v != null)
       const cookieList = jar.flatMap(([name, value]) => ([
         { name, value: String(value), domain: '.pinduoduo.com', path: '/' },
-        { name, value: String(value), domain: 'mms.pinduuduo.com'.replace('pinduuduo', 'pinduoduo'), path: '/' },
+        { name, value: String(value), domain: 'mms.pinduoduo.com', path: '/' },
       ]))
       await page.setCookie(...cookieList)
       console.error(`[chance] 已从凭证库注入 ${cookieList.length} 个 Cookie（PASS_ID ${storePid.length} 字符）`)
@@ -260,16 +316,23 @@ const PRICE_LABEL_NAMES = { 0: '品质档', 1: '主流档', 2: '引流档' }
     if (r && (r.error_code === 40002 || r.errorCode === 40002)) {
       console.error('[chance] ⚠️ 40002 高频限流，稍后重试')
       try {
-        const { recordToAntiban } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-error.mjs`)
+        const { recordToAntiban } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-error.mjs')))
         await recordToAntiban(SHOP, 40002, 'rate_limit')
-      } catch { /* ignore */ }
+      } catch (e) {
+        // ★ 2026-10-27 修：原为 catch { ignore }，命中风控却不记健康分 →
+        //   账号风控记忆丢失，下次仍全速打（"盲目重试"的温床）。改为告警。
+        console.error(`[chance] ⚠ 记录风控健康分失败（40002）：${String(e && e.message || e).slice(0, 120)}`)
+      }
     }
     // ★ 54001 → 记健康分（该域一般不踩，兜底）
     if (r && (r.error_code === 54001 || r.errorCode === 54001)) {
       try {
-        const { recordToAntiban } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-error.mjs`)
+        const { recordToAntiban } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-error.mjs')))
         await recordToAntiban(SHOP, 54001, 'captcha')
-      } catch { /* ignore */ }
+      } catch (e) {
+        // ★ 同上：健康分记录失败必须可见
+        console.error(`[chance] ⚠ 记录风控健康分失败（54001）：${String(e && e.message || e).slice(0, 120)}`)
+      }
     }
     return r
   }
