@@ -58,8 +58,8 @@
  *             （见 readSubmitErrors），并继续等待、识别用户手动提交的结果。
  */
 import { CredentialStore, resolveAccountForRequest, type StoredAccount } from './services/credential-store.js'
-import { CAPTCHA_SELF_HEAL } from './pdd-captcha'
-import { applyStealth } from './stealth-inject'
+import { CAPTCHA_SELF_HEAL } from './pdd-captcha.js'
+import { applyStealth } from './stealth-inject.js'
 import { preuploadProductImages } from './pdd-image-preupload.js'
 import { clearProfileLocks, findChromePath, profileDir, profileOwner, releaseProfile, tryAcquireProfile, sleep, UI_STEP_DELAY_MS } from './browser-login.js'
 import { createAttrCache, type AttrCache } from './services/attr-cache.js'
@@ -67,13 +67,27 @@ import { loadPublishConfig, anchorSpec, configString, configTimeout, type Publis
 import { existsSync, statSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 import { homedir } from 'node:os'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 /** 商品列表入口 —— 发布的**唯一正确起点**（从列表点「发布新商品」才会带上完整上下文参数）。
  *  配置来源：publish-config/pdd.json → urls.goodsList（refreshPddConfig 热加载） */
 let PDD_GOODS_LIST_URL = 'https://mms.pinduoduo.com/goods/goods_list'
-/** 风控模块（skills/_shared/pdd-risk.mjs）所在插件根 —— 由 lib 位置向上推 */
-const PLUGIN_ROOT_FOR_RISK = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
+/**
+ * 风控模块（skills/_shared/pdd-risk.mjs）所在**插件根**。
+ *
+ * ★ 2026-10-27 修：原来是 `'..', '..'`（上推两层），**指错了地方**。
+ *   安装位置的插件自带 skills 目录：
+ *
+ *     node_modules/@dsagent/dsagent-plugin/
+ *       ├─ lib/pdd-publish.js      ← 本文件编译后在这
+ *       └─ skills/_shared/pdd-risk.mjs
+ *
+ *   从 lib/ 出发只需上推**一层**。上推两层会指到 `node_modules/@dsagent`，
+ *   那里没有 skills → 本文件里两处 `await import(riskPath)` 恒失败，
+ *   而它们都有 `.catch(() => null)` 兜底 → **静默失效**：
+ *   发布链路的「检测滑块 → 自动过滑块」从未真正生效过，只是没报错。
+ */
+const PLUGIN_ROOT_FOR_RISK = join(dirname(fileURLToPath(import.meta.url)), '..')
 
 /**
  * 诊断日志（写文件）。
@@ -813,6 +827,95 @@ async function clickByTextReal(page: any, textReSrc: string): Promise<string> {
  * @returns 选中的类目路径文本（如「童装/婴儿装/亲子装 > 套装 > 套装」）；失败返回 ''
  */
 async function selectCategory(page: any, keyword: string, categoryPath?: string): Promise<string> {
+  // ★ 2026-10-27 平台改版适配：
+  //   情况 A：类目页直接是表单第一步（商品主图+标题+「下一步」按钮）→ 类目已自动选好
+  //   情况 B：类目页有「确认发布该类商品」按钮 → 类目已选好（最近使用/已选分类）
+  //   情况 C：真正的类目搜索页（有搜索框，需要搜+选）→ 走原流程
+  const state = await page.evaluate(() => {
+    const hasTitle = !!document.querySelector('input[placeholder*="商品标题组成"], input[data-tracking-click-viewid="title_input_area"]')
+    const hasNext = [...document.querySelectorAll('button, a, div, span')]
+      .some(e => /下一步|完善商品信息/.test((e.innerText || e.textContent || '').trim()))
+    const hasConfirm = [...document.querySelectorAll('button, a, div, span')]
+      .some(e => /确认发布该类商品/.test((e.innerText || e.textContent || '').trim()))
+    return { hasTitle, hasNext, hasConfirm }
+  }).catch(() => ({ hasTitle: false, hasNext: false, hasConfirm: false }))
+
+  if (state.hasTitle && state.hasNext) {
+    diag('类目页已是表单第一步（平台改版，跳过类目搜索）')
+    return '(已自动选好类目)'
+  }
+  if (state.hasConfirm) {
+    // ★ 2026-10-27：类目页同时有搜索框 + 确认按钮。
+    //   已选类目可能是平台记住的旧类目（童装），与本次目标（纸杯）不符。
+    //   策略：直接走搜索选类目（搜到 → 选 → 确认），不依赖「已选分类」文本
+    //   （该文本是空节点读不到值，实测）。
+    diag('类目页有搜索框，走搜索选类目（忽略已选类目）')
+    const inputHandle = await page.$(CATE_SEARCH_INPUT).catch(() => null)
+    if (!inputHandle) {
+      // 没搜索框才退化为点确认
+      diag('无搜索框，退化为点「确认发布该类商品」')
+      const pos = await page.evaluate(() => {
+        const btns = [...document.querySelectorAll('button, a, div, span')]
+          .map(e => { const r = e.getBoundingClientRect(); return { tx: (e.innerText || e.textContent || '').trim(), x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2), w: Math.round(r.width) } })
+          .filter(o => /确认发布该类商品/.test(o.tx) && o.w > 30)
+        return btns[btns.length - 1] || null
+      }).catch(() => null)
+      if (pos) {
+        await page.mouse.click(pos.x, pos.y).catch(() => { /* 忽略 */ })
+        await sleep(3000)
+      }
+      return '(已确认类目)'
+    }
+    await inputHandle.click({ delay: 30 }).catch(() => { /* 忽略 */ })
+    await inputHandle.click({ clickCount: 3, delay: 20 }).catch(() => { /* 忽略 */ })
+    await page.keyboard.press('Backspace').catch(() => { /* 忽略 */ })
+    await page.keyboard.type(keyword, { delay: 120 })
+    await sleep(3500)
+    // 点搜索结果 + 确认
+    const picked = await page.evaluate((kw: string, catPath: string) => {
+      const vis = (el: HTMLElement) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 }
+      const items = Array.from(document.querySelectorAll('li'))
+        .filter(el => {
+          if (!vis(el as HTMLElement)) return false
+          const cls = String((el as HTMLElement).className || '')
+          if (!/SPP_searchItem|searchItem/i.test(cls)) return false
+          const t = (el as HTMLElement).innerText || ''
+          if (!t || t.length > 120) return false
+          if (/没有合适的类目|立即反馈|发布须知|攻略/.test(t)) return false
+          return true
+        })
+      if (!items.length) return ''
+      const kwWords = String(kw || '').split(/\s+/).filter(w => w.length >= 2)
+      const pathWords = String(catPath || '').split(/[>＞\s/]+/).filter(w => w.length >= 2)
+      const scored = items.map(el => {
+        const t = ((el as HTMLElement).innerText || '').replace(/\s+/g, ' ').trim()
+        let s = 0
+        for (const w of kwWords) if (t.includes(w)) s += 10
+        for (const w of pathWords) if (t.includes(w)) s += 5
+        if (/内衣裤袜|女士|男士/.test(t)) s -= 30
+        if (/童装|儿童/.test(t)) s += 3
+        return { el, t, s }
+      }).sort((a, b) => b.s - a.s)
+      if (!scored.length || scored[0].s <= 0) return ''
+      ;(scored[0].el as HTMLElement).click()
+      return scored[0].t
+    }, keyword, categoryPath || '').catch(() => '')
+    if (picked) {
+      await sleep(1500)
+      const cpos = await page.evaluate(() => {
+        const btns = [...document.querySelectorAll('button, a, div, span')]
+          .map(e => { const r = e.getBoundingClientRect(); return { tx: (e.innerText || e.textContent || '').trim(), x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2), w: Math.round(r.width) } })
+          .filter(o => /确认发布该类商品/.test(o.tx) && o.w > 30)
+        return btns[btns.length - 1] || null
+      }).catch(() => null)
+      if (cpos) {
+        await page.mouse.click(cpos.x, cpos.y).catch(() => { /* 忽略 */ })
+        await sleep(3000)
+      }
+      return picked
+    }
+    return ''
+  }
   // ① 类目搜索框：placeholder「请输入关键词搜索分类」。
   //   ★ 不能放宽为 [placeholder*="搜索"]：会先命中顶部全局搜索框（实测踩坑跳到课程页）
   const inputHandle = await page.$(CATE_SEARCH_INPUT).catch(() => null)
@@ -3902,8 +4005,11 @@ export async function pddPublish(
      */
     try {
       const riskPath = join(PLUGIN_ROOT_FOR_RISK, 'skills/_shared/pdd-risk.mjs')
+      // ★ 2026-10-27 修：riskPath 是 Windows 路径（C:\...），不能直接给 import()，
+      //   否则抛 ERR_UNSUPPORTED_ESM_URL_SCHEME 被 .catch 吞掉 → risk=null →
+      //   发布链路的「检测滑块 → 自动过滑块」从未真正生效（静默失效）。
       const risk = existsSync(riskPath)
-        ? await import(/* @vite-ignore */ riskPath).catch(() => null)
+        ? await import(/* @vite-ignore */ pathToFileURL(riskPath).href).catch(() => null)
         : null
       if (risk?.detectSlider && await risk.detectSlider(page)) {
         console.warn('[dsagent-pdd-publish] 段1 检测到滑块遮罩，尝试自动过滑块...')
@@ -3946,7 +4052,8 @@ export async function pddPublish(
       // ★ 风控 L3：编辑页也可能弹滑块 → 内联自动过
       try {
         const riskPath2 = join(PLUGIN_ROOT_FOR_RISK, 'skills/_shared/pdd-risk.mjs')
-        const risk2 = existsSync(riskPath2) ? await import(/* @vite-ignore */ riskPath2).catch(() => null) : null
+        // ★ 同上：Windows 路径需 pathToFileURL 转 file:// URL 才能给 import()
+        const risk2 = existsSync(riskPath2) ? await import(/* @vite-ignore */ pathToFileURL(riskPath2).href).catch(() => null) : null
         if (risk2?.detectSlider && await risk2.detectSlider(page)) {
           console.warn('[dsagent-pdd-publish] 段1E 检测到滑块遮罩，尝试自动过滑块...')
           const solved2 = await risk2.autoSolveSlider(shopKey, page).catch((e: unknown) => ({ ok: false, text: String(e) }))

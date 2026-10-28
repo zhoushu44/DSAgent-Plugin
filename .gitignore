@@ -29,3 +29,30 @@ dev/accio-analysis/
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# ── 构建产物（TS 编译输出，不入库） ───────────────────────
+lib/**/*.js
+lib/**/*.js.map
+lib/**/*.d.ts
+!lib/pdd-publish.js
+!lib/pdd-mode2.js
+!lib/pdd-publish2.js
+
+# ── Python 缓存 ───────────────────────────────────────────
+__pycache__/
+*.pyc
+.dsagent/runtime/__pycache__/
+
+# ── 本地运行产物 ──────────────────────────────────────────
+artifacts/
+.trae/
+
+# ── 第三方 skill 目录（未审核） ───────────────────────────
+skills/_re_qianchuan/
+skills/taobao-promo/
+skills/douyin-plan-ops/contract.json
+skills/douyin-uni-prom/contract.json
+
+# ── 测试脚本（本地诊断用，不入库） ────────────────────────
+dev/_*.py
+dev/_*.txt
