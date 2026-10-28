@@ -22,7 +22,7 @@
  *   - 发布设置（封面 / 话题 / 投稿至问题）是页面侧栏，非阻塞弹窗
  */
 import { CredentialStore, resolveAccountForRequest, type StoredAccount } from './services/credential-store.js'
-import { applyStealth } from './stealth-inject'
+import { applyStealth } from './stealth-inject.js'
 import { clearProfileLocks, findChromePath, profileDir, profileOwner, releaseProfile, tryAcquireProfile, sleep, UI_STEP_DELAY_MS } from './browser-login.js'
 
 const WRITE_URL = 'https://zhuanlan.zhihu.com/write'

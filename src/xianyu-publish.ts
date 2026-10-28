@@ -26,7 +26,7 @@
  *   扫码登录**得到的（只有这条路能拿到 havana_lgc2_77 会话票据）。
  */
 import { CredentialStore, resolveAccountForRequest, type StoredAccount } from './services/credential-store.js'
-import { applyStealth } from './stealth-inject'
+import { applyStealth } from './stealth-inject.js'
 import { clearProfileLocks, findChromePath, profileDir, profileOwner, releaseProfile, tryAcquireProfile, sleep, UI_STEP_DELAY_MS } from './browser-login.js'
 import { existsSync, statSync } from 'node:fs'
 import { loadPublishConfig, anchorSpec, configString, configTimeout, type PublishConfig } from './services/publish-config-loader.js'

@@ -27,7 +27,7 @@
  *             窗口内补全，若提交被校验拦住，工具会继续等待并识别用户手动提交的结果。
  */
 import { CredentialStore, resolveAccountForRequest, type StoredAccount } from './services/credential-store.js'
-import { applyStealth } from './stealth-inject'
+import { applyStealth } from './stealth-inject.js'
 import { type AttrModelHandle } from './pdd-publish.js'
 import { loadPublishConfig, anchorSpec, configString, configTimeout, type PublishConfig } from './services/publish-config-loader.js'
 import { clearProfileLocks, findChromePath, profileDir, profileOwner, releaseProfile, tryAcquireProfile, registerProfilePort, registeredPortFor, verifyPortOwnership, sleep, UI_STEP_DELAY_MS } from './browser-login.js'
@@ -1939,6 +1939,131 @@ async function clickPropOption(page: any, text: string): Promise<boolean> {
   }, text).catch(() => false) as boolean
 }
 
+/**
+ * combobox 型属性（如「品牌」）的填值：click 选项对 next-select-auto-complete 无效
+ * （2026-10 真机实测：点第一个候选后 .next-select-values 仍空、「重要属性 0/2」不变）。
+ * 必须**键入文字 → 等候选刷新 → 点中匹配项**，值才会进 React state。
+ *
+ * ★ 2026-10-28 补强（照抄 pdd-publish.js）：
+ *   - 键入必须走**原型链原生 value setter**，直接 `inp.value = x` 会被 React 丢弃；
+ *   - 面板没自动展开时主动点 trigger 重试（部分 next combobox 键入不出面板）；
+ *   - 三轮仍点不中选项时，回读「键入文本是否已被 React 认下」当成功（有些 combobox 输完即提交值）。
+ *
+ * @param id 属性项 id（struct-p-XXXX 或 label:名称）
+ * @param text 要填入的品牌/文本
+ */
+async function fillComboboxProp(page: any, id: string, text: string): Promise<boolean> {
+  const t = String(text || '').trim()
+  if (!t) return false
+
+  // ① 定位输入框并键入
+  const typed = await page.evaluate((sid: string, val: string) => {
+    let box: HTMLElement | null = null
+    if (sid.startsWith('label:')) {
+      const want = sid.slice(6)
+      for (const l of Array.from(document.querySelectorAll('label')) as HTMLElement[]) {
+        const name = (l.innerText || '').replace(/[*＊]/g, '').replace(/\s+/g, '')
+        if (name !== want) continue
+        let b: HTMLElement | null = l
+        for (let i = 0; i < 6 && b; i++) {
+          const cand = b.closest('.sell-catProp-item-common, .sell-catProp-item, [id^="struct-p-"]') as HTMLElement | null
+          if (cand && cand.querySelector('input')) { box = cand; break }
+          b = b.parentElement
+        }
+        if (box) break
+      }
+    } else {
+      box = document.getElementById(sid)
+    }
+    if (!box) return { ok: false, why: 'box not found' }
+    const inp = box.querySelector('input') as HTMLInputElement | null
+    if (!inp) return { ok: false, why: 'no input' }
+    // ★ React 受控输入框：必须取原型链上的原生 value setter，
+    //   否则 React 内部记录的 value 不变，后续 onChange 拿到的还是旧值（照抄 pdd-publish.js）。
+    const desc = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(inp), 'value')
+      || Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')
+    inp.focus()
+    inp.click()
+    if (desc && desc.set) desc.set.call(inp, val)
+    else inp.value = val
+    inp.dispatchEvent(new Event('input', { bubbles: true }))
+    inp.dispatchEvent(new Event('change', { bubbles: true }))
+    return { ok: true, value: inp.value }
+  }, id, t).catch((e: any) => ({ ok: false, why: String(e) })) as any
+  if (!typed?.ok) return false
+
+  // ② 等候选刷新后点中匹配项；面板未自动展开则主动点 trigger 重试
+  let clicked = false
+  for (let round = 0; round < 3 && !clicked; round++) {
+    if (round > 0) {
+      await page.evaluate((sid: string) => {
+        let box: HTMLElement | null = sid.startsWith('label:') ? null : document.getElementById(sid)
+        if (!box) {
+          const want = sid.slice(6)
+          for (const l of Array.from(document.querySelectorAll('label')) as HTMLElement[]) {
+            const name = (l.innerText || '').replace(/[*＊]/g, '').replace(/\s+/g, '')
+            if (name !== want) continue
+            let b: HTMLElement | null = l
+            for (let i = 0; i < 6 && b; i++) {
+              const cand = b.closest('.sell-catProp-item-common, .sell-catProp-item, [id^="struct-p-"]') as HTMLElement | null
+              if (cand) { box = cand; break }
+              b = b.parentElement
+            }
+            if (box) break
+          }
+        }
+        const trig = box?.querySelector('.next-select-trigger, .next-select, [class*="select"]') as HTMLElement | null
+        if (trig) trig.click()
+      }, id).catch(() => { })
+      await sleep(700)
+    }
+    clicked = await page.evaluate((val: string) => {
+      const panels = (Array.from(document.querySelectorAll('.next-overlay-wrapper.opened')) as HTMLElement[])
+        .filter(p => p.offsetParent !== null)
+      const panel = panels[panels.length - 1]
+      if (!panel) return false
+      const nodes = Array.from(
+        panel.querySelectorAll('.options-item, li, .next-menu-item, [role="option"], [class*="option"]'),
+      ) as HTMLElement[]
+      const vis = nodes.filter(n => n.offsetParent !== null)
+      const norm = (s: string) => (s || '').replace(/\s+/g, ' ').trim()
+      const hit = vis.find(n => norm(n.getAttribute('title') || n.innerText) === val)
+        || vis.find(n => norm(n.innerText).includes(val))
+      if (!hit) return false
+      hit.click()
+      return true
+    }, t).catch(() => false) as boolean
+    if (!clicked) await sleep(500)
+  }
+  await sleep(500)
+
+  // ③ 点不到选项时，确认键入的文本是否已被 React 认下
+  if (!clicked) {
+    return await page.evaluate((sid: string, val: string) => {
+      let box: HTMLElement | null = sid.startsWith('label:') ? null : document.getElementById(sid)
+      if (!box) {
+        const want = sid.slice(6)
+        for (const l of Array.from(document.querySelectorAll('label')) as HTMLElement[]) {
+          const name = (l.innerText || '').replace(/[*＊]/g, '').replace(/\s+/g, '')
+          if (name !== want) continue
+          let b: HTMLElement | null = l
+          for (let i = 0; i < 6 && b; i++) {
+            const cand = b.closest('.sell-catProp-item-common, .sell-catProp-item, [id^="struct-p-"]') as HTMLElement | null
+            if (cand) { box = cand; break }
+            b = b.parentElement
+          }
+          if (box) break
+        }
+      }
+      if (!box) return false
+      const inp = box.querySelector('input') as HTMLInputElement | null
+      const shown = ((box.querySelector('.next-select-values') as HTMLElement | null)?.innerText || '').trim()
+      return (!!inp && inp.value === val) || shown === val || shown.includes(val)
+    }, id, t).catch(() => false) as boolean
+  }
+  return true
+}
+
 /** 点选后回读属性项，确认值确实落到了控件上（选中值可能写在 input.value 或 .next-select-values 文本里） */
 async function verifyPropValue(page: any, id: string, value: string): Promise<boolean> {
   return await page.evaluate((sid: string, v: string) => {
@@ -2170,6 +2295,13 @@ async function fillCategoryAttrs(
     catId?: string
     /** 渠道键（'taobao'/'tmall'，档案按渠道分开存） */
     platform?: string
+    /**
+     * 用户显式声明的品牌（来自 `taobaoPublish` 的 opts.brand，即工具的 `brand` 参数）。
+     * ★ 非空时「品牌」不参与 ATTR_SKIP_RE 跳过（那是用户对自己品牌的声明，应尊重），
+     *   否则品牌是唯一必填属性的类目会永远卡在「重要属性 0/N」发不出去。
+     *   仍只在页面真实候选里命中才填，命中不了只记 missed，绝不编造品牌。
+     */
+    brand?: string
   },
 ): Promise<{ filled: string[]; missed: string[]; confirmed: Record<string, string>; schemaNames: string[]; schemaFp: string; profile: CategoryProfile | null }> {
   const filled: string[] = []
@@ -2179,6 +2311,17 @@ async function fillCategoryAttrs(
   /** 档案/日志用的平台键（'taobao'/'tmall'，档案按渠道分开存） */
   const PLATFORM = ctx.platform || 'taobao'
   const explicitMap = new Map((ctx.explicit || []).map(a => [a.name, a.value]))
+  // ★ 品牌例外：ATTR_SKIP_RE 默认跳过「品牌」（授权风险，不替用户瞎猜）。
+  //   但用户**显式传了 brand**（ctx.brand，来自 dsagent_taobao_publish 的 --brand 或
+  //   product 里的 brand 字段）时，那是用户对自己品牌的声明，应当尊重并填入 ——
+  //   否则「品牌」是唯一必填属性的类目会永远卡在「重要属性 0/2」发不出去。
+  //   仍只在页面真实候选里命中才填，命中不了只记 missed，绝不编造品牌。
+  const brandOptIn = String(ctx.brand || '').trim()
+  const isSkipped = (name: string) => {
+    if (!ATTR_SKIP_RE.test(name)) return false
+    if (name === '品牌' && brandOptIn) return false
+    return true
+  }
   const all = await readCatPropItems(page)
   // ★ 空结果必须显式报警：早先 readCatPropItems 用错了容器选择器（找 sell-field-* 包裹层，
   //   而 v2 页面属性项就是 #struct-p-XXXX 自身），返回空数组后被下游静默当成
@@ -2227,10 +2370,11 @@ async function fillCategoryAttrs(
   // ★ 待填清单：下拉型属性 + 文本型属性。
   //   早先 `i.kind !== 'text'` 把文本型（如「货号」「系列」「吊牌价」）整体排除，
   //   但其中也有必填项，会直接导致「商品属性 >> 必填项未填」。文本型走 fillAttrText。
-  const todo = all.filter(i => i.name && !i.filled && !ATTR_SKIP_RE.test(i.name))
+  const todo = all.filter(i => i.name && !i.filled && !isSkipped(i.name))
   if (all.length) {
     console.log(`[dsagent-taobao-publish] 类目属性共 ${all.length} 项，待填 ${todo.length} 项`
-      + `${todo.length ? `：${todo.map(i => i.name).join('、')}` : ''}`)
+      + `${todo.length ? `：${todo.map(i => i.name).join('、')}` : ''}`
+      + `${brandOptIn ? `（品牌按显式声明「${brandOptIn}」参与匹配）` : '（品牌默认跳过：授权风险，未显式声明不填）'}`)
   }
 
   for (const it of todo) {
@@ -2247,6 +2391,23 @@ async function fillCategoryAttrs(
         if (!explicitVal) missed.push(`${it.name}（必填，已占位「${val}」，建议人工确认）`)
       } else {
         missed.push(`${it.name}（文本填写失败）`)
+      }
+      continue
+    }
+
+    // ── combobox 型属性（如「品牌」：键入 → 选中，click 选项无效）──
+    if (it.kind === 'combobox') {
+      const explicitVal = explicitMap.get(it.name) || brandOptIn
+      if (!explicitVal) {
+        missed.push(`${it.name}（combobox，未给值；品牌类请用 brand 参数显式声明）`)
+        continue
+      }
+      const done = await fillComboboxProp(page, it.id, explicitVal)
+      if (done) {
+        filled.push(`${it.name}=${explicitVal}（显式）`)
+        confirmedAttrs[it.name] = explicitVal
+      } else {
+        missed.push(`${it.name}=${explicitVal}（combobox 键入/选中失败，请人工补填）`)
       }
       continue
     }
@@ -2292,17 +2453,40 @@ async function fillCategoryAttrs(
     // ── ④ 必填项兜底（无模型 / 模型弃权时）──
     //   ★ 为什么不交给人工：实测儿童裤子类目有 20 项属性、其中十多项带红星，
     //     不填则提交被「商品属性 >> 必填项未填」硬拦（错误(3) 之一）。
-    //     这里对**必填**属性按安全优先级挑一个候选，保证能过必填校验：
-    //       ① 明确的「无/否/其他/不适用」类安全值（对商品的真实影响最小）
-    //       ② 其余情况取第一个候选（平台候选通常按常用度排序）
-    //   非必填属性仍交人工，避免瞎填污染商品信息。
-    if (!pick && it.required) {
-      const SAFE_RE = /^(无|否|没有|其他|其它|不适用|不含|不涉及|无品牌|无内衬|无弹|不开裆|非定制|不支持)$/
-      const safe = options.find(o => SAFE_RE.test(o.trim()))
-      const chosen = safe || options[0]
-      pick = { value: chosen, hesitated: false, candidates: options.length }
-      source = safe ? '必填兜底(安全值)' : '必填兜底(首项)'
-      console.log(`[dsagent-taobao-publish] 属性「${it.name}」必填兜底选「${chosen}」（候选：${options.slice(0, 6).join('/')}…）`)
+    //   ★★ 照抄 pdd-publish.js 的 2026-10-20 真机教训：「盲选第一项」必须废止。
+    //      拼多多侧实测踩坑：模型不可用时盲选首项，填出「下装长=短款（商品是长裤）、
+    //      适用年龄段=14岁以上（商品110-160cm）、安全等级=A类（实物B类）、领型=挂脖（实物翻领）」——
+    //      不是「稍微不准」，而是把商品描述成另一种东西；更糟的是盲选值还会写进档案，
+    //      下次同类目直接复用（污染累积）。
+    //      因此新策略分级：
+    //        ① 标题词匹配命中 → 用（hesitated 标注，便于人工核对）
+    //        ② 匹配不到但属性确为必填 → 才允许取首项（不填会卡住提交，两害相权）
+    //        ③ 匹配不到且非必填 → 留空，宁可不填也不写错（写错=虚假描述/流量损失）
+    if (!pick && options.length) {
+      const titleTokens = String(ctx.title || '')
+        .replace(/[（）()【】\[\]{}]/g, '')
+        .split(/[\s/\\>＞、,，|]+/)
+        .filter((t) => t.length >= 2)
+      let matched: string | null = null
+      for (const tok of titleTokens) {
+        const hit = options.find((o) => o.includes(tok) || tok.includes(o))
+        if (hit) {
+          matched = hit
+          break
+        }
+      }
+      if (matched) {
+        pick = { value: matched, hesitated: true, candidates: options.length }
+        console.log(`[dsagent-taobao-publish] 属性「${it.name}」标题词匹配命中「${matched}」`)
+      } else if (it.required) {
+        const chosen = options[0]
+        pick = { value: chosen, hesitated: true, candidates: options.length }
+        console.log(`[dsagent-taobao-publish] 属性「${it.name}」必填且无匹配，只能取首项「${chosen}」（建议人工核对；候选：${options.slice(0, 6).join('/')}）`)
+      } else {
+        await closePropDropdown(page)
+        missed.push(`${it.name}（选填项，无匹配候选故留空；候选：${options.slice(0, 8).join('/')}）`)
+        continue
+      }
     }
 
     if (!pick) {
@@ -2316,8 +2500,12 @@ async function fillCategoryAttrs(
     const confirmed = ok && await verifyPropValue(page, it.id, pick.value)
     await closePropDropdown(page)
     if (confirmed) {
-      filled.push(`${it.name}=${pick.value}（${source}）`)
+      const tag = pick.hesitated ? '标题词/兜底' : source
+      filled.push(`${it.name}=${pick.value}（${tag}）`)
       confirmedAttrs[it.name] = pick.value
+      if (pick.hesitated) {
+        missed.push(`${it.name}=${pick.value}（${it.required ? '必填' : '标题词'}兜底，建议人工核对）`)
+      }
     } else {
       missed.push(`${it.name}（点选「${pick.value}」${ok ? '后未确认到值' : '失败'}）`)
     }
@@ -3585,6 +3773,8 @@ export async function taobaoPublish(
     const attrs = await fillCategoryAttrs(page, {
       title, model: attrModel, explicit: attributes,
       catId: publishCatId, platform: channelKey,
+      // 用户显式声明的品牌（见 fillCategoryAttrs 的品牌例外说明）
+      brand,
     })
     filled.push(...attrs.filled)
     missed.push(...attrs.missed)
@@ -3742,6 +3932,19 @@ export async function taobaoPublish(
     while (Date.now() < deadline) {
       await sleep(2000)
       finalUrl = page.url()
+
+      // ★★ URL 判定放在最前（先于风控/文案/面板三路诊断）：
+      //   淘宝发布成功的落地页是 `sell/v2/success.htm?primaryId=<商品ID>&catId=...&isEdit=false`。
+      //   真机实测（2026-10-28）该页既无 #success-container、正文也无「发布成功」字样，
+      //   且残留的校验提示会被 readSubmitErrors 当成硬拦因 —— 三者叠加导致
+      //   「商品已发布却 180s 空转报未检测到成功标志」的假阴性（连踩两次）。
+      //   URL 命中 success.htm 是平台自己的路由事实，比任何文案都可靠，直接判成功。
+      if (/\/sell\/v\d*\/?success\.htm/i.test(String(finalUrl || ''))) {
+        success = true
+        successId = String(finalUrl).match(/primaryId=(\d+)/i)?.[1] || ''
+        console.log(`[dsagent-taobao-publish] 发布成功（URL 判定）：success.htm，商品ID=${successId || '(未取到)'}`)
+        break
+      }
 
       const risk = await detectRisk(page)
       if (risk.hit) {

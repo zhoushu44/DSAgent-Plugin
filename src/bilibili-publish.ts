@@ -27,7 +27,7 @@
  *     ★ submit-add 实测在视口外（y≈1099.5 > 视口 900），必须先 scrollIntoView 再点
  */
 import { CredentialStore, resolveAccountForRequest, type StoredAccount } from './services/credential-store.js'
-import { applyStealth } from './stealth-inject'
+import { applyStealth } from './stealth-inject.js'
 import { clearProfileLocks, findChromePath, profileDir, profileOwner, releaseProfile, tryAcquireProfile, sleep, UI_STEP_DELAY_MS } from './browser-login.js'
 import { existsSync, statSync } from 'node:fs'
 

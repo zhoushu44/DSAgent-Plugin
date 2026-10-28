@@ -8,6 +8,7 @@
  *   node dev/publish-taobao.mjs --channel=tmall       # 发到天猫（默认 taobao）
  *   node dev/publish-taobao.mjs --category=儿童睡衣   # 自动选类目（★传叶子类目词，不传一级大类名或整段标题）
  *   node dev/publish-taobao.mjs --brand=某某 --model=X1 # 类目把「品牌/型号」列为必填属性时自动填（如 AI软件订阅/Token充值）
+ *   node dev/publish-taobao.mjs --catId=50008860      # 直达发布页（跳过选类目；属性区完整渲染，见 taobao-publish.ts 注释）
  *
  * 前置：先 `npm run build:host` 产出 lib/（脚本 import 的是 lib/ 编译产物，不是 src/）。
  * 账号库是 AES-256-GCM 加密的，无法离线读 shopKey，故本脚本用 CredentialStore 现场解析。
@@ -47,6 +48,10 @@ const channel = argOf('channel') || 'taobao'
 const categoryKeyword = argOf('category')
 const brand = argOf('brand')
 const model = argOf('model')
+const catId = argOf('catId')
+const directPublishUrl = catId
+  ? `https://item.upload.taobao.com/sell/v2/publish.htm?catId=${encodeURIComponent(catId)}`
+  : undefined
 
 // ── 测试商品（复用 pdd-link-matrix 的本地素材）──
 const SRC = join('e:', '360MoveData', 'Users', 'Administrator', 'Desktop', 'DSAgent-Plugin', 'skills', 'pdd-link-matrix', 'assets', 'src')
@@ -61,6 +66,7 @@ const result = await taobaoPublish(store, {
   categoryKeyword,
   brand,
   model,
+  directPublishUrl,
   account,
   confirm: CONFIRM,
   // 显式属性——前序真机实测页面「平台推荐值」+ 候选列表中的合理值

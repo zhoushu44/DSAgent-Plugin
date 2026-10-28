@@ -637,6 +637,9 @@ export function buildPublishTools(deps: PublishToolsDeps): import('@deepseek-ai/
         product: { type: 'string', required: true, description: '统一商品数据（必填），JSON 字符串。结构：{ title(必填,≤60字), images(必填,本地绝对路径数组,1~5张,单张≤20MB), detailImages?(详情图,≤20张), channel?("taobao" 默认 / "tmall"), category?(类目关键词), price?(一口价,元), stock?(库存), itemNo?(商家编码/货号), specs?(规格维度数组:[{name:"颜色分类",values:[{value:"黑色"}]}],最多2维), skus?(SKU 行数组:[{specs:{颜色分类:"黑色"},price:"99",stock:"10",itemNo:"SKU001"}],每行需覆盖全部维度), attributes?([{name:"内衣质地",value:"云朵棉"}]), account?(指定账号) }。' },
         confirm: { type: 'boolean', description: '是否已获用户确认。省略或 false 时只返回发布预览，不产生任何写操作；用户同意后传 true 才真正提交' },
         account: { type: 'string', description: '要使用的账号 shopKey（可选）。该平台有多个可用账号时，先按返回的候选向用户确认，再把选定的 shopKey 填到这里' },
+        brand: { type: 'string', description: '品牌（可选）。部分类目把「品牌」列为必填属性（如手机支架/手机配件），不填则永远卡在「重要属性 0/N」发不出去。传了会按「键入 → 从页面真实候选中选中」填入（只在候选里命中才填，不编造）。★ 不填则品牌一律留人工（授权风险）' },
+        model: { type: 'string', description: '型号（可选）。部分类目在选类目页把「型号」列为必填属性，不填则无法进入表单' },
+        directPublishUrl: { type: 'string', description: '（可选，进阶）已知类目 ID 时直达发布页，形如 https://item.upload.taobao.com/sell/v2/publish.htm?catId=150708。跳过「选类目」页：淘宝从选类目页进入时属性区是空壳（label 读不到），必填类目属性填不上、提交被前端校验硬拦；从 catId 直达则属性区正常渲染。批量发布同类目时建议先跑一次拿到 catId，之后都用本参数。' },
       },
       output: { schema: { type: 'json' }, render: renderToolOutput },
       async execute(args, exec) {
@@ -683,6 +686,9 @@ export function buildPublishTools(deps: PublishToolsDeps): import('@deepseek-ai/
             attributes: p.attributes,
             confirm: (args as any).confirm === true,
             account: args.account ? String(args.account).trim() : '',
+            brand: (args as any).brand ? String((args as any).brand).trim() : '',
+            model: (args as any).model ? String((args as any).model).trim() : '',
+            directPublishUrl: (args as any).directPublishUrl ? String((args as any).directPublishUrl).trim() : '',
             agentId: agentIdOf(exec),
             attrModel: attrModel as any,
           })

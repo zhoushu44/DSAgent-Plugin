@@ -19,7 +19,7 @@
  *   在 goofish 域下恒为未登录态，本工具会返回 token_expired 引导用户重新扫码。
  */
 import { CredentialStore, resolveAccountForRequest, type StoredAccount } from './services/credential-store.js'
-import { applyStealth } from './stealth-inject'
+import { applyStealth } from './stealth-inject.js'
 import { clearProfileLocks, findChromePath, profileDir, profileOwner, releaseProfile, tryAcquireProfile } from './browser-login.js'
 
 const PERSONAL_URL = 'https://www.goofish.com/personal'

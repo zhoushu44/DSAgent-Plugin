@@ -29,7 +29,7 @@
  *   - 提交被拦要三路回读（toast + 字段红字 + 建议面板）。
  */
 import { existsSync, statSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs'
-import { applyStealth } from './stealth-inject'
+import { applyStealth } from './stealth-inject.js'
 import { basename, join } from 'node:path'
 import type { CredentialStore, StoredAccount } from './services/credential-store.js'
 import { resolveAccountForRequest, toAccountChoice } from './services/credential-store.js'
