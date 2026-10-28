@@ -362,6 +362,60 @@ def run_batch(plan_path, out_dir, model, base, key, workers=8):
     return {"ok": all(r and r.get("ok") for r in results), "results": results}
 
 
+def run_from_pack(pack_dir, out_dir, model, base, key, workers=8, category="儿童睡衣"):
+    """★ 2026-10-28：从 1688 素材包直接出整套 15 张图（主图 5 + 详情 10）
+    自动组装 prompt：双参考（商品原图 + 第1张原图当模特基准），锁款式锁人脸。
+    """
+    import glob as _glob
+    pack = Path(pack_dir)
+    prod_file = pack / "product.json"
+    if not prod_file.exists():
+        raise SystemExit(f"素材包缺 product.json：{prod_file}")
+    product = json.loads(prod_file.read_text(encoding="utf-8"))
+    srcs = sorted(str(p) for p in (pack / "src").glob("*") if p.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp"))
+    if not srcs:
+        raise SystemExit(f"素材包 src/ 没有原图：{pack / 'src'}")
+    ref_product = srcs[0]          # 商品原图（锁款式配色）
+    ref_model = srcs[1] if len(srcs) > 1 else srcs[0]   # 模特基准（锁脸部发型）
+
+    style = "插肩拼色长袖，圆领，左胸小方块笑脸刺绣"
+    lock = f"严格保持参考图1中的款式与配色不变，{style}，严格保持参考图2中模特的脸部发型年龄不变，"
+
+    items = []
+    main_prompts = [
+        f"{category}套装商品主图，{lock}纯白背景，左侧儿童模特全身展示蓝色套装穿搭效果，右侧竖排展示灰色粉色黄色三套同款小图，左下角圆形面料细节放大图，自然柔光，电商主图风格，高清细节，无文字无水印",
+        f"{category}套装商品主图，{lock}纯白背景，儿童模特全身展示蓝色套装，右侧竖排三格细节图分别是领口罗纹特写，袖口走线，面料微距，自然柔光，电商主图风格，高清细节，无文字无水印",
+        f"{category}商品主图，{lock}纯白背景，展示莫代尔面料微距特写，面料柔软细腻有光泽，纹理清晰，蓝色，自然柔光，电商主图风格，高清细节，无文字无水印",
+        f"{category}商品主图，{lock}纯白背景，展示睡衣领口罗纹包边与袖口走线做工特写，针脚工整，蓝色，自然柔光，电商主图风格，高清细节，无文字无水印",
+        f"{category}套装商品主图，{lock}纯白背景，展示四套同款不同配色家居服平铺排列，蓝色灰色粉色黄色，版型宽松，自然柔光，电商主图风格，高清细节，无文字无水印",
+    ]
+    for i, p in enumerate(main_prompts, 1):
+        items.append({"out": f"main_{i}.jpg", "refs": [ref_product, ref_model], "prompt": p})
+
+    grids = [
+        ("750x1000", "儿童模特半身出镜，表情自然可爱，展示家居服上衣正面，左侧留白，竖排中文大字标题舒绒童睡衣，竖排副标题A类棉亲肤透气，底部小字2026NEWARRIVAL，浅灰纯色背景，电商详情页风格，高清摄影质感"),
+        ("750x1000", "儿童模特全身出镜，姿势自然展示套装穿搭效果，左侧留白，竖排中文大字标题居家舒眠套装，竖排副标题亲肤棉暖护一觉，底部小字COMFORTSLEEPWEAR，浅灰纯色背景，电商详情页风格，高清摄影质感"),
+        ("1000x1849", "竖版构图，左侧竖排大字柔软亲肤，竖排小字副题莫代尔棉垂感顺滑，中间儿童模特全身居中展示蓝色家居服套装，左下角嵌入一张面料细节缩略小图，底部英文卖点SOFTSKINFRIENDLY，浅色简洁背景，电商详情页风格高清"),
+        ("1000x1849", "竖版构图，左侧竖排大字A类亲肤，竖排小字副题无荧光安心材质，中间儿童模特全身居中展示家居服套装，左下角嵌入一张缝线做工缩略小图，底部英文卖点SKINFRIENDLYGRADEA，浅色简洁背景，电商详情页风格高清"),
+        ("1000x1849", "竖版构图，左侧竖排大字精致做工，竖排小字副题四针六线无骨缝制，中间展示家居服领口罗纹与袖口走线特写，左下角嵌入一张成衣平铺缩略小图，底部英文卖点FINECRAFTDETAIL，浅色简洁背景，电商详情页风格高清"),
+        ("1000x1849", "竖版构图，左侧竖排大字宽松版型，竖排小字副题活动自如不束缚，中间儿童模特全身居中展示家居服活动姿态，左下角嵌入一张裤腰松紧带缩略小图，底部英文卖点LOOSEFITDESIGN，浅色简洁背景，电商详情页风格高清"),
+        ("1000x1849", "竖版构图，左侧竖排大字多色可选，竖排小字副题清新配色每日好心情，中间展示四套同款不同配色家居服平铺排列蓝色灰色粉色黄色，左下角嵌入一张单套正面缩略小图，底部英文卖点MULTICOLORCHOICE，浅色简洁背景，电商详情页风格高清"),
+        ("1000x1849", "竖版构图，左侧竖排大字尺码指南，竖排小字副题100110120130全码段，中间展示家居服平铺测量示意与尺码信息排版，左下角嵌入一张面料细节缩略小图，底部英文卖点SIZEGUIDEREFERENCE，浅色简洁背景，电商详情页风格高清"),
+        ("1000x1849", "竖版构图，左侧竖排大字居家场景，竖排小字副题睡前玩耍一整套搞定，中间儿童模特在温馨居家卧室环境中展示家居服穿搭，左下角嵌入一张面料细节缩略小图，底部英文卖点HOMEDAILYWEAR，浅色简洁背景，电商详情页风格高清"),
+        ("1000x1849", "竖版构图，左侧竖排大字洗护说明，竖排小字副题机洗不跑团久穿如新，中间展示折叠好的家居服平铺状态与洗护图标排版，左下角嵌入一张面料特写缩略小图，底部英文卖点EASYCAREWASHABLE，浅色简洁背景，电商详情页风格高清"),
+    ]
+    for i, (size, p) in enumerate(grids, 1):
+        items.append({"out": f"detail_{i}.jpg", "refs": [ref_product, ref_model], "size": size,
+                      "prompt": f"{category}详情屏，{lock}{p}"})
+
+    # 写临时 plan 并复用 run_batch
+    plan_path = Path(out_dir) / "_plan.json"
+    plan_path.parent.mkdir(parents=True, exist_ok=True)
+    plan_path.write_text(json.dumps({"items": items}, ensure_ascii=False), encoding="utf-8")
+    print(f"[from-pack] {len(items)} 张计划已生成 -> {plan_path}", file=sys.stderr)
+    return run_batch(str(plan_path), out_dir, model, base, key, workers=workers)
+
+
 def run_probe(base, key, model):
     models = _request(base + "/models", headers={"Authorization": f"Bearer {key}"})["data"]
     ids = sorted(m["id"] for m in models)
@@ -379,9 +433,9 @@ def run_probe(base, key, model):
 def main(argv=None):
     ap = argparse.ArgumentParser(description="NewAPI 生图/改图桥接")
     # 同时兼容 `gen.py probe` 与 `gen.py --mode probe` 两种调用习惯
-    ap.add_argument("mode_pos", nargs="?", choices=["generate", "edit", "batch", "probe"],
+    ap.add_argument("mode_pos", nargs="?", choices=["generate", "edit", "batch", "probe", "from-pack"],
                     help="子命令（位置参数写法）")
-    ap.add_argument("--mode", dest="mode_flag", choices=["generate", "edit", "batch", "probe"],
+    ap.add_argument("--mode", dest="mode_flag", choices=["generate", "edit", "batch", "probe", "from-pack"],
                     help="子命令（flag 写法，等价于位置参数）")
     ap.add_argument("--prompt", help="提示词")
     ap.add_argument("--prompt-file", help="从文件读提示词（长提示词用这个，免转义）")
@@ -397,6 +451,8 @@ def main(argv=None):
     ap.add_argument("--base", default=DEFAULT_BASE)
     ap.add_argument("--key", default=DEFAULT_KEY)
     ap.add_argument("--workers", type=int, default=8, help="batch 并发线程数（默认 8）")
+    ap.add_argument("--pack", help="from-pack 模式：1688 素材包目录（含 product.json + src/）")
+    ap.add_argument("--category", default="儿童睡衣", help="from-pack 模式：品类名（用于 prompt）")
     a = ap.parse_args(argv)
 
     # harness 可能按 SKILL.md 首条用例补一个位置子命令（如 probe），
@@ -425,6 +481,11 @@ def main(argv=None):
             raise SystemExit("edit 需要 --prompt 和至少一个 --ref")
         result = run_edit(prompt, a.ref, a.size, a.n, a.out, a.name, a.model,
                           a.quality, a.background, a.base, a.key)
+    elif a.mode == "from-pack":
+        if not a.pack:
+            raise SystemExit("from-pack 需要 --pack（1688 素材包目录）")
+        result = run_from_pack(a.pack, a.out, a.model, a.base, a.key,
+                               workers=a.workers, category=a.category)
     else:
         if not a.plan:
             raise SystemExit("batch 需要 --plan")
