@@ -321,7 +321,10 @@ async function fillCustomInputs(page, dimIdx, phKeyword, values) {
             && (e.type === 'text' || !e.type)
         })
       }
+      // ★ 没有空框 → 需要点「添加定制规格」补框
+      //   （新建维度只自动创建 1 个空框，第 2+ 个值必须补）
       const empty = els.find(e => !e.value)
+      if (!empty && els.length) return { needAdd: true }
       const el = empty || els[els.length - 1]
       if (!el) return null
       el.scrollIntoView({ block: 'center' })
