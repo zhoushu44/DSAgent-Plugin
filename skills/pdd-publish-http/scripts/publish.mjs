@@ -17,6 +17,116 @@ function skuKey(specs) {
     .map(k => `${k}=${String(specs[k]).trim()}`)
     .join('|')
 }
+
+/** 1688 尺码字符串 → 拼多多尺码值 */
+function normSize(s) {
+  const str = String(s)
+  const m = str.match(/^(\d+)码/); if (m) return m[1]
+  const m2 = str.match(/^([SMLXL]+)\s*【?码?】?/); if (m2) return m2[1]
+  const m3 = str.match(/(\d+)\s*cm/i); if (m3) return m3[1]
+  const m4 = str.match(/^(\d+)$/); if (m4) return m4[1]
+  return str.slice(0, 4).trim()
+}
+
+/**
+ * 从 1688 素材包 + AI 图目录组装商品 JSON（工作流 --from-pack 用）
+ * @param packDir ali1688-pick 产出的素材包（含 product.json + src/）
+ * @param genDir  AI 生图目录（含 main_1..5 / detail_1..10，直接文件或子目录都认）
+ * @param opts    { priceFactor, maxColors, maxSizes, categoryKw }
+ */
+function buildProductFromPack(packDir, genDir, opts = {}) {
+  const { priceFactor = 2, maxColors = 3, maxSizes = 3, categoryKw = '儿童睡衣' } = opts
+  const product = JSON.parse(fs.readFileSync(path.join(packDir, 'product.json'), 'utf8'))
+
+  // ── AI 图：递归收集 main_N / detail_N（batch 模式是平铺文件，单张模式是子目录） ──
+  const genMap = {}
+  if (genDir && fs.existsSync(genDir)) {
+    const walk = (dir) => {
+      for (const f of fs.readdirSync(dir)) {
+        const p = path.join(dir, f)
+        if (fs.statSync(p).isDirectory()) { walk(p); continue }
+        const m = f.match(/^(main_\d+|detail_\d+)\.(jpg|png|jpeg|webp)/i)
+        if (!m) continue
+        const base = m[1].toLowerCase()
+        const mt = fs.statSync(p).mtimeMs
+        if (!genMap[base] || mt > genMap[base].mt) genMap[base] = { path: p, mt }
+      }
+    }
+    walk(genDir)
+  }
+  const genList = Object.entries(genMap)
+    .sort((a, b) => a[0].localeCompare(b[0], 'en', { numeric: true }))
+    .map(([, v]) => v.path)
+  if (!genList.length) throw new Error('AI 图目录没有图：' + genDir)
+  const mainImgs = genList.filter(p => /main_\d+/i.test(path.basename(p))).slice(0, 5)
+  const detailImgs = genList.filter(p => /detail_\d+/i.test(path.basename(p))).slice(0, 10)
+  const thumb = mainImgs[0] || genList[0]
+
+  // ── 1688 真实 SKU ──
+  const rawSkus = (product.skus || []).filter(s => s && (s.color || s.size))
+  if (!rawSkus.length) throw new Error('1688 素材包无 SKU')
+  const colors = [...new Set(rawSkus.map(s => String(s.color || '').trim()).filter(Boolean))]
+  const sizes = [...new Set(rawSkus.map(s => normSize(s.size)).filter(Boolean))]
+  const finalColors = colors.length ? colors.slice(0, maxColors) : ['图片色']
+  const numSizes = sizes.filter(s => /^\d+$/.test(s)).sort((a, b) => parseInt(a) - parseInt(b))
+  const letterSizes = sizes.filter(s => /^[SMLXL]+$/.test(s))
+  const sortedSizes = numSizes.length >= 3 ? numSizes : (letterSizes.length >= 2 ? letterSizes : sizes)
+  const finalSizes = sortedSizes.slice(0, maxSizes)
+  if (!finalSizes.length) throw new Error('1688 素材包无尺码')
+
+  // SKU 行：1688 真实行命中筛选
+  const skuRows = []
+  for (const s of rawSkus) {
+    const c = String(s.color || '').trim() || finalColors[0]
+    const sz = normSize(s.size)
+    if (!finalColors.includes(c)) continue
+    if (!finalSizes.includes(sz)) continue
+    skuRows.push({ color: c, size: sz, price: String(s.price || ''), stock: String(s.stock || '300') })
+  }
+  let finalRows = skuRows
+  if (!finalRows.length) {
+    const ps = rawSkus.map(s => parseFloat(s.price)).filter(p => p > 0)
+    const avg = ps.length ? ps.reduce((a, b) => a + b, 0) / ps.length : 75
+    for (const c of finalColors) for (const s of finalSizes) finalRows.push({ color: c, size: s, price: avg.toFixed(2), stock: '300' })
+  }
+
+  // 价格：1688 均价 × 系数（默认 ×2 零售），对齐 .9 尾数
+  const allPrices = rawSkus.map(s => parseFloat(s.price)).filter(p => p > 0)
+  const avg = allPrices.length ? allPrices.reduce((a, b) => a + b, 0) / allPrices.length : 75
+  const price = (Math.floor(avg * priceFactor) + 0.9).toFixed(1)
+  console.log(`[from-pack] 1688 均价 ${avg.toFixed(2)} × ${priceFactor} → 拼单价 ${price}`)
+  console.log(`[from-pack] 颜色(${finalColors.length}): ${finalColors.join(' / ')} | 尺码(${finalSizes.length}): ${finalSizes.join(' / ')} | SKU ${finalRows.length} 行`)
+
+  // 属性：1688 原始名直传（fillAttributes 里别名映射）
+  const attributes = []
+  for (const a of (product.attributes || [])) {
+    const name = String(a.name || '').trim()
+    let val = String(a.value || '').trim()
+    if (!name || !val) continue
+    if (val.includes('、') && val.length > 30) continue
+    if (val.length > 20) val = val.slice(0, 20)
+    attributes.push({ name, value: val })
+  }
+  console.log(`[from-pack] 属性 ${attributes.length} 条`)
+
+  const specs = [
+    { name: '颜色分类', values: finalColors.map(c => ({ value: c, image: thumb })) },
+    { name: '参考分类', values: finalSizes.map(s => ({ value: s })) },
+  ]
+  const skus = finalRows.map(r => ({
+    specs: { '颜色分类': r.color, '参考分类': r.size },
+    price: r.price, stock: r.stock || '300',
+    image: thumb,
+  }))
+  return JSON.stringify({
+    title: (product.title || categoryKw).slice(0, 60),
+    images: mainImgs.length ? mainImgs : genList.slice(0, 5),
+    detailImages: detailImgs.length ? detailImgs : genList.slice(5, 15),
+    category: categoryKw,
+    price, stock: '300',
+    specs, skus, attributes,
+  })
+}
 const PKG_BASE = [
   path.join(PLUGIN_ROOT, 'package.json'),
   path.join(HERE, 'package.json'),
@@ -58,22 +168,42 @@ const productStr = argOf('product')
 const confirm = hasFlag('confirm') && argOf('confirm') !== 'false'
 const account = argOf('account')
 
+// ★ 2026-10-28：--from-pack 模式（工作流用）——直接吃 1688 素材包 + AI 图目录，
+//   内部组装成商品 JSON 再上架，省掉外部组装步骤。
+const fromPack = argOf('from-pack')       // ali1688-pick 的 pack_dir
+const genDir = argOf('gen')               // AI 生图输出目录（含 main_1..5 / detail_1..10）
+const priceFactor = parseFloat(argOf('price-factor') || '2')   // 1688 进价 × 该系数
+const maxColors = parseInt(argOf('max-colors') || '3', 10)
+const maxSizes = parseInt(argOf('max-sizes') || '3', 10)
+const categoryKw = argOf('category') || '儿童睡衣'
+
 const emit = (obj) => {
   process.stdout.write('__DSAGENT_RESULT__' + JSON.stringify(obj) + '\n')
 }
 
-if (!productFile && !productStr) {
-  emit({ ok: false, failureKind: 'api_error', text: '缺少 --product-file 或 --product 参数。' })
+if (!productFile && !productStr && !fromPack) {
+  emit({ ok: false, failureKind: 'api_error', text: '缺少 --product-file / --product / --from-pack 参数。' })
   process.exit(2)
 }
 
 // ─── 1. 读取商品数据 ───
 let raw = ''
-try {
-  raw = productFile ? fs.readFileSync(productFile, 'utf8') : productStr
-} catch (e) {
-  emit({ ok: false, failureKind: 'api_error', text: `读取商品文件失败：${e.message}` })
-  process.exit(2)
+if (fromPack) {
+  // ★ from-pack 模式：组装商品 JSON
+  try {
+    raw = buildProductFromPack(fromPack, genDir, { priceFactor, maxColors, maxSizes, categoryKw })
+    console.log('[pdd-publish-http] --from-pack 组装完成（' + raw.length + ' bytes）')
+  } catch (e) {
+    emit({ ok: false, failureKind: 'api_error', text: `from-pack 组装失败：${e.message}` })
+    process.exit(2)
+  }
+} else {
+  try {
+    raw = productFile ? fs.readFileSync(productFile, 'utf8') : productStr
+  } catch (e) {
+    emit({ ok: false, failureKind: 'api_error', text: `读取商品文件失败：${e.message}` })
+    process.exit(2)
+  }
 }
 
 // 校验必填
@@ -167,18 +297,36 @@ const poolCandidates = [
   path.join(process.cwd(), 'spec-pool.json'),
   path.join(PLUGIN_ROOT, 'skills', 'pdd-publish-http', 'assets', 'spec-pool.json'),
 ]
+// 判断池是否"有货"：pool 里至少 1 个维度、1 个带 spec_id 的值。
+// ★ 2026-10-28 修：原逻辑"找到第一个文件就用"，而 workspace 里那份是
+//   采集失败留下的空壳（pool:{} / goodsScanned:0），会把插件 assets 里
+//   有货的池（6 色 + 7 码）整个盖住 → 运行时永远拿到空池。
+const poolHasValues = (p) => {
+  const pool = p?.pool
+  if (!pool || typeof pool !== 'object') return false
+  for (const vals of Object.values(pool)) {
+    for (const rec of Object.values(vals || {})) {
+      if (rec?.spec_id) return true
+    }
+  }
+  return false
+}
 let specPool = null
 for (const c of poolCandidates) {
-  if (fs.existsSync(c)) {
-    try {
-      specPool = JSON.parse(fs.readFileSync(c, 'utf8'))
-      console.log(`[pdd-publish-http] 规格池已加载：${c}（${Object.keys(specPool.pool || {}).length} 个维度）`)
-      break
-    } catch { /* 下一个 */ }
-  }
+  if (!fs.existsSync(c)) continue
+  try {
+    const parsed = JSON.parse(fs.readFileSync(c, 'utf8'))
+    if (!poolHasValues(parsed)) {
+      console.log(`[pdd-publish-http] 规格池无货，跳过：${c}（pool 为空或 goodsScanned=0）`)
+      continue
+    }
+    specPool = parsed
+    console.log(`[pdd-publish-http] 规格池已加载：${c}（${Object.keys(specPool.pool || {}).length} 个维度）`)
+    break
+  } catch { /* 下一个 */ }
 }
 if (!specPool) {
-  console.log('[pdd-publish-http] 未找到规格池，将不带 spec_id 提交（平台按 spec_value 自解析）')
+  console.log('[pdd-publish-http] 未找到有货的规格池，将不带 spec_id 提交（平台按 spec_value 自解析）')
 }
 
 // ─── 3. 预览 or 确认 ───
@@ -259,7 +407,18 @@ try {
   }
 
   const { pddPublish2 } = await import(`file:///${PLUGIN_ROOT}/lib/pdd-publish2.js`)
-  const extra = { product: raw, confirm: true, mode2: true }
+  // ★ 2026-10-28 修：原代码先设 mode2=true，挂了 DOM 填规格后又置 false。
+  //   这是误导——只要有规格维度就走 DOM 填规格、必然关闭 mode2，
+  //   于是 mode2 实际恒为 false，110KB 改包引擎在标准链路里从不执行。
+  //   改为由"是否有规格维度"直接决定，语义与执行一致：
+  //     · 有 specs → DOM 全填（规格/价格/预览图/参考价）→ mode2=false 走页面自然提交
+  //     · 无 specs（单 SKU）→ 仍走 mode2 改包注入 gallery/skus
+  // ★ 为什么有规格时不能开 mode2：改包会和页面状态冲突
+  //   （参考价被覆盖回商品 price），导致提交被拦/超时。页面自己提交最稳
+  //   （平台校验的就是页面状态）。
+  const hasSpecDims = (parsed.specs || []).some(d => d && d.name && Array.isArray(d.values) && d.values.length)
+  const extra = { product: raw, confirm: true, mode2: !hasSpecDims }
+  console.log(`[pdd-publish-http] 提交模式：${hasSpecDims ? 'DOM 全填（mode2 关闭，走页面自然提交）' : 'mode2 改包（单 SKU 无规格维度）'}`)
   if (account)
     extra.account = account
   // ★ 规格解析 v3（2026-10-26）：自由维度 + 字典维度
@@ -328,13 +487,9 @@ try {
   } catch (e) {
     console.log('[pdd-publish-http] 规格解析异常（继续）：' + (e?.message || e))
   }
-  // ★ 2026-10-27：DOM 已填全部（规格/价格/预览图/参考价）→ 关闭 mode2 改包
-  //   改包会和页面状态冲突（参考价被覆盖回商品 price），导致提交被拦/超时。
-  //   页面自己提交最稳（平台校验的就是页面状态）。
-  if (extra.domFillSpecs) {
-    extra.mode2 = false
-    console.log('[pdd-publish-http] DOM 全填 → 关闭 mode2 改包，走页面自然提交')
-  }
+  // ★ 2026-10-28 删：此处原本有一段 `if (extra.domFillSpecs) extra.mode2 = false`。
+  //   mode2 现在在 extra 初始化处就按 hasSpecDims 决定（见上），这里重复置 false
+  //   只会掩盖"为什么关"，已并入上方注释。
   const result = await pddPublish2(
     new (await import(`file:///${PLUGIN_ROOT}/lib/services/credential-store.js`)).CredentialStore(
       path.join(homedir(), '.dsh', 'dsagent-accounts.json')),
