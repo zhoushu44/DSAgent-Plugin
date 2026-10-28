@@ -486,9 +486,135 @@ async function readSkuRowCount(page) {
   }).catch(() => 0)
 }
 
+/**
+ * 确保该维度有可用的空自定义输入框（第 2+ 个值要先点「添加定制规格」）。
+ */
+async function ensureCustomBox(page, dimIdx, value) {
+  // 数该维度已有几个输入框（自定义尺码输入框）
+  const count = await page.evaluate((sel, ci) => {
+    const root = document.querySelector(sel)
+    const c = [...root.querySelectorAll('.property-container-v2'), ...root.querySelectorAll('.goods-spec-row')][ci]
+    if (!c) return { inputs: 0, filled: 0 }
+    const inps = [...c.querySelectorAll('input[placeholder="自定义尺码"]')]
+    return { inputs: inps.length, filled: inps.filter(i => (i.value || '').trim()).length }
+  }, SPEC_ROOT, dimIdx).catch(() => ({ inputs: 0, filled: 0 }))
+
+  // 已有空框（未填的）→ 直接用
+  if (count.filled < count.inputs) return true
+
+  // 没有空框 → 点「添加定制规格」按钮（维度行尾的 + 按钮）
+  const pos = await page.evaluate((sel, ci) => {
+    const root = document.querySelector(sel)
+    const c = [...root.querySelectorAll('.property-container-v2'), ...root.querySelectorAll('.goods-spec-row')][ci]
+    if (!c) return null
+    const btn = [...c.querySelectorAll('button, a, span, div')]
+      .find(e => /添加定制规格|添加规格|定制规格/.test((e.innerText || e.textContent || '').trim()))
+    if (!btn) return null
+    btn.scrollIntoView({ block: 'center' })
+    const r = btn.getBoundingClientRect()
+    return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }
+  }, SPEC_ROOT, dimIdx).catch(() => null)
+  if (!pos) return false
+
+  await sleep(400)
+  const pos2 = await page.evaluate((sel, ci) => {
+    const root = document.querySelector(sel)
+    const c = [...root.querySelectorAll('.property-container-v2'), ...root.querySelectorAll('.goods-spec-row')][ci]
+    if (!c) return null
+    const btn = [...c.querySelectorAll('button, a, span, div')]
+      .find(e => /添加定制规格|添加规格|定制规格/.test((e.innerText || e.textContent || '').trim()))
+    if (!btn) return null
+    const r = btn.getBoundingClientRect()
+    return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }
+  }, SPEC_ROOT, dimIdx).catch(() => null)
+  if (!pos2) return false
+
+  await page.mouse.click(pos2.x, pos2.y)
+  await sleep(1500)
+
+  // 验证新框出现
+  const after = await page.evaluate((sel, ci) => {
+    const root = document.querySelector(sel)
+    const c = [...root.querySelectorAll('.property-container-v2'), ...root.querySelectorAll('.goods-spec-row')][ci]
+    return c ? c.querySelectorAll('input[placeholder="自定义尺码"]').length : 0
+  }, SPEC_ROOT, dimIdx).catch(() => 0)
+  return after > count.inputs
+}
+
+/**
+ * 填「自定义尺码」输入框（真实键盘键入 + 点空白失焦）。
+ * ★ 用户 2026-10-28 指明：不用勾选平台的 S/M checkbox，直接自定义输入，
+ *   输入完成点空白，然后再点一次空白。其他类目一样。
+ */
+async function fillCustomSize(page, dimIdx, value) {
+  // ★ 先补框：平台默认只给 1 个空输入框，第 2+ 个值要先点「添加定制规格」
+  //   （系统自动创建的空框不注册，必须手动添加）
+  await ensureCustomBox(page, dimIdx, value)
+
+  await page.evaluate((sel, ci) => {
+    const root = document.querySelector(sel)
+    const c = [...root.querySelectorAll('.property-container-v2'), ...root.querySelectorAll('.goods-spec-row')][ci]
+    c?.querySelector('input[placeholder="自定义尺码"]')?.scrollIntoView({ block: 'center' })
+  }, SPEC_ROOT, dimIdx)
+  await sleep(400)
+
+  const pos = await page.evaluate((sel, ci) => {
+    const root = document.querySelector(sel)
+    const c = [...root.querySelectorAll('.property-container-v2'), ...root.querySelectorAll('.goods-spec-row')][ci]
+    if (!c) return null
+    // ★ 取最后一个空的输入框（不是第一个！第 2+ 个值要填到新框里）
+    const inps = [...c.querySelectorAll('input[placeholder="自定义尺码"]')]
+    const inp = inps.find(i => !(i.value || '').trim()) || inps[inps.length - 1]
+    if (!inp) return null
+    const r = inp.getBoundingClientRect()
+    return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }
+  }, SPEC_ROOT, dimIdx)
+  if (!pos) return false
+
+  // 真实键盘键入
+  await page.mouse.click(pos.x, pos.y)
+  await sleep(400)
+  await page.keyboard.type(String(value), { delay: 50 })
+  await sleep(300)
+  // ★ 点页面空白处失焦
+  await page.mouse.click(30, 300)
+  await sleep(1000)
+  // ★ 再点一次空白（用户：在自定义输入空白点一下）
+  await page.mouse.click(30, 300)
+  await sleep(1200)
+
+  // 回读确认值进了输入框（任一输入框有值就算成功）
+  const back = await page.evaluate((sel, ci, val) => {
+    const root = document.querySelector(sel)
+    const c = [...root.querySelectorAll('.property-container-v2'), ...root.querySelectorAll('.goods-spec-row')][ci]
+    if (!c) return false
+    return [...c.querySelectorAll('input[placeholder="自定义尺码"]')].some(i => (i.value || '').trim() === val)
+  }, SPEC_ROOT, dimIdx, String(value))
+  return back
+}
+
 /* ─────────── ⑥ 勾选 checkbox 值（适配版：页面有就勾，没有就自定义添加） ─────────── */
 async function checkBoxes(page, dimIdx, values) {
   const log = []
+  // ★ 2026-10-28（用户实测指明）：尺码类维度（页面有「自定义尺码」输入框）
+  //   → 全部走「自定义尺码」输入框键入用户值，不用平台预设 S/M/L
+  //   → 输入完成后点页面空白处失焦
+  const hasCustomSize = await page.evaluate((sel, ci) => {
+    const root = document.querySelector(sel)
+    const c = [...root.querySelectorAll('.property-container-v2'), ...root.querySelectorAll('.goods-spec-row')][ci]
+    if (!c) return false
+    return !!c.querySelector('input[placeholder="自定义尺码"]')
+  }, SPEC_ROOT, dimIdx).catch(() => false)
+
+  if (hasCustomSize) {
+    console.log('[dom-fill-spec]   该维度有「自定义尺码」输入框 → 走自定义尺码输入（不用预设 S/M）')
+    for (const v of values) {
+      const ok = await fillCustomSize(page, dimIdx, v)
+      log.push({ v, ok, via: 'custom-size' })
+    }
+    return log
+  }
+
   for (const v of values) {
     const clean = String(v).replace(/(cm|厘米|ml|mL|L|l|g|kg|G|KG)$/i, '').trim()
 
@@ -984,6 +1110,14 @@ export async function fillSpecsOnPage(page, specs, defaults = {}) {
       }
     }
     await sleep(1500)
+  }
+
+  // ★ 2026-10-28（用户实测）：尺码值填完后平台会生成「尺码表」（身高/体重参数勾选），
+  //   不填尺码表数据会被拦提交（"3个规格值尺码信息未填写正确"）。
+  //   因此填完尺码后必须再停用一次尺码表（第一次在填规格前，那时还没出现）。
+  if (defaults.disableSizeChart !== false) {
+    const disabled2 = await disableSizeChart(page)
+    if (disabled2) log('已停用尺码表（填完规格后二次停用）')
   }
 
   // 填 SKU 价格表（默认跳过，由模式2改包注入 price/stock）

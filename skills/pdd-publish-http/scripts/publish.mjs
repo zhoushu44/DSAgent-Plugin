@@ -1,3 +1,17 @@
+import { createRequire } from 'node:module'
+import * as fs from 'node:fs'
+import * as path from 'node:path'
+import { homedir } from 'node:os'
+import { tmpdir } from 'node:os'
+import { fileURLToPath } from 'node:url'
+
+// ★ 路径推导（替代原硬编码绝对路径）：本文件在 skills/<name>/scripts/ 下，上推三层到插件根
+const HERE = path.dirname(fileURLToPath(import.meta.url))
+const PLUGIN_ROOT = path.resolve(HERE, '..', '..', '..')
+const PKG_BASE = [
+  path.join(PLUGIN_ROOT, 'package.json'),
+  path.join(HERE, 'package.json'),
+].find(p => fs.existsSync(p)) || path.join(tmpdir(), 'pdd-script-base.json')
 /**
  * 拼多多商品上架（HTTP 逆向模式）—— 技能入口脚本
  *
@@ -21,14 +35,8 @@
  *
  * 输出协议：dsagent-result（__DSAGENT_RESULT__ 前缀 + ---[OUTPUT_FILES] 标记）
  */
-import { createRequire } from 'node:module'
-import * as fs from 'node:fs'
-import * as path from 'node:path'
-import { homedir } from 'node:os'
 
-const require = createRequire('E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/package.json')
-const PLUGIN_ROOT = 'E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin'
-
+const require = createRequire(PKG_BASE)
 // ─── 参数解析 ───
 const argOf = (name) => {
   const i = process.argv.indexOf(`--${name}`)
@@ -113,11 +121,15 @@ for (const p of parsed.images) {
 }
 
 // ─── 2. 规格池定位（workspace 优先，其次技能 assets） ───
+// ★ 2026-10-27：原第 4 候选是写死的绝对路径
+//   'E:/360MoveData/.../童装/artifacts/pdd-re/spec-pool.json'。
+//   那是**本 workspace 的业务数据**（不属于插件资产），写死后换目录即失效。
+//   而前两个候选已用 process.cwd() 覆盖同一位置，故直接删除该绝对候选，
+//   语义不变（cwd 即 workspace 根）。
 const poolCandidates = [
   path.join(process.cwd(), 'artifacts', 'pdd-re', 'spec-pool.json'),
   path.join(process.cwd(), 'spec-pool.json'),
   path.join(PLUGIN_ROOT, 'skills', 'pdd-publish-http', 'assets', 'spec-pool.json'),
-  'E:/360MoveData/Users/Administrator/Desktop/童装/artifacts/pdd-re/spec-pool.json',
 ]
 let specPool = null
 for (const c of poolCandidates) {
@@ -172,6 +184,41 @@ try {
     if (chk.blocked) {
       emit({ ok: false, failureKind: chk.failureKind, shopKey: shopKey0, text: chk.text })
       process.exit(2)
+    }
+    // ★ 2026-10-27 补：账号级并发锁（pdd-publish-http 此前缺，属共性缺口）。
+    //   发布是最高风险的写操作，两个任务同时打同一个号会显著提高被封概率。
+    //   锁由 _shared/pdd-risk.mjs 提供（文件锁 + 心跳 + 僵尸强夺），
+    //   与 pdd-shop / pdd-works / pdd-promo / pdd-activity / pdd-crawl 共用同一把。
+    // ★ 2026-10-27 补（第二轮）：失败必须打日志，不能静默降级。
+    //   原写法 `.catch(() => null)` 会让 import 失败时锁被静默跳过 ——
+    //   账号级互斥形同虚设却无人知晓（第 27 轮在 pdd-crawl 抓到过同类）。
+    //   发布是最高风险写操作，无锁时至少要让人看见。
+    const riskMod = await import(`file:///${PLUGIN_ROOT}/skills/_shared/pdd-risk.mjs`)
+      .catch((e) => {
+        console.error(`[pdd-publish-http] ⚠ 账号锁模块加载失败，本次发布将无账号级互斥保护：${String(e && e.message || e).slice(0, 120)}`)
+        return null
+      })
+    if (!riskMod?.tryAcquireAccountLock) {
+      console.error('[pdd-publish-http] ⚠ 账号锁不可用（模块无 tryAcquireAccountLock），继续执行但无并发保护')
+    }
+    if (riskMod?.tryAcquireAccountLock) {
+      const lock = await riskMod.tryAcquireAccountLock(shopKey0, 'pdd-publish-http', 300_000)
+      if (!lock.ok) {
+        emit({
+          ok: false, failureKind: 'rate_limit', shopKey: shopKey0,
+          text: `账号 ${shopKey0} 正被其他拼多多任务占用${lock.holder ? `（${lock.holder}）` : ''}。\n`
+            + '拼多多按账号累计行为评分，两个任务同时打同一个号会显著提高被封概率。\n'
+            + '请等待当前任务结束后再试。',
+        })
+        process.exit(2)
+      }
+      const release = () => { try { riskMod.releaseAccountLock(shopKey0) } catch { /* ignore */ } }
+      process.on('exit', release)
+      process.on('SIGINT', () => { release(); process.exit(130) })
+      process.on('SIGTERM', () => { release(); process.exit(143) })
+      const hb = setInterval(() => { try { riskMod.heartbeatAccountLock(shopKey0, 'pdd-publish-http') } catch { /* ignore */ } }, 180_000)
+      // 发布完成后清心跳（在 import pdd-publish2 之前挂上，finally 里清）
+      process.on('exit', () => { try { clearInterval(hb) } catch { /* ignore */ } })
     }
   }
 
@@ -249,6 +296,29 @@ try {
       await recordToAntiban(shopKey0, result?.ok ? 1000000 : null, result?.ok ? 'ok' : null)
     } catch { /* ignore */ }
   }
+  // ★ 2026-10-28：发布成功 → 沉淀类目模板（下次同类目直接复用维度映射/必填属性）
+  if (result?.ok && parsed.category) {
+    try {
+      const { saveTemplate } = await import('./category-template.mjs')
+      const goodsId = (result.finalUrl || '').match(/goods_id=(\d+)/)?.[1] || ''
+      // 维度映射：本次用户维度 → 页面实际维度（从 domSpecs + result 里拿不到 page 名，
+      //   这里记 user 侧；page 侧由 dom-fill-spec 内部记录，见 dom-fill-spec 的 template 上报）
+      const dims = (parsed.specs || [])
+        .filter(d => d && d.name && Array.isArray(d.values) && d.values.length)
+        .map(d => ({ user: d.name, page: d.name, type: '' }))
+      saveTemplate(parsed.category, {
+        catId: (result.finalUrl || '').match(/[?&]id=(\d+)/)?.[1] || '',
+        catePath: (result.text || '').match(/类目=商品分类\s*([^\s]+)/)?.[1] || '',
+        dims,
+        requiredAttrs: (parsed.attributes || []).filter(a => a && a.name && a.value),
+        price: parsed.price,
+        stock: parsed.stock,
+        goodsId,
+      })
+    } catch (e) {
+      console.log('[pdd-publish-http] 模板沉淀失败（不影响发布结果）：' + (e?.message || e))
+    }
+  }
   emit({
     ok: !!result?.ok,
     failureKind: result?.failureKind,
@@ -262,7 +332,9 @@ try {
   try {
     const { normalizeError, recordToAntiban } = await import(`file:///${PLUGIN_ROOT}/skills/_shared/pdd-error.mjs`)
     const n = normalizeError(e, '商品发布')
-    if (account) await recordToAntiban(account, null, n.failureKind === 'risk_control' ? 'captcha' : null).catch(() => {})
+    // ★ 2026-10-27 修：原为 .catch(() => {}) 静默吞掉，健康分丢失无人知晓
+    if (account) await recordToAntiban(account, null, n.failureKind === 'risk_control' ? 'captcha' : null)
+      .catch((e2) => console.error(`[pdd-publish-http] ⚠ 记录风控健康分失败：${String(e2 && e2.message || e2).slice(0, 120)}`))
     emit({ ok: false, failureKind: n.failureKind, text: n.text })
     process.exit(2)
   } catch { /* ignore */ }
