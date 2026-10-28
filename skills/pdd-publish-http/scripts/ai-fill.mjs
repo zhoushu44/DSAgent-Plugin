@@ -18,12 +18,43 @@
  */
 import { execFileSync } from 'node:child_process'
 import * as path from 'node:path'
+import * as fs from 'node:fs'
+import { fileURLToPath } from 'node:url'
+
+// ★ 插件根推导（本文件在 skills/pdd-publish-http/scripts/ 下，上推三层）
+const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..')
 
 const SPEC_ROOT = '#goods-spec-sku'
 const SKU_ROOT = '#sku'
 const NEW_SPEC_BTN_XPATH = '//*[@id="newSpec"]/div[2]/div/div/div/div[4]/button/div'
 const PY = 'C:/Users/Administrator/AppData/Local/Programs/Python/Python313/python.exe'
-const IMGKIT_DIR = 'E:/360MoveData/Users/Administrator/Desktop/童装/artifacts/pajama'
+/**
+ * imgkit（含 BASE/KEY 的 GLM 调用封装）所在目录。
+ *
+ * ★ 2026-10-27：原为写死的绝对路径
+ *   'E:/360MoveData/.../童装/artifacts/pajama'。那是**workspace 的 Python
+ *   工具库**（不属于插件资产），写死后换目录即失效。
+ *
+ *   现在按优先级探测（workspace 相对优先，其次插件自带副本）：
+ *     ① <cwd>/artifacts/pajama
+ *     ② <cwd>/../artifacts/pajama        （技能从子目录启动时）
+ *     ③ <PLUGIN_ROOT>/artifacts/pajama
+ *   都找不到就退化成第①个路径（让 Python 报 ImportError，而不是静默用不存在路径）。
+ *
+ *   ★ 必须转成正斜杠：该值经 `JSON.stringify()` 注入 Python 代码字符串，
+ *   而 stringify 会把单个 `\` 转成 `\\` → Python 侧变成双反斜杠字面量 →
+ *   sys.path 加了个无效路径 → `from imgkit import ...` 失败。
+ *   Windows 下 Python 完全支持正斜杠，故统一用 `/`。
+ */
+const IMGKIT_CANDIDATES = [
+  'E:/360MoveData/Users/Administrator/Desktop/童装/artifacts/pajama',
+  path.join(process.cwd(), 'artifacts', 'pajama'),
+  path.join(process.cwd(), '..', 'artifacts', 'pajama'),
+  path.join(PLUGIN_ROOT, 'artifacts', 'pajama'),
+]
+const IMGKIT_DIR = (IMGKIT_CANDIDATES.find(d => {
+  try { return fs.existsSync(path.join(d, 'imgkit.py')) } catch { return false }
+}) || IMGKIT_CANDIDATES[0]).replace(/\\/g, '/')
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 
 /** 调 GLM 文本模型（非视觉，快） */
@@ -41,8 +72,7 @@ function askText(prompt) {
   ].join('\n')
   const out = execFileSync(PY, ['-c', code], {
     encoding: 'utf8', timeout: 90000,
-    env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
-  })
+    env: { ...process.env, PYTHONIOENCODING: 'utf-8' },  })
   return out.trim()
 }
 

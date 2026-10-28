@@ -957,13 +957,23 @@ export async function fillSpecsOnPage(page, specs, defaults = {}) {
       //   纯选择器搞不定：新建维度的空框/已填框混在一起、类目间结构有差异
       if (target.type === 'spec-type' && defaults.useAi !== false) {
         log(`  → AI 辅助填「${target.dim}」(${values.length} 值)`)
+        let aiResults = []
         try {
           const { aiFillDim } = await import('./ai-fill.mjs')
-          const r = await aiFillDim(page, target.dim, values, { dimIdx: target.idx })
-          r.forEach(x => log(`    "${x.v}" → ${x.ok ? 'OK' : '失败'} (${x.via}${x.reason ? ': ' + x.reason : ''})`))
+          aiResults = await aiFillDim(page, target.dim, values, { dimIdx: target.idx })
+          aiResults.forEach(x => log(`    "${x.v}" → ${x.ok ? 'OK' : '失败'} (${x.via}${x.reason ? ': ' + x.reason : ''})`))
         } catch (e) {
-          log(`  AI 填失败，回退普通填: ${e?.message || e}`)
-          const r = await fillCustomInputs(page, target.idx, '', values)
+          log(`  AI 填异常，回退普通填: ${e?.message || e}`)
+        }
+        // ★ AI 失败/不可用（网关 503 等）→ 用普通填补齐失败的值
+        const failed = aiResults.filter(x => !x.ok).map(x => x.v)
+        if (failed.length === values.length && aiResults.length) {
+          log(`  AI 全部失败 → 回退普通填`)
+          const r = await fillCustomInputs(page, target.idx, '', failed)
+          r.forEach(x => log(`    "${x.v}" → ${x.ok ? 'OK' : '失败'}`))
+        } else if (failed.length) {
+          log(`  AI 部分失败 → 补齐: ${failed.join('/')}`)
+          const r = await fillCustomInputs(page, target.idx, '', failed)
           r.forEach(x => log(`    "${x.v}" → ${x.ok ? 'OK' : '失败'}`))
         }
       } else {
