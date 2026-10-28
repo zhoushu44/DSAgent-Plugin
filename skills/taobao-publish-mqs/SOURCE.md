@@ -91,7 +91,6 @@ PROTECTED_OFFICIAL_ONLY_KEYS = ["auctionPoint","stuffStatus","sevenDaySupport",
 | `catProp` 用「stored 打底 + target 覆盖」合并而非直接覆盖 | 框架可能已写入类目默认属性 |
 
 ## 五之二、★ 图片链路实测（2026-10，逆向 + 真机反复验证）
-
 这一节是本仓对觅千手「预上传 + 重放」链路的实测校准，踩过的坑全部记在这里。
 
 ### 5.2.1 逆向 HTTP 上传（已落地 `src/taobao-image-space.ts`）
@@ -170,6 +169,99 @@ replace 后  img=0   「上传图片」×5
 条件必填，含「材质成分」复合表）在提交时被拦 —— 这是属性域的问题，与图片链路无关，
 按既定决策（不写类目特化）交人工补全。
 
+---
+
+## 五之三、★ 类目属性链路实测（2026-10-28，两个类目真机发布验证）
+
+本节是属性域的实测结论。**「按既定决策交人工补全」这句在 5.2.6 里已被部分推翻** ——
+属性是可以自动填的，但有三条此前不知道的硬结论。
+
+### 5.3.1 觅千手不填属性（源码级结论）
+
+对本地分发包（`E:\...\Desktop\觅千手`，57KB `source/pageHooks.js` + 492KB `script/tb_subway/index.js`
++ 114KB `script/service_worker_new.js` + 153KB `source/iframeHandler.js`）做了全量扫描：
+
+| 找的东西 | 结果 |
+|---|---|
+| `catProp` 填充逻辑 | pageHooks.js 有 12 处，但**全部是「搬家时搬走已有 catProp」**，不是从零填 |
+| `kdds_taobao_catprop_filled` 写入方 | 全包**只读不写**，无写入方 |
+| 淘宝发品属性填充 | **不存在**。pageHooks.js 的 61 个函数全是搬家/图片/SKU |
+| CDN 引擎 `_gm.js`（5.83MB，含发品） | 已被清理，`rea-gm-modules/` 拆分产物也不在 |
+
+**觅千手是搬品工具，不是发品工具。** 它的 catProp 策略（`applyFullJsonReplayToTarget` 内）：
+
+```js
+var srcCatProp = lsCatPropKeyCount > 0 ? lsCatProp          // localStorage kdds_taobao_catprop_filled
+              : jsonFvCatPropKeyCount > 0 ? jsonFvCatProp    // 兜底 window.Json.models.formValues.catProp
+              : null;
+if (srcCatProp && srcCatPropKeyCount > 0) {
+  var reactSessionCatProp = targetFv.catProp || {};
+  var syncedCatProp = Object.assign({}, cloneJsonValue(srcCatProp), cloneJsonValue(reactSessionCatProp));
+  targetFv.catProp = syncedCatProp;                                    // ① 写 formValues
+  syncComponentProp(val, "catProp", cloneJsonValue(syncedCatProp));    // ② 同步组件 props
+}
+```
+
+即「**搬来的值打底 + 页面已有值覆盖，双写（formValues + components.props.value）**」。
+`syncComponentProp` 本体极简：`val.components[key].props.value = propValue`。
+它假设属性已填好，只负责搬 —— 所以本地包里没有「从零填属性」的实现可抄。
+
+**本仓的属性填充是对 `lib/pdd-publish.js` 的 `fillAttributes()` 的横向移植**（那是本仓
+自己真机验证过的同类逻辑），不是抄觅千手。
+
+### 5.3.2 进入路径决定属性区能否渲染（最坑的一条）
+
+| 进入方式 | 属性区 DOM | 结果 |
+|---|---|---|
+| 选类目页 → 确认下一步 | `struct-p-*` 28 个 / `label` **0 个**（空壳） | 必填属性读不到也填不上，提交被「重要属性 0/N」硬拦，**连请求都发不出去** |
+| `?catId=XXXX` 直达 | `label.required` 正常出现，属性可填 | 正常 |
+
+所以 `taobaoPublish` 有 `directPublishUrl` 参数：已知 catId 时直接开
+`https://item.upload.taobao.com/sell/v2/publish.htm?catId=XXXX`。
+批量发布同类目：先跑一次拿到 catId，之后全部直达。
+
+属性项定位用「**从 label 反查容器**」：全页扫 `label.required` + `#struct-catProp label` +
+兜底所有 label，每个往上找最近的 `.sell-catProp-item-common / .sell-catProp-item / [id^="struct-p-"]`
+容器（要求容器里确有 `.next-select / .next-select-trigger / input`），因为两套 DOM 并存，
+`getElementById('struct-catProp')` 只拿得到空壳。
+
+### 5.3.3 品牌是 combobox，click 选项无效
+
+实测「品牌」属性容器 id 就是 `struct-p-20000`（= 发布 URL 里
+`keyProps={"p-20000":{"value":3236884,"text":"007"}}` 那个键），控件是
+`.next-select-auto-complete`。**直接 click 下拉选项后 `.next-select-values` 仍空、
+「重要属性 0/2」不变** —— 必须「键入 → 等候选刷新 → 点中匹配项」，且键入要走
+**原型链原生 value setter**（`Object.getOwnPropertyDescriptor(Object.getPrototypeOf(inp),'value').set`），
+直接 `inp.value = x` 会被 React 丢弃。
+
+品牌是**部分类目的唯一必填属性**（手机支架/手机配件类目必填只有「品牌 + 适用场景」），
+所以默认 `ATTR_SKIP_RE` 跳过品牌的策略会让这类目永远发不出去。现规则：
+用户显式传 `brand` 时才填（用户对自己品牌的声明），且只在页面真实候选里命中。
+
+### 5.3.4 成功判定必须认 URL，不能认文案
+
+淘宝发布成功的落地页是：
+
+```
+https://item.upload.taobao.com/sell/v2/success.htm?primaryId=<商品ID>&catId=...&isEdit=false&pageStyle=
+```
+
+该页**既没有 `#success-container`，正文也没有「发布成功/上架成功/提交成功」等字样**，
+且残留的校验提示还会被三路错误回读当成硬拦因。三者叠加导致连续两次
+「**商品其实已发布（primaryId 都拿到了），却 180s 空转后报『未检测到成功标志』**」的假阴性。
+现规则：循环开头先判 `if (/\/sell\/v\d*\/?success\.htm/i.test(finalUrl))`，命中即成功，
+`primaryId` 直接当商品ID。URL 路由事实比任何文案都可靠。
+
+### 5.3.5 真机验证记录（2026-10-28，账号 tb957985228335）
+
+| 类目 | catId | 属性命中 | 商品ID |
+|---|---|---|---|
+| 手机支架/手机座 | 150708 | 2/2（品牌007 + 适用场景桌面） | 1096741116047 |
+| 手机壳/保护套定制 | 50025033 | 3/6（材质硅胶 + 品牌/适用品牌闪魔） | 1096739872970 |
+
+第二个类目未填的 3 项**全是选填项且与标题无关**（定制服务/保护套工艺/流行元素），
+按新策略正确留空（宁可不填也不写错）。
+
 ## 六、同步更新流程
 
 1. 发布页结构变更（replayMode 失效）→ 打开淘宝真实发布页，DevTools 确认框架是否仍把表单 state 赋给 `window.Json`/`Json2`（`Object.keys(window)` 找 `Json`，或断点 `Object.defineProperty`）。
@@ -197,3 +289,8 @@ replace 后  img=0   「上传图片」×5
 | `src/taobao-publish.ts` `replayMode` 注入点（evaluateOnNewDocument） | 觅千手「页面脚本执行前注入 page hook」 | 注入时机 |
 | `src/taobao-publish.ts` 降级 DOM 填写 | —（本仓新增兜底，觅千手无） | 框架不走 Json 赋值时回退 |
 | `buildTaobaoJsonDocument()` | `loadStoredJsonDocument` 的 `{models:{formValues},components}` 结构 | payload 文档结构 |
+| `src/taobao-publish.ts` `directPublishUrl` | —（本仓新增，觅千手无对应路径） | 绕过「选类目页 → 空壳属性区」，见 §5.3.2 |
+| `src/taobao-publish.ts` `fillCategoryAttrs` 的 label 反查 | —（本仓新增） | 两套 DOM 并存，`getElementById('struct-catProp')` 只拿空壳 |
+| `src/taobao-publish.ts` `fillComboboxProp` | —（本仓新增，思路同 `lib/pdd-publish.js` 的 React setter 键入） | combobox 型属性（品牌）必须键入 + 原生 setter，见 §5.3.3 |
+| `src/taobao-publish.ts` 标题词匹配兜底 | —（横向移植 `lib/pdd-publish.js` 2026-10-20 真机教训） | 废止「盲选第一项」，见 §5.3.3 / SKILL.md「类目属性」节 |
+| `src/taobao-publish.ts` 成功判定 `success.htm` 分支 | —（本仓新增） | URL 判定优先于文案，见 §5.3.4 |

@@ -38,7 +38,7 @@ metadata:
 - **不做拼多多 / 闲鱼发布** → 用 `skills/pdd-publish-2/SKILL.md` 与 `skills/xianyu-publish/SKILL.md`。
 - **不做商品采集与比价** → 用 taobao-crawl；**不做生意参谋分析** → 用 sycm 系技能。
 - **不做批量 / 定时发布**：当前只支持**单件**商品发布，多件需逐件调用。
-- ★ **品牌一律不自动填**（涉及品牌授权，`ATTR_SKIP_RE` 跳过），留给用户在弹出窗口内人工选择。
+- ★ **品牌默认不自动填**（涉及品牌授权，`ATTR_SKIP_RE` 跳过）。但用户**显式传 `brand`** 时除外——那是对自己品牌的声明，会被填入（仍只在页面真实候选里命中，不编造）。详见淘宝侧 `skills/taobao-publish-mqs/SKILL.md`「类目属性」节。
 - ★ **商品资质与部分类目属性**仍需人工补全（平台因类目而异，无法统一自动化）。
 
 ## 输入
@@ -115,7 +115,7 @@ openEntry（天猫发布入口 sell.publish.tmall.com）→ selectCategory（关
 | 登录态共用 | 天猫没有独立登录，一律复用淘宝登录态；缺登录态 → failureKind=token_expired |
 | 规格值必须逐值键入 + Tab | 天猫销售属性是受控输入，只有「键入后按 Tab」才能提交进 React state，回车无效 |
 | 属性下拉展开方式 | 只有元素原生 `element.click()` 能展开，鼠标事件全无效（等面板动画 `attrDropdownWaitMs`） |
-| 品牌必填且需授权 | 一律 `ATTR_SKIP_RE` 跳过，由用户在窗口内人工选择 |
+| 品牌属性 | 部分类目必填，是 **combobox** | 默认 `ATTR_SKIP_RE` 跳过（授权风险）；用户显式传 `brand` 时按「键入 → 选中」填入。填不了会导致该类目永远卡在「重要属性 0/N」 |
 | 运费模板是隐藏必填 | 勾选运费后必须再选一个模板，否则提交被拦 |
 | 类目规则从 DOM 读 | `maxlength` / `.required` / 红色校验文案都在页面里，不查文档 |
 
@@ -127,7 +127,7 @@ openEntry（天猫发布入口 sell.publish.tmall.com）→ selectCategory（关
 | 登录态 | 与淘宝**共用**一套淘宝登录态 | 无需也无法单独登录天猫；缺登录态时 failureKind=token_expired |
 | 类目选择 | 关键词搜索 + 选第一个候选 | 与淘宝一致（`cateSearchInput` → `cateResultItem`） |
 | AI 类目推荐 | 有（`ai/category.htm?force=true` 直进） | 与淘宝一致 |
-| 品牌属性 | **必填且需授权** | 一律 `ATTR_SKIP_RE` 跳过，由用户在窗口内人工选择 |
+| 品牌属性 | **必填且需授权** | 默认 `ATTR_SKIP_RE` 跳过（授权风险）；用户显式传 `brand` 时按「键入 → 选中」填入 |
 
 > 上表依据共享规范 `PUBLISH-MATRIX.md`（7 函数链 / 三路错误回读 / 各平台现状；第八节把「淘宝/天猫」列为同一条完整链路）与 `PUBLISH-SPEC.md`（JSON 驱动、XPath 四级锚点、能力块六步协议），以及锚点集 `publish-config/taobao.json`。
 
