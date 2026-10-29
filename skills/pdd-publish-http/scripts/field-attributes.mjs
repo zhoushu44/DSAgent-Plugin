@@ -151,20 +151,33 @@ export async function verifyAttrValue(page, id, want) {
  * 按钮「添加材质成分(N/7)」→ 弹窗多选 → 「确定(N/7)」
  * ★ 弹窗勾选必须用坐标点击（JS click 是 untrusted，计数一直 0/7）
  */
+/**
+ * 填「材质成分」IngredientList 组件
+ *
+ * ★ 2026-10-29 真机 dump 定论（改代码前必读）：
+ *   弹窗是**搜索式小浮层**（272×360），不是选项列表：
+ *     panel HTML = [搜索框 placeholder="请输入搜索内容"] + [滚动区] + [确定(N/7) / 取消]
+ *   **弹窗刚打开时候选区是空的** —— 必须在搜索框输入关键词，候选才出现！
+ *
+ *   流程：滚动到按钮 → 坐标点「添加材质成分(N/7)」
+ *        → 等 searchPanel → **在 panel 搜索框输入材质名**
+ *        → 等候选出现 → 点候选 → 点「确定(N/7)」→ 验证计数
+ */
 export async function fillIngredient(page, value) {
   const v = String(value || '').trim()
   if (!v) return false
 
-  // ★ 2026-10-29：按钮可能在视口外很远（实测 y≈1014+），必须 scrollIntoView 后重新取坐标
-  const scrollOk = await page.evaluate(() => {
+  // ① 滚动到按钮
+  const scrolled = await page.evaluate(() => {
     const b = [...document.querySelectorAll('button')].find(x => /添加材质成分/.test(x.innerText || ''))
     if (!b) return false
     b.scrollIntoView({ block: 'center' })
     return true
   }).catch(() => false)
-  if (!scrollOk) return false
-  await sleep(1200)   // 等滚动 + 布局稳定
+  if (!scrolled) return false
+  await sleep(1500)
 
+  // ② 点按钮（真实鼠标坐标）
   const btnPos = await page.evaluate(() => {
     const btns = [...document.querySelectorAll('button')].filter(b => /添加材质成分/.test(b.innerText || ''))
     const b = btns[btns.length - 1]
@@ -174,69 +187,94 @@ export async function fillIngredient(page, value) {
     return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }
   }).catch(() => null)
   if (!btnPos) return false
-
   await jsClick(page, btnPos.x, btnPos.y)
-  // 等弹窗出现（轮询，最多 8s）
-  let modalReady = false
+
+  // ③ 等 searchPanel 出现
+  let panelReady = false
   for (let w = 0; w < 16; w++) {
     await sleep(500)
-    modalReady = await page.evaluate(() => {
-      const btns = [...document.querySelectorAll('button')].filter(b => /确定\(\d+\/\d+\)/.test(b.innerText || '') && b.offsetParent !== null)
-      return btns.length > 0
+    panelReady = await page.evaluate(() => {
+      const p = document.querySelector('[class*="IngredientList_searchPanel"]')
+      if (!p) return false
+      const r = p.getBoundingClientRect()
+      return r.width > 100 && r.height > 50
     }).catch(() => false)
-    if (modalReady) break
+    if (panelReady) break
   }
-  if (!modalReady) return false
+  if (!panelReady) return false
 
-  // 弹窗多选：别名映射
+  // ④ ★ 关键：在 panel 搜索框里输入材质名（不输入则候选区为空）
+  const searchPos = await page.evaluate(() => {
+    const panel = document.querySelector('[class*="IngredientList_searchPanel"]')
+    const inp = panel?.querySelector('input[placeholder*="搜索"]')
+    if (!inp) return null
+    const r = inp.getBoundingClientRect()
+    if (r.width < 20) return null
+    return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }
+  }).catch(() => null)
+  if (!searchPos) return false
+
+  // 输入搜索词（用原值；别名留给后续匹配）
+  const searchTerm = v.replace(/[（(].*?[)）]/g, '').trim() || v
+  await jsClick(page, searchPos.x, searchPos.y)
+  await sleep(400)
+  await page.keyboard.type(searchTerm, { delay: 80 })
+  await sleep(2000)   // 等候选加载
+
+  // ⑤ 在 panel 内找候选（别名映射）并点
   const alias = {
     '棉': ['棉', '纯棉'],
     '粘纤': ['粘纤', '粘胶纤维', '粘胶'],
     '聚酯纤维': ['涤纶（聚酯纤维）', '涤纶', '聚酯纤维'],
     '涤纶': ['涤纶（聚酯纤维）', '涤纶', '聚酯纤维'],
     '莫代尔': ['莫代尔', '再生纤维素纤维'],
+    '氨纶': ['氨纶', '聚氨酯弹性纤维'],
+    '锦纶': ['锦纶', '聚酰胺纤维', '尼龙'],
   }
-  const targets = alias[v] || [v]
+  const targets = alias[v] || alias[searchTerm] || [v, searchTerm]
 
-  // 候选可能在弹窗内滚动区，先找可见的
-  let optPos = await page.evaluate((tg) => {
-    const labels = [...document.querySelectorAll('label, [class*="CBX"]')]
-      .filter(e => e.offsetParent !== null && tg.some(t => (e.innerText || '').trim() === t))
-    if (!labels.length) return null
-    const r = labels[0].getBoundingClientRect()
-    if (r.width < 5) return null
-    labels[0].scrollIntoView({ block: 'center' })
-    return { needScroll: true }
+  const optPos = await page.evaluate((tg) => {
+    const panel = document.querySelector('[class*="IngredientList_searchPanel"]')
+    if (!panel) return null
+    // 候选：panel 内（除搜索框/按钮区）的可点元素，文本匹配目标
+    const cands = [...panel.querySelectorAll('label, [class*="CBX_outerWrapper"], [class*="CBX_textWrapper"], li, div, span')]
+      .filter(e => {
+        if (e.closest('[class*="IngredientList_footer"]')) return false
+        if (e.querySelector('input')) return false
+        const t = (e.textContent || '').trim()
+        if (!t || t.length > 15) return false
+        if (!tg.some(x => t === x || t.includes(x) || x.includes(t))) return false
+        const r = e.getBoundingClientRect()
+        return r.width > 5 && r.height > 5 && r.y >= 0 && r.y < window.innerHeight
+      })
+    if (!cands.length) return null
+    // 取最内层
+    const inner = cands.filter(e => !cands.some(o => o !== e && e.contains(o)))
+    const el = inner[0] || cands[0]
+    const r = el.getBoundingClientRect()
+    return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2), text: (el.textContent || '').trim() }
   }, targets).catch(() => null)
 
-  if (optPos?.needScroll) {
-    await sleep(800)
-    optPos = await page.evaluate((tg) => {
-      const labels = [...document.querySelectorAll('label, [class*="CBX"]')]
-        .filter(e => e.offsetParent !== null && tg.some(t => (e.innerText || '').trim() === t))
-      if (!labels.length) return null
-      const r = labels[0].getBoundingClientRect()
-      return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }
-    }, targets).catch(() => null)
-  }
-  if (optPos?.x) {
-    await jsClick(page, optPos.x, optPos.y)
-    await sleep(1200)
-  }
+  if (!optPos) return false
+  await jsClick(page, optPos.x, optPos.y)
+  await sleep(1200)
 
-  // 点「确定(n/7)」
+  // ⑥ 点 footer 的「确定(N/7)」
   const okPos = await page.evaluate(() => {
-    const btns = [...document.querySelectorAll('button')]
-      .filter(b => /确定\(\d+\/\d+\)/.test(b.innerText || '') && b.offsetParent !== null)
+    const footer = document.querySelector('[class*="IngredientList_footer"]')
+    const scope = footer || document
+    const btns = [...scope.querySelectorAll('button')].filter(b => /确定\(\d+\/\d+\)/.test(b.innerText || ''))
     const b = btns[btns.length - 1]
     if (!b) return null
     const r = b.getBoundingClientRect()
+    if (r.width < 10) return null
     return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }
   }).catch(() => null)
-  if (okPos) await jsClick(page, okPos.x, okPos.y)
+  if (!okPos) return false
+  await jsClick(page, okPos.x, okPos.y)
   await sleep(2000)
 
-  // 验证计数 > 0
+  // ⑦ 验证计数 > 0
   return page.evaluate(() => {
     const btns = [...document.querySelectorAll('button')].filter(b => /添加材质成分/.test(b.innerText || ''))
     const txt = btns[btns.length - 1]?.innerText || ''

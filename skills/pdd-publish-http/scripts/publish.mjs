@@ -456,56 +456,15 @@ try {
     const r = resolveSpecs(parsed, specPool?.pool || {})
     for (const n of r.notes) console.log('[pdd-publish-http] ' + n)
 
-    // ★ DOM 填规格：全部维度（预置的直接填，没有的添加规格类型）
-    const { fillSpecsOnPage } = await import('./dom-fill-spec.mjs')
-    const domSpecs = (parsed.specs || [])
-      .filter(d => d && d.name && Array.isArray(d.values) && d.values.length)
-      .map(d => ({
-        name: d.name,
-        values: d.values.map(v => (v && typeof v === 'object') ? String(v.value ?? '').trim() : String(v ?? '').trim()).filter(Boolean)
-      }))
-      .filter(d => d.values.length)
-    if (domSpecs.length) {
-      // ★ 构建预览图映射（两级）：
-      //   ① thumbMap：规格值 → 图（单维度匹配，同值复用一张图）
-      //   ② thumbMapSku：SKU 组合 → 图（组合级匹配，每个 SKU 一张不同图）
-      //      key = 所有维度值按维度名排序后拼接（如「尺寸=40cm|款式=方款」），
-      //      匹配时也按这个格式生成，与维度顺序无关。
-      const thumbMap = {}
-      for (const d of (parsed.specs || [])) {
-        for (const v of (d.values || [])) {
-          const val = (v && typeof v === 'object') ? String(v.value ?? '').trim() : String(v ?? '').trim()
-          const img = (v && typeof v === 'object') ? v.image : null
-          if (val && img && typeof img === 'string' && fs.existsSync(img)) thumbMap[val] = img
-        }
-      }
-      // SKU 级：从 skus[].image 取（每个 SKU 组合一张图）
-      const thumbMapSku = {}
-      for (const s of (parsed.skus || [])) {
-        const specs = s?.specs
-        const img = s?.image
-        if (!specs || !img || typeof img !== 'string' || !fs.existsSync(img)) continue
-        const key = skuKey(specs)
-        if (key) thumbMapSku[key] = img
-      }
-      extra.domFillSpecs = async (page) => {
-        console.log('[pdd-publish-http] DOM 填规格开始')
-        const result = await fillSpecsOnPage(page, domSpecs, {
-          price: parsed.price || '29.9',
-          stock: parsed.stock || '999',
-          // ★ 价格/参考价也 DOM 填（平台提交前校验页面价格非空，只靠改包会被拦）
-          fillPriceTable: true,
-          fillRefPrice: true,
-          thumbMap,
-          thumbMapSku,
-        })
-        console.log('[pdd-publish-http] DOM 填规格结果: ' + result.message)
-        return result
-      }
-      console.log('[pdd-publish-http] DOM 填规格已挂载: ' + domSpecs.length + ' 维度 → ' +
-        domSpecs.map(d => d.name + '(' + d.values.length + ')').join(', ') +
-        (Object.keys(thumbMap).length ? '，预览图(值级) ' + Object.keys(thumbMap).length + ' 个' : '（无预览图）') +
-        (Object.keys(thumbMapSku).length ? '，预览图(SKU级) ' + Object.keys(thumbMapSku).length + ' 个' : ''))
+    // ★ 2026-10-29 回滚：组件化版本（sku-component / field-*）尚未验证通过，
+    //   重新使用 lib/pdd-publish.js 里**已经上架成功过**的路径：
+    //     fillAttributes → fillShippingAndFreight → fillSkuSpecMulti
+    //   publish.mjs 不再挂 extra.domFillSpecs，lib 会走自己的 else 分支。
+    //   组件文件保留在 scripts/ 下，待逐个验证通过后再接入。
+    const hasSpecs = Array.isArray(parsed.specs) && parsed.specs.some(d => d && d.name && Array.isArray(d.values) && d.values.length)
+    if (hasSpecs) {
+      console.log('[pdd-publish-http] SKU 走 lib 已验证路径: ' +
+        parsed.specs.filter(d => d?.values?.length).map(d => d.name + '(' + d.values.length + ')').join(', '))
     }
   } catch (e) {
     console.log('[pdd-publish-http] 规格解析异常（继续）：' + (e?.message || e))
