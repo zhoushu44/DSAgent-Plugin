@@ -456,14 +456,14 @@ try {
     const r = resolveSpecs(parsed, specPool?.pool || {})
     for (const n of r.notes) console.log('[pdd-publish-http] ' + n)
 
-    // ★ 2026-10-29 回滚：组件化版本（sku-component / field-*）尚未验证通过，
-    //   重新使用 lib/pdd-publish.js 里**已经上架成功过**的路径：
-    //     fillAttributes → fillShippingAndFreight → fillSkuSpecMulti
-    //   publish.mjs 不再挂 extra.domFillSpecs，lib 会走自己的 else 分支。
-    //   组件文件保留在 scripts/ 下，待逐个验证通过后再接入。
+    // ★ 2026-10-29 定稿：publish.mjs 保持 lib 内建路径。
+    //   组件链（publish-flow.mjs）已验证可独立跑通（120s，goods_id=1022682668973），
+    //   但它**自己包含段3（标题/主图/详情）+ 段4（规格/价格/属性/发货）**，
+    //   而 lib 的 domFillSpecs 分支也会做属性+发货 → 两者重复，不能直接挂。
+    //   需要组件链时：用 test_components.mjs 或直接调 publishFlow()。
     const hasSpecs = Array.isArray(parsed.specs) && parsed.specs.some(d => d && d.name && Array.isArray(d.values) && d.values.length)
     if (hasSpecs) {
-      console.log('[pdd-publish-http] SKU 走 lib 已验证路径: ' +
+      console.log('[pdd-publish-http] SKU 走 lib 内建路径: ' +
         parsed.specs.filter(d => d?.values?.length).map(d => d.name + '(' + d.values.length + ')').join(', '))
     }
   } catch (e) {
