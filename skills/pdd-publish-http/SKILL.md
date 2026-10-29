@@ -397,6 +397,59 @@ node scripts/publish.mjs \
 | 规格图非 1:1 或边长 < 480 | 补白 + 放大到 480 |
 | 体积 > 3MB | JPEG 质量阶梯压缩，必要时降分辨率 |
 
+## 组件化结构（2026-10-29 定稿）
+
+### 铁律：组件化 = 结构化拆分，**不是重写逻辑**
+
+> 血泪教训：曾把 `lib/pdd-publish.js` 里**已经上架成功过**的
+> `fillAttributes` / `fillSkuSpecMulti` / `fillPriceTable` 全部重写成新实现，
+> 结果材质成分连续坏 3 次（滚动 → 弹窗定位 → 搜索框），上架直接失败。
+>
+> **正确做法**：给 lib 里已验证的函数加 `export`，组件文件只做 `re-export`。
+> 一行业务逻辑都不新写。
+
+### 组件清单（`scripts/`）
+
+| 组件 | 导出的函数（全部来自 lib，已验证） | 是否随类目变化 |
+|---|---|---|
+| `field-basic.mjs` | `fillTitle`、`fillField`（+ `readCategory`） | ❌ 通用 |
+| `field-images.mjs` | `uploadImages`、`uploadDetailImages`、`readUploadCount`、`findFileInput` | ❌ 通用 |
+| `field-attributes.mjs` | `fillAttributes`（含材质成分 IngredientList） | ⚠️ **是** |
+| `field-shipping.mjs` | `fillShippingAndFreight`、`disableSizeChart` | ❌ 通用 |
+| `spec-dims.mjs` | `fillSkuSpecMulti`、`fillSkuSpec` | ⚠️ **是** |
+| `sku-table.mjs` | `fillPriceTable` | ❌ 通用 |
+| `publish-flow.mjs` | `publishFlow(page, product, opts)` 总编排 | ❌ 通用 |
+
+**只有两个模块随类目变化**：属性（`field-attributes`）和规格（`spec-dims`）。
+其余全部类目无关——这就是「一套代码打所有类目」的依据。
+
+### 段4 调用顺序（**不能改**）
+
+```
+规格（fillSkuSpecMulti） → 价格库存（fillPriceTable） → 属性（fillAttributes） → 发货（fillShippingAndFreight）
+```
+
+属性必须在价格表**之后**：属性下拉重渲染会冲掉前面填的内容。
+
+### 数据形状坑
+
+- `fillSkuSpecMulti(page, specs, skuRows, category)` 的 `specs[].values`
+  必须是**对象数组** `{ value, image }`，传字符串会被 `String(v?.value||'')`
+  全部过滤 → 0 项、价格表只剩 1 行。
+- `fillPriceTable(page, { price, stock, itemNo, rows })` 返回 `{ filled: [], missed: [] }`。
+
+### 两条路径的关系
+
+| 路径 | 入口 | 用途 | 状态 |
+|---|---|---|---|
+| **lib 内建** | `publish.mjs --product-file` | 生产默认 | ✅ 已验证（140s） |
+| **组件链** | `publish-flow.mjs` | 独立编排 / 二次开发 | ✅ 已验证（120s，`goods_id=1022603205669`） |
+
+`publish.mjs` 目前走 lib 内建路径；组件链供需要单独控制某一段的场景使用。
+
+未验证的自研实现保留为 `sku-component-experimental.mjs`、`sku-thumb-experimental.mjs`、
+`sku-rows.mjs`，**不要接入生产**，待逐项对比验证。
+
 ## 规格池维护
 
 规格池是「规格值 → spec_id」映射（店铺内稳定复用），位于：
