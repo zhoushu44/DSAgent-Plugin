@@ -200,14 +200,31 @@ if (process.argv[1] && process.argv[1].includes('reuse.mjs')) {
   const goodsId = argOf('goods-id')
   ;(async () => {
     const puppeteer = require('puppeteer-core')
-    const profile = path.join(homedir(), '.dsh', 'browser-profiles', 'accounts', `pdd_mms_de55c3e159072dfb5297b234eaa487c3`)
+    // ★ 2026-10-28 修：原写死单个账号 hash 的 profile 目录，换号/多号即失效。
+    //   改为按凭证库里 pdd_mms 账号动态选 profile；只有 --profile 可显式覆盖。
+    const store0 = new (await import(`file:///${PLUGIN_ROOT}/lib/services/credential-store.js`)).CredentialStore(
+      path.join(homedir(), '.dsh', 'dsagent-accounts.json'))
+    const mmsAccs = store0.listAccounts().filter(a => a.platform === 'pdd_mms' && a.cookies?.['PASS_ID'])
+    const shopKey0 = argOf('account') || mmsAccs.slice(-1)[0]?.shop_key
+    if (!shopKey0) {
+      console.error('错误: 未绑定拼多多商家后台账号，无法确定浏览器 profile。')
+      process.exit(1)
+    }
+    // shop_key 形如 pdd_mms_<hash>；profile 目录名即 hash 部分
+    const profile = argOf('profile')
+      || path.join(homedir(), '.dsh', 'browser-profiles', 'accounts', String(shopKey0).replace(/^pdd_mms_/, ''))
+    if (!fs.existsSync(profile)) {
+      console.error(`错误: profile 不存在：${profile}（账号 ${shopKey0}）。请先完成一次登录。`)
+      process.exit(1)
+    }
+    console.log(`使用账号 ${shopKey0} → ${profile}`)
     // ★ 自动清理 Cookie 域污染（2026-10-28）：同名 Cookie 分散在
     //   .pinduoduo.com / mms.pinduoduo.com / yingxiao.pinduoduo.com 时，
     //   浏览器优先发子域旧值 → 推广域反复掉登录。删子域同名项即恢复。
     //   跳过：--no-cookie-clean
-    if (process.argv.includes('--cookie-clean')) {
+    if (!process.argv.includes('--no-cookie-clean')) {
       try {
-        const { cleanCookiePollution } = await import(pathToFileURL('e:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/pdd-promo/scripts/cookie-clean.mjs').href)
+        const { cleanCookiePollution } = await import(`file:///${PLUGIN_ROOT}/skills/pdd-promo/scripts/cookie-clean.mjs`)
         const r = await cleanCookiePollution(profile, { log: (m) => console.warn('[pdd] ' + m) })
         if (r.ok && r.deleted > 0) console.warn('[pdd] ✅ 清理 ' + r.deleted + ' 条域污染 Cookie')
       } catch (e) {
@@ -218,6 +235,10 @@ if (process.argv[1] && process.argv[1].includes('reuse.mjs')) {
     const page = (await browser.pages())[0] || await browser.newPage()
     await page.goto('https://mms.pinduoduo.com/goods/goods_list', { waitUntil: 'domcontentloaded', timeout: 60000 })
     await new Promise(r => setTimeout(r, 8000))
+    if (!category) {
+      console.error('错误: 缺少 --category 参数（如 --category "童装 套装"）。')
+      process.exit(1)
+    }
     const r = await threeLayerReuse(page, { category })
     console.log('\n=== 三层查一复用结果 ===')
     console.log('layer:', r.layer, '| catId:', r.catId)

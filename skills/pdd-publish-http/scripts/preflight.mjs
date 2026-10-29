@@ -1,10 +1,13 @@
 /**
- * 拼多多上架前置处理（imgprep + 品牌默认 + spec_id 借位）
+ * 拼多多上架前置处理（imgprep + 品牌默认）
  *
- * 本模块被 publish.mjs 在主流程前调用，解决三类实测踩过的坑：
+ * 本模块被 publish.mjs 在主流程前调用，解决两类实测踩过的坑：
  *   ① 详情图尺寸不合规 → 自动压缩；外部来源的超长整图 → 拆成合规单图
  *   ② 品牌未指定时不填 → 自动补「无」
- *   ③ 规格值缺 spec_id（重复的规格Id）→ 用池里现成值借位，保留我们的显示名
+ *
+ * ★ 2026-10-28 删：原第 ③ 项 borrowSpecIds（spec_id 借位）已整段移除。
+ *   DOM 填规格路线实测「值写什么就是什么」，借位会让平台按 id 还原成别人的
+ *   名字，且该函数自 2026-10-27 起已无任何调用方（SKILL.md 121 行早标注废弃）。
  */
 import * as fs from 'node:fs'
 import * as path from 'node:path'
@@ -83,76 +86,6 @@ export function ensureBrand(product) {
     console.log(`[pdd-publish-http] 品牌已指定 → 保留「${b.value}」`)
   }
   return { ...product, attributes: attrs }
-}
-
-/**
- * ③ spec_id 借位
- *
- * 拼多多 SKU 提交的是 spec_id（数字），规格名只是显示文字。
- * 新花色名在店铺里没出现过 → 没有 spec_id → 全写 0 → 平台判「存在重复的规格Id」。
- *
- * 做法：同一个维度内，按顺序把「池里已有的 spec_id」借给我们的规格值，
- *      显示名保持我们的真实花色名。约束：借位数 ≤ 池内该维度的值个数。
- *
- * @param {object} product 统一商品 JSON
- * @param {object} pool    spec-pool.json 的 pool 字段（{维度名: {值: {spec_id, parent_spec_id}}})
- * @returns {{product:object, specIds:object, notes:string[]}}
- */
-export function borrowSpecIds(product, pool) {
-  const notes = []
-  const specIds = {}
-  if (!pool || !Object.keys(pool).length) return { product, specIds, notes: ['规格池为空，未做借位'] }
-
-  // 池里可借的 id 池（按维度展开，去重）
-  const donors = {}
-  for (const [dimName, vals] of Object.entries(pool)) {
-    const seen = new Set()
-    donors[dimName] = []
-    for (const [, rec] of Object.entries(vals || {})) {
-      const id = rec?.spec_id
-      if (!id || seen.has(id)) continue
-      seen.add(id)
-      donors[dimName].push({ spec_id: id, parent_id: rec.parent_spec_id })
-    }
-  }
-
-  // 维度名映射：我们的维度 → 池里哪个维度可借
-  const aliasOf = (name) => {
-    const n = String(name || '')
-    const keys = Object.keys(donors)
-    if (keys.includes(n)) return n
-    const re = /颜色|色|花色|款式|图案/
-    if (re.test(n)) return keys.find(k => re.test(k)) || keys[0]
-    const re2 = /尺码|尺寸|身高|码|规格/
-    if (re2.test(n)) return keys.find(k => re2.test(k)) || keys[keys.length - 1]
-    return keys[0]
-  }
-
-  const nextProduct = JSON.parse(JSON.stringify(product))
-  for (const dim of nextProduct.specs || []) {
-    const donorKey = aliasOf(dim.name)
-    const list = donors[donorKey] || []
-    if (!list.length) {
-      notes.push(`维度「${dim.name}」无可用 spec_id（池里无对应维度）`)
-      continue
-    }
-    const values = (dim.values || []).filter(v => String(v.value || '').trim())
-    if (values.length > list.length) {
-      // 只在进入循环前告警一次，而不是每个越界值都刷一遍
-      notes.push(
-        `维度「${dim.name}」值数 ${values.length} 超过可借 id 数 ${list.length}，` +
-        `将循环复用 → 会被平台判「重复的规格Id」，必须先建 ${values.length - list.length} 个新规格`)
-    }
-    let i = 0
-    for (const v of values) {
-      const val = String(v.value || '').trim()
-      const d = list[i % list.length]
-      i++
-      specIds[val] = { spec_id: d.spec_id, parent_id: d.parent_id }
-    }
-    notes.push(`维度「${dim.name}」借 ${Math.min(i, list.length)} 个 spec_id（源维度：${donorKey}）`)
-  }
-  return { product: nextProduct, specIds, notes }
 }
 
 /** 详情图合规自检（不改图，只报告） */
