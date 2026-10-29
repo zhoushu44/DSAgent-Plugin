@@ -125,12 +125,36 @@ def main():
         {"name": "颜色分类", "values": [{"value": c, "image": thumb} for c in final_colors]},
         {"name": "参考分类", "values": [{"value": s} for s in final_sizes]},
     ]
-    # ★ 2026-10-29（用户指出）：SKU 预览图不能全用同一张。
-    #   按「颜色 → 主图」建立映射：第 i 个颜色优先用第 i 张主图（main_1..5），
-    #   不够时回落到 main_1。这样不同颜色 SKU 的预览图不同。
-    color_thumb = {}
-    for ci, c in enumerate(final_colors):
-        color_thumb[c] = main_imgs[ci] if ci < len(main_imgs) else thumb
+    # ★ 2026-10-29（用户指出）：SKU 预览图必须「按 SKU 行的颜色」匹配对应颜色的图。
+    #   例：SKU = 黄色110 / 红色110 / 黄色120 / 红色120
+    #       → 黄色110 & 黄色120 都用「黄色图」，红色110 & 红色120 都用「红色图」
+    #
+    #   匹配优先级（见 pick_color_img）：
+    #     ① 图文件名包含颜色名（yellow.jpg / 黄色主图.jpg）
+    #     ② 规格值自带 image（product.specs[].values[].image，1688 若有）
+    #     ③ 按颜色索引兜底（第 i 个颜色 → 第 i 张主图）
+    spec_val_img = {}
+    for sp in (product.get("specs") or []):
+        if str(sp.get("name") or "").strip() in ("颜色分类", "颜色", "色号", "颜色分类（必填）"):
+            for v in (sp.get("values") or []):
+                if isinstance(v, dict) and v.get("value") and v.get("image"):
+                    spec_val_img[str(v["value"]).strip()] = v["image"]
+
+    def pick_color_img(color: str, idx: int) -> str:
+        c = str(color or "").strip()
+        if not c:
+            return thumb
+        # ① 文件名含颜色名（不区分大小写）
+        for p in main_imgs + gen_list:
+            if c.lower() in Path(p).name.lower():
+                return p
+        # ② 规格值自带图
+        if c in spec_val_img:
+            return spec_val_img[c]
+        # ③ 索引兜底
+        return main_imgs[idx] if idx < len(main_imgs) else thumb
+
+    color_thumb = {c: pick_color_img(c, i) for i, c in enumerate(final_colors)}
     skus = [
         {"specs": {"颜色分类": r["color"], "参考分类": r["size"]},
          "price": r["price"], "stock": r["stock"],
@@ -139,6 +163,7 @@ def main():
     ]
     # 规格值预览图也跟着按颜色分配
     specs[0]["values"] = [{"value": c, "image": color_thumb.get(c, thumb)} for c in final_colors]
+    print(f"[build_product] SKU 预览图按颜色分配：{ {k: Path(v).name for k, v in color_thumb.items()} }")
 
     payload = {
         "title": str(product.get("title") or a.category)[:60],

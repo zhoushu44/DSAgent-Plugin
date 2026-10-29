@@ -109,9 +109,28 @@ function buildProductFromPack(packDir, genDir, opts = {}) {
   }
   console.log(`[from-pack] 属性 ${attributes.length} 条`)
 
-  // ★ 2026-10-29：SKU 预览图按颜色分配（第 i 个颜色用第 i 张主图），不全用同一张
+  // ★ 2026-10-29（用户指出）：SKU 预览图必须「按 SKU 行的颜色」匹配对应颜色的图。
+  //   例：黄色110 / 红色110 / 黄色120 / 红色120 → 黄色两行都用黄色图，红色两行都用红色图。
+  //   匹配：① 文件名含颜色名 ② 规格值自带 image ③ 按颜色索引兜底
+  const specValImg = {}
+  for (const sp of (product.specs || [])) {
+    const n = String(sp.name || '').trim()
+    if (!['颜色分类', '颜色', '色号'].includes(n)) continue
+    for (const v of (sp.values || [])) {
+      if (v && typeof v === 'object' && v.value && v.image) specValImg[String(v.value).trim()] = v.image
+    }
+  }
+  const pickColorImg = (color, idx) => {
+    const c = String(color || '').trim()
+    if (!c) return thumb
+    for (const p of [...mainImgs, ...genList]) {
+      if (path.basename(p).toLowerCase().includes(c.toLowerCase())) return p
+    }
+    if (specValImg[c]) return specValImg[c]
+    return mainImgs[idx] || thumb
+  }
   const colorThumb = {}
-  finalColors.forEach((c, ci) => { colorThumb[c] = mainImgs[ci] || thumb })
+  finalColors.forEach((c, ci) => { colorThumb[c] = pickColorImg(c, ci) })
   const specs = [
     { name: '颜色分类', values: finalColors.map(c => ({ value: c, image: colorThumb[c] || thumb })) },
     { name: '参考分类', values: finalSizes.map(s => ({ value: s })) },
@@ -121,6 +140,7 @@ function buildProductFromPack(packDir, genDir, opts = {}) {
     price: r.price, stock: r.stock || '300',
     image: colorThumb[r.color] || thumb,
   }))
+  console.log(`[from-pack] SKU 预览图按颜色分配：${JSON.stringify(Object.fromEntries(finalColors.map(c => [c, path.basename(colorThumb[c] || thumb)])))}`)
   return JSON.stringify({
     title: (product.title || categoryKw).slice(0, 60),
     images: mainImgs.length ? mainImgs : genList.slice(0, 5),
