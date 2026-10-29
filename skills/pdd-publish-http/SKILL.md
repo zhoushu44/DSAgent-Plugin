@@ -399,6 +399,36 @@ node scripts/publish.mjs \
 
 ## 组件化结构（2026-10-29 定稿）
 
+### ★ 推荐入口：`publish-v2.mjs`（全组件链，已真实上架验证）
+
+```bash
+node {baseDir}/scripts/publish-v2.mjs \
+  --product-file <商品JSON> \
+  --account <shopKey> \
+  --confirm true
+```
+
+**为什么不走 lib**：lib 的 `domFillSpecs` 分支会先填属性+发货再调外部函数，
+与组件链的段3/段4 重复 → 实测 358 秒且预览图偶发失败。
+v2 只走组件链 → **157 秒，预览图 9/9，errors 为空**（`goods_id=1022780587384`）。
+
+**五段结构**：
+
+| 段 | 组件 | 职责 |
+|---|---|---|
+| 1 | `stage-nav.openPublishEntry` | 打开商品列表 → 点「发布新商品」 |
+| 2 | `stage-nav.selectCategory` | 搜类目 → 等结果稳定 → 选中 → 确认 |
+| 3 | `publish-flow`（前半） | 标题 / 参考价 / 主图（全部）/ 详情图 |
+| 4 | `publish-flow`（后半） | 规格 → 价格库存 → 属性 → 发货 |
+| 5 | `stage-submit.submitAndVerify` | 点提交 + 判定 + 15s 补点兜底 |
+
+**参数写法**：`--key value` / `--key=value` / `--flag` 三种都支持。
+
+**L2 门禁**：不带 `--confirm true` 只返回预览（不启浏览器、零写操作）。
+
+**已知坑（已修）**：页面常显示「错误（**0**）」（表示无错误），
+不能把 `错误（\d+）` 当失败信号 —— 必须 `N > 0` 才算错。
+
 ### 铁律：组件化 = 结构化拆分，**不是重写逻辑**
 
 > 血泪教训：曾把 `lib/pdd-publish.js` 里**已经上架成功过**的
@@ -418,7 +448,9 @@ node scripts/publish.mjs \
 | `field-shipping.mjs` | `fillShippingAndFreight`、`disableSizeChart` | ❌ 通用 |
 | `spec-dims.mjs` | `fillSkuSpecMulti`、`fillSkuSpec` | ⚠️ **是** |
 | `sku-table.mjs` | `fillPriceTable` | ❌ 通用 |
-| `publish-flow.mjs` | `publishFlow(page, product, opts)` 总编排 | ❌ 通用 |
+| `publish-flow.mjs` | `publishFlow(page, product, opts)` 段3+段4 总编排 | ❌ 通用 |
+| `stage-nav.mjs` | `openPublishEntry`、`waitForPublishPage`、`selectCategory` | ❌ 通用 |
+| `stage-submit.mjs` | `submitAndVerify` | ❌ 通用 |
 
 **只有两个模块随类目变化**：属性（`field-attributes`）和规格（`spec-dims`）。
 其余全部类目无关——这就是「一套代码打所有类目」的依据。
@@ -438,17 +470,15 @@ node scripts/publish.mjs \
   全部过滤 → 0 项、价格表只剩 1 行。
 - `fillPriceTable(page, { price, stock, itemNo, rows })` 返回 `{ filled: [], missed: [] }`。
 
-### 两条路径的关系
+### 两条路径对照
 
-| 路径 | 入口 | 用途 | 状态 |
-|---|---|---|---|
-| **lib 内建** | `publish.mjs --product-file` | 生产默认 | ✅ 已验证（140s） |
-| **组件链** | `publish-flow.mjs` | 独立编排 / 二次开发 | ✅ 已验证（120s，`goods_id=1022603205669`） |
-
-`publish.mjs` 目前走 lib 内建路径；组件链供需要单独控制某一段的场景使用。
+| 路径 | 入口 | 实测 |
+|---|---|---|
+| **组件链（推荐）** | `publish-v2.mjs` | ✅ 157s，`goods_id=1022780587384` |
+| lib 内建 | `publish.mjs --product-file` | ⚠️ 358s，预览图偶发只传 1/9 |
 
 未验证的自研实现保留为 `sku-component-experimental.mjs`、`sku-thumb-experimental.mjs`、
-`sku-rows.mjs`，**不要接入生产**，待逐项对比验证。
+`sku-rows.mjs`，**不要接入生产**。
 
 ## 规格池维护
 
