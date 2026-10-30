@@ -242,14 +242,19 @@ try {
         ? alignDims(pageDims, product.specs || [])
         : (product.specs || []).map(d => ({ user: d.name, page: d.name, type: '' }))
 
-      // 只沉淀「实际上架成功的属性」
+      // 只沉淀**真正的类目属性**（排除规格值/价格库存这类非属性项）
+      const ATTR_EXCLUDE = /^(标题|参考价|类目|主图|详情图|SKU|发货方式|发货时间|运费模板|库存|拼单价|单买价|第\d+行|颜色|尺寸|容量|型号|款式|尺码|规格)/
       const attrFromFilled = flowResult.filled
-        .filter(s => /^[^=]+=/.test(s) && !/^(标题|参考价|类目|主图|详情图|SKU|发货方式|发货时间|运费模板|库存|拼单价|单买价)/.test(s))
+        .filter(s => /^[^=]+=/.test(s) && !ATTR_EXCLUDE.test(s))
         .map(s => {
           const i = s.indexOf('=')
-          return { name: s.slice(0, i).replace(/（.*?）$/, '').trim(), value: s.slice(i + 1).trim() }
+          const name = s.slice(0, i).replace(/（.*?）$/, '').trim()
+          const value = s.slice(i + 1).replace(/（.*?）$/, '').trim()
+          return { name, value }
         })
-        .filter(a => a.name && a.value && a.name.length <= 20)
+        .filter(a => a.name && a.value && a.name.length <= 20 && a.value.length <= 30)
+        // 去掉「第N行xxx」这种带行号的
+        .filter(a => !/^第\d+行/.test(a.name))
 
       saveTemplate(catKey, {
         catId,
@@ -262,6 +267,21 @@ try {
       })
       log(`[template] 已沉淀「${catKey}」：catId=${catId || '?'} catePath="${catePath || '?'}" `
         + `维度 ${dims.map(d => `${d.user}→${d.page}(${d.type || '?'})`).join('/')} 属性 ${attrFromFilled.length} 条`)
+
+      // ★ 2026-10-30 用户要求：「第一次发布的新的类目的是后属性都要拔下来存库」
+      //   上架成功后，把当前页面**所有下拉型属性的候选值**全部采集入库。
+      //   这样下次同类目直接用，不用重新探测。
+      try {
+        const { harvestAndSave } = await import('./attr-harvest.mjs')
+        const hr = await harvestAndSave(work, catKey, {
+          log: (m) => log('[harvest] ' + m),
+          catePath,
+          catId,
+        })
+        log(`[harvest] 已存库「${catKey}」：${hr.count} 个属性`)
+      } catch (e) {
+        log(`[harvest] 采集失败（不影响上架）：${e.message}`)
+      }
     } catch (e) {
       log(`[template] 沉淀失败（不影响上架）：${e.message}`)
     }
