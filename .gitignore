@@ -1,16 +1,26 @@
 # ── 凭据与调试产物：一律不入库 ──────────────────────────────
 # 真实登录态 / Cookie / 二维码 / 登录截图，任何形式都不进仓库
 # （dev/tmp-pdd-cookies.json 曾含 PASS_ID + JSESSIONID，属高危）
+# 技能本地凭据目录（如 xiaohongshu-analytics/.secrets/login.json 存 Cookie）
+**/.secrets/
+skills/**/.tmp-*
 dev/tmp-*.json
 dev/tmp-*.png
 dev/tmp-*.cjs
 dev/tmp-*.js
+dev/tmp-*.ps1
+dev/tmp-*.txt
 dev/*cookies*.json
 dev/*cookie*.json
 **/tmp-*-cookies.json
 **/*cookie*.json
 !dev/portable/**
 *.pdd-cookies.json
+
+# 依赖与本地构建残留
+node_modules/
+*.bak-*
+*_backup_*/
 
 # 多智能体协作的临时工作区与数据库
 .swarm*/
@@ -22,6 +32,7 @@ dsagent-accounts*.json
 
 # 截图与探针产物
 dev/.ui-shots/
+dev/patrol-evidence/
 .tmp-accio/
 dev/accio-analysis/
 
@@ -34,6 +45,7 @@ desktop.ini
 lib/**/*.js
 lib/**/*.js.map
 lib/**/*.d.ts
+lib/**/*.d.ts.map
 !lib/pdd-publish.js
 !lib/pdd-mode2.js
 !lib/pdd-publish2.js
@@ -46,6 +58,10 @@ __pycache__/
 # ── 本地运行产物 ──────────────────────────────────────────
 artifacts/
 .trae/
+# 本地缓存（SQLite，按机器/账号变化，不入库）
+.dsagent/cache/
+**/.dsagent/cache/
+!skills/.dsagent/**
 
 # ── 第三方 skill 目录（未审核） ───────────────────────────
 skills/_re_qianchuan/
