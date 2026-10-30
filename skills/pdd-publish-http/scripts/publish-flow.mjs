@@ -232,10 +232,11 @@ export async function publishFlow(page, product, opts = {}) {
     const r = await fillShippingAndFreight(page, {
       costTemplate: opts.costTemplate,
       deliveryTime: opts.deliveryTime,
+      log,
     })
     filled.push(...(r.filled || []))
     missed.push(...(r.missed || []))
-    log(`  发货售后 → 已填 ${r.filled?.length || 0} 项`)
+    log(`  发货售后 → 已填 ${r.filled?.length || 0} 项，未填 ${r.missed?.length || 0} 项`)
   } catch (e) {
     missed.push(`发货与售后（异常：${e.message}）`)
   }
