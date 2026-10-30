@@ -39,6 +39,11 @@ async function findSkuTable(page) {
 async function setCell(page, rowIdx, ord, value) {
   const v = String(value ?? '')
 
+  // ★ 2026-10-30 真机 dump：表头顺序是 [容量, 库存, 拼单价, 单买价, 预览图, 规格编码, 状态]
+  //   input 顺序是 [容量, 库存, 拼单价, 单买价]（4 个 text input）
+  //   所以**库存是 inputs[1]，不是 inputs[0]**！之前按 0/1/2 索引全错位。
+  //   这里 ord 的含义：1=库存 2=拼单价 3=单买价（与 input 索引一致）
+
   // ① JS setter（快）
   const jsOk = await page.evaluate((ri, o, val) => {
     const tb = [...document.querySelectorAll('table')].find(t => /拼单价/.test(t.textContent || ''))
@@ -131,8 +136,16 @@ export async function fillPriceTable(page, opts = {}) {
   const missed = []
   const detail = []
 
-  for (let ri = 0; ri < info.rows; ri++) {
-    const ov = rowOverrides[ri] || {}
+  // ★ 2026-10-30 真机实测：平台会**按「值 + 单位」去重**，
+  //   比如 250ml 和 350ml 都是 mL → 合并成 1 行。
+  //   所以**实际行数可能 < 传入的 skus 数量**，必须按实际行数填，不能硬凑。
+  const actualRows = info.rows
+  if (actualRows !== rowOverrides.length) {
+    console.log(`[sku-table] 注意：实际行数 ${actualRows} ≠ 传入 SKU 数 ${rowOverrides.length}（平台按值+单位去重）`)
+  }
+
+  for (let ri = 0; ri < actualRows; ri++) {
+    const ov = rowOverrides[ri] || rowOverrides[rowOverrides.length - 1] || {}
     const rowPrice = String(ov.price || defPrice)
     // ★ 单买价 = 该行拼单价 + 1；平台要求严格 >1 元，取 +1.01（两位小数）
     const pNum = parseFloat(rowPrice) || 0
@@ -140,15 +153,25 @@ export async function fillPriceTable(page, opts = {}) {
     const rowStock = String(ov.stock || defStock)
 
     const cells = []
-    for (const [name, ord, val] of [
+    // ★ 2026-10-30 真机 dump 定论（这是最终结论，不要再改）：
+    //   表头: [容量, *库存, *拼单价(元), *单买价(元), *预览图, 规格编码, 状态]
+    //   每行 input 数组（排除 file）:
+    //     inputs[0] = 库存（空）
+    //     inputs[1] = 拼单价
+    //     inputs[2] = 单买价
+    //     inputs[3] = 规格编码（不填）
+    //   容量列是纯文本，不是 input。
+    console.log(`[sku-table] 第 ${ri + 1}/${actualRows} 行：库存=${rowStock} 拼单价=${rowPrice} 单买价=${rowSingle}`)
+    for (const [name, inputIdx, val] of [
       ['库存', 0, rowStock],
       ['拼单价', 1, rowPrice],
       ['单买价', 2, rowSingle],
     ]) {
-      const r = await setCell(page, ri, ord, val)
+      const r = await setCell(page, ri, inputIdx, val)
       if (r.ok) filled.push(`第${ri + 1}行${name}=${val}`)
       else missed.push(`第${ri + 1}行${name}（${r.via}）`)
-      cells.push({ name, ord, want: val, back: r.back, ok: r.ok, via: r.via })
+      cells.push({ name, inputIdx, want: val, back: r.back, ok: r.ok, via: r.via })
+      if (!r.ok) console.log(`[sku-table]   ${name} 失败：via=${r.via} back="${r.back}"`)
     }
     detail.push({ row: ri, cells })
   }

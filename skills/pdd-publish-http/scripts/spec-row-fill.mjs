@@ -329,5 +329,31 @@ export async function fillSpecValuesRowByRow(page, dimName, values, opts = {}) {
     else missed.push(`${dimName}=${v}（3 次未提交成功）`)
   }
 
+  // ★ 2026-10-30 真机定论：**最后一个值的 checkbox 经常不自动勾选**，
+  //   导致 SKU 表少 1 行（3 个规格值只生成 2 行）。
+  //   所以填完后必须**把所有未勾选的规格行勾上**。
+  const checked = await page.evaluate(() => {
+    const root = document.querySelector('#newSpec')
+    if (!root) return 0
+    let n = 0
+    for (const row of root.querySelectorAll('.package-item-container, [class*="package-item"]')) {
+      const cb = row.querySelector('input[type=checkbox]')
+      if (cb && !cb.checked) {
+        // 只勾**有值**的行（空行不勾）
+        const hasValue = [...row.querySelectorAll('input[type=text], input:not([type])')]
+          .some(e => (e.value || '').trim() && !(e.placeholder || '').includes('备注'))
+        if (hasValue) {
+          cb.click()
+          n++
+        }
+      }
+    }
+    return n
+  }).catch(() => 0)
+  if (checked > 0) {
+    log(`[spec-row] 补勾 ${checked} 个未勾选的规格行`)
+    await sleep(800)
+  }
+
   return { filled, missed, stripped }
 }

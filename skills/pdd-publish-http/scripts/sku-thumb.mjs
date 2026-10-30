@@ -38,33 +38,43 @@ const sleep = ms => new Promise(r => setTimeout(r, ms))
  */
 async function readThumbSlots(page) {
   return page.evaluate(() => {
+    // ★ 2026-10-30 真机 dump：SKU 表可能分**多个 table**（或行分散在不同 table），
+    //   不能只取第一个。要**合并所有含「拼单价」表头的 table** 的 tbody tr。
     const tables = [...document.querySelectorAll('table')].filter(t => /拼单价/.test(t.innerText || ''))
-    const tb = tables[0]
-    if (!tb) return []
-    return [...tb.querySelectorAll('tbody tr')].map((tr, ri) => {
-      // 预览图单元格：包含 file input 的 td，或表头「预览图」对应的列
+    const allRows = []
+    for (const tb of tables) {
+      const heads = [...tb.querySelectorAll('thead th')].map(th => th.textContent.trim())
+      const col = heads.findIndex(h => /预览图/.test(h))
+      for (const tr of tb.querySelectorAll('tbody tr')) {
+        allRows.push({ tr, heads, col })
+      }
+    }
+
+    return allRows.map(({ tr, heads, col }, ri) => {
       const tds = [...tr.querySelectorAll('td')]
       let thumbTd = tds.find(td => td.querySelector('input[type="file"]'))
-      if (!thumbTd) {
-        // 没有 file input → 按表头索引找预览图列
-        const heads = [...tb.querySelectorAll('thead th')].map(th => th.textContent.trim())
-        const col = heads.findIndex(h => /预览图/.test(h))
+      if (!thumbTd && col >= 0) {
         const rowspanOffset = tds.length < heads.length ? heads.length - tds.length : 0
-        const idx = col >= 0 ? col - rowspanOffset : -1
+        const idx = col - rowspanOffset
         thumbTd = idx >= 0 ? tds[idx] : null
       }
+
       // 完成判据：格子内出现真实背景图或 img
       let hasThumb = false
       if (thumbTd) {
         hasThumb = [...thumbTd.querySelectorAll('*')].some(e => {
           const r = e.getBoundingClientRect()
           if (r.width < 20 || r.height < 20 || r.width > 300) return false
-          const bg = getComputedStyle(e).backgroundImage || ''
-          if (/url\(/.test(bg)) return true
-          if (e.tagName === 'IMG' && (e.src || '').startsWith('http')) return true
+          const bg = window.getComputedStyle(e).backgroundImage || ''
+          if (/url\(/.test(bg) && bg !== 'none') return true
+          if (e.tagName === 'IMG') {
+            const src = e.getAttribute('src') || ''
+            if (/^https?:\/\//.test(src) || src.startsWith('data:')) return true
+          }
           return false
         })
       }
+
       return {
         row: ri,
         hasFile: tds.some(td => td.querySelector('input[type="file"]')),
@@ -87,80 +97,105 @@ export async function fillSkuRowImagesSimple(page, rowFiles, opts = {}) {
   const filled = []
   const missed = []
 
-  const slots = await readThumbSlots(page)
+  // ★ 2026-10-30：等 SKU 表**所有行**都出现再读（规格填完后表格是异步生成的）
+  //   真机实测：规格填完后 SKU 表只有 2 行，但**滚动到底部后第 3 行才出现**。
+  //   所以先滚动到 SKU 表底部，触发行生成，再读。
+  await page.evaluate(() => {
+    const tb = [...document.querySelectorAll('table')].find(t => /拼单价/.test(t.innerText || ''))
+    if (tb) {
+      tb.scrollIntoView({ block: 'end' })
+      window.scrollBy(0, 500)   // 再往下滚一点，触发懒加载
+    }
+  }).catch(() => {})
+  await sleep(1000)
+
+  let slots = []
+  const expectRows = rowFiles.length
+  for (let w = 0; w < 30; w++) {
+    await sleep(500)
+    slots = await readThumbSlots(page)
+    if (slots.length >= expectRows && slots.length > 0) {
+      log(`[sku-thumb] 行数已稳定：${slots.length} 行（预期 ${expectRows}）`)
+      break
+    }
+  }
   if (!slots.length) {
     return { filled: [], missed: ['SKU 预览图（找不到 SKU 表）'] }
   }
+  if (slots.length < expectRows) {
+    log(`[sku-thumb] ⚠ 实际行数 ${slots.length} < 预期 ${expectRows}（可能平台合并了同单位行）`)
+  }
   log(`[sku-thumb] 表格 ${slots.length} 行，其中 ${slots.filter(s => s.hasFile).length} 行有上传入口`)
+  slots.forEach((s, i) => {
+    log(`[sku-thumb]   第${i+1}行：hasThumb=${s.hasThumb} hasFile=${s.hasFile}`)
+  })
 
-  for (let ri = 0; ri < slots.length; ri++) {
-    const slot = slots[ri]
-    const file = String(rowFiles[ri] || '').trim()
+  // ★ 2026-10-30：先上传前 N 行，然后**重新读行数**（可能触发生成新行）
+  //   真机实测：上传前 2 行后，第 3 行才出现（异步生成）。
+  let uploaded = 0
+  for (let round = 0; round < 3; round++) {
+    const fileInputs = await page.$$('table tbody tr input[type="file"]').catch(() => [])
+    if (!fileInputs.length) break
 
-    // 已上传 → 跳过（多维场景颜色图会自动下发到同色各行）
-    if (slot.hasThumb) {
-      filled.push(`SKU 预览图（第${ri + 1}行，已有）`)
-      continue
-    }
-    if (!file) {
-      missed.push(`SKU 预览图（第${ri + 1}行，未提供图片）`)
-      continue
-    }
-    if (!fs.existsSync(file)) {
-      missed.push(`SKU 预览图（第${ri + 1}行，文件不存在）`)
-      continue
-    }
+    log(`[sku-thumb] 第 ${round + 1} 轮：找到 ${fileInputs.length} 个 file input`)
 
-    // 拿该行的第一个 file input handle
-    const el = await page.evaluateHandle((ri) => {
-      const tables = [...document.querySelectorAll('table')].filter(t => /拼单价/.test(t.innerText || ''))
-      const tb = tables[0]
-      if (!tb) return null
-      const tr = [...tb.querySelectorAll('tbody tr')][ri]
-      if (!tr) return null
-      tr.scrollIntoView({ block: 'center' })
-      return tr.querySelector('input[type="file"]') || null
-    }, ri).then(h => h.asElement()).catch(() => null)
+    for (let ri = uploaded; ri < fileInputs.length; ri++) {
+      const file = String(rowFiles[ri] || '').trim()
+      if (!file) {
+        missed.push(`SKU 预览图（第${ri + 1}行，未提供图片）`)
+        continue
+      }
+      if (!fs.existsSync(file)) {
+        missed.push(`SKU 预览图（第${ri + 1}行，文件不存在）`)
+        continue
+      }
 
-    if (!el) {
-      missed.push(`SKU 预览图（第${ri + 1}行，无上传入口）`)
-      continue
-    }
+      const el = fileInputs[ri]
+      await el.uploadFile(file).catch(() => {})
+      await sleep(800)
 
-    await sleep(300)
-    await el.uploadFile(file).catch(() => {})
+      // 校验：该 input 是否消失（上传成功后 file input 会被替换为缩略图）
+      const stillThere = await page.evaluate((idx) => {
+        const inputs = [...document.querySelectorAll('table tbody tr input[type="file"]')]
+        return inputs.length > idx
+      }, ri).catch(() => true)
 
-    // 等缩略图出现（最多 8 秒）
-    let ok = false
-    for (let w = 0; w < 16; w++) {
-      await sleep(500)
-      ok = await page.evaluate((ri) => {
-        const tb = [...document.querySelectorAll('table')].find(t => /拼单价/.test(t.innerText || ''))
-        const tr = [...(tb?.querySelectorAll('tbody tr') || [])][ri]
-        if (!tr) return false
-        const tds = [...tr.querySelectorAll('td')]
-        // 找到预览图单元格（有 file input 的，或按表头索引）
-        let td = tds.find(x => x.querySelector('input[type="file"]'))
-        if (!td) {
-          const heads = [...tb.querySelectorAll('thead th')].map(th => th.textContent.trim())
-          const col = heads.findIndex(h => /预览图/.test(h))
-          const offset = tds.length < heads.length ? heads.length - tds.length : 0
-          td = col >= 0 ? tds[col - offset] : null
+      if (!stillThere) {
+        filled.push(`SKU 预览图（第${ri + 1}行）`)
+        uploaded++
+      } else {
+        // 再校验：是否有背景图
+        const hasThumb = await page.evaluate((idx) => {
+          const trs = [...document.querySelectorAll('table tbody tr')]
+          const tr = trs[idx]
+          if (!tr) return false
+          const tds = [...tr.querySelectorAll('td')]
+          const thumbTd = tds.find(td => td.querySelector('input[type="file"]')) || tds[4]
+          if (!thumbTd) return false
+          return [...thumbTd.querySelectorAll('*')].some(e => {
+            const bg = window.getComputedStyle(e).backgroundImage || ''
+            if (/url\(/.test(bg) && bg !== 'none') return true
+            if (e.tagName === 'IMG') {
+              const src = e.getAttribute('src') || ''
+              if (/^https?:\/\//.test(src) || src.startsWith('data:')) return true
+            }
+            return false
+          })
+        }, ri).catch(() => false)
+
+        if (hasThumb) {
+          filled.push(`SKU 预览图（第${ri + 1}行）`)
+          uploaded++
+        } else {
+          missed.push(`SKU 预览图（第${ri + 1}行，上传后未出现缩略图）`)
         }
-        if (!td) return false
-        return [...td.querySelectorAll('*')].some(e => {
-          const r = e.getBoundingClientRect()
-          if (r.width < 20 || r.height < 20 || r.width > 300) return false
-          if (/url\(/.test(getComputedStyle(e).backgroundImage || '')) return true
-          if (e.tagName === 'IMG' && (e.src || '').startsWith('http')) return true
-          return false
-        })
-      }, ri).catch(() => false)
-      if (ok) break
+      }
     }
 
-    if (ok) filled.push(`SKU 预览图（第${ri + 1}行）`)
-    else missed.push(`SKU 预览图（第${ri + 1}行，上传后未出现缩略图）`)
+    // 等 1 秒，看是否生成新行
+    await sleep(1000)
+    const newInputs = await page.$$('table tbody tr input[type="file"]').catch(() => [])
+    if (newInputs.length <= uploaded) break   // 没有新行，结束
   }
 
   log(`[sku-thumb] 已填 ${filled.length} 项，未填 ${missed.length} 项`)

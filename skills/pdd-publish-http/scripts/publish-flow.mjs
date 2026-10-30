@@ -188,6 +188,9 @@ export async function publishFlow(page, product, opts = {}) {
   }
 
   // ③ 价格及库存
+  // ② 价格库存（★ 2026-10-30：**先填价格，等行数稳定后再填图**）
+  //   真机实测：规格填完后 SKU 表只有 2 行，价格库存填完后变成 3 行。
+  //   所以必须**先填价格**，等行数到预期后再填预览图。
   {
     const priceRows = specs.length
       ? skuRows.map(r => ({ price: r.price, stock: r.stock, specs: r.specs }))
@@ -196,13 +199,10 @@ export async function publishFlow(page, product, opts = {}) {
     filled.push(...(r.filled || []))
     missed.push(...(r.missed || []))
     log(`  价格库存 → 已填 ${r.filled?.length || 0} 项，未填 ${r.missed?.length || 0} 项`)
-    await sleep(1500)
+    await sleep(2000)   // 等表格重渲染
   }
 
-  // ③.5 SKU 预览图（独立组件）
-  //   ★ 2026-10-30：手机壳等类目**强制要求**每行预览图，缺了平台会拦
-  //     「请上传第N行规格的预览图后重新操作」。
-  //   放在价格表之后：此时行结构已稳定（价格表填充会重建行 DOM）。
+  // ③ SKU 预览图（★ 在价格库存之后，等行数到预期）
   if (specs.length && skuRows.length) {
     try {
       const { fillSkuThumbs } = await import('./sku-thumb.mjs')
