@@ -421,8 +421,58 @@ export async function fillDimByVision(page, dimName, values, opts = {}) {
     }
   }
 
-  // ② 再分析（此时维度行已存在，截图能看到真实输入框）
-  let analysis = opts.analysis || await analyzeSpecArea(page, dimName, vals, { log })
+  // ★★ 2026-10-30 用户指出：规格区若是「自定义输入框 + checkbox」结构（#newSpec），
+  //    必须走「填最后空框 → 点空白 → 平台追加新行 → 继续填」的流程。
+  //    不能按索引依次填（填完第一个后平台重排，索引全乱 → 值互相覆盖）。
+  try {
+    const isRowStyle = await page.evaluate(() => {
+      const root = document.querySelector('#newSpec')
+      if (!root) return false
+      const inputs = [...root.querySelectorAll('input')].filter(e => {
+        const ph = e.placeholder || ''
+        if (!ph.includes('自定义')) return false
+        if (ph.includes('排序')) return false
+        const r = e.getBoundingClientRect()
+        return r.width > 20 && r.height > 10
+      })
+      return inputs.length > 0
+    }).catch(() => false)
+
+    if (isRowStyle) {
+      log(`[vision] 检测到「自定义输入框 + checkbox」结构（#newSpec）→ 走逐行填写`)
+      const { fillSpecValuesRowByRow } = await import('./spec-row-fill.mjs')
+      const r = await fillSpecValuesRowByRow(page, dimName, vals, { log })
+      return { ...r, analysis: { ok: true, dim_type: 'row-input', strategy: 'row-by-row' } }
+    }
+  } catch (e) {
+    log(`[vision] 逐行填写异常：${e.message.slice(0, 80)}，回退通用策略`)
+  }
+
+  // ② 查视觉缓存（同类目第 2 单起直接用，省 8s）
+  let analysis = opts.analysis || null
+  if (!analysis) {
+    try {
+      const { getVisionCache, setVisionCache, bumpVisionHit } = await import('./vision-cache.mjs')
+      const cached = getVisionCache(opts.category || '', dimName)
+      if (cached) {
+        log(`[vision] 命中缓存「${dimName}」：${cached.dim_type}/${cached.strategy}（已用 ${cached.hitCount || 0} 次）`)
+        analysis = { ok: true, ...cached, fromCache: true }
+        bumpVisionHit(opts.category || '', dimName)
+      }
+    } catch { /* ignore */ }
+  }
+
+  // ③ 缓存没命中 → 截图分析
+  if (!analysis) {
+    analysis = await analyzeSpecArea(page, dimName, vals, { log })
+    // 存缓存（仅当分析成功且置信度不是 low）
+    if (analysis?.ok && analysis.confidence !== 'low') {
+      try {
+        const { setVisionCache } = await import('./vision-cache.mjs')
+        setVisionCache(opts.category || '', dimName, analysis)
+      } catch { /* ignore */ }
+    }
+  }
 
   if (!analysis?.ok) {
     log(`[vision] 分析失败：${analysis?.error || 'unknown'}，回退到通用输入`)
@@ -430,7 +480,7 @@ export async function fillDimByVision(page, dimName, values, opts = {}) {
 
   const strategy = analysis?.strategy || 'type-and-blur'
   const dimType = analysis?.dim_type || 'text-input'
-  log(`[vision] 执行策略：${strategy}（维度类型 ${dimType}）`)
+  log(`[vision] 执行策略：${strategy}（维度类型 ${dimType}）${analysis?.fromCache ? ' [缓存]' : ''}`)
 
   const filled = []
   const missed = []

@@ -228,6 +228,18 @@ export async function fillAttrsWithAI(page, product, opts = {}) {
     return { filled: [], missed: [], aiAttrs: null, skipped: true }
   }
 
+  // ★ 2026-10-30 优化：查视觉缓存（同类目第 2 单起直接用，省 8s）
+  try {
+    const { getVisionCache, setVisionCache, bumpVisionHit } = await import('./vision-cache.mjs')
+    const cached = getVisionCache(product.category || '', '__attrs__')
+    if (cached?.attrs && Object.keys(cached.attrs).length) {
+      log(`[attr-ai] 命中属性缓存 ${Object.keys(cached.attrs).length} 条（已用 ${cached.hitCount || 0} 次）`)
+      bumpVisionHit(product.category || '', '__attrs__')
+      const r = await fillAttrsByAI(page, cached.attrs, opts)
+      return { ...r, aiAttrs: cached.attrs, fromCache: true }
+    }
+  } catch { /* ignore */ }
+
   const analysis = await analyzeAttrsByVision(page, product, opts)
   if (!analysis.ok) {
     log(`[attr-ai] 分析失败：${analysis.error}`)
@@ -235,5 +247,20 @@ export async function fillAttrsWithAI(page, product, opts = {}) {
   }
 
   const r = await fillAttrsByAI(page, analysis.attrs, opts)
+
+  // 存缓存
+  if (analysis.attrs && Object.keys(analysis.attrs).length) {
+    try {
+      const { setVisionCache } = await import('./vision-cache.mjs')
+      setVisionCache(product.category || '', '__attrs__', {
+        dim_type: 'attrs',
+        strategy: 'json',
+        element_hints: [],
+        confidence: 'medium',
+        attrs: analysis.attrs,
+      })
+    } catch { /* ignore */ }
+  }
+
   return { ...r, aiAttrs: analysis.attrs }
 }

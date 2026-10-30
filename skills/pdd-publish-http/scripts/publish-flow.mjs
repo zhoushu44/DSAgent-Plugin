@@ -138,7 +138,7 @@ export async function publishFlow(page, product, opts = {}) {
           const sp = specs[di]
           const vals = (sp.values || []).map(v => (v && typeof v === 'object') ? v : { value: String(v) })
           log(`  填第 ${di + 1}/${specs.length} 维「${sp.name}」（${vals.length} 个值）`)
-          const vr = await fillDimByVision(page, sp.name, vals, { log })
+          const vr = await fillDimByVision(page, sp.name, vals, { log, category })
           if (vr.filled?.length) {
             filled.push(...vr.filled)
             usedVision = true

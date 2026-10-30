@@ -74,6 +74,24 @@ export async function selectCategory(page, category, opts = {}) {
   const kw = String(category || '').trim()
   log(`段2 选类目: ${kw}`)
 
+  // ★ 2026-10-30 优化：老类目用模板里的 catId 直达（跳过搜索，省 5s）
+  if (opts.catId) {
+    const directUrl = `https://mms.pinduoduo.com/goods/goods_add/index?type=add&from=category&id=${opts.catId}`
+    log(`  用 catId=${opts.catId} 直达表单页`)
+    await page.goto(directUrl, { waitUntil: 'domcontentloaded', timeout: 40000 }).catch(() => {})
+    // 等表单页就绪
+    for (let i = 0; i < 30; i++) {
+      await sleep(800)
+      const ready = await page.evaluate(() => {
+        const hasSpecBox = !!document.querySelector('#goods-spec-sku')
+        const hasTitle = !!document.querySelector('input[placeholder*="商品标题组成"]')
+        return hasSpecBox && hasTitle
+      }).catch(() => false)
+      if (ready) { log('  直达页已就绪'); await sleep(800); return page }
+    }
+    log('  ⚠ 直达页 24s 内未就绪，回退搜索选类目')
+  }
+
   // ★ 2026-10-30：页面跳转时 frame 会失效（detached Frame）。
   //   所有页面操作包一层"frame 失效则等待重试"，最多重试 3 次。
   //   ★ 注意：内部必须调 page.evaluate（原始方法），不能再调 safeEval（会无限递归）

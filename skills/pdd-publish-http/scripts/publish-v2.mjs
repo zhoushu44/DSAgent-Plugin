@@ -76,6 +76,8 @@ const account = argOf('account') || ''
 const confirmRaw = A.vals.confirm
 const confirm = (A.flags.has('confirm') && confirmRaw !== 'false')
   || confirmRaw === 'true' || confirmRaw === true
+// ★ 2026-10-30：--no-submit = 只填到提交前，不点发布（供人工核对）
+const noSubmit = A.flags.has('no-submit') || argOf('no-submit') === 'true'
 
 // ─── 读取/组装商品数据 ───
 let product = null
@@ -208,12 +210,45 @@ try {
 
   // 段1
   await openPublishEntry(page, { log })
-  // 段2
+  // 段2（★ 老类目用 catId 直达，省 5s）
   let work = await waitForPublishPage(browser, { log })
-  work = await selectCategory(work, product.category || categoryKw, { log })
+  work = await selectCategory(work, product.category || categoryKw, { log, catId: tpl?.catId || '' })
 
   // 段3 + 段4
   const flowResult = await publishFlow(work, product, { log })
+
+  // ★ 2026-10-30：--no-submit 模式 → 不点提交，保留页面供人工核对
+  if (noSubmit) {
+    const cost = Math.round((Date.now() - t0) / 1000)
+    log('')
+    log('════════════════════════════════════════')
+    log('  ★ --no-submit 模式：已填完，未点提交')
+    log('  页面保持打开，请在浏览器窗口内核对后手动点「提交并上架」')
+    log('════════════════════════════════════════')
+    emit({
+      ok: true,
+      noSubmit: true,
+      shopKey,
+      costSeconds: cost,
+      filled: flowResult.filled,
+      missed: flowResult.missed,
+      text: [
+        '【填表完成 · 未提交】',
+        `耗时：${cost} 秒`,
+        `已填 ${flowResult.filled.length} 项：`,
+        ...flowResult.filled.map(f => '  · ' + f),
+        '',
+        `未填 ${flowResult.missed.length} 项：`,
+        ...flowResult.missed.map(m => '  · ' + m),
+        '',
+        '页面已保留，请人工核对后手动点击「提交并上架」。',
+      ].join('\n'),
+    })
+    // 保持进程存活，等人工核对（最多 30 分钟）
+    log('浏览器保留 30 分钟供核对（Ctrl+C 可提前结束）')
+    await sleep(30 * 60 * 1000)
+    process.exit(0)
+  }
 
   // 段5
   const submitResult = await submitAndVerify(work, { log, timeoutMs: 30000 })
