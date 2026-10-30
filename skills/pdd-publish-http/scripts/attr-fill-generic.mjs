@@ -188,7 +188,7 @@ export async function checkFieldFilled(page, boxId) {
     const inputValue = (inp?.value || '').trim()
     const boxText = (box.innerText || '').replace(/\n/g, '|').trim()
 
-    // 拿到字段名（label）
+    // 拿字段名（label）
     let label = ''
     let cur = box
     for (let d = 0; d < 6 && cur; d++) {
@@ -200,14 +200,34 @@ export async function checkFieldFilled(page, boxId) {
       cur = cur.parentElement
     }
 
-    // boxText 去掉字段名后，还有内容 → 说明有选中值
+    // ★ 2026-10-30 关键修复（第二次）：把**提示文字**全部剔除
+    //   实测误判：`✅ 平方克重 = 重要`（label 提取带了空格，split 没命中）
+    //   现在改成：不去 split label，而是**直接把所有提示词从整段文本里剔掉**，
+    //   再判断剩下有没有实质内容。
     let rest = boxText
-    if (label) rest = rest.replace(label, '').replace(/\|/g, '').trim()
-    // 排除占位词
-    rest = rest.replace(/^(请选择|请输入|搜索)/, '').trim()
+      .replace(/重要|必填|[*＊]/g, '')
+      .replace(/请选择|请输入|搜索|点击申请|未找到需要的品牌/g, '')
+      .replace(/请确保该商品中含有所选材质/g, '')
+      .replace(/填写率|请准确填写属性[^|]*/g, '')
+      .replace(/[|｜]/g, '')
+      .replace(/[\s？?。，,、：:；;！!…]+/g, '')   // ★ 标点也剔掉（避免「？」被当成值）
+      .trim()
 
-    const filled = !!inputValue || rest.length > 0
-    return { filled, value: inputValue || rest, boxText: boxText.slice(0, 120), label }
+    // 再剔除字段名本身（用去空格的字段名去匹配）
+    if (label) {
+      const labelNorm = label.replace(/\s+/g, '')
+      if (labelNorm) rest = rest.split(labelNorm).join('')
+    }
+
+    // 只有 inputValue 有值，或 rest 里还有实质内容
+    const filled = !!inputValue || rest.length >= 1
+    return {
+      filled,
+      value: inputValue || rest,
+      boxText: boxText.slice(0, 120),
+      label,
+      rest,
+    }
   }, boxId).catch(() => ({ filled: false, value: '', boxText: '' }))
 }
 
@@ -222,23 +242,45 @@ export async function harvestAttributes(page, opts = {}) {
   const log = opts.log || (() => {})
 
   // ★ 2026-10-30：属性区是**异步渲染**的（规格填完后才陆续出现）。
-  //   先等 box 数量稳定（连续 3 次不变），再采集，否则会漏字段（实测漏过「适用型号」）。
+  //   实测坑：流程里只检测到 7 个字段，单独测试却有 8 个 —— 第 8 个出现得更晚。
+  //   三步确保全部渲染：
+  //     ① 滚到属性区顶部 → 底部 → 再回顶部（强制触发懒渲染）
+  //     ② 等「数量连续 4 次不变」且总等待 >= 3 秒
+  //     ③ 再补一次 1.5 秒静置
+  await page.evaluate(() => {
+    const root = document.querySelector('#property') || document.querySelector('.goods-propertys')
+    if (!root) return
+    root.scrollIntoView({ block: 'start' })
+    window.scrollBy(0, 400)
+  }).catch(() => {})
+  await sleep(600)
+  await page.evaluate(() => window.scrollBy(0, 800)).catch(() => {})
+  await sleep(600)
+  await page.evaluate(() => {
+    const root = document.querySelector('#property') || document.querySelector('.goods-propertys')
+    if (root) root.scrollIntoView({ block: 'start' })
+  }).catch(() => {})
+  await sleep(600)
+
   let lastCount = 0
   let stable = 0
-  for (let w = 0; w < 30; w++) {
+  const t0 = Date.now()
+  for (let w = 0; w < 40; w++) {
     const cnt = await page.evaluate(() => {
       const root = document.querySelector('#property') || document.querySelector('.goods-propertys')
       return root ? root.querySelectorAll('[id^="basic.propertys."]').length : 0
     }).catch(() => 0)
     if (cnt > 0 && cnt === lastCount) {
       stable++
-      if (stable >= 3) break
+      // ★ 连续 4 次不变 **且** 已等 >=3 秒才认为稳定
+      if (stable >= 4 && Date.now() - t0 >= 3000) break
     } else {
       stable = 0
     }
     lastCount = cnt
     await sleep(500)
   }
+  await sleep(1500)
   log(`[attr] 属性区渲染稳定：${lastCount} 个字段`)
 
   // ① 列出所有字段

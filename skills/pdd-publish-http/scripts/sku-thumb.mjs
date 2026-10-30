@@ -133,8 +133,9 @@ export async function fillSkuRowImagesSimple(page, rowFiles, opts = {}) {
   // ★ 2026-10-30：上传后 DOM 会重排，**不能缓存 fileInput handle**。
   //   每行都重新查一次（按行索引定位该行的 file input）。
   let uploaded = 0
+  let rowCount = 0   // ★ 提到循环外（之前声明在 for 内，循环外引用报 rowCount is not defined）
   for (let round = 0; round < 3; round++) {
-    const rowCount = await page.evaluate(() => {
+    rowCount = await page.evaluate(() => {
       const tb = [...document.querySelectorAll('table')].find(t => /拼单价/.test(t.innerText || ''))
       return tb ? tb.querySelectorAll('tbody tr').length : 0
     }).catch(() => 0)

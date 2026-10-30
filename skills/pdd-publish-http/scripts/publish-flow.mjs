@@ -224,8 +224,28 @@ export async function publishFlow(page, product, opts = {}) {
   try {
     const { harvestAttributes, fillAttributesGeneric, pickAttrValuesByAI } = await import('./attr-fill-generic.mjs')
 
+    // ★ 2026-10-30：SKU 预览图上传后页面会重渲染，属性区可能还没完全展开。
+    //   先滚到属性区、静置 2 秒，再采集（避免漏字段，实测漏过「适用型号」）。
+    await page.evaluate(() => {
+      const root = document.querySelector('#property') || document.querySelector('.goods-propertys')
+      if (root) root.scrollIntoView({ block: 'start' })
+    }).catch(() => {})
+    await sleep(2000)
+
     // ① 采集所有字段 + 真实候选
-    const { fields } = await harvestAttributes(page, { log })
+    let { fields } = await harvestAttributes(page, { log })
+
+    // ★ 兜底：如果必填字段数偏少，再等 3 秒重采一次（取并集）
+    const reqCount1 = fields.filter(f => f.required).length
+    if (reqCount1 < 3) {
+      log(`[attr] 必填字段仅 ${reqCount1} 个，3 秒后重采一次`)
+      await sleep(3000)
+      const retry = await harvestAttributes(page, { log })
+      if (retry.fields.length > fields.length) {
+        fields = retry.fields
+        log(`[attr] 重采后 ${fields.length} 个字段`)
+      }
+    }
 
     // ② 用户值 → Map（字段名归一化用于匹配）
     const userMap = new Map()
@@ -235,17 +255,35 @@ export async function publishFlow(page, product, opts = {}) {
     }
 
     // ③ 组装最终要填的值：用户值优先，缺失的用 AI 选
+    //   ★ 2026-10-30 关键修复：字段名匹配必须**严格**，否则「填充物」会拿到「填充物净重」的值
+    //     规则：① 完全相等 ② 用户名字段名是页面字段名的**前缀且长度差<=2**
+    //     禁止：任意互相包含（会让 填充物 ⊂ 填充物净重 误匹配）
     const wantValues = {}
     const userHitNames = new Set()
     for (const f of fields) {
       const fn = String(f.name).replace(/\s+/g, '')
-      // 用户给的字段名可能和页面不完全一致（材质 vs 重要材质）
+
+      // ① 完全相等
       let uv = userMap.get(fn)
+
+      // ② 页面字段名以用户字段名开头，且用户名足够长（>=2）→ 视为同一字段
+      //    例：用户「材质」→ 页面「材质」✅；用户「材质」→ 页面「材质成分」✅
+      //    但「填充物」不会匹配「填充物净重」（因为净重更长且是不同字段，交给AI）
       if (!uv) {
+        const candidates = []
         for (const [un, v] of userMap) {
-          if (fn.includes(un) || un.includes(fn)) { uv = v; break }
+          if (!un || un.length < 2) continue
+          if (fn === un) { candidates.push({ un, v, exact: true }); continue }
+          // 只允许「页面字段名 = 用户字段名 + 后缀」，且后缀是常见修饰（材质/成分/类型 等）
+          if (fn.startsWith(un) && fn.length - un.length <= 2) {
+            candidates.push({ un, v, exact: false })
+          }
         }
+        // 优先精确，其次最短后缀
+        candidates.sort((a, b) => (b.exact ? 1 : 0) - (a.exact ? 1 : 0))
+        if (candidates.length) uv = candidates[0].v
       }
+
       if (uv) {
         wantValues[f.name] = uv
         userHitNames.add(fn)
@@ -259,31 +297,107 @@ export async function publishFlow(page, product, opts = {}) {
       log(`[attr] ${missing.length} 个字段用户未提供，走 AI 从候选里选`)
       const aiPicked = await pickAttrValuesByAI(page, missing, { title, category }, { log })
       Object.assign(wantValues, aiPicked)
+
+      // ★ 2026-10-30 用户要求「重要是必填的」：
+      //   AI 没选中的**必填字段**，必须兜底取候选第一个可用值，不能留空。
+      const stillMissingRequired = missing.filter(
+        f => f.required && !wantValues[f.name] && f.options?.length
+      )
+      for (const f of stillMissingRequired) {
+        // 跳过明显不合适的候选
+        const usable = f.options.filter(o => !/^(请选择|其他|其它)$/.test(o))
+        const fallback = usable[0] || f.options[0]
+        if (fallback) {
+          wantValues[f.name] = fallback
+          log(`[attr] ★必填「${f.name}」AI 未选中 → 兜底取「${fallback}」`)
+        }
+      }
     }
 
-    // ⑤ 填
-    if (Object.keys(wantValues).length) {
-      const r = await fillAttributesGeneric(page, wantValues, { log })
+    // ★ 补充：即使字段没有 options（输入框型必填），也要记录出来供人工看
+    const requiredNoOptions = fields.filter(f => f.required && !f.options?.length)
+    if (requiredNoOptions.length) {
+      log(`[attr] ★必填但无候选（需人工）：${requiredNoOptions.map(f => f.name).join('、')}`)
+    }
+
+    // ⑤ 填（★ 2026-10-30 关键：属性存在**级联依赖** —— 选了「适用品牌」才会出现「适用型号」。
+    //   所以必须「填一轮 → 重新采集 → 补齐新出现的字段」，最多 3 轮。）
+    const doneFields = new Set()
+    for (let round = 0; round < 3; round++) {
+      // 每轮都重新采集（可能发现新字段）
+      if (round > 0) {
+        await sleep(1200)
+        const again = await harvestAttributes(page, { log })
+        if (again.fields.length > fields.length) {
+          log(`[attr] 第 ${round + 1} 轮：属性区从 ${fields.length} 个增加到 ${again.fields.length} 个（级联字段出现）`)
+          fields = again.fields
+        }
+      }
+
+      // 计算本轮要填的：用户值优先，缺失的 AI 选
+      const roundValues = {}
+      for (const f of fields) {
+        if (doneFields.has(f.name)) continue
+        const fn = String(f.name).replace(/\s+/g, '')
+        let uv = userMap.get(fn)
+        if (!uv) {
+          for (const [un, v] of userMap) {
+            if (fn.startsWith(un) && fn.length - un.length <= 2) { uv = v; break }
+          }
+        }
+        if (uv) roundValues[f.name] = uv
+      }
+
+      const roundMissing = fields.filter(f => !doneFields.has(f.name) && !roundValues[f.name] && f.options?.length)
+      if (roundMissing.length) {
+        const aiPicked = await pickAttrValuesByAI(page, roundMissing, { title, category }, { log })
+        Object.assign(roundValues, aiPicked)
+        // 必填兜底
+        for (const f of roundMissing) {
+          if (f.required && !roundValues[f.name] && f.options?.length) {
+            const usable = f.options.filter(o => !/^(请选择|其他|其它)$/.test(o))
+            const fb = usable[0] || f.options[0]
+            if (fb) {
+              roundValues[f.name] = fb
+              log(`[attr] ★必填「${f.name}」AI 未选中 → 兜底取「${fb}」`)
+            }
+          }
+        }
+      }
+
+      if (!Object.keys(roundValues).length) {
+        log(`[attr] 第 ${round + 1} 轮：无可填字段，结束`)
+        break
+      }
+
+      log(`[attr] 第 ${round + 1} 轮：填 ${Object.keys(roundValues).length} 个字段`)
+      const r = await fillAttributesGeneric(page, roundValues, { log })
       for (const f of r.filled || []) if (!filled.includes(f)) filled.push(f)
       for (const m of r.missed || []) if (!missed.includes(m)) missed.push(m)
-      log(`  属性 → 已填 ${r.filled?.length || 0} 项，未填 ${r.missed?.length || 0} 项`)
+      for (const k of Object.keys(roundValues)) doneFields.add(k)
 
-      // ★ 2026-10-30 用户指出：带「重要」标记的是**必填**，漏了平台会拦。
-      //   逐项复核，必填项没值 → 明确报错（不能静默通过）。
-      const { checkFieldFilled } = await import('./attr-fill-generic.mjs')
-      const reqFields = fields.filter(f => f.required)
-      const reqMissing = []
-      for (const f of reqFields) {
-        const st = await checkFieldFilled(page, f.id)
-        if (!st.filled) reqMissing.push(f.name)
-      }
-      log(`  ★必填项 ${reqFields.length} 个：${reqFields.map(f => f.name).join('、')}`)
-      if (reqMissing.length) {
-        missed.push(`★必填未填：${reqMissing.join('、')}`)
-        log(`  ⚠⚠ 必填未填：${reqMissing.join('、')}`)
-      } else {
-        log(`  ✅ 所有必填项已填`)
-      }
+      // 本轮全失败 → 不再重试
+      if (!r.filled?.length) break
+    }
+    // ★ 去重统计（多轮会重复追加同一字段）
+    const finalFilled = [...new Set(filled)]
+    log(`  属性 → 已填 ${finalFilled.length} 个字段`)
+
+    // ★ 2026-10-30 用户指出：带「重要」标记的是**必填**，漏了平台会拦。
+    //   逐项复核，必填项没值 → 明确报错（不能静默通过）。
+    const { checkFieldFilled } = await import('./attr-fill-generic.mjs')
+    const reqFields = fields.filter(f => f.required)
+    const reqMissing = []
+    for (const f of reqFields) {
+      const st = await checkFieldFilled(page, f.id)
+      if (!st.filled) reqMissing.push(f.name)
+    }
+    log(`  ★必填项 ${reqFields.length} 个：${reqFields.map(f => f.name).join('、')}`)
+    if (reqMissing.length) {
+      missed.push(`★必填未填：${reqMissing.join('、')}`)
+      log(`  ⚠⚠ 必填未填：${reqMissing.join('、')}`)
+    } else {
+      log(`  ✅ 所有必填项已填`)
     }
   } catch (e) {
     missed.push(`商品属性（异常：${e.message}）`)
