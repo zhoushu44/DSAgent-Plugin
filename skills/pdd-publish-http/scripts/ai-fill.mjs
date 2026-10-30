@@ -64,7 +64,7 @@ function askText(prompt) {
     `sys.path.insert(0, ${JSON.stringify(IMGKIT_DIR)})`,
     'ctx = ssl.create_default_context(); ctx.check_hostname=False; ctx.verify_mode=ssl.CERT_NONE',
     'from imgkit import BASE, KEY',
-    'payload = {"model": "glm-4-flash", "messages":[{"role":"user","content":' + JSON.stringify(prompt) + '}], "temperature":0.1}',
+    'payload = {"model": "cn:glm-5.3-flash", "messages":[{"role":"user","content":' + JSON.stringify(prompt) + '}], "temperature":0.1}',
     'req = urllib.request.Request(f"{BASE}/chat/completions", data=json.dumps(payload).encode(), method="POST",',
     '    headers={"Authorization":f"Bearer {KEY}","Content-Type":"application/json"})',
     'with urllib.request.urlopen(req, timeout=60, context=ctx) as r: j = json.loads(r.read().decode())',
