@@ -48,17 +48,17 @@ export async function openPublishEntry(page, opts = {}) {
  * @returns { page } 目标页
  */
 export async function waitForPublishPage(browser, opts = {}) {
-  const timeoutMs = opts.timeoutMs || 60000
+  const timeoutMs = opts.timeoutMs || 90000   // ★ 60s → 90s（大促/晚上页面慢）
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     const pages = await browser.pages()
     const hit = pages.find(p => /goods\/(category|goods_add)/.test(String(p.url() || '')))
     if (hit) {
       await hit.bringToFront()
-      await sleep(2000)   // ★ 从 3s 降到 2s
+      await sleep(2000)
       return hit
     }
-    await sleep(500)   // ★ 从 1s 降到 500ms
+    await sleep(500)
   }
   throw new Error('类目页/表单页未出现')
 }
@@ -75,7 +75,8 @@ export async function selectCategory(page, category, opts = {}) {
   log(`段2 选类目: ${kw}`)
 
   // ★ 2026-10-30 优化：老类目用模板里的 catId 直达（跳过搜索，省 5s）
-  if (opts.catId) {
+  //   注意：连接模式下 page.goto 会挂起，所以只有**新开浏览器**时才用直达
+  if (opts.catId && !opts.connected) {
     const directUrl = `https://mms.pinduoduo.com/goods/goods_add/index?type=add&from=category&id=${opts.catId}`
     log(`  用 catId=${opts.catId} 直达表单页`)
     await page.goto(directUrl, { waitUntil: 'domcontentloaded', timeout: 40000 }).catch(() => {})

@@ -130,16 +130,19 @@ export async function fillSkuRowImagesSimple(page, rowFiles, opts = {}) {
     log(`[sku-thumb]   第${i+1}行：hasThumb=${s.hasThumb} hasFile=${s.hasFile}`)
   })
 
-  // ★ 2026-10-30：先上传前 N 行，然后**重新读行数**（可能触发生成新行）
-  //   真机实测：上传前 2 行后，第 3 行才出现（异步生成）。
+  // ★ 2026-10-30：上传后 DOM 会重排，**不能缓存 fileInput handle**。
+  //   每行都重新查一次（按行索引定位该行的 file input）。
   let uploaded = 0
   for (let round = 0; round < 3; round++) {
-    const fileInputs = await page.$$('table tbody tr input[type="file"]').catch(() => [])
-    if (!fileInputs.length) break
+    const rowCount = await page.evaluate(() => {
+      const tb = [...document.querySelectorAll('table')].find(t => /拼单价/.test(t.innerText || ''))
+      return tb ? tb.querySelectorAll('tbody tr').length : 0
+    }).catch(() => 0)
+    if (!rowCount) break
 
-    log(`[sku-thumb] 第 ${round + 1} 轮：找到 ${fileInputs.length} 个 file input`)
+    log(`[sku-thumb] 第 ${round + 1} 轮：表格 ${rowCount} 行`)
 
-    for (let ri = uploaded; ri < fileInputs.length; ri++) {
+    for (let ri = uploaded; ri < rowCount; ri++) {
       const file = String(rowFiles[ri] || '').trim()
       if (!file) {
         missed.push(`SKU 预览图（第${ri + 1}行，未提供图片）`)
@@ -150,27 +153,24 @@ export async function fillSkuRowImagesSimple(page, rowFiles, opts = {}) {
         continue
       }
 
-      const el = fileInputs[ri]
-      await el.uploadFile(file).catch(() => {})
-      await sleep(800)
+      // ★ 每次都重新拿该行的 file input handle（不缓存）
+      const el = await page.evaluateHandle((idx) => {
+        const tb = [...document.querySelectorAll('table')].find(t => /拼单价/.test(t.innerText || ''))
+        if (!tb) return null
+        const tr = [...tb.querySelectorAll('tbody tr')][idx]
+        if (!tr) return null
+        tr.scrollIntoView({ block: 'center' })
+        return tr.querySelector('input[type="file"]')
+      }, ri).then(h => h.asElement()).catch(() => null)
 
-      // 校验：该 input 是否消失（上传成功后 file input 会被替换为缩略图）
-      const stillThere = await page.evaluate((idx) => {
-        const inputs = [...document.querySelectorAll('table tbody tr input[type="file"]')]
-        return inputs.length > idx
-      }, ri).catch(() => true)
-
-      if (!stillThere) {
-        filled.push(`SKU 预览图（第${ri + 1}行）`)
-        uploaded++
-      } else {
-        // 再校验：是否有背景图
+      if (!el) {
+        // 该行可能已有图（file input 消失）
         const hasThumb = await page.evaluate((idx) => {
-          const trs = [...document.querySelectorAll('table tbody tr')]
-          const tr = trs[idx]
+          const tb = [...document.querySelectorAll('table')].find(t => /拼单价/.test(t.innerText || ''))
+          const tr = [...(tb?.querySelectorAll('tbody tr') || [])][idx]
           if (!tr) return false
           const tds = [...tr.querySelectorAll('td')]
-          const thumbTd = tds.find(td => td.querySelector('input[type="file"]')) || tds[4]
+          const thumbTd = tds[4] || tds.find(td => /预览/.test(td.innerText || ''))
           if (!thumbTd) return false
           return [...thumbTd.querySelectorAll('*')].some(e => {
             const bg = window.getComputedStyle(e).backgroundImage || ''
@@ -182,24 +182,59 @@ export async function fillSkuRowImagesSimple(page, rowFiles, opts = {}) {
             return false
           })
         }, ri).catch(() => false)
-
         if (hasThumb) {
-          filled.push(`SKU 预览图（第${ri + 1}行）`)
+          filled.push(`SKU 预览图（第${ri + 1}行，已有）`)
           uploaded++
         } else {
-          missed.push(`SKU 预览图（第${ri + 1}行，上传后未出现缩略图）`)
+          missed.push(`SKU 预览图（第${ri + 1}行，无上传入口）`)
         }
+        continue
+      }
+
+      await sleep(300)
+      await el.uploadFile(file).catch(() => {})
+      await sleep(1200)
+
+      // 校验：该行是否出现缩略图
+      let hasThumb = false
+      for (let w = 0; w < 8; w++) {
+        hasThumb = await page.evaluate((idx) => {
+          const tb = [...document.querySelectorAll('table')].find(t => /拼单价/.test(t.innerText || ''))
+          const tr = [...(tb?.querySelectorAll('tbody tr') || [])][idx]
+          if (!tr) return false
+          const tds = [...tr.querySelectorAll('td')]
+          const thumbTd = tds[4] || tds.find(td => /预览/.test(td.innerText || ''))
+          if (!thumbTd) return false
+          return [...thumbTd.querySelectorAll('*')].some(e => {
+            const bg = window.getComputedStyle(e).backgroundImage || ''
+            if (/url\(/.test(bg) && bg !== 'none') return true
+            if (e.tagName === 'IMG') {
+              const src = e.getAttribute('src') || ''
+              if (/^https?:\/\//.test(src) || src.startsWith('data:')) return true
+            }
+            return false
+          })
+        }, ri).catch(() => false)
+        if (hasThumb) break
+        await sleep(500)
+      }
+
+      if (hasThumb) {
+        filled.push(`SKU 预览图（第${ri + 1}行）`)
+        uploaded++
+      } else {
+        missed.push(`SKU 预览图（第${ri + 1}行，上传后未出现缩略图）`)
       }
     }
 
-    // 等 1 秒，看是否生成新行
-    await sleep(1000)
-    const newInputs = await page.$$('table tbody tr input[type="file"]').catch(() => [])
-    if (newInputs.length <= uploaded) break   // 没有新行，结束
+    if (uploaded >= rowCount) break
   }
 
-  log(`[sku-thumb] 已填 ${filled.length} 项，未填 ${missed.length} 项`)
-  return { filled, missed }
+  log(`[sku-thumb] 表格共 ${rowCount} 行 → 成功 ${filled.length} 行，失败 ${missed.length} 行`)
+  // ★ 2026-10-30：按行去重统计（避免多轮重复计数）
+  const uniqueFilled = [...new Set(filled)]
+  const uniqueMissed = [...new Set(missed)]
+  return { filled: uniqueFilled, missed: uniqueMissed }
 }
 
 /**
