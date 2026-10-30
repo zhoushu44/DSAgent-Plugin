@@ -167,6 +167,21 @@ export async function fillPriceTable(page, opts = {}) {
       ['拼单价', 1, rowPrice],
       ['单买价', 2, rowSingle],
     ]) {
+      // ★ 2026-10-30：如果该格**已有值**，跳过不覆盖（用于属性后补填新行场景）
+      const existing = await page.evaluate((rowIdx, ii) => {
+        const tb = [...document.querySelectorAll('table')].find(t => /拼单价/.test(t.textContent || ''))
+        const tr = [...(tb?.querySelectorAll('tbody tr') || [])][rowIdx]
+        if (!tr) return null
+        const inputs = [...tr.querySelectorAll('input')].filter(i => i.type !== 'file')
+        return inputs[ii]?.value || ''
+      }, ri, inputIdx).catch(() => '')
+
+      if (String(existing || '').trim() === String(val)) {
+        filled.push(`第${ri + 1}行${name}=${val}（已有）`)
+        cells.push({ name, inputIdx, want: val, back: existing, ok: true, via: 'skip-existing' })
+        continue
+      }
+
       const r = await setCell(page, ri, inputIdx, val)
       if (r.ok) filled.push(`第${ri + 1}行${name}=${val}`)
       else missed.push(`第${ri + 1}行${name}（${r.via}）`)

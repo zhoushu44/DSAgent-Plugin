@@ -399,6 +399,36 @@ export async function publishFlow(page, product, opts = {}) {
     } else {
       log(`  ✅ 所有必填项已填`)
     }
+
+    // ★ 2026-10-30 关键补充：属性级联会导致 SKU 表**新增行**（如抱枕 2→3 行），
+    //   而价格库存是在属性之前填的 → 新行没有价格库存 → 提交报「请输入第N行规格的库存」。
+    //   所以属性填完后必须**再补一遍价格库存**（只补空行，不覆盖已有值）。
+    try {
+      const priceRows = specs.length
+        ? skuRows.map(r => ({ price: r.price, stock: r.stock, specs: r.specs }))
+        : skuRows.map(s => ({ price: s.price, stock: s.stock }))
+      const r2 = await fillPriceTable(page, { price, stock, itemNo, rows: priceRows })
+      if (r2.filled?.length) {
+        log(`  [补] 属性后补价格库存 ${r2.filled.length} 项（新行）`)
+        for (const f of r2.filled) if (!filled.includes(f)) filled.push(f)
+      }
+      if (r2.missed?.length) log(`  [补] 价格库存未填 ${r2.missed.length} 项`)
+    } catch (e) {
+      log(`  [补] 价格库存异常：${e.message.slice(0, 60)}`)
+    }
+
+    // ★ 同上：属性级联新增行也需要预览图，补一遍（已有图的会跳过）
+    try {
+      const { fillSkuThumbs } = await import('./sku-thumb.mjs')
+      const r3 = await fillSkuThumbs(page, product, { log })
+      if (r3.filled?.length) {
+        log(`  [补] 属性后补预览图 ${r3.filled.length} 项`)
+        for (const f of r3.filled) if (!filled.includes(f)) filled.push(f)
+      }
+      if (r3.missed?.length) log(`  [补] 预览图未填 ${r3.missed.length} 项`)
+    } catch (e) {
+      log(`  [补] 预览图异常：${e.message.slice(0, 60)}`)
+    }
   } catch (e) {
     missed.push(`商品属性（异常：${e.message}）`)
     log(`  属性异常：${e.message.slice(0, 100)}`)
