@@ -69,7 +69,24 @@ export async function selectCategory(page, category, opts = {}) {
   const kw = String(category || '').trim()
   log(`段2 选类目: ${kw}`)
 
-  const hasSearch = await page.evaluate(() =>
+  // ★ 2026-10-30：页面跳转时 frame 会失效（detached Frame）。
+  //   所有页面操作包一层"frame 失效则等待重试"，最多重试 3 次。
+  //   ★ 注意：内部必须调 page.evaluate（原始方法），不能再调 safeEval（会无限递归）
+  const safeEval = async (fn, ...args) => {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        return await page.evaluate(fn, ...args)
+      } catch (e) {
+        const msg = String(e?.message || '')
+        if (!/detached Frame|Execution context was destroyed|Target closed/.test(msg)) throw e
+        log(`  页面跳转中，等待重试（${attempt + 1}/3）`)
+        await sleep(2500)
+      }
+    }
+    return null
+  }
+
+  const hasSearch = await safeEval(() =>
     !!document.querySelector('input[placeholder*="搜索分类"]')
   ).catch(() => false)
 
@@ -79,7 +96,7 @@ export async function selectCategory(page, category, opts = {}) {
     return page
   }
 
-  const sp = await page.evaluate(() => {
+  const sp = await safeEval(() => {
     const e = document.querySelector('input[placeholder*="搜索分类"]')
     const r = e.getBoundingClientRect()
     return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }
@@ -100,7 +117,7 @@ export async function selectCategory(page, category, opts = {}) {
   let stableTimes = 0
   for (let w = 0; w < 20; w++) {
     await sleep(600)
-    const c = await page.evaluate(() =>
+    const c = await safeEval(() =>
       [...document.querySelectorAll('li')].filter(el => /SPP_searchItem|searchItem/i.test(el.className || '')).length
     ).catch(() => 0)
     if (c > 0 && c === prevCount) {
@@ -113,7 +130,7 @@ export async function selectCategory(page, category, opts = {}) {
   }
 
   // 点第一个结果
-  const picked = await page.evaluate(() => {
+  const picked = await safeEval(() => {
     const items = [...document.querySelectorAll('li')].filter(el => /SPP_searchItem|searchItem/i.test(el.className || ''))
     if (!items.length) return null
     const txt = (items[0].innerText || '').replace(/\s+/g, ' ').trim()
@@ -124,7 +141,7 @@ export async function selectCategory(page, category, opts = {}) {
   await sleep(2000)
 
   // 点「确认发布该类商品」
-  const cp = await page.evaluate(() => {
+  const cp = await safeEval(() => {
     const btns = [...document.querySelectorAll('button, a, div, span')]
       .map(e => {
         const r = e.getBoundingClientRect()
@@ -154,11 +171,34 @@ export async function selectCategory(page, category, opts = {}) {
     await sleep(1000)
   }
 
-  // 等规格区渲染
-  for (let i = 0; i < 15; i++) {
-    await sleep(1500)
-    const ready = await page.evaluate(() => !!document.querySelector('#goods-spec-sku')).catch(() => false)
+  // ★ 2026-10-30：等表单页**完全就绪**（不只是 URL 变了）
+  //   判定三件事同时成立：
+  //     ① 规格区容器 #goods-spec-sku 存在
+  //     ② 标题输入框存在（说明基本信息区渲染完）
+  //     ③ 「添加规格类型」按钮 或 预置规格行 至少有一个
+  //   之前只等 ①，导致段4 一上来就找不到按钮、截图失败。
+  let ready = false
+  for (let i = 0; i < 40; i++) {
+    await sleep(1000)
+    ready = await safeEval(() => {
+      const hasSpecBox = !!document.querySelector('#goods-spec-sku')
+      const hasTitle = !!document.querySelector('input[placeholder*="商品标题组成"]')
+      const hasAddBtn = [...document.querySelectorAll('button, div, span, a')].some(e => {
+        const t = (e.innerText || '').trim()
+        const r = e.getBoundingClientRect()
+        return /^添加规格类型|^添加规格/.test(t) && r.width > 20
+      })
+      const hasSpecRow = !!document.querySelector('#goods-spec-sku .property-container-v2, #goods-spec-sku .goods-spec-row')
+      return hasSpecBox && hasTitle && (hasAddBtn || hasSpecRow)
+    }).catch(() => false)
     if (ready) break
   }
+  if (ready) {
+    log('  表单页完全就绪')
+    await sleep(1500)   // 再稳一下，等 React 渲染完
+  } else {
+    log('  ⚠ 表单页 40s 内未完全就绪，仍尝试继续')
+  }
+
   return page
 }

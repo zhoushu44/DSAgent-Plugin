@@ -221,14 +221,28 @@ try {
   const cost = Math.round((Date.now() - t0) / 1000)
 
   if (submitResult.ok) {
-    // ══════ 成功 → 沉淀类目模板（下次同目录直接复用属性） ══════
+    // ══════ 成功 → 沉淀类目模板（采集页面真实结构，供下次复用） ══════
     try {
-      const dims = (product.specs || []).map(d => ({
-        user: d.name,
-        page: d.name,          // 首次记录时页面维度名等同上架成功后的定名
-        type: '',              // 由下次实际填写时补全
-      }))
-      // 只沉淀「实际上架成功的属性」——从 filled 里解析出 名称=值 的项
+      // ★ 关键：上架成功后从**页面**采集真实维度结构，而不是用商品 JSON 的维度名
+      //   这样模板里存的是「页面维度名 + 填写类型 + 类目路径 + catId」，
+      //   下次同目录可以直接按模板填，不用重新探测。
+      const { scanDims, alignDims } = await import('./spec-dims.mjs')
+      const pageInfo = await scanDims(work).catch(() => ({ dims: [] }))
+      const pageDims = pageInfo?.dims || []
+
+      // 类目路径：从表单页 #goods-category 读回；catId 从 URL 的 id 参数取
+      const catePath = await work.evaluate(() => {
+        const el = document.querySelector('#goods-category')
+        return (el?.innerText || '').replace(/\s+/g, ' ').trim()
+      }).catch(() => '')
+      const catId = (submitResult.url.match(/[?&]id=(\d+)/) || [])[1] || tpl?.catId || ''
+
+      // 维度映射：优先页面对齐结果（含 type），拿不到才退回商品 JSON
+      const dims = pageDims.length
+        ? alignDims(pageDims, product.specs || [])
+        : (product.specs || []).map(d => ({ user: d.name, page: d.name, type: '' }))
+
+      // 只沉淀「实际上架成功的属性」
       const attrFromFilled = flowResult.filled
         .filter(s => /^[^=]+=/.test(s) && !/^(标题|参考价|类目|主图|详情图|SKU|发货方式|发货时间|运费模板|库存|拼单价|单买价)/.test(s))
         .map(s => {
@@ -238,15 +252,16 @@ try {
         .filter(a => a.name && a.value && a.name.length <= 20)
 
       saveTemplate(catKey, {
-        catId: (submitResult.url.match(/[?&]id=(\d+)/) || [])[1] || tpl?.catId || '',
-        catePath: tpl?.catePath || '',
+        catId,
+        catePath: catePath && catePath !== '商品分类' ? catePath : (tpl?.catePath || ''),
         dims,
         requiredAttrs: attrFromFilled,
         price: product.price || '',
         stock: product.stock || '',
         goodsId: submitResult.goodsId,
       })
-      log(`[template] 已沉淀「${catKey}」：属性 ${attrFromFilled.length} 条`)
+      log(`[template] 已沉淀「${catKey}」：catId=${catId || '?'} catePath="${catePath || '?'}" `
+        + `维度 ${dims.map(d => `${d.user}→${d.page}(${d.type || '?'})`).join('/')} 属性 ${attrFromFilled.length} 条`)
     } catch (e) {
       log(`[template] 沉淀失败（不影响上架）：${e.message}`)
     }

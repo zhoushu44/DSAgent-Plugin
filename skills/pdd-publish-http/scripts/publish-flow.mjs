@@ -117,13 +117,68 @@ export async function publishFlow(page, product, opts = {}) {
   // ① 尺码表停用（服装类目才有，其他类目自动 false）
   if (await disableSizeChart(page)) log('  已停用尺码表')
 
-  // ② 规格
+  // ② 规格（★ 2026-10-30：视觉识别优先，失败回退 lib 老逻辑）
+  //
+  //   为什么视觉优先：拼多多各类目规格区结构完全不同
+  //     服装 → 颜色分类（色值卡片，输入后必须失焦才提交）
+  //     纸杯 → 容量（纯文本输入 + 回车）
+  //     手机壳 → 型号（下拉/输入）
+  //     抱枕 → 尺寸（纯文本输入）
+  //   写死任何一种都会挂，所以先截图让视觉模型看，按它的 strategy 填。
   if (specs.length) {
-    const r = await fillSkuSpecMulti(page, specs, skuRows, category)
-    filled.push(...(r.filled || []))
-    missed.push(...(r.missed || []))
-    log(`  规格 → 已填 ${r.filled?.length || 0} 项，未填 ${r.missed?.length || 0} 项`)
-    await sleep(1500)
+    let usedVision = false
+    if (opts.useVision !== false) {
+      try {
+        const { fillDimByVision } = await import('./vision-fill.mjs')
+        // ★★ 2026-10-30 用户点醒：「一维输入好，二维才能选」
+        //   正确顺序必须是 **每个维度：建行 → 立即填完值 → 再建下一个**。
+        //   之前是「建行1 → 建行2 → 填值1 → 填值2」，第二个维度建的时候
+        //   第一个维度还没填值，页面没进入「可添加下一维」的状态 → 按钮消失/截图失败。
+        for (let di = 0; di < specs.length; di++) {
+          const sp = specs[di]
+          const vals = (sp.values || []).map(v => (v && typeof v === 'object') ? v : { value: String(v) })
+          log(`  填第 ${di + 1}/${specs.length} 维「${sp.name}」（${vals.length} 个值）`)
+          const vr = await fillDimByVision(page, sp.name, vals, { log })
+          if (vr.filled?.length) {
+            filled.push(...vr.filled)
+            usedVision = true
+          }
+          if (vr.missed?.length) {
+            log(`    ⚠ 本维未完成 ${vr.missed.length} 项`)
+          }
+          // ★ 填完这一维后，等页面稳定再进下一维（关键！）
+          if (di < specs.length - 1) {
+            log(`    等页面稳定后建下一维…`)
+            await sleep(2500)
+            // 等「添加规格类型」按钮重新出现
+            for (let w = 0; w < 12; w++) {
+              const btnReady = await page.evaluate(() => {
+                return [...document.querySelectorAll('button, div, span, a')].some(e => {
+                  const t = (e.innerText || '').trim()
+                  const r = e.getBoundingClientRect()
+                  return /^添加规格类型|^添加规格/.test(t) && r.width > 20
+                })
+              }).catch(() => false)
+              if (btnReady) break
+              await sleep(1000)
+            }
+            await sleep(1000)
+          }
+        }
+        if (usedVision) log(`  规格（视觉）→ 已填 ${filled.filter(f => specs.some(s => f.startsWith(s.name + '='))).length} 项`)
+      } catch (e) {
+        log(`  视觉填规格异常：${e.message.slice(0, 80)}，回退 lib 逻辑`)
+      }
+    }
+
+    // 兜底：lib 已验证逻辑（视觉没用上时才跑，避免重复填）
+    if (!usedVision) {
+      const r = await fillSkuSpecMulti(page, specs, skuRows, category)
+      filled.push(...(r.filled || []))
+      missed.push(...(r.missed || []))
+      log(`  规格（lib）→ 已填 ${r.filled?.length || 0} 项，未填 ${r.missed?.length || 0} 项`)
+      await sleep(1500)
+    }
   } else if (skuRows.length) {
     const r = await fillSkuSpec(page, skuRows, { category })
     filled.push(...(r.filled || []))
@@ -142,6 +197,24 @@ export async function publishFlow(page, product, opts = {}) {
     missed.push(...(r.missed || []))
     log(`  价格库存 → 已填 ${r.filled?.length || 0} 项，未填 ${r.missed?.length || 0} 项`)
     await sleep(1500)
+  }
+
+  // ③.5 SKU 预览图（独立组件）
+  //   ★ 2026-10-30：手机壳等类目**强制要求**每行预览图，缺了平台会拦
+  //     「请上传第N行规格的预览图后重新操作」。
+  //   放在价格表之后：此时行结构已稳定（价格表填充会重建行 DOM）。
+  if (specs.length && skuRows.length) {
+    try {
+      const { fillSkuThumbs } = await import('./sku-thumb.mjs')
+      const r = await fillSkuThumbs(page, product, { log })
+      filled.push(...(r.filled || []))
+      missed.push(...(r.missed || []))
+      log(`  SKU 预览图 → 已填 ${r.filled?.length || 0} 项，未填 ${r.missed?.length || 0} 项`)
+    } catch (e) {
+      missed.push(`SKU 预览图（异常：${e.message}）`)
+      log(`  SKU 预览图异常：${e.message.slice(0, 80)}`)
+    }
+    await sleep(1200)
   }
 
   // ④ 商品属性（★ 必须在价格表之后，属性下拉重渲染会冲掉前面的填写）

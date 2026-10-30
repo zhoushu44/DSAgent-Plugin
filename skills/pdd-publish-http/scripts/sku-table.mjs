@@ -1,20 +1,218 @@
 /**
- * 发布组件 · SKU 表（库存 / 拼单价 / 单买价 / 参考价）
+ * SKU 组件 · ② 价格表（极简通用版）
  *
- * ★ SKU ≠ 规格：
- *   规格决定表结构，SKU 填表格里的价格库存。
+ * ★★ 核心（2026-10-30 用户点醒：SKU 最简单）★★
  *
- * ★ 设计原则：只 re-export lib 里已验证的 fillPriceTable，不改逻辑。
+ *   表格结构（真机实测）：
+ *     thead: [型号][颜色][*库存][*拼单价][*单买价][*预览图][规格编码][状态]
+ *     tbody 每行：颜色列用 rowspan 合并，所以同一型号的 2 行里只有第 1 行有「型号」td
  *
- *   lib 的 fillPriceTable 已实现：
- *     · 按「拼单价」表头定位 table
- *     · 逐行填 库存 / 拼单价 / 单买价
- *     · JS setter 优先 + 键盘兜底 + 回读验证
+ *   但**每行的 input 数量是一样的**：每行有 3 个 text input（库存/拼单价/单买价）
+ *   + 可能 1 个 file input（预览图）。
  *
- *   注意：lib 版是按**行索引**逐行填，实测能成功上架。
- *   我另写的 sku-table.mjs（按 rowspan 继承 key 定位）留作实验版，
- *   待对比验证通过后再替换。
+ *   所以最简单可靠的做法：
+ *     ✓ 遍历 tbody 的每个 tr（顺序 = SKU 顺序）
+ *     ✓ 取该 tr 里的 text input（排除 file）
+ *     ✓ 第 0 个填库存、第 1 个填拼单价、第 2 个填单买价
+ *
+ *   不需要：
+ *     ✗ 列索引（rowspan 会错位）
+ *     ✗ window.__pddSkuCols helper（没装就全废）
+ *     ✗ 行文本匹配（同色行文本重复）
  */
-export {
-  fillPriceTable,  // 填 SKU 表价格/库存
-} from '../../../lib/pdd-publish.js'
+import { jsClick, jsBlur, sleep } from './spec-dims.mjs'
+
+/** 找 SKU 表（含「拼单价」表头的 table） */
+async function findSkuTable(page) {
+  return page.evaluate(() => {
+    const tb = [...document.querySelectorAll('table')].find(t => /拼单价/.test(t.textContent || ''))
+    if (!tb) return null
+    const heads = [...tb.querySelectorAll('thead th')].map(th => th.textContent.trim())
+    return { heads, rows: tb.querySelectorAll('tbody tr').length }
+  }).catch(() => null)
+}
+
+/**
+ * 在指定行的第 ord 个 text input 里填值
+ * @param ord 0=库存 1=拼单价 2=单买价
+ */
+async function setCell(page, rowIdx, ord, value) {
+  const v = String(value ?? '')
+
+  // ① JS setter（快）
+  const jsOk = await page.evaluate((ri, o, val) => {
+    const tb = [...document.querySelectorAll('table')].find(t => /拼单价/.test(t.textContent || ''))
+    const tr = [...(tb?.querySelectorAll('tbody tr') || [])][ri]
+    if (!tr) return false
+    const inputs = [...tr.querySelectorAll('input')].filter(i => i.type !== 'file')
+    const el = inputs[o]
+    if (!el) return false
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set
+    if (!setter) return false
+    setter.call(el, val)
+    el.dispatchEvent(new Event('input', { bubbles: true }))
+    el.dispatchEvent(new Event('change', { bubbles: true }))
+    el.dispatchEvent(new Event('blur', { bubbles: true }))
+    return true
+  }, rowIdx, ord, v).catch(() => false)
+  await sleep(180)
+
+  const readBack = () => page.evaluate((ri, o) => {
+    const tb = [...document.querySelectorAll('table')].find(t => /拼单价/.test(t.textContent || ''))
+    const tr = [...(tb?.querySelectorAll('tbody tr') || [])][ri]
+    if (!tr) return ''
+    const inputs = [...tr.querySelectorAll('input')].filter(i => i.type !== 'file')
+    return inputs[o]?.value || ''
+  }, rowIdx, ord).catch(() => '')
+
+  let back = await readBack()
+  if (String(back).trim() === v) return { ok: true, via: 'js', back }
+
+  // ② 键盘兜底（真实事件）
+  const pos = await page.evaluate((ri, o) => {
+    const tb = [...document.querySelectorAll('table')].find(t => /拼单价/.test(t.textContent || ''))
+    const tr = [...(tb?.querySelectorAll('tbody tr') || [])][ri]
+    if (!tr) return null
+    tr.scrollIntoView({ block: 'center' })
+    const inputs = [...tr.querySelectorAll('input')].filter(i => i.type !== 'file')
+    const el = inputs[o]
+    if (!el) return null
+    const r = el.getBoundingClientRect()
+    if (r.width < 5) return null
+    return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }
+  }, rowIdx, ord).catch(() => null)
+  if (!pos) return { ok: false, via: 'no-pos', back }
+
+  await sleep(250)
+  await jsClick(page, pos.x, pos.y)
+  await sleep(180)
+  await page.keyboard.down('Control').catch(() => {})
+  await page.keyboard.press('KeyA').catch(() => {})
+  await page.keyboard.up('Control').catch(() => {})
+  await page.keyboard.press('Backspace').catch(() => {})
+  await sleep(80)
+  await page.keyboard.type(v, { delay: 35 }).catch(() => {})
+  await sleep(150)
+  await page.keyboard.press('Enter').catch(() => {})
+  await sleep(400)
+
+  back = await readBack()
+  return { ok: String(back).trim() === v, via: 'keyboard', back }
+}
+
+/**
+ * 填价格表（库存 + 拼单价 + 单买价）
+ *
+ * @param opts {
+ *   price: 默认拼单价,
+ *   stock: 默认库存,
+ *   rows:  [{ price, stock, single }] 每行覆盖值（按 SKU 顺序）
+ * }
+ * @returns { rows, filled, missed: [], detail }
+ */
+export async function fillPriceTable(page, opts = {}) {
+  const defPrice = String(opts.price || '29.9')
+  const defStock = String(opts.stock || '999')
+  const rowOverrides = opts.rows || []
+
+  // ★ 2026-10-30：等 SKU 表出现（规格填完后表格是异步生成的）
+  //   判定：存在含「拼单价」表头且 tbody 有行的 table
+  let info = null
+  for (let w = 0; w < 20; w++) {
+    info = await findSkuTable(page)
+    if (info && info.rows > 0) break
+    await sleep(1000)
+  }
+  if (!info || !info.rows) {
+    return { rows: 0, filled: 0, missed: ['价格表（30s 内 SKU 表未出现）'], detail: [] }
+  }
+
+  const filled = []
+  const missed = []
+  const detail = []
+
+  for (let ri = 0; ri < info.rows; ri++) {
+    const ov = rowOverrides[ri] || {}
+    const rowPrice = String(ov.price || defPrice)
+    // ★ 单买价 = 该行拼单价 + 1；平台要求严格 >1 元，取 +1.01（两位小数）
+    const pNum = parseFloat(rowPrice) || 0
+    const rowSingle = ov.single ? String(ov.single) : (Math.round((pNum + 1.01) * 100) / 100).toFixed(2)
+    const rowStock = String(ov.stock || defStock)
+
+    const cells = []
+    for (const [name, ord, val] of [
+      ['库存', 0, rowStock],
+      ['拼单价', 1, rowPrice],
+      ['单买价', 2, rowSingle],
+    ]) {
+      const r = await setCell(page, ri, ord, val)
+      if (r.ok) filled.push(`第${ri + 1}行${name}=${val}`)
+      else missed.push(`第${ri + 1}行${name}（${r.via}）`)
+      cells.push({ name, ord, want: val, back: r.back, ok: r.ok, via: r.via })
+    }
+    detail.push({ row: ri, cells })
+  }
+
+  return { rows: info.rows, filled, missed, detail }
+}
+
+/**
+ * 读价格表当前快照（校验用）
+ */
+export async function readPriceSnapshot(page) {
+  return page.evaluate(() => {
+    const tb = [...document.querySelectorAll('table')].find(t => /拼单价/.test(t.textContent || ''))
+    if (!tb) return []
+    return [...tb.querySelectorAll('tbody tr')].map((tr, ri) => {
+      const inputs = [...tr.querySelectorAll('input')].filter(i => i.type !== 'file')
+      return {
+        row: ri,
+        stock: inputs[0]?.value || '',
+        price: inputs[1]?.value || '',
+        single: inputs[2]?.value || '',
+      }
+    })
+  }).catch(() => [])
+}
+
+/**
+ * 填参考价
+ */
+export async function fillRefPrice(page, refPrice) {
+  const v = String(refPrice || '')
+  if (!v) return false
+
+  const scrolled = await page.evaluate(() => {
+    let inp = [...document.querySelectorAll('input')].find(e => /大于/.test(e.placeholder || ''))
+    if (!inp) return false
+    inp.scrollIntoView({ block: 'center' })
+    window.__refInp = inp
+    return true
+  }).catch(() => false)
+  if (!scrolled) return false
+  await sleep(800)
+
+  const pos = await page.evaluate(() => {
+    const inp = window.__refInp
+    if (!inp || !inp.isConnected) return null
+    const r = inp.getBoundingClientRect()
+    if (r.width < 20 || r.y < 0) return null
+    return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }
+  }).catch(() => null)
+  if (!pos) return false
+
+  await jsClick(page, pos.x, pos.y)
+  await sleep(400)
+  await page.keyboard.down('Control').catch(() => {})
+  await page.keyboard.press('KeyA').catch(() => {})
+  await page.keyboard.up('Control').catch(() => {})
+  await page.keyboard.press('Backspace').catch(() => {})
+  await page.keyboard.type(v, { delay: 45 }).catch(() => {})
+  await sleep(300)
+  await page.keyboard.press('Enter').catch(() => {})
+  await sleep(600)
+  await jsBlur(page)
+
+  const back = await page.evaluate(() => window.__refInp?.value || '').catch(() => '')
+  return String(back).trim() === v || String(back).includes(v)
+}
