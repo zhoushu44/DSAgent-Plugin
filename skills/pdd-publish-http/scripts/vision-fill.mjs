@@ -460,39 +460,83 @@ export async function fillDimByVision(page, dimName, values, opts = {}) {
 
     for (let attempt = 0; attempt < 4 && !ok; attempt++) {
       const useStrategy = strategies[attempt % strategies.length]
-      // 每轮重新定位（页面重渲染后旧坐标失效）
+
+      // ★ 2026-10-30 提速：**JS setter 优先**（比键盘快 5-10 倍）
+      //   规格值输入框是普通 text input，React 受控组件用原生 setter + input/change 事件即可。
+      //   JS 不生效时才退回真实键盘（键盘慢但最保险）。
+      const jsDone = await page.evaluate((dn, idx, val) => {
+        const root = document.querySelector('#goods-spec-sku')
+        if (!root) return false
+        const rows = [...root.querySelectorAll('.property-container-v2, .goods-spec-row')]
+        let target = null
+        for (const r of rows) {
+          const t = (r.querySelector('.property-name-title')?.textContent
+            || r.querySelector('[class*="sizeStandardWrapper_title"]')?.textContent
+            || r.querySelector('input[placeholder^="规格类型"]')?.value || '').trim()
+          if (t && (t === dn || t.includes(dn) || dn.includes(t))) { target = r; break }
+        }
+        if (!target) target = rows[0]
+        if (!target) return false
+        const inputs = [...target.querySelectorAll('input')].filter(e => {
+          const p = e.placeholder || ''
+          if (p.startsWith('规格类型')) return false
+          if (/排序|备注|搜索/.test(p)) return false
+          if (e.type && e.type !== 'text') return false
+          const r = e.getBoundingClientRect()
+          return r.width > 20 && r.height > 10
+        })
+        const empty = inputs.filter(e => !(e.value || '').trim())
+        const el = empty[Math.min(idx, empty.length - 1)] || inputs[Math.min(idx, inputs.length - 1)]
+        if (!el) return false
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set
+        if (!setter) return false
+        el.focus()
+        setter.call(el, val)
+        el.dispatchEvent(new Event('input', { bubbles: true }))
+        el.dispatchEvent(new Event('change', { bubbles: true }))
+        return true
+      }, dimName, i, v).catch(() => false)
+
+      if (jsDone) {
+        await sleep(300)
+        // JS 填完立即触发提交动作（Enter 最快）
+        await page.keyboard.press('Enter').catch(() => {})
+        await sleep(600)
+        ok = await dimHasValue(page, dimName, v)
+        if (ok) continue
+        // JS 没生效 → 走键盘兜底
+      }
+
+      // 键盘兜底（真实事件，最保险）
       const pos = await findInputInDim(page, dimName, i, analysis?.element_hints || [])
       if (!pos) {
         log(`[vision] 「${v}」第 ${attempt + 1} 次：找不到输入框`)
-        await sleep(1500)
+        await sleep(800)
         continue
       }
 
-      // 点击 → 清空 → 输入
       await page.mouse.click(pos.x, pos.y).catch(() => {})
-      await sleep(400)
+      await sleep(250)
       await page.keyboard.down('Control').catch(() => {})
       await page.keyboard.press('KeyA').catch(() => {})
       await page.keyboard.up('Control').catch(() => {})
       await page.keyboard.press('Backspace').catch(() => {})
-      await sleep(120)
-      // 慢速输入（更快触发平台的下拉/校验）
-      await page.keyboard.type(v, { delay: 80 }).catch(() => {})
-      await sleep(600)
+      await sleep(80)
+      // ★ 提速：delay 从 80 降到 20
+      await page.keyboard.type(v, { delay: 20 }).catch(() => {})
+      await sleep(350)
 
-      // 触发提交
       if (useStrategy === 'type-and-enter') {
         await page.keyboard.press('Enter').catch(() => {})
       } else {
         await page.evaluate(() => document.activeElement?.blur?.()).catch(() => {})
-        await sleep(250)
+        await sleep(150)
         await clickBlankInSpecArea(page).catch(() => {})
-        await sleep(250)
+        await sleep(150)
         await page.keyboard.press('Tab').catch(() => {})
       }
-      await sleep(1500)
+      await sleep(800)
 
-      // 校验：该维度内出现这个值
       ok = await dimHasValue(page, dimName, v)
       if (!ok) log(`[vision] 「${v}」第 ${attempt + 1} 次未成功（策略 ${useStrategy}）`)
     }

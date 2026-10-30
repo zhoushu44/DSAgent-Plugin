@@ -112,7 +112,7 @@ async function setCell(page, rowIdx, ord, value) {
  */
 export async function fillPriceTable(page, opts = {}) {
   const defPrice = String(opts.price || '29.9')
-  const defStock = String(opts.stock || '999')
+  const defStock = String(opts.stock || '100')   // ★ 2026-10-30 用户定：每个 SKU 默认库存 100
   const rowOverrides = opts.rows || []
 
   // ★ 2026-10-30：等 SKU 表出现（规格填完后表格是异步生成的）

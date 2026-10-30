@@ -51,7 +51,7 @@ export async function publishFlow(page, product, opts = {}) {
 
   const title = String(product.title || '').trim()
   const price = String(product.price || '').trim()
-  const stock = String(product.stock || '999')
+  const stock = String(product.stock || '100')   // ★ 2026-10-30 用户定：每个 SKU 默认库存 100
   const itemNo = String(product.itemNo || '').trim()
   const category = String(product.category || '').trim()
   const images = product.images || []
@@ -217,12 +217,23 @@ export async function publishFlow(page, product, opts = {}) {
     await sleep(1200)
   }
 
-  // ④ 商品属性（★ 必须在价格表之后，属性下拉重渲染会冲掉前面的填写）
+  // ④ 商品属性
+  //   ★ 2026-10-30 用户定：「没给属性才走 AI 一键填充」
+  //     · 用户给了 attributes → 用 lib 已验证逻辑（显式值匹配 + 别名展开）
+  //     · 没给 attributes → 截图属性区+主图 → AI 一次对话返回 JSON → 按 JSON 填
   try {
-    const r = await fillAttributes(page, { title, category, model: opts.attrModel, values: attributes })
-    filled.push(...(r.filled || []))
-    missed.push(...(r.missed || []))
-    log(`  属性 → 已填 ${r.filled?.length || 0} 项，未填 ${r.missed?.length || 0} 项`)
+    if (attributes.length) {
+      const r = await fillAttributes(page, { title, category, model: opts.attrModel, values: attributes }, { log })
+      filled.push(...(r.filled || []))
+      missed.push(...(r.missed || []))
+      log(`  属性（用户值）→ 已填 ${r.filled?.length || 0} 项，未填 ${r.missed?.length || 0} 项`)
+    } else {
+      const { fillAttrsWithAI } = await import('./attr-ai-fill.mjs')
+      const r = await fillAttrsWithAI(page, { title, category, images: product.images }, { log })
+      filled.push(...(r.filled || []))
+      missed.push(...(r.missed || []))
+      log(`  属性（AI 一键）→ 已填 ${r.filled?.length || 0} 项，未填 ${r.missed?.length || 0} 项`)
+    }
   } catch (e) {
     missed.push(`商品属性（异常：${e.message}）`)
   }

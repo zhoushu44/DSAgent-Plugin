@@ -19,22 +19,27 @@ export async function openPublishEntry(page, opts = {}) {
   log('段1 打开商品列表')
 
   await page.goto(LIST_URL, { waitUntil: 'domcontentloaded', timeout: 60000 })
-  await sleep(5000)
-
-  // 找「发布新商品」按钮（排除左侧导航里的同名项）
-  const pt = await page.evaluate(() => {
-    const NAV = 'nav, aside, [class*="sidenav"], [class*="sideNav"], [class*="menu"]'
-    const els = [...document.querySelectorAll('button, a, div, span')]
-      .filter(el => (el.innerText || '').trim() === '发布新商品' && !el.closest(NAV))
-    const el = els.find(e => e.tagName === 'BUTTON') || els[els.length - 1]
-    if (!el) return null
-    const r = el.getBoundingClientRect()
-    return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }
-  })
+  // ★ 2026-10-30 优化：把固定 5s 等待改成轮询（等到按钮出现就继续，最多 8s）
+  let pt = null
+  for (let w = 0; w < 16; w++) {
+    await sleep(500)
+    pt = await page.evaluate(() => {
+      const NAV = 'nav, aside, [class*="sidenav"], [class*="sideNav"], [class*="menu"]'
+      const els = [...document.querySelectorAll('button, a, div, span')]
+        .filter(el => (el.innerText || '').trim() === '发布新商品' && !el.closest(NAV))
+      const el = els.find(e => e.tagName === 'BUTTON') || els[els.length - 1]
+      if (!el) return null
+      const r = el.getBoundingClientRect()
+      if (r.width < 20 || r.y < 0 || r.y > window.innerHeight) return null
+      return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }
+    }).catch(() => null)
+    if (pt) break
+  }
   if (!pt) throw new Error('找不到「发布新商品」按钮')
 
   await page.mouse.click(pt.x, pt.y)
-  await sleep(5000)
+  // ★ 轮询等类目页/表单页（原来固定 5s，改成等到 URL 变化）
+  await sleep(1500)
   return page
 }
 
@@ -50,10 +55,10 @@ export async function waitForPublishPage(browser, opts = {}) {
     const hit = pages.find(p => /goods\/(category|goods_add)/.test(String(p.url() || '')))
     if (hit) {
       await hit.bringToFront()
-      await sleep(3000)
+      await sleep(2000)   // ★ 从 3s 降到 2s
       return hit
     }
-    await sleep(1000)
+    await sleep(500)   // ★ 从 1s 降到 500ms
   }
   throw new Error('类目页/表单页未出现')
 }
@@ -159,16 +164,25 @@ export async function selectCategory(page, category, opts = {}) {
     await page.mouse.click(cp.x, cp.y)
     log('  点了确认')
   }
-  await sleep(8000)
+  // ★ 2026-10-30 优化：把固定 8s 等待改成轮询（等 URL 变到 goods_add，最多 12s）
+  {
+    const t0 = Date.now()
+    while (Date.now() - t0 < 12000) {
+      await sleep(500)
+      const pages = await page.browser().pages()
+      const hit = pages.find(p => /goods_add\/index/.test(String(p.url() || '')))
+      if (hit) { await hit.bringToFront(); break }
+    }
+  }
 
   // 等表单页
-  const deadline = Date.now() + 30000
+  const deadline = Date.now() + 20000   // ★ 从 30s 降到 20s
   while (Date.now() < deadline) {
     if (/goods_add\/index/.test(String(page.url() || ''))) break
     const pages = await page.browser().pages()
     const hit = pages.find(p => /goods_add\/index/.test(String(p.url() || '')))
     if (hit) { await hit.bringToFront(); break }
-    await sleep(1000)
+    await sleep(500)   // ★ 从 1s 降到 500ms
   }
 
   // ★ 2026-10-30：等表单页**完全就绪**（不只是 URL 变了）
@@ -195,7 +209,7 @@ export async function selectCategory(page, category, opts = {}) {
   }
   if (ready) {
     log('  表单页完全就绪')
-    await sleep(1500)   // 再稳一下，等 React 渲染完
+    await sleep(800)   // ★ 从 1500 降到 800（React 已渲染完，不需要再等）
   } else {
     log('  ⚠ 表单页 40s 内未完全就绪，仍尝试继续')
   }
