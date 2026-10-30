@@ -141,11 +141,52 @@ const puppeteer = require('puppeteer-core')
 const { openPublishEntry, waitForPublishPage, selectCategory } = await import('./stage-nav.mjs')
 const { publishFlow } = await import('./publish-flow.mjs')
 const { submitAndVerify } = await import('./stage-submit.mjs')
+const { findTemplate, saveTemplate } = await import('./category-template.mjs')
 
 const shopKey = account
 if (!shopKey) {
   emit({ ok: false, failureKind: 'api_error', text: '缺少 --account（shopKey）' })
   process.exit(2)
+}
+
+// ══════ 类目模板：上架前读取，用于预填属性 ══════
+const catKey = String(product.category || categoryKw || '').trim()
+let tpl = null
+try {
+  tpl = findTemplate(catKey)
+  if (tpl) {
+    log(`[template] 命中类目模板「${catKey}」：已成功 ${tpl.successCount || 0} 次，`
+      + `属性 ${(tpl.requiredAttrs || []).length} 条，规格 ${(tpl.dims || []).length} 维`)
+  } else {
+    log(`[template] 无「${catKey}」模板，本次从头探测（成功后自动沉淀）`)
+  }
+} catch (e) {
+  log(`[template] 读取失败（忽略）：${e.message}`)
+}
+
+// 用模板属性补全商品属性：商品里没给的、模板里有的 → 用模板值
+// （商品自带属性优先，模板只补空缺 —— 避免覆盖本次真实数据）
+if (tpl?.requiredAttrs?.length) {
+  const norm = s => String(s || '').replace(/\s+/g, '')
+  const have = new Set((product.attributes || []).map(a => norm(a.name)))
+  const added = []
+  for (const a of tpl.requiredAttrs) {
+    const n = norm(a?.name)
+    if (!n || have.has(n)) continue
+    // 跳过「商品货号」这类一物一码的字段（模板值对本次无意义）
+    if (/货号|商品编码|规格编码|商家编码/.test(n)) continue
+    product.attributes = product.attributes || []
+    product.attributes.push({ name: a.name, value: a.value })
+    added.push(a.name)
+    have.add(n)
+  }
+  if (added.length) log(`[template] 从模板补全 ${added.length} 条属性：${added.join('、')}`)
+}
+
+// 用模板价格兜底（商品没给 price 时才用）
+if (!product.price && tpl?.price) {
+  product.price = String(tpl.price)
+  log(`[template] 用模板价格兜底：${product.price}`)
 }
 
 const PROFILE = path.join(homedir(), '.dsh', 'browser-profiles', 'accounts', shopKey)
@@ -180,6 +221,36 @@ try {
   const cost = Math.round((Date.now() - t0) / 1000)
 
   if (submitResult.ok) {
+    // ══════ 成功 → 沉淀类目模板（下次同目录直接复用属性） ══════
+    try {
+      const dims = (product.specs || []).map(d => ({
+        user: d.name,
+        page: d.name,          // 首次记录时页面维度名等同上架成功后的定名
+        type: '',              // 由下次实际填写时补全
+      }))
+      // 只沉淀「实际上架成功的属性」——从 filled 里解析出 名称=值 的项
+      const attrFromFilled = flowResult.filled
+        .filter(s => /^[^=]+=/.test(s) && !/^(标题|参考价|类目|主图|详情图|SKU|发货方式|发货时间|运费模板|库存|拼单价|单买价)/.test(s))
+        .map(s => {
+          const i = s.indexOf('=')
+          return { name: s.slice(0, i).replace(/（.*?）$/, '').trim(), value: s.slice(i + 1).trim() }
+        })
+        .filter(a => a.name && a.value && a.name.length <= 20)
+
+      saveTemplate(catKey, {
+        catId: (submitResult.url.match(/[?&]id=(\d+)/) || [])[1] || tpl?.catId || '',
+        catePath: tpl?.catePath || '',
+        dims,
+        requiredAttrs: attrFromFilled,
+        price: product.price || '',
+        stock: product.stock || '',
+        goodsId: submitResult.goodsId,
+      })
+      log(`[template] 已沉淀「${catKey}」：属性 ${attrFromFilled.length} 条`)
+    } catch (e) {
+      log(`[template] 沉淀失败（不影响上架）：${e.message}`)
+    }
+
     emit({
       ok: true,
       shopKey,
