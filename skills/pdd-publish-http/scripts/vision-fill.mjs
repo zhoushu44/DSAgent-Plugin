@@ -595,6 +595,38 @@ export async function fillDimByVision(page, dimName, values, opts = {}) {
     else missed.push(`${dimName}=${v}（4 次未提交成功）`)
   }
 
+  // ★ 2026-10-31：填完后**补勾所有「有值但未勾选」的规格行**
+  //   实测收纳盒：3 尺寸 × 2 颜色应 6 项，实际只填 5 项 —— 少一个是因为某行 checkbox 没勾
+  try {
+    const fixed = await page.evaluate(() => {
+      const root = document.querySelector('#goods-spec-sku') || document.querySelector('#newSpec')
+      if (!root) return 0
+      let n = 0
+      for (const row of root.querySelectorAll('.package-item-container, [class*="package-item"]')) {
+        const cb = row.querySelector('input[type=checkbox]')
+        if (!cb || cb.checked || cb.disabled) continue
+        // 只勾「有值」的行
+        const hasVal = [...row.querySelectorAll('input[type=text], input:not([type])')]
+          .some(e => (e.value || '').trim() && !(e.placeholder || '').includes('备注'))
+        if (hasVal) { cb.click(); n++ }
+      }
+      // ★ 也用 beast-core 的 data-checked 判断
+      for (const wrapper of root.querySelectorAll('[data-testid="beast-core-checkbox"][data-checked="0"]')) {
+        const cb = wrapper.querySelector('input[type=checkbox]')
+        if (cb && !cb.disabled) {
+          const row = wrapper.closest('.package-item-container') || wrapper.parentElement
+          const hasVal = row ? [...row.querySelectorAll('input')].some(e => (e.value || '').trim() && !(e.placeholder || '').includes('备注')) : false
+          if (hasVal) { wrapper.click(); n++ }
+        }
+      }
+      return n
+    }).catch(() => 0)
+    if (fixed > 0) {
+      log(`[vision] 补勾 ${fixed} 个未勾选的规格行`)
+      await sleep(500)
+    }
+  } catch { /* ignore */ }
+
   return { filled, missed, analysis }
 }
 

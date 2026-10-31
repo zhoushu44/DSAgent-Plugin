@@ -379,7 +379,7 @@
   },
   "毛巾": {
     "catId": "205041314615",
-    "catePath": "商品分类 居家日用 > 毛巾/浴巾/浴袍 > 毛巾/面巾 修改分类",
+    "catePath": "",
     "dims": [
       {
         "user": "尺寸",
@@ -438,11 +438,188 @@
       {
         "name": "抗菌等级",
         "value": "1A抗菌"
+      },
+      {
+        "name": "尺寸",
+        "value": "80x160cm"
+      },
+      {
+        "name": "颜色",
+        "value": "蓝色"
+      },
+      {
+        "name": "功能",
+        "value": "透气"
+      },
+      {
+        "name": "流行元素",
+        "value": "纯色"
+      },
+      {
+        "name": "使用对象",
+        "value": "纸巾"
       }
     ],
     "price": "",
     "stock": "100",
-    "updatedAt": "2026-10-31T07:45:01.187Z",
-    "successCount": 14
+    "updatedAt": "2026-10-31T08:39:04.173Z",
+    "successCount": 15,
+    "goodsId": ""
+  },
+  "水杯": {
+    "catId": "205049623165",
+    "catePath": "",
+    "dims": [
+      {
+        "user": "容量",
+        "page": "容量",
+        "type": "custom-input",
+        "checkboxCount": 0
+      }
+    ],
+    "requiredAttrs": [
+      {
+        "name": "产地",
+        "value": "中国大陆"
+      },
+      {
+        "name": "品牌",
+        "value": "无品牌/无注册商标"
+      },
+      {
+        "name": "外身材质",
+        "value": "201不锈钢"
+      },
+      {
+        "name": "内胆材质种类",
+        "value": "201不锈钢"
+      },
+      {
+        "name": "保温时长",
+        "value": "6h以下"
+      },
+      {
+        "name": "风格",
+        "value": "运动"
+      },
+      {
+        "name": "是否带茶隔",
+        "value": "不带茶隔"
+      },
+      {
+        "name": "杯盖款式",
+        "value": "弹跳式"
+      },
+      {
+        "name": "杯子种类",
+        "value": "大肚杯"
+      },
+      {
+        "name": "是否显示温度",
+        "value": "不显示温度"
+      },
+      {
+        "name": "适用场景",
+        "value": "运动"
+      },
+      {
+        "name": "附加功能",
+        "value": "防滑"
+      },
+      {
+        "name": "包装方式",
+        "value": "普通盒装"
+      },
+      {
+        "name": "服务承诺",
+        "value": "假一赔十"
+      },
+      {
+        "name": "容量",
+        "value": "1000ml"
+      },
+      {
+        "name": "材质",
+        "value": "皮革"
+      },
+      {
+        "name": "功能",
+        "value": "可折叠"
+      },
+      {
+        "name": "流行元素",
+        "value": "透明"
+      },
+      {
+        "name": "使用对象",
+        "value": "碗筷"
+      }
+    ],
+    "price": "",
+    "stock": "100",
+    "updatedAt": "2026-10-31T08:36:44.503Z",
+    "successCount": 2,
+    "goodsId": ""
+  },
+  "收纳盒": {
+    "catId": "205049841846",
+    "catePath": "",
+    "dims": [
+      {
+        "user": "尺寸",
+        "page": "尺寸",
+        "type": "custom-input",
+        "checkboxCount": 0
+      },
+      {
+        "user": "颜色",
+        "page": "颜色",
+        "type": "custom-input",
+        "checkboxCount": 0
+      }
+    ],
+    "requiredAttrs": [
+      {
+        "name": "品牌",
+        "value": "无品牌/无注册商标"
+      },
+      {
+        "name": "功能",
+        "value": "分格"
+      },
+      {
+        "name": "流行元素",
+        "value": "透明"
+      },
+      {
+        "name": "使用对象",
+        "value": "文具"
+      },
+      {
+        "name": "适用场景",
+        "value": "办公室"
+      },
+      {
+        "name": "服务承诺",
+        "value": "假一赔十"
+      },
+      {
+        "name": "材质",
+        "value": "皮革"
+      },
+      {
+        "name": "尺寸",
+        "value": "大号"
+      },
+      {
+        "name": "颜色",
+        "value": "灰色"
+      }
+    ],
+    "price": "",
+    "stock": "100",
+    "updatedAt": "2026-10-31T08:37:28.638Z",
+    "successCount": 4,
+    "goodsId": ""
   }
 }

@@ -52,8 +52,10 @@ export async function publishFlow(page, product, opts = {}) {
   const stock = String(product.stock || '100')   // ★ 2026-10-30 用户定：每个 SKU 默认库存 100
 
   // ★ 2026-10-31 用户定：**商品参考价默认 = 最大 SKU 拼单价 + 1**
-  //   平台要求参考价 > 最大单买价，所以取 max(price) + 1 最稳妥。
-  //   product.price 显式给了就用显式的（用户可覆盖）。
+  //   ★ 但平台校验是「参考价应大于商品最大**单买价**」，
+  //     而单买价 = 拼单价 + 1.01 → 所以参考价至少要 = max(拼单价) + 1.02
+  //     实测：拼单价 29.9 → 单买价 30.91 → 参考价 30.9 被拒，必须 >= 30.91
+  //   改成 max(拼单价) + 1.01 + 0.01 = max + 1.02，向上取 2 位小数
   let price = String(product.price || '').trim()
   {
     const allPrices = (product.skus || [])
@@ -61,15 +63,17 @@ export async function publishFlow(page, product, opts = {}) {
       .filter(n => Number.isFinite(n) && n > 0)
     if (allPrices.length) {
       const maxPrice = Math.max(...allPrices)
-      const autoRef = Math.round((maxPrice + 1) * 100) / 100
+      // 最大单买价 = max(拼单价) + 1.01；参考价需严格大于它
+      const maxSingle = Math.round((maxPrice + 1.01) * 100) / 100
+      const autoRef = Math.round((maxSingle + 0.01) * 100) / 100
       if (!price) {
         price = String(autoRef)
-        log(`  参考价未指定 → 自动取「最大SKU价 ${maxPrice} + 1 = ${price}」`)
+        log(`  参考价未指定 → 自动取「最大SKU拼单价 ${maxPrice} → 最大单买价 ${maxSingle} → 参考价 ${price}」`)
       } else {
-        // 显式给了但低于 max+1 时，仍按用户给的（只提示）
         const given = parseFloat(price)
-        if (Number.isFinite(given) && given <= maxPrice) {
-          log(`  ⚠ 参考价 ${price} <= 最大SKU价 ${maxPrice}，平台可能拦；建议 ${autoRef}`)
+        if (Number.isFinite(given) && given <= maxSingle) {
+          log(`  ⚠ 参考价 ${price} <= 最大单买价 ${maxSingle}，平台会拦；已自动改为 ${autoRef}`)
+          price = String(autoRef)
         }
       }
     }
@@ -335,20 +339,33 @@ export async function publishFlow(page, product, opts = {}) {
       log(`[attr] ${missing.length} 个字段用户未提供，走 AI 从候选里选`)
       const aiPicked = await pickAttrValuesByAI(page, missing, { title, category }, { log })
       Object.assign(wantValues, aiPicked)
+    }
 
-      // ★ 2026-10-30 用户要求「重要是必填的」：
-      //   AI 没选中的**必填字段**，必须兜底取候选第一个可用值，不能留空。
-      const stillMissingRequired = missing.filter(
-        f => f.required && !wantValues[f.name] && f.options?.length
+    // ★ 2026-10-31 修复：兜底要覆盖**所有必填字段**，不只是 missing 里的
+    //   实测收纳盒：用户给了「材质=塑料」，但候选里没有「塑料」→ 既不在 missing 也没兜底 → 必填留空
+    const stillMissingRequired = fields.filter(
+      f => f.required && f.options?.length && (
+        !wantValues[f.name] ||
+        // 用户值不在候选里也要兜底
+        !f.options.some(o => o === wantValues[f.name] || o.includes(wantValues[f.name]) || wantValues[f.name].includes(o))
       )
-      for (const f of stillMissingRequired) {
+    )
+    for (const f of stillMissingRequired) {
+      // 优先保留用户值（如果是候选的子集关系）
+      const uv = wantValues[f.name]
+      let fallback = null
+      if (uv) {
+        fallback = f.options.find(o => o === uv || o.includes(uv) || uv.includes(o)) || null
+      }
+      if (!fallback) {
         // 跳过明显不合适的候选
         const usable = f.options.filter(o => !/^(请选择|其他|其它)$/.test(o))
-        const fallback = usable[0] || f.options[0]
-        if (fallback) {
-          wantValues[f.name] = fallback
-          log(`[attr] ★必填「${f.name}」AI 未选中 → 兜底取「${fallback}」`)
-        }
+        fallback = usable[0] || f.options[0]
+      }
+      if (fallback) {
+        const changed = uv && fallback !== uv
+        wantValues[f.name] = fallback
+        log(`[attr] ★必填「${f.name}」${changed ? `用户值「${uv}」不在候选 → 兜底取「${fallback}」` : `未选中 → 兜底取「${fallback}」`}`)
       }
     }
 
@@ -383,6 +400,13 @@ export async function publishFlow(page, product, opts = {}) {
             if (fn.startsWith(un) && fn.length - un.length <= 2) { uv = v; break }
           }
         }
+        // ★ 2026-10-31：第2轮起，如果用户值不在候选里，改用 wantValues 里的兜底值
+        if (uv && f.options?.length) {
+          const inOptions = f.options.some(o => o === uv || o.includes(uv) || uv.includes(o))
+          if (!inOptions && wantValues[f.name]) {
+            uv = wantValues[f.name]   // 用兜底值
+          }
+        }
         if (uv) roundValues[f.name] = uv
       }
 
@@ -412,7 +436,15 @@ export async function publishFlow(page, product, opts = {}) {
       const r = await fillAttributesGeneric(page, roundValues, { log })
       for (const f of r.filled || []) if (!filled.includes(f)) filled.push(f)
       for (const m of r.missed || []) if (!missed.includes(m)) missed.push(m)
-      for (const k of Object.keys(roundValues)) doneFields.add(k)
+
+      // ★ 2026-10-31 修复：只把**成功**的字段加入 doneFields
+      //   失败的要留给下一轮重试（实测收纳盒：材质第1轮用「塑料」失败，
+      //   因被标记为 done，第2轮没机会用兜底值「皮革」重试）
+      const okNames = new Set((r.filled || []).map(f => String(f).split('=')[0]))
+      for (const k of Object.keys(roundValues)) {
+        if (okNames.has(k)) doneFields.add(k)
+        else log(`[attr] 「${k}」本轮失败，下一轮重试`)
+      }
 
       // 本轮全失败 → 不再重试
       if (!r.filled?.length) break
@@ -484,6 +516,19 @@ export async function publishFlow(page, product, opts = {}) {
     log(`  发货售后 → 已填 ${r.filled?.length || 0} 项，未填 ${r.missed?.length || 0} 项`)
   } catch (e) {
     missed.push(`发货与售后（异常：${e.message}）`)
+  }
+
+  // ⑥ 服务承诺（★ 2026-10-31：某些类目强制要求勾选「7天无理由退货」）
+  //   毛巾类目实测：不勾提交报「该类商品，必须支持【7天无理由退换货】服务」
+  try {
+    const { fillServiceCommitments } = await import('./field-service.mjs')
+    const r = await fillServiceCommitments(page, { log })
+    filled.push(...(r.filled || []))
+    missed.push(...(r.missed || []))
+    log(`  服务承诺 → 已勾选 ${r.filled?.length || 0} 项，未勾选 ${r.missed?.length || 0} 项`)
+  } catch (e) {
+    missed.push(`服务承诺（异常：${e.message}）`)
+    log(`  服务承诺异常：${e.message.slice(0, 80)}`)
   }
 
   return { filled, missed }

@@ -68,6 +68,26 @@ export async function submitAndVerify(page, opts = {}) {
     return { ok: true, goodsId, url: finalUrl, errors: [] }
   }
 
+  // ★ 2026-10-31 重要修复：`错误（0）` = **没有错误**，商品可能已提交成功但页面未跳转。
+  //   实测毛巾：提交后停在同一页，弹窗显示「错误（0）| 建议 | 商品属性 填写属性，获取流量」，
+  //   但商品列表里确实出现了新商品（1023496708207，因内容问题被驳回）。
+  //   所以「错误（0）」时必须再查一次商品列表确认。
+  const errCount = await page.evaluate(() => {
+    const m = (document.body?.innerText || '').match(/错误（(\d+)）/)
+    return m ? parseInt(m[1], 10) : 0
+  }).catch(() => 0)
+
+  if (errCount === 0) {
+    // 查商品列表最近商品，看是否创建成功
+    log('  错误（0）：页面未跳转但无校验错误，查商品列表确认…')
+    const check = await verifyCreatedInList(page, opts).catch(() => null)
+    if (check?.ok) {
+      log(`  ✅ 商品已创建 goods_id=${check.goodsId}${check.status ? `（${check.status}）` : ''}`)
+      return { ok: true, goodsId: check.goodsId, url: finalUrl, errors: [], note: check.status }
+    }
+    log('  ⚠ 商品列表未找到新商品，判定为未成功')
+  }
+
   // 失败：抓错误详情
   const diag = await page.evaluate(() => {
     const bodyText = document.body?.innerText || ''
@@ -87,4 +107,45 @@ export async function submitAndVerify(page, opts = {}) {
   if (diag.panelText) log(`  填写建议: ${diag.panelText}`)
 
   return { ok: false, goodsId, url: finalUrl, errors: diag.errors || [], panelText: diag.panelText }
+}
+
+/**
+ * 查商品列表，确认商品是否创建成功
+ * @returns { ok, goodsId, status }
+ */
+async function verifyCreatedInList(page, opts = {}) {
+  const title = String(opts.productTitle || opts.title || '').trim()
+  const newPage = await page.browser().newPage().catch(() => null)
+  if (!newPage) return null
+  try {
+    await newPage.goto('https://mms.pinduoduo.com/goods/goods_list', { waitUntil: 'domcontentloaded', timeout: 30000 })
+    await sleep(4000)
+    const found = await newPage.evaluate((wantTitle) => {
+      const text = document.body.innerText || ''
+      // 找「商品ID：xxx」+「商品标题：xxx」的组合
+      const m = text.match(/商品ID\s*[：:]\s*(\d+)\s*商品标题\s*[：:]\s*([^\n]+)/g) || []
+      for (const line of m) {
+        const idMatch = line.match(/商品ID\s*[：:]\s*(\d+)/)
+        const titleMatch = line.match(/商品标题\s*[：:]\s*([^\n]+)/)
+        if (!idMatch) continue
+        const t = (titleMatch?.[1] || '').trim()
+        // 标题前 8 个字匹配即可
+        if (wantTitle && t && (t.includes(wantTitle.slice(0, 8)) || wantTitle.includes(t.slice(0, 8)))) {
+          // 找该商品的状态/驳回原因
+          const idx = text.indexOf(line)
+          const after = text.slice(idx, idx + 400)
+          const rejectMatch = after.match(/驳回原因[：:]\s*([^\n]+)/)
+          return {
+            goodsId: idMatch[1],
+            title: t,
+            status: rejectMatch ? `驳回：${rejectMatch[1].slice(0, 80)}` : '已创建',
+          }
+        }
+      }
+      return null
+    }, title).catch(() => null)
+    return found ? { ok: true, ...found } : null
+  } finally {
+    await newPage.close().catch(() => {})
+  }
 }
