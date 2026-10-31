@@ -18,7 +18,9 @@ metadata:
 | 纸杯 | 1 维（容量 mL） | `1023381759702` 真实上架 ✅ | 8/9 | 4/4 ✅ | — |
 | 手机壳 | 2 维（型号×颜色）+ 级联 | `1023382208344` 真实上架 ✅ | 8/8 | 6/6 ✅ | — |
 | 抱枕 | 1 维（尺寸）+ 级联 | `1023385539665` 真实上架 ✅ | 16/16 | 12/12 ✅ | — |
-| 毛巾 | 2 维（尺寸×颜色）**全新类目** | 第1次 229s / **第2次 63s** | 25→35 | 6/6 ✅ | **提速 54%** |
+| 毛巾 | 2 维（尺寸×颜色）**全新类目** | 第1次 229s / **第2次 63s**（真实提交 `1023496708207`） | 25→35 | 6/6 ✅ | **提速 54%** |
+| 水杯 | 1 维（容量）**全新类目** | 155s | 28 | **8/8 ✅** | — |
+| 收纳盒 | 2 维（尺寸×颜色）**全新类目** | 58s | 39 | **4/4 ✅** | — |
 
 **毛巾两次运行证明模板复用 + 性能优化有效：**
 ```
@@ -45,11 +47,66 @@ node scripts/publish-v2.mjs --product-file <product.json> --account <shopKey> --
 
 ---
 
+## 一点五、批量上架（batch-publish.mjs）
+
+### 用法
+
+```bash
+# 目录结构：每个子目录一个 product.json
+# batches/
+#   ├── item1/product.json
+#   ├── item2/product.json
+#   └── item3/product.json
+
+# 仅填表（人工核对，不提交）
+node scripts/batch-publish.mjs --dir <目录> --account <shopKey> --no-submit
+
+# 真实提交
+node scripts/batch-publish.mjs --dir <目录> --account <shopKey> --confirm
+```
+
+### 行为
+
+```
+for each product.json:
+  ① 查类目模板（命中则用 catId 直达 + 属性补全）
+  ② 启动独立浏览器（避免 Profile 锁冲突）
+  ③ 段1→段4 完整填表
+  ④ （--confirm 时）提交并验证
+  ⑤ 沉淀模板
+  ⑥ 关闭浏览器 + 清理 Profile 锁
+  ⑦ 等 3 秒再处理下一个
+```
+
+### 输出
+
+- 每个商品的耗时/已填项数/结果
+- 汇总 `成功 N/M`
+- `batch-results.json`（结构化结果）
+
+### 实测（3 个商品）
+
+```
+✅ bottle: 110s | 已填 34 项
+✅ box:     41s | 已填 35 项
+✅ towel:   92s | 已填 30 项
+成功 3/3
+```
+
+### 注意
+
+- **每个商品独立浏览器进程**：Profile 是互斥的，不能多开
+- **串行执行**：不并行，因为共用同一个店铺账号
+- 单个失败不影响后续（catch 后继续）
+
+---
+
 ## 二、段4 正确顺序（不可改）
 
 ```
 ① 规格（逐行 + 补勾）→ ② 价格库存 → ③ SKU 预览图 → ④ 属性（多轮级联）
-→ ⑤ 【补】价格库存（新增行）→ ⑥ 【补】SKU 预览图（新增行）→ 段5 提交
+→ ⑤ 【补】价格库存（新增行）→ ⑥ 【补】SKU 预览图（新增行）
+→ ⑦ 发货售后 → ⑧ 服务承诺 → 段5 提交
 ```
 
 **为什么要有 ⑤⑥**：属性级联会让 SKU 表**新增行**（抱枕 2→3 行）。
@@ -242,11 +299,54 @@ single = (price + 1.01).toFixed(2)
 
 | 项 | 规则 |
 |---|---|
-| **参考价** | **默认 = `max(SKU 拼单价) + 1`**（平台要求 > 最大单买价）<br>例：毛巾 SKU 价 19.9/29.9 → 参考价 **30.9**<br>`product.price` 显式给了就用显式的 |
+| **参考价** | **默认 = `max(SKU 拼单价) + 1.02`**<br>原因：平台校验「参考价应大于商品最大**单买价**」，而单买价 = 拼单价 + 1.01<br>例：毛巾 SKU 价 19.9/29.9 → 最大单买价 30.91 → 参考价 **30.92**<br>`product.price` 显式给了且合规就用显式的，否则自动修正 |
 | 默认库存 | **100**（每 SKU） |
 | 默认发货时间 | **48 小时** |
 | 主图数量 | **按输入全量**（1-10 张，不写死 5） |
 | 提交判定 | `错误（0）` 不算错，只有 `错误（N>0）` 才停 |
+
+---
+
+## 七点五、服务承诺（field-service.mjs）
+
+### 为什么需要
+
+某些类目**强制要求**勾选「7天无理由退货」，不勾提交报：
+```
+该类商品，必须支持【7天无理由退换货】服务
+```
+纸杯/手机壳/抱枕默认已勾选，**毛巾类目需要手动勾**（2026-10-31 实测）。
+
+### 真机结构（beast-core checkbox）
+
+```html
+<label class="CBX_outerWrapper CBX_checkbox CBX_active CBX_disabled"
+       data-testid="beast-core-checkbox" data-checked="1">
+  <input type="checkbox" checked disabled style="display:none">
+  ...
+</label>
+```
+
+**关键**：`input` 是**隐藏的**（`w=0 h=0`），真实选中状态在 `data-checked` 属性上。
+- `data-checked="1"` + `CBX_disabled` → 平台强制勾选且禁用（视为已完成）
+- `data-checked="0"` 且未禁用 → 需要勾选
+
+### 判定逻辑
+
+```js
+const dataChecked = wrapper?.getAttribute('data-checked')
+const isChecked = dataChecked === '1' || cb.checked
+const isDisabled = cb.disabled || /CBX_disabled/.test(wrapper?.className)
+```
+
+### 扫描方式（通用，不写死文案）
+
+```
+① 找所有含「必须支持/强制要求/必须勾选/该类商品」的提示
+② 从提示向上找 5 层容器，找该容器内的 checkbox
+③ 未勾选 + 未禁用 → 点击 label（不是 input）
+④ 校验 data-checked 变为 "1"
+```
 
 ---
 
@@ -359,6 +459,8 @@ lib 版写死服装类目文案，非服装类目填 0 项。改为：
 | 文件 | 职责 |
 |---|---|
 | `publish-v2.mjs` | 主入口（参数解析 + 浏览器 + 5 段编排 + 模板沉淀） |
+| `batch-publish.mjs` | 批量上架（扫描目录 + 逐个处理 + 汇总） |
+| `field-service.mjs` | 服务承诺（7天无理由等强制勾选项） |
 | `publish-flow.mjs` | 段3+段4 组件编排 |
 | `stage-nav.mjs` | 段1 打开列表 + 段2 选类目 |
 | `stage-submit.mjs` | 段5 提交 + 校验 |
