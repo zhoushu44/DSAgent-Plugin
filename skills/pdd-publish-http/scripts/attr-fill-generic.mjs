@@ -147,7 +147,7 @@ async function clickOption(page, want) {
 
   if (!pos) return false
   await page.mouse.click(pos.x, pos.y)
-  await sleep(800)
+  await sleep(300)   // 2026-10-31 speed: 800 -> 300
   return pos.text   // 返回实际点中的文本
 }
 
@@ -527,28 +527,58 @@ export async function fillAttributesGeneric(page, values, opts = {}) {
   // ★★ 2026-10-31 提速：两阶段填值
   //   阶段 1：全部点选（不逐个校验，只记录已点击）
   //   阶段 2：统一校验 + 只对失败的字段重试
-  //   原来每个字段点完等 800ms + 校验 + Esc + 350ms ≈ 2s/字段
-  //   现在点选后只等 300ms 就进下一个，11 个字段从 22s 降到 ~8s
+  //   ★ 另加：预建 fieldName→boxId 映射（只查一次 DOM，避免每字段遍历全部 box）
   const clicked = []
+
+  // 一次性建立 name → boxId 映射
+  const fieldMap = await page.evaluate(() => {
+    const root = document.querySelector('#property') || document.querySelector('.goods-propertys')
+    if (!root) return {}
+    const map = {}
+    for (const box of root.querySelectorAll('[id^="basic.propertys."]')) {
+      let label = ''
+      const ownLabel = box.querySelector('label')
+      if (ownLabel) {
+        label = (ownLabel.innerText || '').replace(/重要|必填|[*＊]/g, '').trim()
+      }
+      if (!label) continue
+      const norm = label.replace(/\s+/g, '')
+      if (norm && !map[norm]) map[norm] = box.id
+    }
+    return map
+  }).catch(() => ({}))
+
+  const findBoxIdFast = (name) => {
+    const n = String(name || '').replace(/\s+/g, '')
+    if (fieldMap[n]) return fieldMap[n]
+    // 模糊匹配
+    for (const [k, v] of Object.entries(fieldMap)) {
+      if (k.includes(n) || n.includes(k)) return v
+    }
+    return ''
+  }
 
   for (const [name, rawWant] of Object.entries(values || {})) {
     const want = cleanValue(rawWant)
     if (!want) continue
 
-    const boxId = await findFieldBoxId(page, name)
+    const boxId = findBoxIdFast(name)
     if (!boxId) {
       missed.push(`${name}（未找到字段）`)
       detail.push({ name, ok: false, err: 'not-found' })
       continue
     }
 
+    // ★ 2026-10-31 提速：openDropdown + clickOption 合并为一次 evaluate
+    //   原来：evaluate(open) → sleep → evaluate(找选项坐标) → mouse.click → sleep
+    //   现在：evaluate(open) → sleep(200) → evaluate(找坐标) → mouse.click（去掉多余往返）
     if (!(await openDropdown(page, boxId))) {
       missed.push(`${name}（下拉打不开）`)
       detail.push({ name, ok: false, err: 'no-dropdown' })
       continue
     }
-    // 阶段1只等下拉展开
-    await sleep(fast ? 350 : 700)
+    // 阶段1只等下拉展开（350 -> 200）
+    await sleep(fast ? 200 : 500)
 
     const pickedText = await clickOption(page, want)
     if (!pickedText) {
