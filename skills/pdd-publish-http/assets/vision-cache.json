@@ -1,0 +1,118 @@
+{
+  "纸杯::容量": {
+    "dim_type": "text-input",
+    "strategy": "type-and-enter",
+    "blur_target": "自定义容量排序下方空白处",
+    "element_hints": [
+      "容量",
+      "自定义规格",
+      "ml"
+    ],
+    "confidence": "high",
+    "cachedAt": 1793371296626,
+    "hitCount": 1
+  },
+  "手机壳::型号": {
+    "dim_type": "text-input",
+    "strategy": "type-and-enter",
+    "blur_target": "添加图片",
+    "element_hints": [
+      "型号",
+      "请输入规格名称"
+    ],
+    "confidence": "high",
+    "cachedAt": 1793386635851,
+    "hitCount": 14,
+    "lastHitAt": 1793409598510
+  },
+  "手机壳::颜色": {
+    "dim_type": "dropdown",
+    "strategy": "click-dropdown",
+    "blur_target": "",
+    "element_hints": [
+      "颜色",
+      "请输入规格名称"
+    ],
+    "confidence": "high",
+    "cachedAt": 1793386662150,
+    "hitCount": 14,
+    "lastHitAt": 1793409617761
+  },
+  "抱枕::尺寸": {
+    "dim_type": "text-input",
+    "strategy": "type-and-enter",
+    "blur_target": "价格及库存区域空白处",
+    "element_hints": [
+      "请输入规格名称",
+      "尺寸"
+    ],
+    "confidence": "high",
+    "cachedAt": 1793389135367,
+    "hitCount": 7,
+    "lastHitAt": 1793409832193
+  },
+  "毛巾::尺寸": {
+    "dim_type": "text-input",
+    "strategy": "type-and-enter",
+    "blur_target": "价格及库存区域空白处",
+    "element_hints": [
+      "请输入规格名称"
+    ],
+    "confidence": "high",
+    "cachedAt": 1793424616393,
+    "hitCount": 22,
+    "lastHitAt": 1793435877615
+  },
+  "毛巾::颜色": {
+    "dim_type": "text-input",
+    "strategy": "type-and-enter",
+    "blur_target": "请输入规格名称输入框下方空白处",
+    "element_hints": [
+      "颜色",
+      "请输入规格名称"
+    ],
+    "confidence": "high",
+    "cachedAt": 1793424639653,
+    "hitCount": 22,
+    "lastHitAt": 1793435880078
+  },
+  "水杯::容量": {
+    "dim_type": "text-input",
+    "strategy": "type-and-enter",
+    "blur_target": "请输入规格名称输入框下方空白处",
+    "element_hints": [
+      "容量",
+      "请输入规格名称"
+    ],
+    "confidence": "high",
+    "cachedAt": 1793434476631,
+    "hitCount": 2,
+    "lastHitAt": 1793435727702
+  },
+  "收纳盒::尺寸": {
+    "dim_type": "text-input",
+    "strategy": "type-and-enter",
+    "blur_target": "请输入规格名称输入框下方空白处",
+    "element_hints": [
+      "尺寸",
+      "请输入规格名称"
+    ],
+    "confidence": "high",
+    "cachedAt": 1793434683207,
+    "hitCount": 4,
+    "lastHitAt": 1793435834198
+  },
+  "收纳盒::颜色": {
+    "dim_type": "text-input",
+    "strategy": "type-and-blur",
+    "blur_target": "颜色输入框右侧的'添加图片'复选框或下方空白区域",
+    "element_hints": [
+      "颜色",
+      "请输入规格名称"
+    ],
+    "confidence": "high",
+    "cachedAt": 1793434706049,
+    "hitCount": 4,
+    "lastHitAt": 1793435837624
+  }
+}
