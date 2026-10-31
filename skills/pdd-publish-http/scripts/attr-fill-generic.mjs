@@ -147,7 +147,7 @@ async function clickOption(page, want) {
 
   if (!pos) return false
   await page.mouse.click(pos.x, pos.y)
-  await sleep(300)   // 2026-10-31 speed: 800 -> 300
+  await sleep(80)   // 2026-10-31 speed: 300 -> 80（阶段2统一等待）
   return pos.text   // 返回实际点中的文本
 }
 
@@ -577,8 +577,8 @@ export async function fillAttributesGeneric(page, values, opts = {}) {
       detail.push({ name, ok: false, err: 'no-dropdown' })
       continue
     }
-    // 阶段1只等下拉展开（350 -> 200）
-    await sleep(fast ? 200 : 500)
+    // 阶段1只等下拉展开（200 -> 100）
+    await sleep(fast ? 100 : 400)
 
     const pickedText = await clickOption(page, want)
     if (!pickedText) {

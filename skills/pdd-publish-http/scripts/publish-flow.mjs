@@ -234,7 +234,7 @@ export async function publishFlow(page, product, opts = {}) {
     filled.push(...(r.filled || []))
     missed.push(...(r.missed || []))
     log(`  价格库存 → 已填 ${r.filled?.length || 0} 项，未填 ${r.missed?.length || 0} 项`)
-    await sleep(2000)   // 等表格重渲染
+    await sleep(600)   // 2026-10-31 speed: 2000 -> 600（表格重渲染很快）
   }
 
   // ③ SKU 预览图（★ 在价格库存之后，等行数到预期）
@@ -249,7 +249,7 @@ export async function publishFlow(page, product, opts = {}) {
       missed.push(`SKU 预览图（异常：${e.message}）`)
       log(`  SKU 预览图异常：${e.message.slice(0, 80)}`)
     }
-    await sleep(1200)
+    await sleep(400)   // 2026-10-31 speed: 1200 -> 400
   }
 
   // ④ 商品属性
