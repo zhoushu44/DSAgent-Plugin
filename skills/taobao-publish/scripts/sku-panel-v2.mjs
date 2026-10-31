@@ -32,11 +32,12 @@ const sleep = ms => new Promise(r => setTimeout(r, ms))
  */
 export async function detectNewSkuPanel(page) {
   return page.evaluate(() => {
-    const box = document.getElementById('struct-sku') || document.getElementById('struct-saleProp')
-    if (!box) return false
-    return [...box.querySelectorAll('button, a, div, span')].some(el => {
-      const e = el
-      return e.offsetParent !== null && /^\s*\+\s*创建规格/.test((e.innerText || '').trim())
+    // ★ 全页查找（不限定 #struct-sku / #struct-saleProp）：
+    //   实测在「基础信息」页时这两个容器不存在，但「+ 创建规格」按钮可见。
+    const all = [...document.querySelectorAll('button, a, div, span')]
+    return all.some(el => {
+      if (el.offsetParent === null) return false
+      return /^\s*\+\s*创建规格/.test((el.innerText || '').trim())
     })
   }).catch(() => false)
 }
