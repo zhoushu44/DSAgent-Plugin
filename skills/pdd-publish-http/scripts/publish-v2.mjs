@@ -196,23 +196,58 @@ const t0 = Date.now()
 let browser = null
 
 try {
-  browser = await puppeteer.launch({
-    executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe',
-    headless: false,
-    userDataDir: PROFILE,
-    defaultViewport: null,
-    args: ['--no-sandbox', '--disable-blink-features=AutomationControlled', '--start-maximized'],
-    ignoreDefaultArgs: ['--enable-automation'],
-    protocolTimeout: 3600000,
-  })
+  // ★ 2026-10-30：优先连接**已打开的浏览器**（用户正在看的窗口），不新开
+  //   这样用户能实时看到操作过程，不会出现「日志说做了但页面没变化」的错位。
+  const portFile = path.join(PROFILE, 'DevToolsActivePort')
+  let connected = false
+  if (fs.existsSync(portFile)) {
+    try {
+      const port = fs.readFileSync(portFile, 'utf8').split('\n')[0].trim()
+      browser = await puppeteer.connect({
+        browserURL: `http://127.0.0.1:${port}`,
+        defaultViewport: null,
+      })
+      connected = true
+      log(`已连接现有浏览器（端口 ${port}），在当前页面继续`)
+    } catch (e) {
+      log(`连接现有浏览器失败：${e.message.slice(0, 60)}，改为新开`)
+    }
+  }
+  if (!connected) {
+    browser = await puppeteer.launch({
+      executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe',
+      headless: false,
+      userDataDir: PROFILE,
+      defaultViewport: null,
+      args: ['--no-sandbox', '--disable-blink-features=AutomationControlled', '--start-maximized'],
+      ignoreDefaultArgs: ['--enable-automation'],
+      protocolTimeout: 3600000,
+    })
+    log('新开浏览器窗口')
+  }
 
-  const page = (await browser.pages())[0] || await browser.newPage()
+  // 优先用「已打开的 goods_add 页面」；没有才新开
+  let page = null
+  if (connected) {
+    const pages = await browser.pages()
+    page = pages.find(p => /goods_add|goods_list/.test(String(p.url() || '')))
+      || pages.find(p => /pinduoduo/.test(String(p.url() || '')))
+      || pages[0]
+    if (page) log('使用已打开页面: ' + String(page.url()).slice(0, 80))
+  }
+  if (!page) {
+    page = (await browser.pages())[0] || await browser.newPage()
+  }
 
   // 段1
-  await openPublishEntry(page, { log })
-  // 段2（★ 老类目用 catId 直达，省 5s）
+  if (!connected) {
+    await openPublishEntry(page, { log })
+  } else {
+    log('连接模式：跳过段1 导航，直接使用当前页面')
+  }
+  // 段2（★ 老类目用 catId 直达，省 5s；连接模式下由 stage-nav 自动跳过直达）
   let work = await waitForPublishPage(browser, { log })
-  work = await selectCategory(work, product.category || categoryKw, { log, catId: tpl?.catId || '' })
+  work = await selectCategory(work, product.category || categoryKw, { log, catId: tpl?.catId || '', connected })
 
   // 段3 + 段4
   const flowResult = await publishFlow(work, product, { log })
@@ -220,6 +255,56 @@ try {
   // ★ 2026-10-30：--no-submit 模式 → 不点提交，保留页面供人工核对
   if (noSubmit) {
     const cost = Math.round((Date.now() - t0) / 1000)
+
+    // ★ 2026-10-31：--no-submit 也沉淀模板（字段已填对，值得复用）
+    //   否则第 2 次同类目还要从头探测（实测毛巾两次都从零开始）
+    try {
+      const { scanDims, alignDims } = await import('./spec-dims.mjs')
+      // ★ scanDims 返回 { dims: [...] }，不是数组
+      const scanResult = await scanDims(work).catch(() => ({ dims: [] }))
+      const pageDims = Array.isArray(scanResult) ? scanResult : (scanResult?.dims || [])
+      const dims = alignDims(pageDims, product.specs || [])
+      const catePath = await work.evaluate(() => {
+        const el = document.querySelector('#goods-category, [class*="categoryPath"], [class*="category-path"]')
+        return el?.innerText?.replace(/\s+/g, ' ').trim() || ''
+      }).catch(() => '')
+      const catId = (String(work.url()).match(/[?&]id=(\d+)/) || [])[1] || ''
+
+      const ATTR_EXCLUDE = /^(标题|参考价|类目|主图|详情图|SKU|发货方式|发货时间|运费模板|库存|拼单价|单买价|第\d+行|颜色|尺寸|容量|型号|款式|尺码|规格)/
+      const attrFromFilled = (flowResult.filled || [])
+        .filter(s => /^[^=]+=/.test(s) && !ATTR_EXCLUDE.test(s))
+        .map(s => {
+          const i = s.indexOf('=')
+          return {
+            name: s.slice(0, i).replace(/（.*?）$/, '').trim(),
+            value: s.slice(i + 1).replace(/（.*?）$/, '').trim(),
+          }
+        })
+        .filter(a => a.name && a.value && a.name.length <= 20 && a.value.length <= 40)
+        .filter(a => !/^第\d+行/.test(a.name))
+
+      // 去重（多轮会重复）
+      const seen = new Set()
+      const uniqAttrs = attrFromFilled.filter(a => {
+        const k = a.name + '=' + a.value
+        if (seen.has(k)) return false
+        seen.add(k)
+        return true
+      })
+
+      saveTemplate(catKey, {
+        catId,
+        catePath: catePath && catePath !== '商品分类' ? catePath : '',
+        dims,
+        requiredAttrs: uniqAttrs,
+        price: product.price || '',
+        stock: product.stock || '',
+      })
+      log(`[template] ✅ --no-submit 也沉淀模板「${catKey}」：catId=${catId || '?'} 维度 ${dims.length} 属性 ${uniqAttrs.length}`)
+    } catch (e) {
+      log(`[template] 沉淀失败（不影响填表）：${e.message.slice(0, 80)}`)
+    }
+
     log('')
     log('════════════════════════════════════════')
     log('  ★ --no-submit 模式：已填完，未点提交')

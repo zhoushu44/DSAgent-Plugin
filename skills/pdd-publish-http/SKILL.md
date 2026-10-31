@@ -11,39 +11,98 @@ metadata:
 
 # 拼多多 · HTTP 逆向上架
 
-## ★ 多类目实测：3 类目全通过（2026-10-30，`--no-submit` 核对模式）
+## ★ 多类目实测（2026-10-31 最新，真实上架 + AI 看图为证）
 
-| 类目 | 规格形态 | 填写率 | SKU 行数 | 属性 | 必填 |
+| 类目 | 规格形态 | goods_id / 结果 | 属性 | 必填 | 耗时 |
 |---|---|---|---|---|---|
-| 纸杯 | 1 维（容量 mL） | 88% | 3 | 8/9 | 4/4 ✅ |
-| 手机壳 | 2 维（型号×颜色） | 87% | 6 | 8/8 | 4/4 ✅ |
-| 抱枕 | 1 维（尺寸） | 87% | 3 | 16/16 | 12/12 ✅ |
+| 纸杯 | 1 维（容量 mL） | `1023381759702` 真实上架 ✅ | 8/9 | 4/4 ✅ | — |
+| 手机壳 | 2 维（型号×颜色）+ 级联 | `1023382208344` 真实上架 ✅ | 8/8 | 6/6 ✅ | — |
+| 抱枕 | 1 维（尺寸）+ 级联 | `1023385539665` 真实上架 ✅ | 16/16 | 12/12 ✅ | — |
+| 毛巾 | 2 维（尺寸×颜色）**全新类目** | 第1次 229s / 第2次 137s | 25→34 | 6/6 ✅ | **省 40%** |
 
-历史成功上架 goods_id：睡衣 `1022912465571`、纸杯 `1022955237163`、手机壳 `1023046067508`、抱枕 `1023056507980`
+**毛巾两次运行证明模板复用有效：**
+```
+第 1 次：[template] 无「毛巾」模板，本次从头探测
+        [template] ✅ 沉淀模板：catId=205041314615 维度 2 属性 11
+第 2 次：[template] 命中模板（2 维 / 11 属性）
+        [template] 从模板补全 10 条属性
+        用 catId=205041314615 直达表单页 → 直达页已就绪
+```
 
-### 段4 正确顺序（不要改）
+---
+
+## 一、推荐入口
+
+```bash
+# 填到提交前（人工核对，浏览器保留 30 分钟）
+node scripts/publish-v2.mjs --product-file <product.json> --account <shopKey> --confirm true --no-submit true
+
+# 真正上架
+node scripts/publish-v2.mjs --product-file <product.json> --account <shopKey> --confirm true
+```
+
+---
+
+## 二、段4 正确顺序（不可改）
 
 ```
-① 规格（逐行）→ ② 价格库存 → ③ SKU 预览图 → ④ 属性 → ⑤ 发货售后
+① 规格（逐行 + 补勾）→ ② 价格库存 → ③ SKU 预览图 → ④ 属性（多轮级联）
+→ ⑤ 【补】价格库存（新增行）→ ⑥ 【补】SKU 预览图（新增行）→ 段5 提交
 ```
 
-### 规格填写三条铁律（spec-row-fill.mjs）
+**为什么要有 ⑤⑥**：属性级联会让 SKU 表**新增行**（抱枕 2→3 行）。
+新行没有价格/预览图 → 提交报「请输入第3行规格的库存」「请上传第3行规格的预览图」。
+
+---
+
+## 三、规格填写（spec-row-fill.mjs）
+
+### 真机结构
+
+```html
+<div id="newSpec">
+  <input type="checkbox" checked>                 <!-- 平台自动勾选 -->
+  <input placeholder="自定义容量" value="250">     <!-- 值必须纯数字 -->
+  <div class="IPT_appendCell">mL</div>            <!-- 单位，固定不可填 -->
+  <input placeholder="备注">
+</div>
+```
+
+### 三条铁律
 
 | 规则 | 说明 |
 |---|---|
-| **值必须纯数字** | `250` 不是 `250ml`。单位在 `[class*="appendCell"]` 里，不可填 |
-| **逐行模式** | 填**最后一个空框** → Enter/失焦 → 平台追加新行 → 继续。不能按索引依次填 |
+| **值必须纯数字** | `250` 不是 `250ml`。单位在 `[class*="appendCell"]` 里 |
+| **逐行模式** | 填**最后一个空框** → Enter/失焦 → 平台追加新行 → 继续。**不能按索引依次填** |
 | **补勾 checkbox** | 最后一个值的 checkbox 常不自动勾 → SKU 表少 1 行。填完必须补勾所有「有值未勾」的行 |
 
-单位剥离 `stripUnit(raw, pageUnit)` **不用白名单**：
-```
-250ml+mL→250  1.5kg+kg→1.5  65W+W→65  110码+码→110
-40x40cm+无→40x40  256GB+GB→256  3.5寸+寸→3.5  100件+件→100
+### 单位剥离（通用，无白名单）
+
+```js
+stripUnit(raw, pageUnit)
+// ① 页面有单位 → 精确剥离该单位
+// ② 页面无单位 → 剥离末尾非数字（保留 40x40 的 x）
 ```
 
-焦点必须用 XPath 精确定位：`.//input[contains(@placeholder,"自定义")]` → `focus()+click()`。纯坐标点击键不进去。
+实测：
+```
+250ml+mL→250   1.5kg+kg→1.5   65W+W→65   110码+码→110
+40x40cm+无→40x40   256GB+GB→256   3.5寸+寸→3.5   100件+件→100
+```
 
-### 价格库存列映射（sku-table.mjs，真机 dump 定论）
+### 焦点定位
+
+**必须用 XPath**，纯坐标点击键不进去：
+```js
+document.evaluate('.//input[contains(@placeholder,"自定义")]', root, ...)
+// → focus() + click()
+```
+
+---
+
+## 四、价格库存（sku-table.mjs）
+
+### 列映射（真机 dump 定论）
 
 ```
 表头：[容量, *库存, *拼单价(元), *单买价(元), *预览图, 规格编码, 状态]
@@ -55,9 +114,21 @@ metadata:
 ```
 
 **容量列是纯文本不是 input** —— 之前全部错位就是因为按 `[0]=库存` 算。
-单买价 = 拼单价 + 1.01（平台要求 ≥+1 元）。
 
-### SKU 预览图（sku-thumb.mjs）
+### 单买价规则
+
+平台要求 **单买价 ≥ 拼单价 + 1 元**：
+```js
+single = (price + 1.01).toFixed(2)
+```
+
+### 补填模式
+
+`fillPriceTable` 支持 **skip-existing**：已有值不覆盖，只补空行（用于属性后补填新增行）。
+
+---
+
+## 五、SKU 预览图（sku-thumb.mjs）
 
 | 坑 | 解法 |
 |---|---|
@@ -65,54 +136,210 @@ metadata:
 | 有图时 file input 消失 | 完成判据用背景图 `computedStyle.backgroundImage` 含 `url(` |
 | 行数异步增长 | 等行数到预期（补勾后 2→3 行） |
 
-### 属性填写（attr-fill-generic.mjs）
+**二维场景**：平台会自动把同色的图下发给同色的各行，所以只上传缺图的行即可。
 
-**两种控件必须区分**：
+---
+
+## 六、属性填写（attr-fill-generic.mjs）
+
+### 真机结构
+
+```html
+<div class="property-item">
+  <label>重要适用型号</label>
+  <div id="basic.propertys.7.value">
+    <input data-testid="beast-core-select-htmlInput">
+  </div>
+</div>
+```
+
+### 两种控件（必须区分）
 
 | 类型 | 行为 | 校验判据 |
 |---|---|---|
-| 单选下拉 | 点后自动关闭，`input.value` 写入 | `inputValue` |
-| **多选下拉** | 点后**面板不关闭**，`input.value` 仍空，`box.innerText` 显示值 | **`boxText`** |
+| 单选下拉 | 点后自动关闭，`input.value` 写入 | `inputValue` 包含值 |
+| **多选下拉** | 点后**面板不关闭**，`input.value` 仍空，`box.innerText` 显示已选值 | **`boxText`** 包含值 |
 
 只校验 `inputValue` → 多选全部误报失败。
 
-**「重要」= 必填**：`harvestAttributes()` 返回 `required`，填完用 `checkFieldFilled()` 逐项复核，未填明确报错。
-实测必填数：纸杯 4、手机壳 4、抱枕 12。
+### ★ 属性级联（最关键的坑）
 
-**字段采集双路径**（属性区异步渲染，会漏字段）：
-- 路径 A：扫 `[id^="basic.propertys."]`，从 box 内部/向上找 label
-- 路径 B：扫所有 `<label>`，找它后面的 select box（补齐 A 漏的）
-- 加渲染稳定等待（连续 3 次数量不变）
+**「适用型号」必须等「适用品牌」填完后才会出现**（实测 7 → 8 个字段）。
+抱枕的「平方克重」同理（15 → 16 个字段）。
 
-**值优先级**：用户值（清洗 `（缓存命中）` 等脏后缀）→ AI 从真实候选选 → 必须命中候选原值。
+**解法：填一轮 → 重新采集 → 补齐新出现的字段，最多 3 轮**
 
-**AI 选值**：`cn:glm-5.3-flash`；prompt **写临时 JSON 文件**传给 Python（直接拼 `-c` 会语法错误）；配置读 `pajama/imgkit.py` 的 BASE/KEY。
+```
+第 1 轮：填 7 个字段
+第 2 轮：属性区从 7 个增加到 8 个（级联字段出现）
+        「适用型号」= iPhone 15 ✅
+第 3 轮：无可填字段，结束
+```
 
-**点击选项**：精确 > 去空格精确 > **最短**包含匹配（`纸` 不能匹配到 `纸+PE膜`）；失败重试一次。
+### 「重要」= 必填
 
-### 发货售后（field-shipping.mjs）
+带「重要」标记的字段必须填，否则平台拦。流程：
+1. `harvestAttributes()` 返回 `required` 标记
+2. 填完后 `checkFieldFilled()` 逐项复核
+3. 必填未填 → 明确报错 `★必填未填：xxx`
+4. **AI 没选中的必填字段 → 强制取候选第一个可用值**（跳过「请选择/其他」）
 
-lib 版写死服装文案 → 非服装类目填 0 项。改为 lib 失败后通用模糊匹配。
-**默认发货时间 = 48 小时**。
+实测必填数：纸杯 4、手机壳 6、抱枕 12、毛巾 6。
 
-### 默认值
+### 字段采集（异步渲染，会漏）
 
-| 项 | 值 |
+属性区异步渲染，`basic.propertys.N.value` 出现时间不一致。双路径采集：
+
+```
+路径 A：扫 [id^="basic.propertys."]，从 box 内部/向上找 label
+路径 B：扫所有 <label>，找它后面的 select box（补齐 A 漏掉的）
+```
+
+加渲染稳定等待（连续 4 次数量不变 **且** 已等 ≥3 秒）。
+
+### 值的选择优先级
+
+```
+① 用户提供（product.attributes）→ 清洗脏后缀（（缓存命中）（显式指定））
+② 用户没给的字段 → AI 从**真实候选**里选（pickAttrValuesByAI）
+③ 必须命中候选原值（防 AI 编造）
+④ AI 没选中且必填 → 兜底取第一个可用候选
+```
+
+**字段名匹配必须严格**：`填充物` 不能匹配到 `填充物净重`（只允许「页面字段名 = 用户字段名 + ≤2字后缀」）。
+
+### AI 选值（pickAttrValuesByAI）
+
+- 模型：`cn:glm-5.3-flash`（文本，快）
+- **prompt 写临时 JSON 文件**传给 Python（直接拼 `-c` 会因换行/引号报语法错误）
+- 配置来源：`pajama/imgkit.py` 的 `BASE/KEY`（**不是** aiimgnew1 的 .env）
+- 实测：4/4、6/6 全部命中
+
+### 点击选项（clickOption）
+
+```
+严格顺序：精确 > 去空格精确 > 最短包含匹配
+「纸」不能匹配到「纸+PE膜」→ 取最短候选
+```
+
+失败**重试一次**（材质这类带特殊字符的候选，首次点击可能没落到正确项）。
+
+### checkFieldFilled 判定
+
+必须剔除所有**提示文字**，否则会把提示误判成已填值：
+```
+误判案例：✅ 平方克重 = 重要 / ✅ 填充物 = 重要请确保该商品中含有所选材质
+剔除清单：重要 / 必填 / 请选择 / 请输入 / 点击申请 / 未找到需要的品牌
+         / 请确保该商品中含有所选材质 / 标点符号
+```
+8/8 单元测试通过。
+
+---
+
+## 七、参考价与默认值
+
+| 项 | 规则 |
 |---|---|
+| **参考价** | **默认 = `max(SKU 拼单价) + 1`**（平台要求 > 最大单买价）<br>例：毛巾 SKU 价 19.9/29.9 → 参考价 **30.9**<br>`product.price` 显式给了就用显式的 |
 | 默认库存 | **100**（每 SKU） |
 | 默认发货时间 | **48 小时** |
-| 主图数量 | **按输入全量**（1-10 张） |
+| 主图数量 | **按输入全量**（1-10 张，不写死 5） |
 | 提交判定 | `错误（0）` 不算错，只有 `错误（N>0）` 才停 |
 
-### 性能
+---
 
-单类目 **54-102 秒**（含 8 项属性 + 6 行 SKU）。优化：固定等待→轮询、视觉分析缓存、catId 直达、规格 JS setter 优先。
+## 八、发货售后（field-shipping.mjs）
 
-### 组件化铁律
+lib 版写死服装类目文案，非服装类目填 0 项。改为：
 
-**组件化 = 结构化拆分，不是重写逻辑。** 已验证函数直接 re-export，只改真正需要改的。
+```
+① 先试 lib 版
+② 没命中 → 通用模糊匹配
+   发货方式：非预售 / 现货 / 48小时内发货 / 现货发售
+   发货时间：48小时发货及揽收 / 48小时发货 / 当日发货 / 24小时发货
+```
 
-<!-- RISK-CHEATSHEET:START（由 dev/inject-risk-cheatsheet.mjs 注入，请勿手改） -->
+---
+
+## 九、类目模板（category-template.mjs）
+
+### 模板结构
+
+```json
+{
+  "毛巾": {
+    "catId": "205041314615",
+    "catePath": "...",
+    "dims": [{"user":"尺寸","page":"尺寸","type":"text-input"}, ...],
+    "requiredAttrs": [{"name":"品牌","value":"无品牌/无注册商标"}, ...],
+    "price": "", "stock": "", "successCount": 2
+  }
+}
+```
+
+### 模板的两大作用
+
+1. **catId 直达**：跳过类目搜索，直接跳表单页（省 5s）
+2. **属性补全**：模板里有值的属性直接填，不用 AI 再选一遍
+
+### ★ `--no-submit` 也沉淀模板
+
+之前只在真正发布成功时才保存模板 → 第 2 次同类目还从零开始。
+现在 `--no-submit` 填完也保存（字段已填对，值得复用）。
+
+### 模板失效条件
+
+- 属性结构变化（`checkSchemaFingerprint` 检测）
+- 类目路径变化
+
+---
+
+## 十、性能
+
+| 场景 | 耗时 | 说明 |
+|---|---|---|
+| 新类目（第 1 次） | 215-239s | 从头探测 + 沉淀模板 |
+| 老类目（第 2 次起） | **137s** | 命中模板 + catId 直达，**省 40%** |
+
+优化点：
+- 固定等待 → 轮询（按钮出现 / URL 变化 / 表单就绪）
+- 视觉分析结果缓存（`vision-cache.mjs`，同类目第 2 单起省 8s）
+- 老类目 catId 直达（省 5s）
+- 规格填值 JS setter 优先 → 键盘兜底
+
+---
+
+## 十一、组件清单
+
+| 文件 | 职责 |
+|---|---|
+| `publish-v2.mjs` | 主入口（参数解析 + 浏览器 + 5 段编排 + 模板沉淀） |
+| `publish-flow.mjs` | 段3+段4 组件编排 |
+| `stage-nav.mjs` | 段1 打开列表 + 段2 选类目 |
+| `stage-submit.mjs` | 段5 提交 + 校验 |
+| `spec-row-fill.mjs` | 规格逐行填写 + 单位剥离 + 补勾 |
+| `spec-dims.mjs` | 规格维度（scanDims / alignDims） |
+| `sku-table.mjs` | 库存/拼单价/单买价（列映射 + skip-existing） |
+| `sku-thumb.mjs` | 每行预览图 |
+| `attr-fill-generic.mjs` | 属性采集 + 填写 + AI 选值 + 必填复核 |
+| `attr-harvest.mjs` | 属性候选采集入库（attr-schema.json） |
+| `category-template.mjs` | 类目模板读写 |
+| `field-basic.mjs` | 标题 / 参考价 |
+| `field-images.mjs` | 主图 / 详情图 |
+| `field-shipping.mjs` | 发货售后（通用模糊匹配） |
+| `vision-fill.mjs` | 视觉分析规格区 |
+| `vision-cache.mjs` | 视觉分析结果缓存 |
+| `analyze_spec_ui.py` | 视觉模型调用（截图 → JSON） |
+| `imgprep.py` | 图片规整 |
+
+---
+
+## 十二、组件化铁律
+
+**组件化 = 结构化拆分，不是重写逻辑。**
+
+已验证的函数直接 re-export，只改真正需要改的。
+之前把验证过的属性/规格逻辑重写，导致上架全线崩，浪费了大量时间。
 
 ## ⚠ 风控速查（先读这里再排查）
 
@@ -497,168 +724,6 @@ node scripts/publish.mjs \
 | 主图非 1:1 或边长 < 800 | **补白成正方形**（不裁切，避免切掉商品） |
 | 规格图非 1:1 或边长 < 480 | 补白 + 放大到 480 |
 | 体积 > 3MB | JPEG 质量阶梯压缩，必要时降分辨率 |
-
-## 组件化结构（2026-10-29 定稿）
-
-### ★ 推荐入口：`publish-v2.mjs`（全组件链，已真实上架验证）
-
-```bash
-node {baseDir}/scripts/publish-v2.mjs \
-  --product-file <商品JSON> \
-  --account <shopKey> \
-  --confirm true
-```
-
-**为什么不走 lib**：lib 的 `domFillSpecs` 分支会先填属性+发货再调外部函数，
-与组件链的段3/段4 重复 → 实测 358 秒且预览图偶发失败。
-v2 只走组件链 → **157 秒，预览图 9/9，errors 为空**（`goods_id=1022780587384`）。
-
-**五段结构**：
-
-| 段 | 组件 | 职责 |
-|---|---|---|
-| 1 | `stage-nav.openPublishEntry` | 打开商品列表 → 点「发布新商品」 |
-| 2 | `stage-nav.selectCategory` | 搜类目 → 等结果稳定 → 选中 → 确认 |
-| 3 | `publish-flow`（前半） | 标题 / 参考价 / 主图（全部）/ 详情图 |
-| 4 | `publish-flow`（后半） | 规格 → 价格库存 → 属性 → 发货 |
-| 5 | `stage-submit.submitAndVerify` | 点提交 + 判定 + 15s 补点兜底 |
-
-**参数写法**：`--key value` / `--key=value` / `--flag` 三种都支持。
-
-**L2 门禁**：不带 `--confirm true` 只返回预览（不启浏览器、零写操作）。
-
-**已知坑（已修）**：页面常显示「错误（**0**）」（表示无错误），
-不能把 `错误（\d+）` 当失败信号 —— 必须 `N > 0` 才算错。
-
-### ★ 多类目实测：4 个类目全部上架成功（2026-10-30）
-
-| 类目 | 规格形态 | goods_id | 耗时 |
-|---|---|---|---|
-| 儿童睡衣 | 2 维（预置「颜色分类」行） | `1022912465571` | 157s |
-| 纸杯 | 1 维（容量，纯文本输入） | `1022955237163` | 135s |
-| 手机壳 | 2 维（型号+颜色，**需新建维度**） | `1023046067508` | 135s |
-| 抱枕 | 1 维（尺寸，纯文本输入） | `1023056507980` | 111s |
-
-**结论：一套代码打所有类目，已实测验证。**
-
-### 视觉驱动的规格填写（vision-fill.mjs）
-
-不同类目的规格区结构完全不同，写死任何一种都会挂。所以用**截图 → 视觉模型分析 → 按策略填**：
-
-```
-① 截图（全视口，不用元素截图 —— 长页面上元素截图易失败）
-② cn:glm-5v-turbo 分析：
-     dim_type:  text-input / color-input / checkbox / dropdown
-     strategy:  type-and-enter / type-and-blur / click-checkbox
-     hints:     截图里该维度的 placeholder 文字
-③ 按 strategy 填；单值失败换策略重试（分析策略 → enter → blur，共 4 次）
-```
-
-**关键流程约束（血泪教训）**：
-
-> **「一维填好，二维才能选」**
->
-> 必须 **每个维度：建行 → 立即填完值 → 再建下一个**。
-> 之前写成「建行1 → 建行2 → 填值1 → 填值2」，第二个维度建的时候第一个还没值，
-> 页面「添加规格类型」按钮消失 / 截图失败，整条链路崩。
-
-**建维度的正确步骤**（`addSpecDimension`）：
-```
-点「添加规格类型」（真实鼠标，React 忽略 JS click）
-→ 打开「规格类型」下拉
-→ 读候选（DOM 能读到就精确/包含匹配；读不到则截图给视觉模型挑）
-→ 点选中
-```
-实测候选有 30 项：尺寸/型号/款式/器型/材质/口味/色号/适用人群/颜色/容量/花型/尺码…
-
-### SKU 三组件（都很简单，别复杂化）
-
-| 组件 | 职责 | 要点 |
-|---|---|---|
-| `spec-dims.mjs` | 规格维度 | 决定表有几行几列 |
-| `sku-table.mjs` | 库存/拼单价/单买价 | **按 tr 顺序取前 3 个 text input** |
-| `sku-thumb.mjs` | 每行预览图 | **按 tr 顺序上传** |
-
-**`sku-table` 的关键坑**：
-- 表格颜色列用 **rowspan 合并**，同色后续行少一个 td → **列索引会错位**
-- lib 旧版依赖 `window.__pddSkuCols` helper，没装就全废
-- ✅ 正确做法：`tr.querySelectorAll('input').filter(i => i.type !== 'file')`
-  第 0 个=库存、第 1 个=拼单价、第 2 个=单买价。不碰列索引、不碰 helper。
-- 填之前要**等 SKU 表出现**（规格填完后表格异步生成，最多等 30s）
-
-**`sku-thumb` 的关键坑**：
-- 预览图列的表现随状态变化：**没图时有 `input[type=file]`，有图时它消失**，只剩缩略图+×
-- 所以「有没有 file input」不能当完成判据
-- ✅ 完成判据 = 格子内有**真实尺寸（20~300px）的背景图或 http img**
-- 多维场景下规格值配了 image 后，平台会**自动下发**预览图到各行（睡衣 9 行全自动有图）
-
-### 发货售后通用化
-
-lib 版把文案写死成「非预售」「当日发货及揽收」，非服装类目（抱枕/纸杯）文案不同 → 填 0 项。
-
-✅ 现在先试 lib 版，没填上走**通用模糊匹配**：
-- 发货方式候选：`非预售 / 现货 / 48小时内发货 / 现货发售`
-- 发货时间候选：`当日发货及揽收 / 当日发货 / 24小时发货 / 48小时发货 / 当日`
-
-### 表单页就绪判定（不能只看 URL）
-
-必须三个条件**同时**成立才开干：
-1. `#goods-spec-sku` 存在
-2. `input[placeholder*="商品标题组成"]` 存在
-3. 「添加规格类型」按钮 **或** 预置规格行 至少有一个
-
-之前只等 ①，导致段4 一上来就找不到按钮、截图失败。
-
-### 铁律：组件化 = 结构化拆分，**不是重写逻辑**
-
-> 血泪教训：曾把 `lib/pdd-publish.js` 里**已经上架成功过**的
-> `fillAttributes` / `fillSkuSpecMulti` / `fillPriceTable` 全部重写成新实现，
-> 结果材质成分连续坏 3 次（滚动 → 弹窗定位 → 搜索框），上架直接失败。
->
-> **正确做法**：给 lib 里已验证的函数加 `export`，组件文件只做 `re-export`。
-> 一行业务逻辑都不新写。
-
-### 组件清单（`scripts/`）
-
-| 组件 | 导出的函数（全部来自 lib，已验证） | 是否随类目变化 |
-|---|---|---|
-| `field-basic.mjs` | `fillTitle`、`fillField`（+ `readCategory`） | ❌ 通用 |
-| `field-images.mjs` | `uploadImages`、`uploadDetailImages`、`readUploadCount`、`findFileInput` | ❌ 通用 |
-| `field-attributes.mjs` | `fillAttributes`（含材质成分 IngredientList） | ⚠️ **是** |
-| `field-shipping.mjs` | `fillShippingAndFreight`、`disableSizeChart` | ❌ 通用 |
-| `spec-dims.mjs` | `fillSkuSpecMulti`、`fillSkuSpec` | ⚠️ **是** |
-| `sku-table.mjs` | `fillPriceTable` | ❌ 通用 |
-| `publish-flow.mjs` | `publishFlow(page, product, opts)` 段3+段4 总编排 | ❌ 通用 |
-| `stage-nav.mjs` | `openPublishEntry`、`waitForPublishPage`、`selectCategory` | ❌ 通用 |
-| `stage-submit.mjs` | `submitAndVerify` | ❌ 通用 |
-
-**只有两个模块随类目变化**：属性（`field-attributes`）和规格（`spec-dims`）。
-其余全部类目无关——这就是「一套代码打所有类目」的依据。
-
-### 段4 调用顺序（**不能改**）
-
-```
-规格（fillSkuSpecMulti） → 价格库存（fillPriceTable） → 属性（fillAttributes） → 发货（fillShippingAndFreight）
-```
-
-属性必须在价格表**之后**：属性下拉重渲染会冲掉前面填的内容。
-
-### 数据形状坑
-
-- `fillSkuSpecMulti(page, specs, skuRows, category)` 的 `specs[].values`
-  必须是**对象数组** `{ value, image }`，传字符串会被 `String(v?.value||'')`
-  全部过滤 → 0 项、价格表只剩 1 行。
-- `fillPriceTable(page, { price, stock, itemNo, rows })` 返回 `{ filled: [], missed: [] }`。
-
-### 两条路径对照
-
-| 路径 | 入口 | 实测 |
-|---|---|---|
-| **组件链（推荐）** | `publish-v2.mjs` | ✅ 157s，`goods_id=1022780587384` |
-| lib 内建 | `publish.mjs --product-file` | ⚠️ 358s，预览图偶发只传 1/9 |
-
-未验证的自研实现保留为 `sku-component-experimental.mjs`、`sku-thumb-experimental.mjs`、
-`sku-rows.mjs`，**不要接入生产**。
 
 ## 规格池维护
 

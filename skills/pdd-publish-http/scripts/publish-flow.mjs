@@ -49,8 +49,31 @@ export async function publishFlow(page, product, opts = {}) {
   const missed = []
 
   const title = String(product.title || '').trim()
-  const price = String(product.price || '').trim()
   const stock = String(product.stock || '100')   // ★ 2026-10-30 用户定：每个 SKU 默认库存 100
+
+  // ★ 2026-10-31 用户定：**商品参考价默认 = 最大 SKU 拼单价 + 1**
+  //   平台要求参考价 > 最大单买价，所以取 max(price) + 1 最稳妥。
+  //   product.price 显式给了就用显式的（用户可覆盖）。
+  let price = String(product.price || '').trim()
+  {
+    const allPrices = (product.skus || [])
+      .map(s => parseFloat(s?.price))
+      .filter(n => Number.isFinite(n) && n > 0)
+    if (allPrices.length) {
+      const maxPrice = Math.max(...allPrices)
+      const autoRef = Math.round((maxPrice + 1) * 100) / 100
+      if (!price) {
+        price = String(autoRef)
+        log(`  参考价未指定 → 自动取「最大SKU价 ${maxPrice} + 1 = ${price}」`)
+      } else {
+        // 显式给了但低于 max+1 时，仍按用户给的（只提示）
+        const given = parseFloat(price)
+        if (Number.isFinite(given) && given <= maxPrice) {
+          log(`  ⚠ 参考价 ${price} <= 最大SKU价 ${maxPrice}，平台可能拦；建议 ${autoRef}`)
+        }
+      }
+    }
+  }
   const itemNo = String(product.itemNo || '').trim()
   const category = String(product.category || '').trim()
   const images = product.images || []
