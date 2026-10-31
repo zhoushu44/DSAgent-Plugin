@@ -113,6 +113,130 @@ dsagent_taobao_publish(images="D:\imgs\1.jpg,D:\imgs\2.jpg", title="纯棉短袖
   同时明确列出**未自动填写的字段**，提醒用户核对
 - 失败：按返回的 `failureKind` 走下方「错误处理」
 
+
+## 二维 SKU（sku-panel-v2.mjs，2026-10-31 打通）
+
+### 实测结果
+
+```
+类目：手机壳 catId=50025033
+规格：型号(3) × 颜色(2)
+→ SKU 表 6 行，价格库存 12 项，发布成功 商品ID=1094634535899
+```
+
+### 入参格式
+
+```js
+await taobaoPublish(store, {
+  title: '...',
+  price: '30.92',
+  stock: '100',
+  imageUrls: ['https://img.alicdn.com/...'],      // 或 images: ['本地路径']
+  detailImageUrls: [...],
+  categoryKeyword: '手机壳',
+  account,
+  confirm: true,
+  // ★ 二维规格
+  specs: [
+    { name: '型号', values: [{ value: 'iPhone 15' }, { value: 'iPhone 16' }] },
+    { name: '颜色', values: [{ value: '黑色' }, { value: '透明' }] },
+  ],
+  skus: [
+    { specs: { 型号: 'iPhone 15', 颜色: '黑色' }, price: '25.9', stock: '100' },
+    // ... 每行覆盖全部维度
+  ],
+})
+```
+
+不传 `specs` 时保持原扁平行为（`skus[].name` = 单个规格值），向后兼容。
+
+### 新版面板结构（真机实测）
+
+**抽屉**（不是 dialog）：
+```html
+<div class="next-overlay-inner next-drawer next-drawer-right ...">
+  <span class="props-label">颜色分类(0)</span>
+  <span class="props-label">适用型号(0)</span>
+  <input placeholder="主色(必选)">   ← 颜色分类
+  <input placeholder="备注(可选)">   ← 跳过
+  <input placeholder="请输入">       ← 适用型号
+  <button>重置</button> <button>确认创建</button> <button>取消</button>
+</div>
+```
+
+### 五个必须知道的机制
+
+| 机制 | 说明 |
+|---|---|
+| **值提交** | **键入 + Tab** 是唯一有效方式。Enter 无效（值 append），仅键入会在「确认创建」时被丢弃 |
+| **计数校验** | `属性名(N)` 只在新槽位 Tab 提交时 +1，可用它判断是否成功 |
+| **多值** | 一个框一个值，多值必须点区块 `+` 按钮（`button .next-icon-add`）加行 |
+| **确认门槛** | 每个属性须 ≥1 已提交值，否则点「确认创建」无效果、无报错、抽屉不关 |
+| **定位** | 全局按 placeholder 找框必错（永远命中第一个属性的主色框） |
+
+### 属性块容器定位（关键）
+
+向上找「**有可见 input 且 `.props-label` 数量 === 1**」的最高祖先：
+
+```
+SPAN.props-label          (0 inputs, 0 labels)
+→ DIV.info-content        (0, 1)
+→ DIV.sell-info           (0, 1)
+→ DIV.front-group         (0, 1)
+→ DIV.header              (0, 1)
+→ DIV.common-wrap         (2 inputs, 1 label)   ← ★ 属性块边界
+→ DIV.sell-component-sale-props (3 inputs, 2 labels) ← 已跨块，停
+```
+
+### 六大坑（都踩过）
+
+1. **抽屉是 `.next-drawer`**，不是 `.next-dialog` / `.next-overlay-wrapper`
+2. **`position:fixed` 元素 `offsetParent === null`** —— 不能用它判断可见性，改用 `getBoundingClientRect()`
+3. **`.props-label` 有子文本节点**（`children.length === 1`）—— 不能用 `children.length === 0` 过滤
+4. **只能点一次**：`dispatchEvent(click)` + `mouse.click` 等于点两次，第二次落在遮罩上会把抽屉关掉
+5. **抽屉有 slide-in 动画** —— 打开后固定等 2.5s，别用轮询（轮询的 evaluate 也可能触发关闭）
+6. **`基础信息` / `销售信息` 是锚点导航**，不是 tab 切换 —— 点导航后要主动滚到 SKU 区
+
+### ★★ replay 不能 merge SKU 三件套
+
+**这是最隐蔽的坑**：
+
+```js
+// 错误：buildTaobaoJsonDocument 里 merge 了 sku / saleProp / customSaleProp
+// → 页面认为「销售规格已配置」
+// → 不渲染「+ 创建规格」按钮
+// → #struct-sku 只剩一句「近期已升级SKU面板，优化SKU创建流程提升操作体验」
+// → SKU 表是空的 → 提交报「至少有一个 sku 的价格大于 0」
+```
+
+**修法**：`buildTaobaoJsonDocument({ skipSku: true })`，SKU 完全交给 DOM 组件填。
+
+### 类目属性（attr-fill.mjs）
+
+淘宝属性区有**两套 DOM 并存**：
+- `#struct-catProp` 里 28 个 `struct-p-*` → **空壳**（0 个 label）
+- 页面其它区域有大量单选项（全新/是/否/发货时间/拍下减库存…）→ **不是类目属性**
+
+**唯一可靠入口**：`.sell-catProp-item-common, .sell-catProp-item` 属性项容器。
+
+```js
+for (const item of document.querySelectorAll('.sell-catProp-item-common, .sell-catProp-item')) {
+  if (item.offsetParent === null) continue
+  const lb = [...item.querySelectorAll('label')].find(l => (l.innerText || '').trim())
+  ...
+}
+```
+
+扫描全页 `label` 会混入 21 个非属性项（实测 6 个真属性 + 21 个假属性 = 28 个）。
+
+### 遇到的问题
+
+**图片上传风控**：`stream-upload.taobao.com` 被 `RGV587_ERROR` 拦截时需要滑块验证。
+- 规避：用 `imageUrls` 传已有 CDN URL，跳过上传
+- 根治：完成滑块验证
+
+---
+
 ## 错误处理
 
 | 场景 | failureKind | 引导动作 |
