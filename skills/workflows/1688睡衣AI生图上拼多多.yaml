@@ -1,0 +1,83 @@
+name: 1688睡衣AI生图上拼多多
+category: 店铺经营
+mode: batch
+count_input: count
+description: |
+  1688 抓新款睡衣货源 → AI 双参考生图（模特自动固定）→ 组装真实 SKU → 拼多多上架。
+
+  每一轮处理一个关键词（跑几个关键词 = 测几个款式）：
+  ① ali1688-pick 抓货（产地锁宜山/苍南/温州/浙江/平阳，选新款最优款）
+  ② image-gen from-pack 出 15 张（主图 5 + 详情 10）+ 顺手生成 product.json
+     · 双参考：素材包第1张锁款式配色 + 第2张锁模特脸部发型
+     · 详情布局贴参考：竖排大字标题+副题、模特居中、左下细节小图、底部英文卖点
+     · 8 线程并发，约 90 秒
+  ③ pdd-publish-http --product-file 上架（1688 真实 SKU + 属性别名映射 + 价格×2）
+
+  ⚠ 生图模型：网关实际模型名是 gpt-image-2.5-1k / -2k / -4k，
+    默认的 gpt-image-2.5 会报 model_not_found。
+    需设置环境变量 NEWAPI_IMAGE_MODEL=gpt-image-2.5-2k（或 1k/4k）。
+
+  一轮约 4 分钟。
+inputs:
+  - key: keywords
+    label: 找品关键词（逗号分隔，每个词测一个款式）
+    type: textarea
+    default: 儿童睡衣新款,女童家居服套装新款,男童睡衣新款纯棉,儿童法兰绒睡衣新款,女童秋衣秋裤套装新款
+    required: true
+  - key: count
+    label: 测试款式数量（即轮次）
+    type: number
+    default: "10"
+    required: true
+    min: 1
+    max: 50
+  - key: origin
+    label: 产地筛选（逗号分隔）
+    type: text
+    default: 宜山,苍南,温州,浙江,平阳
+    required: false
+  - key: shop
+    label: 拼多多 shopKey
+    type: text
+    default: pdd_mms_7953c88bd519a91aac2fee2e3656f7e3
+    required: true
+  - key: category
+    label: 拼多多类目搜索词
+    type: text
+    default: 儿童睡衣
+    required: false
+  - key: priceFactor
+    label: 价格系数（1688 进价 × 该系数）
+    type: number
+    default: "2"
+    required: false
+  - key: workers
+    label: AI 生图并发线程数
+    type: number
+    default: "8"
+    required: false
+steps:
+  - name: 1688抓货
+    skill: ali1688-pick
+    args:
+      keywords: "{{keywords}}"
+      index: "{{loop.index}}"
+      origin: "{{origin}}"
+      out: E:/360MoveData/Users/Administrator/Desktop/童装/artifacts/pajama/out/wf/{{loop.index}}/pick
+    output: pick
+  - name: AI生图15张
+    skill: image-gen
+    args:
+      mode: from-pack
+      pack: "{{pick.pack_dir}}"
+      out: E:/360MoveData/Users/Administrator/Desktop/童装/artifacts/pajama/out/wf/{{loop.index}}/ai
+      workers: "{{workers}}"
+      category: "{{category}}"
+    output: gen
+  - name: 上架拼多多
+    skill: pdd-publish-http
+    args:
+      product_file: E:/360MoveData/Users/Administrator/Desktop/童装/artifacts/pajama/out/wf/{{loop.index}}/ai/product.json
+      confirm: "true"
+      account: "{{shop}}"
+    output: publish

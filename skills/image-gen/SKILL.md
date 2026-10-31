@@ -138,6 +138,67 @@ python3 scripts/gen.py from-pack --pack <素材包> --out <输出目录> --worke
 
 `refs` 传多张 = 多图参考（第 1 张锁商品、第 2 张锁模特）。
 
+
+### from-pack 实战坑位（2026-10-31 真机）
+
+#### ① 默认模型名不存在，必须显式指定
+
+`DEFAULT_MODEL = "gpt-image-2.5"`，但网关只有带分辨率后缀的版本：
+
+```bash
+# ❌ 报 HTTP 503 model_not_found: No available channel for model gpt-image-2.5
+python gen.py --mode from-pack --pack ./pack --out ./out
+
+# ✅ 显式指定
+NEWAPI_IMAGE_MODEL=gpt-image-2.5-2k python gen.py --mode from-pack --pack ./pack --out ./out
+```
+
+可用的模型（查 `/v1/models`）：
+```
+gpt-image-2-1k    gpt-image-2-2k    gpt-image-2-4k
+gpt-image-2.5-1k  gpt-image-2.5-2k  gpt-image-2.5-4k
+```
+
+2k 约 1.2-3.7 MB/张，15 张 8 线程约 4-6 分钟。
+
+#### ② 输出目录混入历史文件时，product.json 可能指向旧图
+
+`from-pack` 生成的文件名带时间戳（`main_1.jpg-20261031-220936-1.png`），**不会覆盖旧文件**。
+如果 `--out` 目录之前跑过，`product.json` 里的 `images` / `detailImages` 可能仍指向旧批次。
+
+**症状**：新图都生成了，但上架时用的是旧图。
+
+**检查**：
+```bash
+# 本次生成的文件数与 product.json 引用的对比
+ls "$OUT" | grep "$(date +%Y%m%d)" | wc -l      # 应 15
+node -e "const p=require('./$OUT/product.json'); console.log(p.images.map(f=>f.split('/').pop()))"
+```
+
+**修法**：上架前按时间戳重新拼 `images` / `detailImages`，或每次用全新 `--out` 目录。
+
+#### ③ 并发 8 时等待时间不均衡
+
+日志会刷 `等待网关响应 ... 16s / 24s / 40s / 64s`，最长单张可达 80s+。
+不要在中途判定失败——进程还活着就继续等，15 张总耗时 4-6 分钟正常。
+
+#### ④ 1688 原始 SKU 需要转换
+
+`pack/product.json` 里 `skus[]` 是 1688 原始字段：
+
+```json
+{ "sku_id": 6131596372894, "color": "WJP-珊瑚绒睡衣）粉色豹纹", "size": "140cm", "price": "46.99", "stock": 8887 }
+```
+
+不是 pdd-publish-http 要的 `{ specs: {维度:值}, price, stock }`。
+且颜色值带厂家前缀（`WJP-珊瑚绒睡衣）`）、尺码带单位（`140cm`）。
+需要转换 + 清洗后才能上架。
+
+#### ⑤ 规格名不对
+
+1688 素材包生成的 `specs[].name` 可能是 `参考分类` 而不是 `尺码`。
+上架时拼多多类目模板按规范名匹配，名字不对会导致维度建不出来。
+
 ## 凭据配置
 
 优先级：命令行 `--key` > 环境变量 > 配置文件。

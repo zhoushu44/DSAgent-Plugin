@@ -99,13 +99,13 @@ def main():
         sz = norm_size(s.get("size"))
         if c not in final_colors or sz not in final_sizes:
             continue
-        rows.append({"color": c, "size": sz, "price": str(s.get("price") or ""), "stock": str(s.get("stock") or "300")})
+        rows.append({"color": c, "size": sz, "price": str(s.get("price") or ""), "stock": str(s.get("stock") or "100")})
     if not rows:
         prices = [float(s["price"]) for s in raw_skus if s.get("price") and float(s["price"]) > 0]
         avg = sum(prices) / len(prices) if prices else 75.0
         for c in final_colors:
             for sz in final_sizes:
-                rows.append({"color": c, "size": sz, "price": f"{avg:.2f}", "stock": "300"})
+                rows.append({"color": c, "size": sz, "price": f"{avg:.2f}", "stock": "100"})
 
     prices = [float(s["price"]) for s in raw_skus if s.get("price") and float(s["price"]) > 0]
     avg = sum(prices) / len(prices) if prices else 75.0
@@ -171,7 +171,7 @@ def main():
         "detailImages": detail_imgs if detail_imgs else gen_list[5:15],
         "category": a.category,
         "price": price,
-        "stock": "300",
+        "stock": "100",
         "specs": specs,
         "skus": skus,
         "attributes": attributes,
