@@ -275,15 +275,15 @@ export async function harvestAttributes(page, opts = {}) {
     }).catch(() => 0)
     if (cnt > 0 && cnt === lastCount) {
       stable++
-      // ★ 连续 4 次不变 **且** 已等 >=3 秒才认为稳定
-      if (stable >= 4 && Date.now() - t0 >= 3000) break
+      // ★ 2026-10-31 提速：连续 3 次不变 且 >=1.5s（原 4 次/3s）
+      if (stable >= 3 && Date.now() - t0 >= 1500) break
     } else {
       stable = 0
     }
     lastCount = cnt
-    await sleep(500)
+    await sleep(400)   // 2026-10-31 speed: 500 -> 400
   }
-  await sleep(1500)
+  await sleep(600)   // 2026-10-31 speed: 1500 -> 600
   log(`[attr] 属性区渲染稳定：${lastCount} 个字段`)
 
   // ① 列出所有字段
@@ -595,10 +595,27 @@ export async function fillAttributesGeneric(page, values, opts = {}) {
   }
 
   // 阶段 2：统一校验
+  //   ★ 2026-10-31 提速：**一次 evaluate 批量校验所有字段**（原来每个字段一次 CDP 往返）
   if (clicked.length) {
     await sleep(fast ? 400 : 800)   // 等页面把值都渲染出来
-    for (const item of clicked) {
-      let verified = await verifyField(page, item.boxId, item.want)
+
+    const batchVerify = await page.evaluate((items) => {
+      const results = []
+      for (const it of items) {
+        const box = document.getElementById(it.boxId)
+        if (!box) { results.push({ ok: false, inputValue: '', boxText: '' }); continue }
+        const inp = box.querySelector('input[data-testid="beast-core-select-htmlInput"]')
+        const inputValue = inp?.value || ''
+        const boxText = (box.innerText || '').replace(/\n/g, '|')
+        const ok = inputValue.includes(it.want) || boxText.includes(it.want)
+        results.push({ ok, inputValue, boxText: boxText.slice(0, 200) })
+      }
+      return results
+    }, clicked.map(c => ({ boxId: c.boxId, want: c.want }))).catch(() => [])
+
+    for (let i = 0; i < clicked.length; i++) {
+      const item = clicked[i]
+      let verified = batchVerify[i] || { ok: false, inputValue: '', boxText: '' }
 
       // 失败重试一次
       if (!verified.ok) {

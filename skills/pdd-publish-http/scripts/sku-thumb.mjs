@@ -97,6 +97,19 @@ export async function fillSkuRowImagesSimple(page, rowFiles, opts = {}) {
   const filled = []
   const missed = []
 
+  // ★ 2026-10-31 提速：先**快速读一次**，如果所有行都已有图就立即返回
+  //   （多数情况平台已自动下发图，不需要任何等待）
+  {
+    const quick = await readThumbSlots(page).catch(() => [])
+    if (quick.length > 0 && quick.every(s => s.hasThumb)) {
+      log(`[sku-thumb] 快速检查：全部 ${quick.length} 行已有预览图，跳过上传`)
+      return {
+        filled: quick.map((s, i) => `SKU 预览图（第${i + 1}行，已有）`),
+        missed: [],
+      }
+    }
+  }
+
   // ★ 2026-10-30：等 SKU 表**所有行**都出现再读（规格填完后表格是异步生成的）
   //   真机实测：规格填完后 SKU 表只有 2 行，但**滚动到底部后第 3 行才出现**。
   //   所以先滚动到 SKU 表底部，触发行生成，再读。
@@ -107,7 +120,7 @@ export async function fillSkuRowImagesSimple(page, rowFiles, opts = {}) {
       window.scrollBy(0, 500)   // 再往下滚一点，触发懒加载
     }
   }).catch(() => {})
-  await sleep(1000)
+  await sleep(600)   // 2026-10-31 speed: 1000 -> 600
 
   let slots = []
   const expectRows = rowFiles.length
@@ -129,6 +142,16 @@ export async function fillSkuRowImagesSimple(page, rowFiles, opts = {}) {
   slots.forEach((s, i) => {
     log(`[sku-thumb]   第${i+1}行：hasThumb=${s.hasThumb} hasFile=${s.hasFile}`)
   })
+
+  // ★ 2026-10-31 提速：所有行都已有图时**立即返回**（避免 3 轮空转，省 ~8s）
+  const allHaveThumbs = slots.length > 0 && slots.every(s => s.hasThumb)
+  if (allHaveThumbs) {
+    log(`[sku-thumb] 全部 ${slots.length} 行已有预览图，跳过上传`)
+    return {
+      filled: slots.map((s, i) => `SKU 预览图（第${i + 1}行，已有）`),
+      missed: [],
+    }
+  }
 
   // ★ 2026-10-30：上传后 DOM 会重排，**不能缓存 fileInput handle**。
   //   每行都重新查一次（按行索引定位该行的 file input）。
