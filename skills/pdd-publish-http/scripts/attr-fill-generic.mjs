@@ -511,12 +511,11 @@ ${todo.map((f, i) => `${i + 1}. ${f.name}：${f.options.join(' / ')}`).join('\n'
 }
 export async function fillAttributesGeneric(page, values, opts = {}) {
   const log = opts.log || (() => {})
-  const fast = opts.fast !== false   // ★ 2026-10-31 默认快速模式
+  const fast = opts.fast !== false
   const filled = []
   const missed = []
   const detail = []
 
-  // ★ 2026-10-30：清洗脏后缀（模板/缓存带来的标注）
   const cleanValue = (v) => String(v || '')
     .replace(/（缓存命中）/g, '')
     .replace(/（显式指定）/g, '')
@@ -524,6 +523,13 @@ export async function fillAttributesGeneric(page, values, opts = {}) {
     .replace(/（AI）/g, '')
     .replace(/（自动）/g, '')
     .trim()
+
+  // ★★ 2026-10-31 提速：两阶段填值
+  //   阶段 1：全部点选（不逐个校验，只记录已点击）
+  //   阶段 2：统一校验 + 只对失败的字段重试
+  //   原来每个字段点完等 800ms + 校验 + Esc + 350ms ≈ 2s/字段
+  //   现在点选后只等 300ms 就进下一个，11 个字段从 22s 降到 ~8s
+  const clicked = []
 
   for (const [name, rawWant] of Object.entries(values || {})) {
     const want = cleanValue(rawWant)
@@ -541,48 +547,54 @@ export async function fillAttributesGeneric(page, values, opts = {}) {
       detail.push({ name, ok: false, err: 'no-dropdown' })
       continue
     }
-    // ★ 2026-10-31 提速：800 → 400
-    await sleep(fast ? 400 : 800)
+    // 阶段1只等下拉展开
+    await sleep(fast ? 350 : 700)
 
-    const clicked = await clickOption(page, want)
-    if (!clicked) {
+    const pickedText = await clickOption(page, want)
+    if (!pickedText) {
       await page.keyboard.press('Escape').catch(() => {})
       missed.push(`${name}（候选里没有「${want}」）`)
       detail.push({ name, ok: false, err: 'option-not-found' })
       continue
     }
 
-    // ★ 多选：面板不关闭，直接校验 boxText
-    let verified = await verifyField(page, boxId, want)
+    // 关闭下拉，立即下一个
+    await page.keyboard.press('Escape').catch(() => {})
+    await sleep(fast ? 120 : 300)
+    clicked.push({ name, want, boxId, pickedText })
+  }
 
-    // ★ 失败重试一次（材质这类候选带特殊字符的下拉，首次点击可能没落到正确项）
-    if (!verified.ok) {
-      log(`[attr] 「${name}」首次未确认，重试`)
-      await page.keyboard.press('Escape').catch(() => {})
-      await sleep(fast ? 200 : 400)
-      if (await openDropdown(page, boxId)) {
-        await sleep(fast ? 400 : 800)
-        const clickedAgain = await clickOption(page, want)
-        if (clickedAgain) {
-          await sleep(fast ? 300 : 600)
-          verified = await verifyField(page, boxId, want)
-          if (verified.ok) log(`[attr] 「${name}」重试成功（实际选中「${clickedAgain}」）`)
+  // 阶段 2：统一校验
+  if (clicked.length) {
+    await sleep(fast ? 400 : 800)   // 等页面把值都渲染出来
+    for (const item of clicked) {
+      let verified = await verifyField(page, item.boxId, item.want)
+
+      // 失败重试一次
+      if (!verified.ok) {
+        log(`[attr] 「${item.name}」首次未确认，重试`)
+        if (await openDropdown(page, item.boxId)) {
+          await sleep(fast ? 400 : 800)
+          const again = await clickOption(page, item.want)
+          if (again) {
+            await sleep(fast ? 350 : 700)
+            verified = await verifyField(page, item.boxId, item.want)
+            if (verified.ok) log(`[attr] 「${item.name}」重试成功（实际选中「${again}」）`)
+          }
+          await page.keyboard.press('Escape').catch(() => {})
+          await sleep(fast ? 120 : 300)
         }
       }
-    }
 
-    if (verified.ok) {
-      filled.push(`${name}=${want}`)
-      log(`[attr] 「${name}」= ${want} ✅`)
-    } else {
-      missed.push(`${name}（未确认）`)
-      log(`[attr] 「${name}」= ${want} ❌ input="${verified.inputValue}" text="${verified.boxText}"`)
+      if (verified.ok) {
+        filled.push(`${item.name}=${item.want}`)
+        log(`[attr] 「${item.name}」= ${item.want} ✅`)
+      } else {
+        missed.push(`${item.name}（未确认）`)
+        log(`[attr] 「${item.name}」= ${item.want} ❌ input="${verified.inputValue}" text="${verified.boxText}"`)
+      }
+      detail.push({ name: item.name, ok: verified.ok, ...verified })
     }
-    detail.push({ name, ok: verified.ok, ...verified })
-
-    await page.keyboard.press('Escape').catch(() => {})
-    // ★ 2026-10-31 提速：350 → 150
-    await sleep(fast ? 150 : 350)
   }
 
   log(`[attr] 已填 ${filled.length} 项，未填 ${missed.length} 项`)
