@@ -240,6 +240,9 @@ export async function checkFieldFilled(page, boxId) {
  */
 export async function harvestAttributes(page, opts = {}) {
   const log = opts.log || (() => {})
+  // ★ 2026-10-31 提速：支持 skipOptions 跳过候选采集（模板已有值时不需读候选）
+  const skipOptions = new Set((opts.skipOptions || []).map(s => String(s || '').replace(/\s+/g, '')))
+  const fast = opts.fast !== false   // 默认快速模式
 
   // ★ 2026-10-30：属性区是**异步渲染**的（规格填完后才陆续出现）。
   //   实测坑：流程里只检测到 7 个字段，单独测试却有 8 个 —— 第 8 个出现得更晚。
@@ -374,15 +377,32 @@ export async function harvestAttributes(page, opts = {}) {
   })
 
   // ② 逐个读候选
+  //   ★ 2026-10-31 提速：
+  //     · skipOptions 里的字段跳过（模板已有值，不需要读候选）
+  //     · fast 模式下降 sleep（800→400 / 250→120）
+  const waitOpen = fast ? 400 : 800
+  const waitClose = fast ? 120 : 250
+  let readCount = 0
+  let skipCount = 0
   for (const f of fields) {
     if (!f.hasSelect) continue
+    // 跳过模板已有值的字段
+    const fname = String(f.name).replace(/\s+/g, '')
+    if (skipOptions.has(fname)) {
+      f.options = []
+      f.skipOptions = true
+      skipCount++
+      continue
+    }
     if (!(await openDropdown(page, f.id))) { f.options = []; continue }
-    await sleep(800)
+    await sleep(waitOpen)
     f.options = await readOptions(page)
     await page.keyboard.press('Escape').catch(() => {})
-    await sleep(250)
+    await sleep(waitClose)
+    readCount++
     log(`[attr] 「${f.name}」${f.options.length} 个候选`)
   }
+  if (skipCount > 0) log(`[attr] 跳过 ${skipCount} 个模板已有值字段的候选读取（提速）`)
 
   return { fields }
 }
@@ -491,6 +511,7 @@ ${todo.map((f, i) => `${i + 1}. ${f.name}：${f.options.join(' / ')}`).join('\n'
 }
 export async function fillAttributesGeneric(page, values, opts = {}) {
   const log = opts.log || (() => {})
+  const fast = opts.fast !== false   // ★ 2026-10-31 默认快速模式
   const filled = []
   const missed = []
   const detail = []
@@ -520,7 +541,8 @@ export async function fillAttributesGeneric(page, values, opts = {}) {
       detail.push({ name, ok: false, err: 'no-dropdown' })
       continue
     }
-    await sleep(800)
+    // ★ 2026-10-31 提速：800 → 400
+    await sleep(fast ? 400 : 800)
 
     const clicked = await clickOption(page, want)
     if (!clicked) {
@@ -537,12 +559,12 @@ export async function fillAttributesGeneric(page, values, opts = {}) {
     if (!verified.ok) {
       log(`[attr] 「${name}」首次未确认，重试`)
       await page.keyboard.press('Escape').catch(() => {})
-      await sleep(400)
+      await sleep(fast ? 200 : 400)
       if (await openDropdown(page, boxId)) {
-        await sleep(800)
+        await sleep(fast ? 400 : 800)
         const clickedAgain = await clickOption(page, want)
         if (clickedAgain) {
-          await sleep(600)
+          await sleep(fast ? 300 : 600)
           verified = await verifyField(page, boxId, want)
           if (verified.ok) log(`[attr] 「${name}」重试成功（实际选中「${clickedAgain}」）`)
         }
@@ -559,7 +581,8 @@ export async function fillAttributesGeneric(page, values, opts = {}) {
     detail.push({ name, ok: verified.ok, ...verified })
 
     await page.keyboard.press('Escape').catch(() => {})
-    await sleep(350)
+    // ★ 2026-10-31 提速：350 → 150
+    await sleep(fast ? 150 : 350)
   }
 
   log(`[attr] 已填 ${filled.length} 项，未填 ${missed.length} 项`)

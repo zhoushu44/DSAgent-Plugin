@@ -250,7 +250,7 @@ try {
   work = await selectCategory(work, product.category || categoryKw, { log, catId: tpl?.catId || '', connected })
 
   // 段3 + 段4
-  const flowResult = await publishFlow(work, product, { log })
+  const flowResult = await publishFlow(work, product, { log, templateAttrs: tpl?.requiredAttrs || [] })
 
   // ★ 2026-10-30：--no-submit 模式 → 不点提交，保留页面供人工核对
   if (noSubmit) {

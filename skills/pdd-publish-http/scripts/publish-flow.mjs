@@ -169,22 +169,35 @@ export async function publishFlow(page, product, opts = {}) {
             log(`    ⚠ 本维未完成 ${vr.missed.length} 项`)
           }
           // ★ 填完这一维后，等页面稳定再进下一维（关键！）
+          //   ★ 2026-10-31 提速：原先固定 sleep(2500) + 最多 12 次 ×1s 轮询 = 最长 14.5s
+          //     实测多数情况按钮 1~2 秒内就出现，改成「250ms 轮询 + 最多 6 秒」
           if (di < specs.length - 1) {
-            log(`    等页面稳定后建下一维…`)
-            await sleep(2500)
-            // 等「添加规格类型」按钮重新出现
-            for (let w = 0; w < 12; w++) {
-              const btnReady = await page.evaluate(() => {
-                return [...document.querySelectorAll('button, div, span, a')].some(e => {
+            const t0 = Date.now()
+            let btnReady = false
+            for (let w = 0; w < 24; w++) {
+              await sleep(250)
+              // ★ 2026-10-31：放宽判定 —— 除了按钮文字，也接受「规格行数已达预期」
+              btnReady = await page.evaluate((expectRows) => {
+                // ① 有「添加规格类型」按钮
+                const hasBtn = [...document.querySelectorAll('button, div, span, a')].some(e => {
                   const t = (e.innerText || '').trim()
                   const r = e.getBoundingClientRect()
                   return /^添加规格类型|^添加规格/.test(t) && r.width > 20
                 })
-              }).catch(() => false)
+                if (hasBtn) return true
+                // ② 或：规格容器数量已达预期（说明已进入可添加下一维状态）
+                const root = document.querySelector('#goods-spec-sku')
+                if (root) {
+                  const rows = root.querySelectorAll('.property-container-v2, .goods-spec-row').length
+                  if (rows >= expectRows) return true
+                }
+                return false
+              }, di + 1).catch(() => false)
               if (btnReady) break
-              await sleep(1000)
             }
-            await sleep(1000)
+            const waited = Date.now() - t0
+            log(`    等页面稳定后建下一维… ${btnReady ? '就绪' : '继续'}（${waited}ms）`)
+            await sleep(300)
           }
         }
         if (usedVision) log(`  规格（视觉）→ 已填 ${filled.filter(f => specs.some(s => f.startsWith(s.name + '='))).length} 项`)
@@ -256,7 +269,9 @@ export async function publishFlow(page, product, opts = {}) {
     await sleep(2000)
 
     // ① 采集所有字段 + 真实候选
-    let { fields } = await harvestAttributes(page, { log })
+    //   ★ 2026-10-31 提速：模板已有值的字段**不读候选**（省掉 N 次开下拉）
+    const tplAttrNames = (opts.templateAttrs || []).map(a => String(a.name || '').replace(/\s+/g, ''))
+    let { fields } = await harvestAttributes(page, { log, skipOptions: tplAttrNames })
 
     // ★ 兜底：如果必填字段数偏少，再等 3 秒重采一次（取并集）
     const reqCount1 = fields.filter(f => f.required).length
