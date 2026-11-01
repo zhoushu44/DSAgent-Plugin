@@ -187,6 +187,51 @@ export async function fillSpecValuesRowByRow(page, dimName, values, opts = {}) {
   const pageUnit = state.unit || ''
   log(`[spec-row] 初始：${state.inputCount} 个输入框（${state.filledCount} 已填 / ${state.emptyCount} 空），页面上单位「${pageUnit || '无'}」`)
 
+  // ★ 2026-11-01：模板污染修复 —— 填新值前先清空旧值
+  //   实测：类目模板回填会带出旧规格值（「13 个输入框，8 个已填」），
+  //   不清空会导致最终 SKU 行数翻倍（6 行变 10 行），多出来的行没有预览图 → 提交报错。
+  if (state.filledCount > 0) {
+    log(`[spec-row] 检测到 ${state.filledCount} 个旧值，先清空避免模板污染`)
+    let clearedCount = 0
+    for (let ci = 0; ci < state.filledCount; ci++) {
+      const pos = await page.evaluate(({ dimName, idx }) => {
+        const root = document.querySelector('#goods-spec-sku') || document.querySelector('#newSpec')
+        if (!root) return null
+        let target = null
+        for (const row of root.querySelectorAll('[class*="property-container"], [class*="goods-spec-row"], tr, .new-spec-row')) {
+          if ((row.innerText || '').trim().includes(dimName)) { target = row; break }
+        }
+        if (!target) target = root
+        const filled = [...target.querySelectorAll('input[type="text"], input:not([type])')]
+          .filter(i => (i.value || '').trim() && i.getBoundingClientRect().width > 20)
+        const el = filled[idx]
+        if (!el) return null
+        el.scrollIntoView({ block: 'center' })
+        el.focus()
+        const r = el.getBoundingClientRect()
+        return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2), val: el.value }
+      }, { dimName, idx: ci }).catch(() => null)
+
+      if (!pos) break
+      await page.mouse.click(pos.x, pos.y).catch(() => {})
+      await sleep(150)
+      await page.keyboard.down('Control').catch(() => {})
+      await page.keyboard.press('KeyA').catch(() => {})
+      await page.keyboard.up('Control').catch(() => {})
+      await page.keyboard.press('Delete').catch(() => {})
+      await sleep(200)
+      await page.keyboard.press('Tab').catch(() => {})
+      await sleep(250)
+      clearedCount++
+    }
+    log(`[spec-row] 已清空 ${clearedCount} 个旧值`)
+    const afterClear = await readSpecState(page).catch(() => null)
+    if (afterClear) {
+      log(`[spec-row] 清空后：${afterClear.inputCount} 框 / ${afterClear.filledCount} 已填 / ${afterClear.emptyCount} 空`)
+    }
+    await sleep(500)
+  }
+
   for (let vi = 0; vi < rawVals.length; vi++) {
     const raw = rawVals[vi]
     // ★ 关键：剥离单位，只填数字

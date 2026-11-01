@@ -433,7 +433,68 @@ export async function publishFlow(page, product, opts = {}) {
       }
 
       log(`[attr] 第 ${round + 1} 轮：填 ${Object.keys(roundValues).length} 个字段`)
-      const r = await fillAttributesGeneric(page, roundValues, { log })
+
+      // ★ 2026-11-01：先处理特殊字段（复合/搜索式），普通字段交给通用组件
+      //   ① 品牌 = 搜索式下拉（必须键入搜索再点候选，不能直接塞值）
+      //   ② 材质成分 = 「添加XX(N/M)」按钮 + 动态行（没有 input）
+      const special = {}
+      const normal = {}
+      for (const [k, v] of Object.entries(roundValues)) {
+        const f = fields.find(x => x.name === k)
+        if (/^品牌$/.test(k)) special[k] = { type: 'brand', v, id: f?.id || '' }
+        else if (/材质成分|成分含量/.test(k)) special[k] = { type: 'composite', v, id: f?.id || '' }
+        else normal[k] = v
+      }
+
+      if (Object.keys(special).length) {
+        const { fillCompositeAttr, fillBrandSearch } = await import('./attr-composite.mjs')
+        for (const [k, s] of Object.entries(special)) {
+          // 若字段没有 id，按名字现找
+          let boxId = s.id
+          if (!boxId) {
+            boxId = await page.evaluate((name) => {
+              for (const box of document.querySelectorAll('[id^="basic.propertys."]')) {
+                let lb = box.querySelector('label')
+                if (!lb) {
+                  let cur = box
+                  for (let d = 0; d < 6 && cur; d++) {
+                    const l = cur.querySelector('label')
+                    if (l && !l.contains(box)) { lb = l; break }
+                    cur = cur.parentElement
+                  }
+                }
+                const n = (lb?.innerText || '').replace(/重要|必填|[*＊\s]/g, '').trim()
+                if (n === name) return box.id
+              }
+              return ''
+            }, k).catch(() => '')
+          }
+          if (!boxId) {
+            missed.push(`${k}（找不到字段容器）`)
+            continue
+          }
+          try {
+            const r = s.type === 'brand'
+              ? await fillBrandSearch(page, boxId, s.v, { log })
+              : await fillCompositeAttr(page, boxId, k, s.v, { log })
+            for (const x of r.filled || []) if (!filled.includes(x)) filled.push(x)
+            for (const x of r.missed || []) if (!missed.includes(x)) missed.push(x)
+          } catch (e) {
+            missed.push(`${k}（特殊字段异常：${e.message.slice(0, 80)}）`)
+          }
+        }
+      }
+
+      if (!Object.keys(normal).length) {
+        // 本轮只有特殊字段，直接进下一轮判定
+        const okNames2 = new Set((filled || []).map(f => String(f).split('=')[0]))
+        for (const k of Object.keys(special)) {
+          if (okNames2.has(k)) doneFields.add(k)
+        }
+        continue
+      }
+
+      const r = await fillAttributesGeneric(page, normal, { log })
       for (const f of r.filled || []) if (!filled.includes(f)) filled.push(f)
       for (const m of r.missed || []) if (!missed.includes(m)) missed.push(m)
 

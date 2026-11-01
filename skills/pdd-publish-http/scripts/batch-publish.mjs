@@ -53,6 +53,17 @@ log(`模式：${noSubmit ? '仅填表（不提交）' : doConfirm ? '真实提�
 
 const results = []
 
+// ★ 2026-11-01 提速：整个批次只启动一次浏览器
+//   原来每个商品 launch + close（8-10s/次），100 个白费 15 分钟
+log('启动浏览器（整批复用）…')
+const sharedBrowser = await puppeteer.launch({
+  executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe',
+  headless: false, userDataDir: PROFILE, defaultViewport: null,
+  args: ['--no-sandbox', '--disable-blink-features=AutomationControlled', '--start-maximized'],
+  ignoreDefaultArgs: ['--enable-automation'], protocolTimeout: 3600000,
+})
+log('浏览器已就绪')
+
 for (let idx = 0; idx < products.length; idx++) {
   const item = products[idx]
   log(`\n${'='.repeat(70)}`)
@@ -73,19 +84,15 @@ for (let idx = 0; idx < products.length; idx++) {
     log(`无模板，首次探测`)
   }
 
-  let browser = null
   const t0 = Date.now()
+  let work = null
   try {
-    browser = await puppeteer.launch({
-      executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe',
-      headless: false, userDataDir: PROFILE, defaultViewport: null,
-      args: ['--no-sandbox', '--disable-blink-features=AutomationControlled', '--start-maximized'],
-      ignoreDefaultArgs: ['--enable-automation'], protocolTimeout: 3600000,
-    })
-    let page = (await browser.pages())[0] || await browser.newPage()
+    // ★ 复用共享浏览器，每个商品开新页面
+    const page = await sharedBrowser.newPage()
+    await page.setViewport({ width: 1600, height: 900 })
 
     await openPublishEntry(page, { log })
-    let work = await waitForPublishPage(browser, { log })
+    work = await waitForPublishPage(sharedBrowser, { log })
     work = await selectCategory(work, catKey, { log, catId: tpl?.catId || '' })
 
     // ★ 2026-11-01：上传前图片预处理（单张 ≤ 3MB）
@@ -154,13 +161,19 @@ for (let idx = 0; idx < products.length; idx++) {
     log(`❌ 失败: ${e.message.slice(0, 150)}`)
     results.push({ name: item.name, ok: false, err: e.message.slice(0, 200) })
   } finally {
-    if (browser) await browser.close().catch(() => {})
-    const fsx = await import('node:fs')
-    for (const f of ['SingletonLock', 'SingletonSocket', 'SingletonCookie', 'DevToolsActivePort', 'lockfile']) {
-      try { fsx.unlinkSync(path.join(PROFILE, f)) } catch { /* ignore */ }
-    }
-    await sleep(3000)
+    // ★ 只关页面，浏览器整批复用
+    try {
+      if (work && !work.isClosed()) await work.close()
+    } catch { /* ignore */ }
+    await sleep(1500)
   }
+}
+
+// ★ 批次结束，关闭共享浏览器
+try { await sharedBrowser.close() } catch { /* ignore */ }
+const fsx = await import('node:fs')
+for (const f of ['SingletonLock', 'SingletonSocket', 'SingletonCookie', 'DevToolsActivePort', 'lockfile']) {
+  try { fsx.unlinkSync(path.join(PROFILE, f)) } catch { /* ignore */ }
 }
 
 log(`\n${'='.repeat(70)}`)
