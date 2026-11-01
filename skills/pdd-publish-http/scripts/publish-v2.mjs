@@ -112,6 +112,21 @@ try {
 // ─── 校验 ───
 const problems = []
 if (!product.title || String(product.title).trim().length < 2) problems.push('标题缺失')
+
+// ★ 2026-11-01：标题长度预校验（拼多多限 30 汉字 / 60 字符）
+//   实测踩过：50 字标题 + 后缀 → 31 汉字 → 超限 → 提交才报错 → 批量白跑
+//   注意：拼多多的「60 字符」= 30 个汉字（汉字算 2 字符），所以两个都要查。
+{
+  const t = String(product.title || '').trim()
+  const hanziCount = (t.match(/[\u4e00-\u9fa5]/g) || []).length
+  const asPddLen = hanziCount * 2 + (t.length - hanziCount)   // 汉字算 2
+  if (hanziCount > 30) {
+    problems.push(`标题汉字超限（${hanziCount} 个汉字，上限 30）`)
+  } else if (asPddLen > 60) {
+    problems.push(`标题超长（按拼多多算法 ${asPddLen} 字符，上限 60）`)
+  }
+}
+
 if (!Array.isArray(product.images) || !product.images.length) problems.push('主图缺失')
 if (problems.length) {
   emit({ ok: false, failureKind: 'api_error', text: `商品数据校验未通过：${problems.join('、')}` })
