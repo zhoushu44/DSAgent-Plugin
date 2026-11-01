@@ -396,6 +396,101 @@ lib 版写死服装类目文案，非服装类目填 0 项。改为：
 
 ---
 
+
+## 图片预处理（img-prep.mjs，2026-11-01）
+
+### 为什么必须做
+
+拼多多主图/详情图**单张 ≤ 3MB**。AI 生成的 PNG 常在 3-4MB，直接上传的结果：
+
+- `publish-v2` 走了 `--no-submit` 时可能**静默通过**（校验在 lib 层，preview 阶段没拦住）
+- 真提交时被平台拒，或 lib 层直接 return 错误，整单失败
+
+实测这批 15 张 AI 图：**7 张超 3MB**（最大 3.76MB）。
+
+### 自动处理（已接入）
+
+`publish-v2` 和 `batch-publish` 在填表前自动跑 `prepareImages()`：
+
+```
+图片预处理 → 压缩 7/15 张（上限 3MB/张）
+```
+
+**实测效果**：
+
+| 原图 | 处理后 | 压缩率 | 策略 |
+|---|---|---|---|
+| 3.35MB PNG | 0.37MB | **-89%** | jpeg q=92 |
+| 3.58MB PNG | 0.39MB | -89% | jpeg q=92 |
+| 3.76MB PNG | 0.39MB | -90% | jpeg q=92 |
+
+耗时 1.6 秒处理 7 张。**q=92 是高质量 JPEG，画质几乎无损**。
+
+### 压缩策略（按顺序尝试直到达标）
+
+1. **PNG → JPEG q=92**（通常这一步就够了，体积降 90%）
+2. JPEG q=85 → q=78
+3. 尺寸缩到长边 1440px + q=78
+4. 长边 1440 + q=72
+5. 长边 1200 + q=72
+6. 长边 1000 + q=68
+7. 仍超标 → 保留原图并告警
+
+**关键**：PNG 转 JPEG 是最大杀器。AI 生成的 PNG 是无损压缩，白底图转 JPEG q=92 后肉眼几乎无差别，但体积差 9 倍。
+
+### 工具链
+
+优先 `sharp`，没有则用 Python PIL：
+
+```js
+const sharp = getSharp()          // 尝试 require('sharp')
+const py = sharp ? null : findPython()   // 兜底找带 PIL 的 Python
+```
+
+PIL 兜底脚本做了同样的事（白底填充 → JPEG → 逐级降质/缩放 → 达标即止）。
+
+### 产物位置
+
+压缩后的图写到 **`<原图目录>/.publish-ready/`**，文件名改为 `.jpg`。
+**原图不动**（避免破坏素材）。
+
+### 独立使用
+
+```bash
+# 只检查（不处理）
+node scripts/compress-images.mjs --dir ./img --check
+
+# 压缩到默认 .publish-ready/
+node scripts/compress-images.mjs --dir ./img
+
+# 指定上限和输出目录
+node scripts/compress-images.mjs --dir ./img --max-mb 5 --out ./compressed
+
+# 指定文件
+node scripts/compress-images.mjs --files a.png,b.png
+```
+
+### 平台上限参考
+
+| 平台 | 主图上限 | 详情图上限 |
+|---|---|---|
+| 拼多多 | **3MB** | 3MB |
+| 淘宝/天猫 | 5MB | 5MB |
+
+### 压缩失败怎么办
+
+代码里会明确列出仍超标的文件：
+
+```
+⚠ 仍有 2 张超过 3MB，请手工处理：
+  - E:/path/to/detail_5.jpg
+```
+
+手工处理的选项：
+- 用 Photoshop / 在线工具降到 3MB 以下
+- 调低分辨率（1440px 长边足够电商用）
+- 换更简单的构图（纯白底比复杂背景小得多）
+
 ## 十、性能
 
 ### 实测耗时（毛巾，2026-10-31 优化后）

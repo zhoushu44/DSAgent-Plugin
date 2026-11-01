@@ -250,6 +250,39 @@ try {
   work = await selectCategory(work, product.category || categoryKw, { log, catId: tpl?.catId || '', connected })
 
   // 段3 + 段4
+  // ★ 2026-11-01：上传前图片预处理（拼多多主图/详情图单张 ≤ 3MB）
+  //   AI 生成的 PNG 常在 3-4MB，直接传会被平台拒或让 lib 层报错退出。
+  //   自动 PNG→JPEG(q92) 压缩，实测 3.5MB → 0.37MB（-89%），画质几乎无损。
+  {
+    try {
+      const { prepareImages } = await import('./img-prep.mjs')
+      const MAX = 3 * 1024 * 1024
+      const before = (product.images || []).length + (product.detailImages || []).length
+
+      const mainRes = await prepareImages(product.images || [], { maxBytes: MAX, log })
+      const detailRes = await prepareImages(product.detailImages || [], { maxBytes: MAX, log })
+
+      product.images = mainRes.files
+      product.detailImages = detailRes.files
+
+      const compressed = mainRes.stats.compressed + detailRes.stats.compressed
+      const failed = mainRes.stats.failed + detailRes.stats.failed
+      if (compressed) log(`  图片预处理 → 压缩 ${compressed}/${before} 张（上限 3MB/张）`)
+      if (failed) log(`  ⚠ 图片预处理 → ${failed} 张压缩失败（保留原图，可能被平台拒）`)
+      if (!compressed && !failed) log(`  图片预处理 → ${before} 张均达标，无需压缩`)
+
+      // 压缩失败且仍超限的，明确告警
+      const stillOver = [...mainRes.detail, ...detailRes.detail]
+        .filter(d => d.ok === false || (d.bytes && d.bytes > MAX))
+      if (stillOver.length) {
+        log(`  ⚠ 仍有 ${stillOver.length} 张超过 3MB，请手工处理：`)
+        stillOver.slice(0, 5).forEach(d => log(`    - ${d.src}`))
+      }
+    } catch (e) {
+      log(`  ⚠ 图片预处理异常（跳过）：${e.message.slice(0, 100)}`)
+    }
+  }
+
   const flowResult = await publishFlow(work, product, { log, templateAttrs: tpl?.requiredAttrs || [] })
 
   // ★ 2026-10-30：--no-submit 模式 → 不点提交，保留页面供人工核对

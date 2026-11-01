@@ -88,6 +88,22 @@ for (let idx = 0; idx < products.length; idx++) {
     let work = await waitForPublishPage(browser, { log })
     work = await selectCategory(work, catKey, { log, catId: tpl?.catId || '' })
 
+    // ★ 2026-11-01：上传前图片预处理（单张 ≤ 3MB）
+    {
+      try {
+        const { prepareImages } = await import(`file:///${S}/img-prep.mjs`)
+        const MAX = 3 * 1024 * 1024
+        const m = await prepareImages(product.images || [], { maxBytes: MAX, log })
+        const d = await prepareImages(product.detailImages || [], { maxBytes: MAX, log })
+        product.images = m.files
+        product.detailImages = d.files
+        const c = m.stats.compressed + d.stats.compressed
+        if (c) log(`  图片预处理 → 压缩 ${c} 张`)
+      } catch (e) {
+        log(`  ⚠ 图片预处理异常（跳过）：${e.message.slice(0, 80)}`)
+      }
+    }
+
     const flowResult = await publishFlow(work, product, {
       log,
       templateAttrs: tpl?.requiredAttrs || [],
