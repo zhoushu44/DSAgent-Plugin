@@ -119,7 +119,7 @@ for (let idx = 0; idx < products.length; idx++) {
     let submitResult = { ok: false, note: 'no-submit 模式' }
     if (!noSubmit && doConfirm) {
       log('点提交…')
-      submitResult = await submitAndVerify(work, { log, timeoutMs: 30000, productTitle: product.title })
+      submitResult = await submitAndVerify(work, { log, timeoutMs: 60000, productTitle: product.title })
     }
 
     const cost = Math.round((Date.now() - t0) / 1000)

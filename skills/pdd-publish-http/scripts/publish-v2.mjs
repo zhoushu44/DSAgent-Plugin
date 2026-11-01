@@ -384,7 +384,7 @@ try {
   }
 
   // 段5
-  const submitResult = await submitAndVerify(work, { log, timeoutMs: 30000, productTitle: product.title || '' })
+  const submitResult = await submitAndVerify(work, { log, timeoutMs: 60000, productTitle: product.title || '' })
 
   const cost = Math.round((Date.now() - t0) / 1000)
 
