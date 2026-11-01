@@ -101,6 +101,33 @@ for each product.json:
 
 ---
 
+
+## 一点六、标题长度校验（提交前必查，2026-11-01）
+
+### 关键：拼多多的「60 字符」= 30 个汉字
+
+汉字算 **2 字符**。所以两个判据都要查：
+
+```js
+const hanziCount = (t.match(/[一-龥]/g) || []).length
+const asPddLen = hanziCount * 2 + (t.length - hanziCount)   // 汉字算 2
+if (hanziCount > 30 || asPddLen > 60) → 拦截
+```
+
+**踩过的坑**：只查 `t.length > 60`，遇到 33 字符但 31 汉字的标题会放过去，批量跑到第 3 个才在提交时被平台拒，白跑几分钟。
+
+**现在**：`publish-v2` 在数据校验阶段就拦住：
+
+```
+商品数据校验未通过：标题汉字超限（31 个汉字，上限 30）
+```
+
+### 批量场景尤其重要
+
+100 个商品里只要有一个标题超限，那个商品会失败但不影响后续（catch 后继续）。不过提前拦住能省下整个浏览器启动 + 填表的时间（约 2 分钟/个）。
+
+---
+
 ## 二、段4 正确顺序（不可改）
 
 ```
@@ -158,6 +185,7 @@ document.evaluate('.//input[contains(@placeholder,"自定义")]', root, ...)
 ```
 
 ---
+
 
 ## 四、价格库存（sku-table.mjs）
 
@@ -295,7 +323,84 @@ single = (price + 1.01).toFixed(2)
 
 ---
 
+
+## 六点五、复合字段与搜索式下拉（attr-composite.mjs，2026-11-01）
+
+真机上架睡衣时踩到的两类字段，形状和普通属性完全不同。**判断错交互模型就会一直填不上，而且看不出原因**。
+
+### 类型 A：弹窗勾选型（材质成分）
+
+**错误认知**：以为它是「加行 + 输入框」结构 → 点了按钮，等输入框出现，等不到 → 判失败。
+
+**真实结构**（截图实证）：
+
+```
+点「添加材质成分(0/7)」→ 弹出选择面板：
+  搜索框：请输入搜索内容
+  ☐ 棉   ☐ 麻   ☐ 蚕丝   ☐ 羊毛   ☐ 羊绒   ☐ 其它
+  ☐ 亚麻  ☐ 氨纶  ☐ 涤纶（聚酯纤维）  ...
+  [确定(0/7)]  [取消]
+```
+
+**正确流程**：
+
+```
+① 点「添加XX」按钮 → 等弹窗（判据：出现「确定(N/M)」按钮 + ≥3 个 checkbox）
+② （可选）在搜索框键入关键词过滤
+③ 找目标选项的 checkbox → 点击勾选
+④ 点「确定」
+⑤ 校验：看「确定」按钮的计数变化 0 → 1，以及弹窗是否关闭
+```
+
+**★ 校验判据必须是「计数变化」，不能是「字段文本包含成分名」**
+平台会改写名称：输入「聚酯纤维（涤纶）」，勾选后显示「涤纶（聚酯纤维）」。
+字符串匹配 `text.includes('聚酯纤维')` 会因为顺序颠倒而失败，但实际已经填好了。
+
+### 类型 B：搜索式下拉（品牌）
+
+**结构**：
+
+```html
+<input placeholder="请输入品牌名称搜索">
+「未找到需要的品牌？点击申请」
+```
+
+**必须先键入搜索，等候选出现，再点选**。直接 `input.value = '其他'` 不会触发候选加载，也不会被平台接受。
+
+流程：
+
+```
+① 点击搜索框 → Ctrl+A → Delete 清空
+② 键入品牌名（delay 55ms，太快候选来不及出）
+③ 等 1.5s 让候选加载
+④ 精确匹配 → 包含匹配 → 「其他/其它/无」时取第一个
+⑤ 点选后校验 input.value 或容器文本包含品牌名
+```
+
+### 判断规则（看 label 文本就知道是哪种）
+
+| label 特征 | 交互模型 | 处理方式 |
+|---|---|---|
+| 有 input，placeholder 含「搜索」 | 搜索式下拉 | 键入 → 等候选 → 点选 |
+| 文本形如 `添加XX(N/M)`，**无 input** | 弹窗勾选 | 点按钮 → 弹窗 → 勾选 → 确定 |
+| 有 input，placeholder 含「请选择」 | 普通下拉 | 点开 → 点选项 |
+| 有 input，可自由输入 | 文本型 | 直接填 |
+
+**排查口诀**：字段无 input 时，不要以为它坏了 —— 先看 label 里有没有「添加XX(N/M)」。
+
+---
+
+
 ## 七、参考价与默认值
+
+### 标题（新增约束）
+
+| 规则 | 值 |
+|---|---|
+| 汉字数上限 | **30** |
+| 拼多多算法字符上限 | **60**（汉字算 2） |
+| 校验时机 | `publish-v2` 数据校验阶段（提交前） |
+
 
 | 项 | 规则 |
 |---|---|
@@ -564,6 +669,7 @@ node scripts/compress-images.mjs --files a.png,b.png
 | `sku-table.mjs` | 库存/拼单价/单买价（列映射 + skip-existing） |
 | `sku-thumb.mjs` | 每行预览图 |
 | `attr-fill-generic.mjs` | 属性采集 + 填写 + AI 选值 + 必填复核 |
+| `attr-composite.mjs` | **复合字段**（弹窗勾选型 / 搜索式下拉，2026-11-01 新增） |
 | `attr-harvest.mjs` | 属性候选采集入库（attr-schema.json） |
 | `category-template.mjs` | 类目模板读写 |
 | `field-basic.mjs` | 标题 / 参考价 |
@@ -572,7 +678,33 @@ node scripts/compress-images.mjs --files a.png,b.png
 | `vision-fill.mjs` | 视觉分析规格区 |
 | `vision-cache.mjs` | 视觉分析结果缓存 |
 | `analyze_spec_ui.py` | 视觉模型调用（截图 → JSON） |
-| `imgprep.py` | 图片规整 |
+| `img-prep.mjs` | **图片自动压缩**（3MB 上限，PNG→JPEG q92，2026-11-01 新增） |
+| `compress-images.mjs` | **独立压缩工具**（--dir / --files / --check，2026-11-01 新增） |
+| `imgprep.py` | 图片规整（旧版，Python） |
+
+### 新增组件说明（2026-11-01）
+
+**`attr-composite.mjs`** —— 处理两类「看起来是属性、实际交互完全不同」的字段：
+
+| 导出函数 | 用途 |
+|---|---|
+| `fillCompositeAttr(page, boxId, name, value, opts)` | 弹窗勾选型（材质成分）：点按钮 → 弹窗 → 勾 checkbox → 点确定 |
+| `fillBrandSearch(page, boxId, brand, opts)` | 搜索式下拉（品牌）：键入搜索 → 等候选 → 点选 |
+| `parseCompositeValue(raw)` | 值解析（`'聚酯纤维（涤纶）'` → `{name, pct}`） |
+
+**`img-prep.mjs`** —— 上传前自动压缩：
+
+| 导出函数 | 用途 |
+|---|---|
+| `prepareImages(files, {maxBytes, log})` | 批量预处理（达标复用，超标压缩），返回 `{files, detail, stats}` |
+| `checkImageSizes(files, maxBytes)` | 只检查不处理 |
+
+**`compress-images.mjs`** —— 命令行入口：
+
+```bash
+node scripts/compress-images.mjs --dir ./img --check
+node scripts/compress-images.mjs --dir ./img --max-mb 3
+```
 
 ---
 
@@ -620,7 +752,6 @@ node scripts/compress-images.mjs --files a.png,b.png
 - **账号级并发**：两个任务同时打同一个号会显著提高被封概率，`_shared/pdd-risk.mjs` 的账号锁会拦住，看到「正被其他任务占用」就等等。
 
 <!-- RISK-CHEATSHEET:END -->
-
 
 
 > **重要:** 上架是**不可撤销的真实操作（L2）**。必须两步走：先拿「上架预览」给用户看，用户**明确同意**后才真正提交。
