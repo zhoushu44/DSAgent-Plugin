@@ -47,6 +47,9 @@ export async function publishFlow(page, product, opts = {}) {
   const log = opts.log || (() => {})
   const filled = []
   const missed = []
+  // ★ 2026-11-02：把属性阶段扫描到的字段（含完整 options）带到返回值，
+  //   供 publish-v2 回写模板（v2 模板要存 options，第二次发布才能零扫描）
+  let __attrFieldsForTemplate = []
 
   const title = String(product.title || '').trim()
   const stock = String(product.stock || '100')   // ★ 2026-10-30 用户定：每个 SKU 默认库存 100
@@ -264,6 +267,32 @@ export async function publishFlow(page, product, opts = {}) {
   try {
     const { harvestAttributes, fillAttributesGeneric, pickAttrValuesByAI } = await import('./attr-fill-generic.mjs')
 
+    // ★★ 2026-11-02 重大提速：模板命中时**直接填**，跳过所有扫描
+    //   模板里已经存了完整的 name→value 映射，没必要再扫 required / 读候选。
+    //   实测：原流程 3 次扫描 ~9 秒 + 逐字段读候选；直填只需 1 次 DOM 索引 ~50ms。
+    //   直填失败（字段结构变了 / 填充率 <80%）才回落到通用流程。
+    if ((opts.templateAttrs || []).length) {
+      try {
+        const { fillAttrsFromTemplate } = await import('./attr-template-direct.mjs')
+        const t0 = Date.now()
+        const direct = await fillAttrsFromTemplate(page, opts.templateAttrs, attributes, { log })
+        const cost = Date.now() - t0
+        filled.push(...direct.filled)
+        missed.push(...direct.missed)
+        log(`[attr] 模板直填 ${direct.usedTemplate} 项，耗时 ${cost}ms，必填 ${direct.requiredFilled}/${direct.requiredTotal}`)
+
+        if (!direct.needFallback) {
+          log(`[attr] ✅ 模板直填覆盖完整，跳过扫描流程`)
+          // 仍需记录到 flowResult，但不进通用流程
+          throw { __templateDone: true }
+        }
+        log(`[attr] ⚠ 模板直填不完整（未找到 ${direct.notFound.length} 个字段，填充率 ${(direct.fillRate * 100).toFixed(0)}%），回落通用流程`)
+      } catch (e) {
+        if (e && e.__templateDone) return { filled, missed }
+        log(`[attr] 模板直填异常：${String(e?.message || e).slice(0, 80)}，回落通用流程`)
+      }
+    }
+
     // ★ 2026-10-30：SKU 预览图上传后页面会重渲染，属性区可能还没完全展开。
     //   先滚到属性区、静置 2 秒，再采集（避免漏字段，实测漏过「适用型号」）。
     await page.evaluate(() => {
@@ -274,8 +303,33 @@ export async function publishFlow(page, product, opts = {}) {
 
     // ① 采集所有字段 + 真实候选
     //   ★ 2026-10-31 提速：模板已有值的字段**不读候选**（省掉 N 次开下拉）
+    //   ★ 2026-11-02 关键修复：**必填字段永远不能跳过候选读取**
+    //     实测抱枕：模板 15 个字段全被跳过 → 没读候选 → 用户值不在候选里时无法兜底
+    //     → 品牌/产品类型/填充物/形状/工艺/安全等级/平方克重 7 个必填留空，填写率仅 43%
+    //     修法：先快速扫一遍拿到 required 名单，只对非必填的模板字段跳过
     const tplAttrNames = (opts.templateAttrs || []).map(a => String(a.name || '').replace(/\s+/g, ''))
-    let { fields } = await harvestAttributes(page, { log, skipOptions: tplAttrNames })
+    let skipForSpeed = tplAttrNames
+    try {
+      const pre = await harvestAttributes(page, { log, skipOptions: [], fast: true, ultraFast: true })
+      const reqNames = new Set(
+        (pre.fields || []).filter(f => f.required).map(f => String(f.name || '').replace(/\s+/g, ''))
+      )
+      if (reqNames.size) {
+        skipForSpeed = tplAttrNames.filter(n => !reqNames.has(n))
+        log(`[attr] 必填 ${reqNames.size} 个不跳过候选读取；仅跳过 ${skipForSpeed.length} 个非必填模板字段`)
+      }
+    } catch { /* 扫描失败退回原逻辑 */ }
+    let { fields } = await harvestAttributes(page, { log, skipOptions: skipForSpeed })
+    // ★ 2026-11-02：记录完整字段（含 options）供模板回写
+    if (Array.isArray(fields) && fields.length) {
+      __attrFieldsForTemplate = fields.map(f => ({
+        name: f.name,
+        required: !!f.required,
+        kind: f.kind || 'select',
+        options: Array.isArray(f.options) ? f.options : [],
+        value: '',
+      }))
+    }
 
     // ★ 兜底：如果必填字段数偏少，再等 3 秒重采一次（取并集）
     const reqCount1 = fields.filter(f => f.required).length
@@ -592,5 +646,5 @@ export async function publishFlow(page, product, opts = {}) {
     log(`  服务承诺异常：${e.message.slice(0, 80)}`)
   }
 
-  return { filled, missed }
+  return { filled, missed, attrFields: __attrFieldsForTemplate || [] }
 }

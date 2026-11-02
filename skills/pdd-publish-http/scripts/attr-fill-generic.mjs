@@ -243,7 +243,10 @@ export async function harvestAttributes(page, opts = {}) {
   // ★ 2026-10-31 提速：支持 skipOptions 跳过候选采集（模板已有值时不需读候选）
   const skipOptions = new Set((opts.skipOptions || []).map(s => String(s || '').replace(/\s+/g, '')))
   const fast = opts.fast !== false   // 默认快速模式
+  // ★ 2026-11-02：ultraFast 只用于「预扫描拿 required 名单」，不做滚动与长等待
+  const ultraFast = opts.ultraFast === true
 
+  if (!ultraFast) {
   // ★ 2026-10-30：属性区是**异步渲染**的（规格填完后才陆续出现）。
   //   实测坑：流程里只检测到 7 个字段，单独测试却有 8 个 —— 第 8 个出现得更晚。
   //   三步确保全部渲染：
@@ -285,6 +288,15 @@ export async function harvestAttributes(page, opts = {}) {
   }
   await sleep(600)   // 2026-10-31 speed: 1500 -> 600
   log(`[attr] 属性区渲染稳定：${lastCount} 个字段`)
+  } else {
+    // ultraFast：只等 2 次短轮询，不滚动不静置（预扫描用，字段已渲染）
+    await sleep(150)
+    const cnt = await page.evaluate(() => {
+      const root = document.querySelector('#property') || document.querySelector('.goods-propertys')
+      return root ? root.querySelectorAll('[id^="basic.propertys."]').length : 0
+    }).catch(() => 0)
+    log(`[attr] 预扫描：${cnt} 个字段（ultraFast）`)
+  }
 
   // ① 列出所有字段
   //   ★ 2026-10-30 关键修复：不能只扫 [id^="basic.propertys."]，

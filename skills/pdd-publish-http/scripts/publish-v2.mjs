@@ -158,7 +158,13 @@ const puppeteer = require('puppeteer-core')
 const { openPublishEntry, waitForPublishPage, selectCategory } = await import('./stage-nav.mjs')
 const { publishFlow } = await import('./publish-flow.mjs')
 const { submitAndVerify } = await import('./stage-submit.mjs')
-const { findTemplate, saveTemplate } = await import('./category-template.mjs')
+const { findTemplate, saveTemplate, templateAttrs: getTplAttrs } = await import('./category-template-v2.mjs')
+// ★ 启动时把老模板升级到 v2（幂等）
+try {
+  const { upgradeTemplates } = await import('./category-template-v2.mjs')
+  const n = upgradeTemplates()
+  if (n > 0) log(`[template] 已升级 ${n} 个模板到 v2`)
+} catch { /* ignore */ }
 
 const shopKey = account
 if (!shopKey) {
@@ -173,7 +179,7 @@ try {
   tpl = findTemplate(catKey)
   if (tpl) {
     log(`[template] 命中类目模板「${catKey}」：已成功 ${tpl.successCount || 0} 次，`
-      + `属性 ${(tpl.requiredAttrs || []).length} 条，规格 ${(tpl.dims || []).length} 维`)
+      + `属性 ${getTplAttrs(tpl).length} 条，规格 ${(tpl.dims || []).length} 维`)
   } else {
     log(`[template] 无「${catKey}」模板，本次从头探测（成功后自动沉淀）`)
   }
@@ -183,11 +189,11 @@ try {
 
 // 用模板属性补全商品属性：商品里没给的、模板里有的 → 用模板值
 // （商品自带属性优先，模板只补空缺 —— 避免覆盖本次真实数据）
-if (tpl?.requiredAttrs?.length) {
+if (getTplAttrs(tpl).length) {
   const norm = s => String(s || '').replace(/\s+/g, '')
   const have = new Set((product.attributes || []).map(a => norm(a.name)))
   const added = []
-  for (const a of tpl.requiredAttrs) {
+  for (const a of getTplAttrs(tpl)) {
     const n = norm(a?.name)
     if (!n || have.has(n)) continue
     // 跳过「商品货号」这类一物一码的字段（模板值对本次无意义）
@@ -298,7 +304,7 @@ try {
     }
   }
 
-  const flowResult = await publishFlow(work, product, { log, templateAttrs: tpl?.requiredAttrs || [] })
+  const flowResult = await publishFlow(work, product, { log, templateAttrs: getTplAttrs(tpl) })
 
   // ★ 2026-10-30：--no-submit 模式 → 不点提交，保留页面供人工核对
   if (noSubmit) {
@@ -340,11 +346,30 @@ try {
         return true
       })
 
+      // ★ 2026-11-02 v2：把扫描到的完整字段（含 options）+ 本次填的值合并保存
+      //   这样第二次发布时可以直接从模板取「字段名 → 值 + 候选」，零扫描
+      const scanned = flowResult.attrFields || []
+      const filledMap = new Map(uniqAttrs.map(a => [a.name.replace(/\s+/g, ''), a.value]))
+      const attrsForTpl = scanned.map(f => ({
+        name: f.name,
+        required: !!f.required,
+        kind: f.kind || 'select',
+        options: Array.isArray(f.options) ? f.options : [],
+        value: filledMap.get(f.name.replace(/\s+/g, '')) || '',
+      }))
+      // 补上扫描里没有但确实填了的（兜底）
+      for (const a of uniqAttrs) {
+        const n = a.name.replace(/\s+/g, '')
+        if (!attrsForTpl.some(x => x.name.replace(/\s+/g, '') === n)) {
+          attrsForTpl.push({ name: a.name, required: false, kind: 'select', options: [], value: a.value })
+        }
+      }
+
       saveTemplate(catKey, {
         catId,
         catePath: catePath && catePath !== '商品分类' ? catePath : '',
         dims,
-        requiredAttrs: uniqAttrs,
+        attrs: attrsForTpl,
         price: product.price || '',
         stock: product.stock || '',
       })
@@ -424,11 +449,28 @@ try {
         // 去掉「第N行xxx」这种带行号的
         .filter(a => !/^第\d+行/.test(a.name))
 
+      // ★ 2026-11-02 v2：同 --no-submit 分支，保存完整字段（含 options）
+      const scanned2 = flowResult.attrFields || []
+      const filledMap2 = new Map(attrFromFilled.map(a => [a.name.replace(/\s+/g, ''), a.value]))
+      const attrsForTpl2 = scanned2.map(f => ({
+        name: f.name,
+        required: !!f.required,
+        kind: f.kind || 'select',
+        options: Array.isArray(f.options) ? f.options : [],
+        value: filledMap2.get(f.name.replace(/\s+/g, '')) || '',
+      }))
+      for (const a of attrFromFilled) {
+        const n = a.name.replace(/\s+/g, '')
+        if (!attrsForTpl2.some(x => x.name.replace(/\s+/g, '') === n)) {
+          attrsForTpl2.push({ name: a.name, required: false, kind: 'select', options: [], value: a.value })
+        }
+      }
+
       saveTemplate(catKey, {
         catId,
         catePath: catePath && catePath !== '商品分类' ? catePath : (tpl?.catePath || ''),
         dims,
-        requiredAttrs: attrFromFilled,
+        attrs: attrsForTpl2,
         price: product.price || '',
         stock: product.stock || '',
         goodsId: submitResult.goodsId,
