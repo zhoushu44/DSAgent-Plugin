@@ -82,14 +82,41 @@ export function saveTemplate(categoryKeyword, info) {
   // 合并 attrs：保留旧值，新值覆盖
   const oldAttrs = Array.isArray(prev.attrs) ? prev.attrs : []
   const newAttrs = Array.isArray(info.attrs) ? info.attrs : []
+
+  // ★ 2026-11-02 防污染：若本次传入了 pageFields（页面上真实存在的字段），
+  //   只保留这些字段 —— 避免把其他类目的属性累积进来。
+  //   实测毛巾：模板累积到 33 个属性，其中 20 个是睡衣的（袖长/下装长/衣门襟/领型...）
+  let allowed = null
+  const pageFieldNames = Array.isArray(info.pageFields)
+    ? info.pageFields.map(f => norm(f.name || f)).filter(Boolean)
+    : []
+  if (pageFieldNames.length) {
+    allowed = new Set(pageFieldNames)
+    const dropped = newAttrs
+      .map(a => norm(a.name))
+      .filter(n => n && !allowed.has(n) && ![...allowed].some(an => an.includes(n) || n.includes(an)))
+    if (dropped.length) {
+      console.log(`[template] 过滤 ${dropped.length} 个非本类目字段：${dropped.slice(0, 5).join('、')}${dropped.length > 5 ? ' 等' : ''}`)
+    }
+  }
+
+  // ★ 若页面字段数远少于已有 attrs（<50%），判定为「类目结构变了」，重建而非合并
+  if (allowed && oldAttrs.length && allowed.size < oldAttrs.length * 0.5) {
+    console.log(`[template] 页面字段 ${allowed.size} 远少于模板 ${oldAttrs.length}，判定类目结构变化，重建`)
+    oldAttrs.length = 0
+  }
+
   const map = new Map()
   for (const a of oldAttrs) {
     const n = norm(a.name)
-    if (n) map.set(n, a)
+    if (!n) continue
+    if (allowed && ![...allowed].some(an => an === n || an.includes(n) || n.includes(an))) continue
+    map.set(n, a)
   }
   for (const a of newAttrs) {
     const n = norm(a.name)
     if (!n) continue
+    if (allowed && ![...allowed].some(an => an === n || an.includes(n) || n.includes(an))) continue
     const prevA = map.get(n) || {}
     map.set(n, {
       name: a.name || prevA.name,
@@ -203,4 +230,35 @@ export function enrichTemplateOptions(categoryKeyword, pageFields) {
     saveAll(all)
   }
   return { updated, key }
+}
+
+
+/**
+ * 清理模板里的过期属性（页面上已不存在的）
+ * @param categoryKeyword
+ * @param pageFieldNames 当前页面上真实存在的字段名数组
+ */
+export function pruneStaleAttrs(categoryKeyword, pageFieldNames) {
+  const all = loadTemplates()
+  const key = Object.keys(all).find(k => norm(k) === norm(categoryKeyword))
+  if (!key) return { pruned: 0, left: 0 }
+  const t = all[key]
+  const attrs = templateAttrs(t)
+  const allowed = new Set((pageFieldNames || []).map(n => norm(n)).filter(Boolean))
+  if (!allowed.size) return { pruned: 0, left: attrs.length }
+
+  const kept = []
+  const dropped = []
+  for (const a of attrs) {
+    const n = norm(a.name)
+    if (allowed.has(n) || [...allowed].some(an => an.includes(n) || n.includes(an))) kept.push(a)
+    else dropped.push(a.name)
+  }
+  t.attrs = kept
+  t.requiredAttrs = kept
+  t._schema = 'v2'
+  t.updatedAt = new Date().toISOString()
+  all[key] = t
+  saveAll(all)
+  return { pruned: dropped.length, left: kept.length, dropped: dropped.slice(0, 10) }
 }

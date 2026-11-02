@@ -401,6 +401,7 @@ try {
         catePath: catePath && catePath !== '商品分类' ? catePath : '',
         dims,
         attrs: attrsForTpl,
+        pageFields: scanned,   // ★ 2026-11-02 防污染：只保留本类目字段
         price: product.price || '',
         stock: product.stock || '',
       })
@@ -502,6 +503,7 @@ try {
         catePath: catePath && catePath !== '商品分类' ? catePath : (tpl?.catePath || ''),
         dims,
         attrs: attrsForTpl2,
+        pageFields: scanned2,
         price: product.price || '',
         stock: product.stock || '',
         goodsId: submitResult.goodsId,
