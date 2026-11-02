@@ -55,10 +55,10 @@ export async function submitAndVerify(page, opts = {}) {
   //   实测：这个全屏 loading 层会吞掉所有点击（mouse.click / dispatchEvent / .click() / Enter 全无效）
   {
     let waited = 0
-    // ★ 2026-11-02 提速：40 次 × 500ms = 20s → 12 次 × 500ms = 6s
-    //   实测遮罩在「填表完成后、提交前」通常不会消失（它是页面级的），
-    //   等 20s 纯浪费。真正需要等的是提交后的处理状态，那里单独判断。
-    for (let w = 0; w < 12; w++) {
+    // ★ 2026-11-02 再提速：6s → 1s
+    //   实测 4 个商品全部「等待 6000ms 后仍存在」，遮罩在提交前不会消失
+    //   它不拦截点击（elementFromPoint 显示按钮可达），等它纯属浪费
+    for (let w = 0; w < 2; w++) {
       const blocking = await page.evaluate(() => {
         const el = document.querySelector('.goods-loading-contain')
         if (!el) return false
@@ -72,7 +72,7 @@ export async function submitAndVerify(page, opts = {}) {
       await sleep(500)
       waited += 500
     }
-    if (waited > 0) log(`  遮罩等待 ${waited}ms 后${waited >= 6000 ? '仍存在（直接尝试提交）' : '已消失'}`)
+    if (waited > 0) log(`  遮罩等待 ${waited}ms 后仍存在（不拦截点击，直接提交）`)
   }
 
   await page.mouse.click(bp.x, bp.y)

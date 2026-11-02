@@ -307,26 +307,19 @@ export async function fillAttrsFromTemplate(page, templateAttrs, userAttrs = [],
   log(`[tpl-direct] 已填 ${okCount}/${merged.size}（其中 ${skipCount} 个已有值），未找到 ${notFound.length} 个字段`)
 
   // ③ 判断是否需要回落到通用流程
-  //   ★ 2026-11-02 修正：原判据 notFound.length > 0 太严 —— 模板里有商品的旧字段
-  //     （如「商品货号」这种一物一码的），页面上本来就没有，不该因此回落。
-  //   新判据（只看真正的风险）：
-  //     a. 必填填充率 < 80%          → 回落（必填没填上，提交必失败）
-  //     b. 有【必填】字段没找到       → 回落（模板结构与页面不符）
-  //     c. 非必填字段没找到          → 不回落（不影响发布）
-  const requiredTotal = indexNames.filter(n => index[n].required).length
-  const requiredFilled = filled.filter(f => {
-    const n = f.split('=')[0].replace(/\s+/g, '')
-    return indexNames.some(k => index[k].required && k.replace(/\s+/g, '') === n)
-  }).length
-  const fillRate = requiredTotal ? requiredFilled / requiredTotal : 1
+  //   ★ 2026-11-02 再修正：只关心「必填项是否都有值」
+  //     · 必填全有值 → 不回落（哪怕非必填没覆盖，不影响发布）
+  //     · 有必填完全没值 → 回落（让 AI 从真实候选择）
+  //   原判据 fillRate < 0.8 太粗：必填 8 个填了 6 个就回落，
+  //   而缺的 2 个可能是非必填，白走一遍通用流程（+40s）
+  const requiredNames = indexNames.filter(n => index[n].required)
+  const filledNames = new Set(filled.map(f => f.split('=')[0].replace(/\s+/g, '')))
+  const requiredEmpty = requiredNames.filter(rn => !filledNames.has(rn.replace(/\s+/g, '')))
+  const fillRate = requiredNames.length
+    ? (requiredNames.length - requiredEmpty.length) / requiredNames.length
+    : 1
 
-  // 只统计「必填字段」里没找到的
-  const missingRequired = notFound.filter(n => {
-    const nn = String(n).replace(/\s+/g, '')
-    return indexNames.some(k => index[k].required && (k.replace(/\s+/g, '') === nn || k.replace(/\s+/g, '').includes(nn)))
-  })
-
-  const needFallback = fillRate < 0.8 || missingRequired.length > 0
+  const needFallback = requiredEmpty.length > 0
 
   return {
     filled,
