@@ -86,13 +86,38 @@ for (let idx = 0; idx < products.length; idx++) {
 
   const t0 = Date.now()
   let work = null
+  let ownPages = []
   try {
-    // ★ 复用共享浏览器，每个商品开新页面
+    // ★ 2026-11-01：页面隔离 —— 记录开始时已有的标签页，之后只认新增的
+    //   否则 waitForPublishPage 会命中上一个商品残留的 goods_add 页面
+    const beforePages = new Set(await sharedBrowser.pages())
+
     const page = await sharedBrowser.newPage()
+    ownPages.push(page)
     await page.setViewport({ width: 1600, height: 900 })
 
     await openPublishEntry(page, { log })
-    work = await waitForPublishPage(sharedBrowser, { log })
+
+    // 只在新出现的页面里找发布页
+    work = await (async () => {
+      // ★ 2026-11-02：90s -> 45s（失败商品不该卡 90 秒；正常 10-15s 就出来了）
+      const deadline = Date.now() + 45000
+      while (Date.now() < deadline) {
+        const pages = await sharedBrowser.pages()
+        const fresh = pages.filter(p => !beforePages.has(p))
+        const hit = fresh.find(p => /goods\/(category|goods_add)/.test(String(p.url() || '')))
+        if (hit) {
+          await hit.bringToFront()
+          await sleep(2000)
+          if (!ownPages.includes(hit)) ownPages.push(hit)
+          return hit
+        }
+        await sleep(500)
+      }
+      throw new Error('类目页/表单页未出现（新标签页）')
+    })()
+    await sleep(1000)
+
     work = await selectCategory(work, catKey, { log, catId: tpl?.catId || '' })
 
     // ★ 2026-11-01：上传前图片预处理（单张 ≤ 3MB）
@@ -119,7 +144,7 @@ for (let idx = 0; idx < products.length; idx++) {
     let submitResult = { ok: false, note: 'no-submit 模式' }
     if (!noSubmit && doConfirm) {
       log('点提交…')
-      submitResult = await submitAndVerify(work, { log, timeoutMs: 60000, productTitle: product.title })
+      submitResult = await submitAndVerify(work, { log, timeoutMs: 45000, productTitle: product.title })
     }
 
     const cost = Math.round((Date.now() - t0) / 1000)
@@ -161,9 +186,20 @@ for (let idx = 0; idx < products.length; idx++) {
     log(`❌ 失败: ${e.message.slice(0, 150)}`)
     results.push({ name: item.name, ok: false, err: e.message.slice(0, 200) })
   } finally {
-    // ★ 只关页面，浏览器整批复用
+    // ★ 只关本商品的页面，浏览器整批复用
+    //   注意：要关掉所有属于这个商品的页面（openPublishEntry 可能开了新标签页）
+    for (const pg of ownPages) {
+      try { if (!pg.isClosed()) await pg.close() } catch { /* ignore */ }
+    }
+    // 兜底：关掉任何还没关的、不在白名单里的页面
     try {
-      if (work && !work.isClosed()) await work.close()
+      const pages = await sharedBrowser.pages()
+      for (const pg of pages) {
+        const url = String(pg.url() || '')
+        if (/goods\/(category|goods_add)/.test(url)) {
+          await pg.close().catch(() => {})
+        }
+      }
     } catch { /* ignore */ }
     await sleep(1500)
   }

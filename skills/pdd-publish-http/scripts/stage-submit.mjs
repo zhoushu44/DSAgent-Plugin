@@ -13,7 +13,17 @@ const sleep = ms => new Promise(r => setTimeout(r, ms))
  */
 export async function submitAndVerify(page, opts = {}) {
   const log = opts.log || (() => {})
-  const timeoutMs = opts.timeoutMs || 30000
+  const timeoutMs = opts.timeoutMs || 45000
+
+  // ★ 2026-11-02：提交前抓商品列表 ID 快照，用于判定「真的新增了」
+  //   否则会把已有的同名商品误认为刚创建的（实测毛巾踩过）
+  let beforeIds = null
+  if (opts.productTitle) {
+    try {
+      beforeIds = await snapshotGoodsIds(page)
+      if (beforeIds) log(`  提交前商品数：${beforeIds.size}`)
+    } catch { /* 忽略，后面降级 */ }
+  }
 
   log('点提交…')
 
@@ -45,7 +55,10 @@ export async function submitAndVerify(page, opts = {}) {
   //   实测：这个全屏 loading 层会吞掉所有点击（mouse.click / dispatchEvent / .click() / Enter 全无效）
   {
     let waited = 0
-    for (let w = 0; w < 40; w++) {
+    // ★ 2026-11-02 提速：40 次 × 500ms = 20s → 12 次 × 500ms = 6s
+    //   实测遮罩在「填表完成后、提交前」通常不会消失（它是页面级的），
+    //   等 20s 纯浪费。真正需要等的是提交后的处理状态，那里单独判断。
+    for (let w = 0; w < 12; w++) {
       const blocking = await page.evaluate(() => {
         const el = document.querySelector('.goods-loading-contain')
         if (!el) return false
@@ -59,7 +72,7 @@ export async function submitAndVerify(page, opts = {}) {
       await sleep(500)
       waited += 500
     }
-    if (waited > 0) log(`  遮罩等待 ${waited}ms 后${waited >= 20000 ? '仍存在（继续尝试）' : '已消失'}`)
+    if (waited > 0) log(`  遮罩等待 ${waited}ms 后${waited >= 6000 ? '仍存在（直接尝试提交）' : '已消失'}`)
   }
 
   await page.mouse.click(bp.x, bp.y)
@@ -143,7 +156,7 @@ export async function submitAndVerify(page, opts = {}) {
   if (errCount === 0) {
     // 查商品列表最近商品，看是否创建成功
     log('  错误（0）：页面未跳转但无校验错误，查商品列表确认…')
-    const check = await verifyCreatedInList(page, opts).catch(() => null)
+    const check = await verifyCreatedInList(page, { ...opts, beforeIds }).catch(() => null)
     if (check?.ok) {
       log(`  ✅ 商品已创建 goods_id=${check.goodsId}${check.status ? `（${check.status}）` : ''}`)
       return { ok: true, goodsId: check.goodsId, url: finalUrl, errors: [], note: check.status }
@@ -173,12 +186,48 @@ export async function submitAndVerify(page, opts = {}) {
 }
 
 /**
+ * 抓当前商品列表的所有商品 ID（提交前快照用）
+ * ★ 2026-11-02：用于区分「新创建」和「已存在的同名商品」
+ */
+async function snapshotGoodsIds(page) {
+  let np = null
+  try {
+    np = await Promise.race([
+      page.browser().newPage(),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 8000)),
+    ])
+    if (!np) return null
+    await np.goto('https://mms.pinduoduo.com/goods/goods_list', { waitUntil: 'networkidle2', timeout: 35000 })
+    await sleep(6000)
+    const ids = await np.evaluate(() => {
+      const out = []
+      for (const row of document.querySelectorAll('tr, [class*="goods-item"]')) {
+        const m = (row.innerText || '').match(/(?:商品)?ID\s*[:：]\s*(\d{10,20})/)
+        if (m) out.push(m[1])
+      }
+      // 兜底：全文扫
+      if (!out.length) {
+        const txt = document.body.innerText || ''
+        for (const m of txt.matchAll(/(?:商品)?ID\s*[:：]\s*(\d{10,20})/g)) out.push(m[1])
+      }
+      return [...new Set(out)]
+    }).catch(() => [])
+    return new Set(ids)
+  } catch {
+    return null
+  } finally {
+    try { if (np && !np.isClosed()) await np.close() } catch { /* ignore */ }
+  }
+}
+
+/**
  * 查商品列表，确认商品是否创建成功
  * @returns { ok, goodsId, status }
  */
 async function verifyCreatedInList(page, opts = {}) {
   const title = String(opts.productTitle || opts.title || '').trim()
   if (!title) return null
+  const beforeIds = opts.beforeIds || null
   // ★ 2026-11-01：加超时保护，避免批量场景下卡死
   let newPage = null
   try {
@@ -195,9 +244,10 @@ async function verifyCreatedInList(page, opts = {}) {
     //   实测：domcontentloaded + 4s 拿到的是「商家后台 | 搜索功能 | 客户端...」导航文本，
     //   列表数据要 networkidle2 + 12s 才渲染出来。
     //   原实现因此永远「查不到新商品」，把成功判成失败。
-    await newPage.goto('https://mms.pinduoduo.com/goods/goods_list', { waitUntil: 'networkidle2', timeout: 45000 })
-    await sleep(12000)
-    const found = await newPage.evaluate((wantTitle) => {
+    await newPage.goto('https://mms.pinduoduo.com/goods/goods_list', { waitUntil: 'networkidle2', timeout: 40000 })
+    await sleep(8000)   // ★ 2026-11-02: 12s -> 8s（networkidle2 已经保证加载完成）
+    const beforeArr = beforeIds ? [...beforeIds] : null
+    const found = await newPage.evaluate(({ wantTitle, beforeIds }) => {
       const text = document.body.innerText || ''
       // ★ 2026-11-01 真机格式（商品列表表格）：
       //   行文本形如：「\t | 女童珊瑚绒睡衣... | ID: 1023974144424 | 商品编码: 暂无编码 | ... | 91.98～93.98 | ...」
@@ -224,15 +274,20 @@ async function verifyCreatedInList(page, opts = {}) {
           || norm(cleanRow).includes(norm(wantTitle).slice(0, 8))
         ))
         if (match) {
-          // 找驳回原因（可能在同一行或紧邻）
+          const gid = idMatch[1]
+          // ★ 2026-11-02：如果有快照，必须确认这是**新增**的 ID
+          if (beforeIds && beforeIds.includes(gid)) {
+            // 已有商品，不是这次创建的 → 跳过，继续找
+            continue
+          }
           const rejectMatch = rowText.match(/驳回原因[：:]\s*([^\n]+)/)
-          // 找价格区间
           const priceMatch = rowText.match(/([\d.]+)\s*[～~]\s*([\d.]+)/)
           return {
-            goodsId: idMatch[1],
+            goodsId: gid,
             title: (title || wantTitle).slice(0, 50),
             status: rejectMatch ? `驳回：${rejectMatch[1].slice(0, 80)}` : '已创建',
             price: priceMatch ? `${priceMatch[1]}~${priceMatch[2]}` : '',
+            isNew: true,
           }
         }
       }
@@ -248,7 +303,7 @@ async function verifyCreatedInList(page, opts = {}) {
         if (idIn) return { goodsId: idIn[1], title: wantTitle.slice(0, 50), status: '已创建' }
       }
       return null
-    }, title).catch(() => null)
+    }, { wantTitle: title, beforeIds: beforeArr }).catch(() => null)
     return found ? { ok: true, ...found } : null
   } finally {
     await newPage.close().catch(() => {})
