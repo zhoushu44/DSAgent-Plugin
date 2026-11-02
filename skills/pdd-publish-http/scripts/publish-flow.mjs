@@ -441,7 +441,11 @@ export async function publishFlow(page, product, opts = {}) {
       // 每轮都重新采集（可能发现新字段）
       if (round > 0) {
         await sleep(1200)
-        const again = await harvestAttributes(page, { log })
+        // ★ 2026-11-02 提速：重采集用 ultraFast（不做滚动/长等待）
+        //   原来走完整 harvestAttributes（滚动 1.8s + 稳定 1.5s + 静置 600ms）
+        //   → 第 2 轮光采集就 4 秒，加上 AI 选值和填写共 16 秒
+        //   现在只查字段数量和候选，1 秒内完成
+        const again = await harvestAttributes(page, { log, ultraFast: true, skipOptions: skipForSpeed })
         if (again.fields.length > fields.length) {
           log(`[attr] 第 ${round + 1} 轮：属性区从 ${fields.length} 个增加到 ${again.fields.length} 个（级联字段出现）`)
           fields = again.fields
@@ -560,7 +564,12 @@ export async function publishFlow(page, product, opts = {}) {
       // ★ 2026-10-31 修复：只把**成功**的字段加入 doneFields
       //   失败的要留给下一轮重试（实测收纳盒：材质第1轮用「塑料」失败，
       //   因被标记为 done，第2轮没机会用兜底值「皮革」重试）
+      //   ★ 2026-11-02 修复：okNames 必须包含 **special 字段**（品牌/材质成分）的成功结果
+      //     否则品牌填成功了也报「本轮失败」→ 下一轮重试 → 浪费 10 秒
       const okNames = new Set((r.filled || []).map(f => String(f).split('=')[0]))
+      for (const k of Object.keys(special)) {
+        if (filled.some(x => String(x).split('=')[0] === k)) okNames.add(k)
+      }
       for (const k of Object.keys(roundValues)) {
         if (okNames.has(k)) doneFields.add(k)
         else log(`[attr] 「${k}」本轮失败，下一轮重试`)
