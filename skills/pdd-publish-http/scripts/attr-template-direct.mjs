@@ -91,11 +91,11 @@ async function fillOneField(page, boxId, want, opts = {}) {
 
   // ③ 点击聚焦
   await page.mouse.click(info.x, info.y).catch(() => {})
-  await sleep(200)
+  await sleep(120)
 
   if (info.readOnly) {
     // 下拉型：点开后找候选
-    await sleep(350)
+    await sleep(220)
     const picked = await page.evaluate((w) => {
       const panels = [...document.querySelectorAll('[class*="dropdownPanel"], [class*="dropdownMain"], [class*="PP_popover"], [class*="next-menu"]')]
         .filter(x => x.offsetParent !== null)
@@ -121,7 +121,7 @@ async function fillOneField(page, boxId, want, opts = {}) {
       return { ok: false, err: 'no-match', options: picked.options, actual: info.value }
     }
     await page.mouse.click(picked.x, picked.y).catch(() => {})
-    await sleep(300)
+    await sleep(180)
     return { ok: true, actual: picked.text }
   }
 
@@ -130,11 +130,11 @@ async function fillOneField(page, boxId, want, opts = {}) {
   await page.keyboard.press('KeyA').catch(() => {})
   await page.keyboard.up('Control').catch(() => {})
   await page.keyboard.press('Delete').catch(() => {})
-  await sleep(120)
-  await page.keyboard.type(String(want), { delay: 30 }).catch(() => {})
-  await sleep(250)
+  await sleep(80)
+  await page.keyboard.type(String(want), { delay: 25 }).catch(() => {})
+  await sleep(180)
   await page.keyboard.press('Tab').catch(() => {})
-  await sleep(300)
+  await sleep(200)
 
   const after = await page.evaluate((id) => {
     const box = document.getElementById(id)
@@ -220,8 +220,12 @@ export async function fillAttrsFromTemplate(page, templateAttrs, userAttrs = [],
   log(`[tpl-direct] 已填 ${okCount}/${merged.size}（其中 ${skipCount} 个已有值），未找到 ${notFound.length} 个字段`)
 
   // ③ 判断是否需要回落到通用流程
-  //    - 有字段没找到（模板结构变了）→ 需要
-  //    - 必填项填充率 < 80% → 需要
+  //   ★ 2026-11-02 修正：原判据 notFound.length > 0 太严 —— 模板里有商品的旧字段
+  //     （如「商品货号」这种一物一码的），页面上本来就没有，不该因此回落。
+  //   新判据（只看真正的风险）：
+  //     a. 必填填充率 < 80%          → 回落（必填没填上，提交必失败）
+  //     b. 有【必填】字段没找到       → 回落（模板结构与页面不符）
+  //     c. 非必填字段没找到          → 不回落（不影响发布）
   const requiredTotal = indexNames.filter(n => index[n].required).length
   const requiredFilled = filled.filter(f => {
     const n = f.split('=')[0].replace(/\s+/g, '')
@@ -229,7 +233,13 @@ export async function fillAttrsFromTemplate(page, templateAttrs, userAttrs = [],
   }).length
   const fillRate = requiredTotal ? requiredFilled / requiredTotal : 1
 
-  const needFallback = notFound.length > 0 || fillRate < 0.8
+  // 只统计「必填字段」里没找到的
+  const missingRequired = notFound.filter(n => {
+    const nn = String(n).replace(/\s+/g, '')
+    return indexNames.some(k => index[k].required && (k.replace(/\s+/g, '') === nn || k.replace(/\s+/g, '').includes(nn)))
+  })
+
+  const needFallback = fillRate < 0.8 || missingRequired.length > 0
 
   return {
     filled,
@@ -240,5 +250,6 @@ export async function fillAttrsFromTemplate(page, templateAttrs, userAttrs = [],
     fillRate,
     needFallback,
     notFound,
+    missingRequired,
   }
 }
