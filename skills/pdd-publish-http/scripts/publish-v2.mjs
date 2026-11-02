@@ -260,15 +260,46 @@ try {
     page = (await browser.pages())[0] || await browser.newPage()
   }
 
-  // 段1
-  if (!connected) {
-    await openPublishEntry(page, { log })
-  } else {
-    log('连接模式：跳过段1 导航，直接使用当前页面')
+  // ★ 2026-11-02 提速：模板有 catId 时**跳过段1**（打开商品列表 6 秒纯属浪费）
+  //   直接 goto 直达 URL，省掉「打开列表 → 等加载 → 点发布新商品 → 等跳转」全流程
+  const catIdDirect = String(tpl?.catId || '').trim()
+  let work = null
+  if (!connected && catIdDirect) {
+    log(`段1+2：catId=${catIdDirect} 直达（跳过商品列表）`)
+    const directUrl = `https://mms.pinduoduo.com/goods/goods_add/index?type=add&from=category&id=${catIdDirect}`
+    await page.goto(directUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(e => log(`  goto 警告：${e.message.slice(0, 60)}`))
+    // 等表单页就绪
+    let ready = false
+    for (let w = 0; w < 40; w++) {
+      await sleep(300)
+      ready = await page.evaluate(() => {
+        // 判据：出现类目属性区或标题输入框
+        const hasProp = document.querySelectorAll('[id^="basic.propertys."]').length > 0
+        const hasTitle = !!document.querySelector('input[placeholder*="标题"]')
+        const hasCategory = !!document.querySelector('#goods-category')
+        return hasProp || (hasTitle && hasCategory)
+      }).catch(() => false)
+      if (ready) break
+    }
+    if (ready) {
+      log(`  直达页已就绪（${catIdDirect}）`)
+      work = page
+    } else {
+      log('  ⚠ 直达页未就绪，回退到常规流程')
+    }
   }
-  // 段2（★ 老类目用 catId 直达，省 5s；连接模式下由 stage-nav 自动跳过直达）
-  let work = await waitForPublishPage(browser, { log })
-  work = await selectCategory(work, product.category || categoryKw, { log, catId: tpl?.catId || '', connected })
+
+  if (!work) {
+    // 段1
+    if (!connected) {
+      await openPublishEntry(page, { log })
+    } else {
+      log('连接模式：跳过段1 导航，直接使用当前页面')
+    }
+    // 段2（★ 老类目用 catId 直达，省 5s；连接模式下由 stage-nav 自动跳过直达）
+    work = await waitForPublishPage(browser, { log })
+    work = await selectCategory(work, product.category || categoryKw, { log, catId: tpl?.catId || '', connected })
+  }
 
   // 段3 + 段4
   // ★ 2026-11-01：上传前图片预处理（拼多多主图/详情图单张 ≤ 3MB）
