@@ -238,13 +238,15 @@ export async function fillAttrsFromTemplate(page, templateAttrs, userAttrs = [],
   const indexNames = Object.keys(index)
   log(`[tpl-direct] 模板 ${merged.size} 项，页面 ${indexNames.length} 个字段`)
 
-  // ② 逐个填（不读候选，直接点选）
+  // ② 先按「页面上有没有」分组（提速关键）
+  //   实测水杯：模板 30 项，页面只有 13 个字段 → 17 项白跑
+  //   （模板是历史累积，很多字段本次类目并没有）
   let okCount = 0
   let skipCount = 0
   const notFound = []
+  const present = []
 
   for (const [normName, item] of merged) {
-    // 找页面字段（精确 → 包含）
     let boxId = index[item.name]?.id
     if (!boxId) {
       const hit = indexNames.find(k => k.replace(/\s+/g, '') === normName)
@@ -257,12 +259,15 @@ export async function fillAttrsFromTemplate(page, templateAttrs, userAttrs = [],
       })
       if (hit) boxId = index[hit].id
     }
+    if (boxId) present.push({ item, boxId })
+    else notFound.push(item.name)
+  }
 
-    if (!boxId) {
-      notFound.push(item.name)
-      continue
-    }
+  if (notFound.length) {
+    log(`[tpl-direct] 模板 ${notFound.length} 项页面上没有，跳过：${notFound.slice(0, 5).join('、')}${notFound.length > 5 ? ' 等' : ''}`)
+  }
 
+  for (const { item, boxId } of present) {
     const r = await fillOneField(page, boxId, item.value, { log })
     if (r.ok) {
       okCount++

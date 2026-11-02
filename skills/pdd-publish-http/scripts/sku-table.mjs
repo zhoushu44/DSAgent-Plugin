@@ -152,20 +152,27 @@ export async function fillPriceTable(page, opts = {}) {
     const rowSingle = ov.single ? String(ov.single) : (Math.round((pNum + 1.01) * 100) / 100).toFixed(2)
     const rowStock = String(ov.stock || defStock)
 
+    // ★ 2026-11-02：规格编码（最后一列可输入列）也要填
+    //   实测表头 8 列：尺寸/颜色/*库存/*拼单价/*单买价/*预览图/规格编码/状态
+    //   每行 input（排除 file）: [库存, 拼单价, 单买价, 规格编码]
+    //   编码规则：用户给了 itemNo 用 itemNo；否则自动生成 SKU+行号
+    const ovItemNo = String(ov.itemNo || '').trim()
+    const rowItemNo = ovItemNo || `SKU${String(ri + 1).padStart(3, '0')}`
+
     const cells = []
     // ★ 2026-10-30 真机 dump 定论（这是最终结论，不要再改）：
-    //   表头: [容量, *库存, *拼单价(元), *单买价(元), *预览图, 规格编码, 状态]
+    //   表头: [尺寸, 颜色, *库存, *拼单价(元), *单买价(元), *预览图, 规格编码, 状态]
     //   每行 input 数组（排除 file）:
-    //     inputs[0] = 库存（空）
+    //     inputs[0] = 库存
     //     inputs[1] = 拼单价
     //     inputs[2] = 单买价
-    //     inputs[3] = 规格编码（不填）
-    //   容量列是纯文本，不是 input。
-    console.log(`[sku-table] 第 ${ri + 1}/${actualRows} 行：库存=${rowStock} 拼单价=${rowPrice} 单买价=${rowSingle}`)
+    //     inputs[3] = 规格编码
+    console.log(`[sku-table] 第 ${ri + 1}/${actualRows} 行：库存=${rowStock} 拼单价=${rowPrice} 单买价=${rowSingle} 规格编码=${rowItemNo}`)
     for (const [name, inputIdx, val] of [
       ['库存', 0, rowStock],
       ['拼单价', 1, rowPrice],
       ['单买价', 2, rowSingle],
+      ['规格编码', 3, rowItemNo],
     ]) {
       // ★ 2026-10-30：如果该格**已有值**，跳过不覆盖（用于属性后补填新行场景）
       const existing = await page.evaluate((rowIdx, ii) => {
