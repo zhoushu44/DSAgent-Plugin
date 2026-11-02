@@ -109,7 +109,17 @@ export async function fillServiceCommitments(page, opts = {}) {
       if (!cb) return false
       // 优先点 label（平台可能监听 label click）
       const label = cb.closest('label')
-      if (label) { label.click(); return true }
+      if (label) {
+        // ★ 2026-11-02：真实鼠标点击（JS click 对 beast-core 无效）
+        const r = label.getBoundingClientRect()
+        const x = Math.round(r.x + r.width / 2)
+        const y = Math.round(r.y + r.height / 2)
+        // 检查可达性
+        const top = document.elementFromPoint(x, y)
+        const reachable = !!top && (top === label || label.contains(top) || top.closest('label') === label)
+        if (reachable) return { x, y }
+        return { reachable: false }
+      }
       cb.click()
       return true
     }, item.mark).catch(() => false)

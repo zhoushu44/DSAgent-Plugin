@@ -95,7 +95,7 @@ async function fillOneField(page, boxId, want, opts = {}) {
 
   if (info.readOnly) {
     // 下拉型：点开后找候选
-    await sleep(220)
+    await sleep(160)
     const picked = await page.evaluate((w) => {
       const panels = [...document.querySelectorAll('[class*="dropdownPanel"], [class*="dropdownMain"], [class*="PP_popover"], [class*="next-menu"]')]
         .filter(x => x.offsetParent !== null)
@@ -134,8 +134,30 @@ async function fillOneField(page, boxId, want, opts = {}) {
   await page.keyboard.press('Delete').catch(() => {})
   await sleep(100)
   await page.keyboard.type(String(want), { delay: 25 }).catch(() => {})
-  // 等候选出现（搜索型下拉需要时间）
-  await sleep(700)
+  // ★ 2026-11-02 提速：等候选出现改成轮询（固定 700ms → 最多 150ms 就走）
+  //   实测：候选通常 150-300ms 内就出来，固定等 700ms 是浪费
+  //   12 个字段 × 500ms = 6 秒白费
+  {
+    const t0 = Date.now()
+    let seen = false
+    while (Date.now() - t0 < 900) {
+      await sleep(100)
+      seen = await page.evaluate(() => {
+        const panels = [...document.querySelectorAll(
+          '[class*="dropdownPanel"], [class*="dropdownMain"], [class*="PP_popover"], [class*="next-menu"], [class*="select-dropdown"]'
+        )].filter(x => {
+          if (x.offsetParent === null) return false
+          const r = x.getBoundingClientRect()
+          if (r.width <= 40 || r.height <= 20) return false
+          // 要有可见的选项节点
+          const nodes = [...x.querySelectorAll('li, [role="option"], [class*="ST_item"], [class*="option"]')]
+          return nodes.some(n => (n.innerText || '').trim() && n.getBoundingClientRect().width > 10)
+        })
+        return panels.length > 0
+      }).catch(() => false)
+      if (seen) break
+    }
+  }
 
   // 尝试点选候选
   const picked = await page.evaluate((w) => {
@@ -171,7 +193,7 @@ async function fillOneField(page, boxId, want, opts = {}) {
 
   if (picked && picked.x != null) {
     await page.mouse.click(picked.x, picked.y).catch(() => {})
-    await sleep(280)
+    await sleep(180)
     // 点选后校验
     const after = await page.evaluate((id) => {
       const box = document.getElementById(id)
@@ -190,7 +212,7 @@ async function fillOneField(page, boxId, want, opts = {}) {
 
   // 没弹出下拉（可能是纯文本字段，如「商品货号」）→ 保留 Tab 提交
   await page.keyboard.press('Tab').catch(() => {})
-  await sleep(200)
+  await sleep(150)
 
   const after = await page.evaluate((id) => {
     const box = document.getElementById(id)
@@ -253,11 +275,15 @@ export async function fillAttrsFromTemplate(page, templateAttrs, userAttrs = [],
       if (hit) boxId = index[hit].id
     }
     if (!boxId) {
-      const hit = indexNames.find(k => {
-        const kn = k.replace(/\s+/g, '')
-        return kn.includes(normName) || normName.includes(kn)
-      })
-      if (hit) boxId = index[hit].id
+      // ★ 2026-11-02：模糊匹配加长度差限制，避免「工艺」匹配到「工艺要求」
+      //   实测毛巾：工艺定位错 → no-match 显示「家用/家用」
+      const cands = indexNames
+        .map(k => ({ k, kn: k.replace(/\s+/g, '') }))
+        .filter(x => x.kn.includes(normName) || normName.includes(x.kn))
+        .sort((a, b) => Math.abs(a.kn.length - normName.length) - Math.abs(b.kn.length - normName.length))
+      const best = cands[0]
+      // 长度差 > 3 视为不同字段
+      if (best && Math.abs(best.kn.length - normName.length) <= 3) boxId = index[best.k].id
     }
     if (boxId) present.push({ item, boxId })
     else notFound.push(item.name)

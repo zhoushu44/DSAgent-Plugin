@@ -52,8 +52,11 @@ async function findAddButton(page, boxId) {
     // ★ 2026-11-01 实测：真按钮是 <button class="BTN_outerWrapper...">，156x28
     //   外层容器是 DIV，444x30 —— 点外层无效。
     //   所以：优先 BUTTON 标签，且宽度 < 300。
-    const all = [...box.querySelectorAll('button, a, [role="button"], div, span')]
-      .filter(el => el.offsetParent !== null)
+    // ★ 2026-11-02：放宽按钮选择器（实测「添加XX」可能是 next-btn）
+  const all = [...box.querySelectorAll(
+    'button, a, [role="button"], .next-btn, [class*="btn"], [class*="addBtn"], div, span'
+  )]
+  .filter(el => el.offsetParent !== null)
 
     const scored = []
     for (const el of all) {
