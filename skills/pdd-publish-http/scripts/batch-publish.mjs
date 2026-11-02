@@ -64,6 +64,47 @@ const sharedBrowser = await puppeteer.launch({
 })
 log('浏览器已就绪')
 
+// ★ 2026-11-02：批次开始前做一次登录预检
+//   否则登录失效时 200 个商品会一个个失败（每个浪费 30 秒 = 100 分钟）
+{
+  log('登录预检…')
+  const checkPage = await sharedBrowser.newPage()
+  try {
+    await checkPage.goto('https://mms.pinduoduo.com/goods/goods_list', { waitUntil: 'domcontentloaded', timeout: 40000 })
+    await sleep(5000)
+    const st = await checkPage.evaluate(() => {
+      const txt = document.body?.innerText || ''
+      const url = location.href
+      const NAV = 'nav, aside, [class*="sidenav"], [class*="sideNav"], [class*="menu"]'
+      const btns = [...document.querySelectorAll('button, a, div, span')]
+        .filter(el => (el.innerText || '').trim() === '发布新商品' && !el.closest(NAV))
+      return {
+        url,
+        isLogin: /\/login\//.test(url) || /扫码登录|账号登录/.test(txt.slice(0, 300)),
+        hasBtn: btns.length > 0,
+        textLen: txt.trim().length,
+      }
+    }).catch(() => null)
+
+    if (!st) {
+      log('  ⚠ 登录预检失败（页面不可读），继续尝试')
+    } else if (st.isLogin) {
+      log('  ❌ 登录已失效！请在浏览器窗口内扫码登录后重跑')
+      log(`     当前页面：${st.url.slice(0, 80)}`)
+      try { await sharedBrowser.close() } catch { /* ignore */ }
+      process.exit(2)
+    } else if (!st.hasBtn) {
+      log('  ⚠ 未找到「发布新商品」按钮（可能页面未加载完），继续尝试')
+    } else {
+      log('  ✅ 登录有效，开始批量')
+    }
+  } catch (e) {
+    log(`  ⚠ 登录预检异常：${e.message.slice(0, 80)}（继续尝试）`)
+  } finally {
+    try { await checkPage.close() } catch { /* ignore */ }
+  }
+}
+
 for (let idx = 0; idx < products.length; idx++) {
   const item = products[idx]
   log(`\n${'='.repeat(70)}`)
@@ -99,22 +140,66 @@ for (let idx = 0; idx < products.length; idx++) {
     await openPublishEntry(page, { log })
 
     // 只在新出现的页面里找发布页
+    // ★ 2026-11-02：改成「快速失败」—— 每轮同时检测明确的失败信号，不必傻等 45 秒
     work = await (async () => {
-      // ★ 2026-11-02：90s -> 45s（失败商品不该卡 90 秒；正常 10-15s 就出来了）
-      const deadline = Date.now() + 45000
-      while (Date.now() < deadline) {
+      const startAt = Date.now()
+      const HARD_TIMEOUT = 30000      // 硬上限 30s（正常 10-15s 就出来）
+      const FAST_FAIL_AFTER = 5000    // 5 秒后开始检测失败信号
+
+      let blankStreak = 0
+      while (Date.now() - startAt < HARD_TIMEOUT) {
+        const elapsed = Date.now() - startAt
+
+        // ① 新标签页里找发布页
         const pages = await sharedBrowser.pages()
         const fresh = pages.filter(p => !beforePages.has(p))
         const hit = fresh.find(p => /goods\/(category|goods_add)/.test(String(p.url() || '')))
         if (hit) {
           await hit.bringToFront()
-          await sleep(2000)
+          await sleep(1500)
           if (!ownPages.includes(hit)) ownPages.push(hit)
           return hit
         }
+
+        // ② 5 秒后开始快速失败检测（只查当前 page，不新建）
+        if (elapsed > FAST_FAIL_AFTER) {
+          const probe = await page.evaluate(() => {
+            const txt = document.body?.innerText || ''
+            const url = location.href
+            return {
+              url,
+              isLoginPage: /\/login\//.test(url) || /扫码登录|账号登录/.test(txt.slice(0, 300)),
+              isBlank: txt.trim().length < 20,
+              hasBlockingDialog: /请先完成|请先完善|无权访问|操作频繁|系统繁忙|账号异常|请重新登录/.test(txt),
+              hasError: /加载失败|出错了|网络异常/.test(txt),
+              textLen: txt.trim().length,
+            }
+          }).catch(() => null)
+
+          if (probe) {
+            if (probe.isLoginPage) {
+              throw new Error(`登录已失效（页面跳到 ${probe.url.slice(0, 60)}），请重新登录`)
+            }
+            if (probe.hasBlockingDialog) {
+              const m = (await page.evaluate(() => (document.body?.innerText || '').match(/(请先完成[^\n]{0,30}|请先完善[^\n]{0,30}|无权访问|操作频繁|系统繁忙|账号异常|请重新登录)/)).catch(() => null))
+              throw new Error(`页面拦截：${m?.[1] || '出现阻断提示'}`)
+            }
+            if (probe.hasError) {
+              throw new Error('页面加载失败')
+            }
+            // 白屏连续 5 次（约 2.5s）判定失败
+            if (probe.isBlank) {
+              blankStreak++
+              if (blankStreak >= 5) throw new Error('页面持续白屏')
+            } else {
+              blankStreak = 0
+            }
+          }
+        }
+
         await sleep(500)
       }
-      throw new Error('类目页/表单页未出现（新标签页）')
+      throw new Error(`类目页/表单页 ${Math.round((Date.now() - startAt) / 1000)}s 内未出现`)
     })()
     await sleep(1000)
 
