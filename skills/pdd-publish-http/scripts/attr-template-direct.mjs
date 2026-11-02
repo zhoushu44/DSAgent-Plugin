@@ -125,14 +125,70 @@ async function fillOneField(page, boxId, want, opts = {}) {
     return { ok: true, actual: picked.text }
   }
 
-  // ④ 文本型：清空 + 键入 + Tab
+  // ④ 键入 → **必须点选弹出的下拉候选**（不能只 Tab）
+  //   ★ 2026-11-02 用户指出：「属性输入后要点下弹出的下拉」
+  //   实测：拼多多属性输入框键入后会弹候选，Tab 只让候选消失、不写值。
   await page.keyboard.down('Control').catch(() => {})
   await page.keyboard.press('KeyA').catch(() => {})
   await page.keyboard.up('Control').catch(() => {})
   await page.keyboard.press('Delete').catch(() => {})
-  await sleep(80)
+  await sleep(100)
   await page.keyboard.type(String(want), { delay: 25 }).catch(() => {})
-  await sleep(180)
+  // 等候选出现（搜索型下拉需要时间）
+  await sleep(700)
+
+  // 尝试点选候选
+  const picked = await page.evaluate((w) => {
+    const panels = [...document.querySelectorAll(
+      '[class*="dropdownPanel"], [class*="dropdownMain"], [class*="PP_popover"], [class*="next-menu"], [class*="select-dropdown"]'
+    )].filter(x => {
+      if (x.offsetParent === null) return false
+      const r = x.getBoundingClientRect()
+      return r.width > 40 && r.height > 20
+    })
+    if (!panels.length) return { noPanel: true }
+    const panel = panels[panels.length - 1]
+    const norm = s => String(s || '').replace(/\s+/g, '')
+    const nodes = [...panel.querySelectorAll('li, [role="option"], [class*="ST_item"], [class*="option"]')]
+      .filter(n => (n.innerText || '').trim() && n.getBoundingClientRect().width > 10)
+    if (!nodes.length) return { noPanel: true }
+    const W = norm(w)
+    // 精确 → 前缀 → 包含（同 attr-fill-generic 的短候选优先策略）
+    let hit = nodes.find(n => norm(n.innerText) === W)
+    if (!hit) hit = nodes.find(n => norm(n.innerText).startsWith(W))
+    if (!hit) {
+      const cands = nodes.filter(n => norm(n.innerText).includes(W) || W.includes(norm(n.innerText)))
+        .sort((a, b) => norm(a.innerText).length - norm(b.innerText).length)
+      hit = cands[0]
+    }
+    // 通用值兜底
+    if (!hit && /^(其他|其它|无|通用|否|是)$/.test(w)) hit = nodes[0]
+    if (!hit) return { none: true, options: nodes.slice(0, 8).map(n => (n.innerText || '').trim()) }
+    hit.scrollIntoView({ block: 'center' })
+    const r = hit.getBoundingClientRect()
+    return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2), text: (hit.innerText || '').trim() }
+  }, want).catch(() => null)
+
+  if (picked && picked.x != null) {
+    await page.mouse.click(picked.x, picked.y).catch(() => {})
+    await sleep(280)
+    // 点选后校验
+    const after = await page.evaluate((id) => {
+      const box = document.getElementById(id)
+      const inp = box?.querySelector('input')
+      return inp?.value || ''
+    }, boxId).catch(() => '')
+    const ok = !!after && (after.includes(want) || want.includes(after) || after.length > 0)
+    return { ok, actual: after, picked: picked.text }
+  }
+
+  // 候选里没有匹配项 → 报明确错误（不要 Tab 蒙）
+  if (picked?.none) {
+    await page.keyboard.press('Escape').catch(() => {})
+    return { ok: false, err: 'no-match', options: picked.options }
+  }
+
+  // 没弹出下拉（可能是纯文本字段，如「商品货号」）→ 保留 Tab 提交
   await page.keyboard.press('Tab').catch(() => {})
   await sleep(200)
 
@@ -143,7 +199,7 @@ async function fillOneField(page, boxId, want, opts = {}) {
   }, boxId).catch(() => '')
 
   const ok = !!after && (after.includes(want) || want.includes(after))
-  return { ok, actual: after }
+  return { ok, actual: after, textOnly: true }
 }
 
 /**
