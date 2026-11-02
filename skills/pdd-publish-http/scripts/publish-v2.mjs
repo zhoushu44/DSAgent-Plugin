@@ -335,7 +335,7 @@ try {
     }
   }
 
-  const flowResult = await publishFlow(work, product, { log, templateAttrs: getTplAttrs(tpl) })
+  const flowResult = await publishFlow(work, product, { log, templateAttrs: getTplAttrs(tpl), templateDims: tpl?.dims || [] })
 
   // ★ 2026-10-30：--no-submit 模式 → 不点提交，保留页面供人工核对
   if (noSubmit) {

@@ -156,7 +156,12 @@ export async function publishFlow(page, product, opts = {}) {
   //   写死任何一种都会挂，所以先截图让视觉模型看，按它的 strategy 填。
   if (specs.length) {
     let usedVision = false
-    if (opts.useVision !== false) {
+
+    // ★ 2026-11-02 实验结论：模板 dims 直建维度**不可行**
+    //   实测抱枕：addSpecDimension 卡 29 秒返回 false，fillSpecValuesRowByRow 报 no #newSpec
+    //   原因：模板记录的 type=custom-input 是"上次的页面状态"，但页面每次渲染的实际结构不同，
+    //        视觉流程本来就要先探测再操作。已回滚，保留视觉流程。
+    if (!usedVision && opts.useVision !== false) {
       try {
         const { fillDimByVision } = await import('./vision-fill.mjs')
         // ★★ 2026-10-30 用户点醒：「一维输入好，二维才能选」
