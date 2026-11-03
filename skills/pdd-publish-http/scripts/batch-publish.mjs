@@ -6,6 +6,7 @@
  */
 import * as fs from 'node:fs'
 import * as path from 'node:path'
+import * as os from 'node:os'
 import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
 const require = createRequire('E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/package.json')
@@ -16,6 +17,8 @@ const { openPublishEntry, waitForPublishPage, selectCategory } = await import(`f
 const { publishFlow } = await import(`file:///${S}/publish-flow.mjs`)
 const { submitAndVerify } = await import(`file:///${S}/stage-submit.mjs`)
 const { findTemplate, saveTemplate } = await import(`file:///${S}/category-template.mjs`)
+
+const BASE = path.join(homedir(), '.dsh', 'browser-profiles', 'accounts')
 
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 const log = (...a) => console.log(`[${new Date().toTimeString().slice(0, 8)}]`, ...a)
@@ -29,13 +32,16 @@ const dir = arg('dir', '')
 const shopKey = arg('account', 'pdd_mms_c09a0b4f80ef6a8524cd0f23d53f40f4')
 const noSubmit = process.argv.includes('--no-submit')
 const doConfirm = process.argv.includes('--confirm')
+// ★ 2026-11-03：--share-cookie <srcShopKey> 从其他已登录 Profile 导入 Cookie
+const shareCookie = arg('share-cookie', '')
 
 if (!dir || !fs.existsSync(dir)) {
-  console.error('用法: node batch-publish.mjs --dir <目录> [--confirm] [--no-submit]')
+  console.error('用法: node batch-publish.mjs --dir <目录> [--confirm] [--no-submit] [--share-cookie <srcShopKey>]')
   process.exit(1)
 }
 
-const PROFILE = path.join(homedir(), '.dsh', 'browser-profiles', 'accounts', shopKey)
+const PROFILE = path.join(BASE, shopKey)
+let cookieFileToInject = ''
 
 // ── 找所有 product.json ──
 const products = []
@@ -53,16 +59,92 @@ log(`模式：${noSubmit ? '仅填表（不提交）' : doConfirm ? '真实提�
 
 const results = []
 
+// ★ 2026-11-03：Profile 占用检测 + Cookie 共享支持
+//   问题：多个对话同时打开拼多多 → 同一 Profile 目录被并发占用 → 两边都掉登录
+//   方案：① 检测锁文件，被占用则提示用共享账号
+//        ② --share-cookie <shopKey> 从其他已登录 Profile 导入 Cookie
+let workProfile = PROFILE
+const lockFiles = ['SingletonLock', 'SingletonSocket', 'SingletonCookie'].filter(f => fs.existsSync(path.join(PROFILE, f)))
+if (lockFiles.length && !shareCookie) {
+  log(`⚠ Profile 正被其他程序占用（${lockFiles.join(', ')}）`)
+  log(`  若另一个对话正在用拼多多，请用共享账号避免互相掉登录：`)
+  log(`    node dev/cookie-share.mjs fresh <本shopKey>_shared`)
+  log(`  然后加参数 --account <本shopKey>_shared`)
+  log(`  或强制继续（可能掉登录）…`)
+}
+
+// ★ 2026-11-03 Cookie 共享：从已登录的源 Profile 读 Cookie（明文，可跨 Profile 迁移）
+//   原理：Chrome 的 Cookie 加密密钥绑定 Profile 路径，所以复制目录会让 Cookie 解不开。
+//        但 page.cookies() 返回的是【解密后的明文】，可注入到任意 Profile。
+//   用法：--share-cookie <srcShopKey>
+if (shareCookie) {
+  const srcDir = path.join(BASE, shareCookie)
+  if (!fs.existsSync(srcDir)) {
+    log(`❌ 源 Profile 不存在: ${srcDir}`)
+    process.exit(1)
+  }
+  log(`Cookie 共享：从 ${shareCookie} 读登录态…`)
+  try {
+    // 锁文件会让 Chrome 启动失败，先清
+    for (const f of ['SingletonLock','SingletonSocket','SingletonCookie','DevToolsActivePort','lockfile']) {
+      try { fs.unlinkSync(path.join(srcDir, f)) } catch {}
+    }
+    const srcB = await puppeteer.launch({
+      executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe',
+      headless: false, userDataDir: srcDir, defaultViewport: null,
+      args: ['--no-sandbox', '--disable-blink-features=AutomationControlled'],
+      ignoreDefaultArgs: ['--enable-automation'], protocolTimeout: 600000,
+    })
+    const sp = await srcB.newPage()
+    await sp.goto('https://mms.pinduoduo.com/goods/goods_list', { waitUntil: 'domcontentloaded', timeout: 60000 })
+    await new Promise(r => setTimeout(r, 8000))
+    const isLogin = await sp.evaluate(() => /\/login\//.test(location.href))
+    if (isLogin) {
+      await srcB.close()
+      log(`❌ 源账号 ${shareCookie} 未登录，请先在账号连接器扫码`)
+      process.exit(1)
+    }
+    const cookies = await sp.cookies()
+    await srcB.close()
+    if (!cookies.length) {
+      log('❌ 源 Profile 没导出到 Cookie')
+      process.exit(1)
+    }
+    cookieFileToInject = path.join(os.tmpdir(), `pdd-cookies-${Date.now()}.json`)
+    fs.writeFileSync(cookieFileToInject, JSON.stringify(cookies), 'utf8')
+    const keyNames = [...new Set(cookies.map(c => c.name))].filter(n => /PASS_ID|JSESSIONID/i.test(n))
+    log(`  ✅ 导出 ${cookies.length} 个 Cookie${keyNames.length ? '（含 ' + keyNames.join(', ') + '）' : ''}`)
+  } catch (e) {
+    log(`  ❌ 读 Cookie 失败: ${String(e.message).slice(0, 100)}`)
+    process.exit(1)
+  }
+}
+
 // ★ 2026-11-01 提速：整个批次只启动一次浏览器
 //   原来每个商品 launch + close（8-10s/次），100 个白费 15 分钟
 log('启动浏览器（整批复用）…')
 const sharedBrowser = await puppeteer.launch({
   executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe',
-  headless: false, userDataDir: PROFILE, defaultViewport: null,
+  headless: false, userDataDir: workProfile, defaultViewport: null,
   args: ['--no-sandbox', '--disable-blink-features=AutomationControlled', '--start-maximized'],
   ignoreDefaultArgs: ['--enable-automation'], protocolTimeout: 3600000,
 })
 log('浏览器已就绪')
+
+// 注入共享 Cookie
+if (cookieFileToInject && fs.existsSync(cookieFileToInject)) {
+  try {
+    const cookies = JSON.parse(fs.readFileSync(cookieFileToInject, 'utf8'))
+    const ip = await sharedBrowser.newPage()
+    await ip.goto('https://mms.pinduoduo.com/', { waitUntil: 'domcontentloaded', timeout: 60000 })
+    await new Promise(r => setTimeout(r, 2000))
+    await ip.setCookie(...cookies)
+    await ip.close()
+    log(`  ✅ 已注入 ${cookies.length} 个共享 Cookie`)
+  } catch (e) {
+    log(`  ⚠ Cookie 注入失败: ${String(e.message).slice(0, 80)}`)
+  }
+}
 
 // ★ 2026-11-02：批次开始前做一次登录预检
 //   否则登录失效时 200 个商品会一个个失败（每个浪费 30 秒 = 100 分钟）
