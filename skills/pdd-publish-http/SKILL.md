@@ -1,1208 +1,591 @@
 ---
 name: pdd-publish-http
-description: "拼多多商品上架【首选：复制本店商品改包】。publish-by-copy.mjs 复制本店同类目已有商品为草稿，改 SKU（1~2 维、任意自定义规格名与数量）/标题/主图/价格后提交；免选类目、免填属性、免填品牌，通用所有类目，实测最快 3 秒/单。product.json：title(≤30汉字)/images/price/stock/specs/skus。已知限制：brand_limit=true 的类目（如纸杯）纯 HTTP 提交会被属性校验拦，改用 publish-flow.mjs 页面提交。内置 pdd-antiban 节流（账号级 4-6s、接口级 1.8s、40002 冷却 240s）。触发：拼多多上架、拼多多发布、拼多多批量上架、复制商品上架、改包上架、拼多多改SKU。排除：采集比价（pdd-crawl）、订单/库存/客服/分析、淘宝/闲鱼/抖店发布。需绑定拼多多商家后台账号；发布为 L2，须先 --dry 预览并获用户同意后才加 --confirm。"
+description: "拼多多商品上架。两条路径：① publish-by-copy.mjs 复制本店同类目商品改包（快，6 单实测成功，但不能换主图）② publish-flow.mjs 页面全流程提交（慢，能换图/处理复杂属性）。改 SKU 支持 1~2 维、任意自定义规格名与数量。product.json 字段：title(≤30汉字)/images/imageUrls/price/stock/specs/skus。首次用新类目必须先跑 harvest-native-props.mjs 采类目模板（拿到 propertys_tid / template_module_id / 品牌 vid）。内置 pdd-antiban 节流与滑块 shadow hook。触发：拼多多上架、拼多多发布、拼多多批量上架、复制商品上架、改包上架、拼多多改SKU。排除：采集比价(pdd-crawl)、订单/库存/客服/分析、淘宝/闲鱼/抖店发布。需绑定拼多多商家后台账号；发布为 L2，须先 --dry 预览并获用户同意后才加 --confirm。"
 metadata:
-  builtin_skill_version: "1.1"
+  builtin_skill_version: "2.0"
   dsagent:
-    display_name: "拼多多·HTTP上架"
+    display_name: "拼多多·商品上架"
     emoji: "🚀"
     requires: {}
 ---
 
-# 拼多多 · HTTP 逆向上架
+# 拼多多 · 商品上架
 
-## ★ 多类目实测（2026-10-31 最新，真实上架 + AI 看图为证）
+> 本文档所有「实测」结论均来自真实运行日志（`artifacts/pdd-publish-by-copy/run-*.log`、`pdd_js_analysis/reports/flow-*.log`）。
+> 未验证的内容明确标注「未验证」。
 
-| 类目 | 规格形态 | goods_id / 结果 | 属性 | 必填 | 耗时 |
-|---|---|---|---|---|---|
-| 纸杯 | 1 维（容量 mL） | `1023381759702` 真实上架 ✅ | 8/9 | 4/4 ✅ | — |
-| 手机壳 | 2 维（型号×颜色）+ 级联 | `1023382208344` 真实上架 ✅ | 8/8 | 6/6 ✅ | — |
-| 抱枕 | 1 维（尺寸）+ 级联 | `1023385539665` 真实上架 ✅ | 16/16 | 12/12 ✅ | — |
-| 毛巾 | 2 维（尺寸×颜色）**全新类目** | 第1次 229s / **第2次 63s**（真实提交 `1023496708207`） | 25→35 | 6/6 ✅ | **提速 54%** |
-| 水杯 | 1 维（容量）**全新类目** | 155s | 28 | **8/8 ✅** | — |
-| 收纳盒 | 2 维（尺寸×颜色）**全新类目** | 58s | 39 | **4/4 ✅** | — |
+## 快速开始（30 秒决定用哪条路）
 
-**毛巾两次运行证明模板复用 + 性能优化有效：**
-```
-第 1 次：[template] 无「毛巾」模板，本次从头探测（229s）
-        [template] ✅ 沉淀模板：catId=205041314615 维度 2 属性 11
-第 2 次：[template] 命中模板（2 维 / 11 属性）
-        [template] 从模板补全 10 条属性
-        用 catId=205041314615 直达表单页 → 直达页已就绪
-        主图 5 张 6s / 详情图 10 张 12s / 属性 35 项 13s
-        总耗时 63s（原 137s，提速 54%）
-```
+| 场景 | 用哪个脚本 | 限制 |
+|---|---|---|
+| 想快点发 | `publish-by-copy.mjs` | 复制**本店已有商品**再改包；规范记录 6 个成功 goods_id，但当前原始日志缺失，未验证。不要指望跨店复制或反复复制同一源商品。 |
+| 必须换主图 | `publish-flow.mjs`（页面路径） | 不要把纯 HTTP `file/create` 当可用方案：规范记录其返回 `40002 操作太过频繁`。换主图仅有 goods_id `1026511479126` 的一次成功记录，之后无法复现；原始日志缺失，未验证。 |
+| 批量发 | `batch-publish.mjs` | **未验证**：只有代码，无成功记录；不能因为脚本存在就按已跑通使用。 |
+| 首次用新类目 | 先用 `harvest-native-props.mjs` 采集该类目模板，再选择发布路径 | 不复用其他类目的 `propertys_tid`、`template_module_id` 或品牌 `vid`。规范记录已采 cat16675 / cat22278，当前采集日志与产物缺失，未验证。 |
+
+> 证据边界：上表的历史成功与失败范围均转述自 `_CLEANUP_SPEC.md`；规范点名的 `artifacts/pdd-publish-by-copy/run-*.log` 和 `pdd_js_analysis/reports/flow-*.log` 在当前工作树中缺失，因此不视为本次实测结论。发布前仍需核对店铺、类目、模板和商品归属。
+
+## 目录
+
+1. [一、两条发布路径](#一两条发布路径)
+2. [二、脚本清单（按用途分组，不按文件名）](#二脚本清单按用途分组不按文件名)
+3. [三、product.json 格式](#三productjson-格式)
+4. [四、类目模板与品牌](#四类目模板与品牌)
+5. [五、限流与风控](#五限流与风控)
+6. [六、已知失败清单（不要重复踩）](#六已知失败清单不要重复踩)
+7. [七、排障速查](#七排障速查)
 
 ---
 
-## ★★ 首选路径：复制本店商品发布（publish-by-copy.mjs）
+## 一、两条发布路径
 
-> **2026-11 起，拼多多上架默认走这条路径。** 不走空白发布页，而是复制本店已有商品再改包。
+本章只区分**复制本店商品改包**与**页面全流程提交**两条主路径。命令依据当前脚本参数整理；成功编号与限制依据 `skills/pdd-publish-http/_CLEANUP_SPEC.md`。规范点名的原始运行日志未随当前工作区提供，因此下表是「规范记录」，不是本章重新实测的结果。
 
-### 为什么用它
+| 场景 | 路径 | 入口 | 结论 |
+|---|---|---|---|
+| 本店已有同类目商品，优先快速改包 | 复制路径（推荐） | `publish-by-copy.mjs` | 免选类目，继承源商品结构；规范记录 6 单成功 |
+| 需要走页面表单、上传主图与详情图 | 页面路径 | `publish-flow.mjs`，由 `publish-v2.mjs` 调用 | 按页面顺序填表并提交；规范记录 4 单成功 |
+| 批量执行页面路径 | 批量入口 | `batch-publish.mjs` | **未验证**：只有代码，无成功记录 |
 
-| 好处 | 说明 |
-|---|---|
-| 免选类目 | 类目跟着源商品走 |
-| 免填属性 | 属性结构继承源商品 |
-| **免填品牌** | 品牌继承源商品，绕过 `brand_limit=true` 类目的必填校验 |
-| 快 | 复制 1-3 秒，全流程 40-90 秒 |
-| **通用** | 不限于某个类目，店里有什么类目就能发什么类目 |
+### 1.1 复制本店商品改包：`publish-by-copy.mjs`（推荐）
 
-### 使用前提（缺一不可）
+#### 用途
 
-1. **本店必须已有【同类目】商品**作为复制源
-   - 跨店复制会报 `该商品不属于该店铺`
-2. **源商品复制一次后会被锁**，再复制报 `600102 该商品已被新建过,请勿连续新建`
-   - 需准备多个源商品轮换
-3. 账号已登录拼多多商家后台（浏览器 profile 有效）
+复制**本店同类目**的已有商品为草稿，再修改标题、规格/SKU、价格库存及可选图片并提交。类目和属性结构随源商品继承，不从空白发布页重新搭建。
 
-### 三步用法
+#### 前提
+
+1. 浏览器账号 Profile 已登录拼多多商家后台，`--shop <shopKey>` 指向该账号。
+2. 本店有同类目商品可作为 `--source`；跨店复制会报「该商品不属于该店铺」（旧 `SKILL.md` 记录）。
+3. 同一源商品不能连续重复复制；旧 `SKILL.md` 记录再次复制会报 `600102 该商品已被新建过,请勿连续新建`，应准备多个源商品轮换。
+4. 先执行 `--dry` 预览。`--confirm` 是真实发布的 L2 写操作，须取得用户明确同意。
+5. `product.json` 的标题、规格组合、SKU 与图片要求见「三、product.json 格式」。
+
+#### 命令
+
+以下命令在 `skills/pdd-publish-http/` 目录执行：
 
 ```bash
-# ① 先看本店有哪些商品可作复制源
-node scripts/publish-by-copy.mjs --shop <shopKey> --list
+# 列出本店商品，选择同类目复制源；catId 可选
+node scripts/publish-by-copy.mjs --shop <shopKey> --list [--catId <类目ID>]
 
-# ② 预览（零写操作）
+# 预览：不做真实发布
 node scripts/publish-by-copy.mjs --shop <shopKey> --product <product.json> --source <goodsId> --dry
 
-# ③ 真实发布（L2，需用户明确同意）
+# 真实发布：L2，须先预览并取得用户同意
 node scripts/publish-by-copy.mjs --shop <shopKey> --product <product.json> --source <goodsId> --confirm
 ```
 
-### product.json 格式
+#### 优点
+
+| 优点 | 说明 |
+|---|---|
+| 免选类目 | 类目跟随源商品，避免重新搜索、选择类目 |
+| 复用属性结构 | 以源商品和对应类目的原生提交 body 为基础改业务字段 |
+| 支持源图/无图改包 | 不传 `images` 时可沿用源商品图；规范也记录了无图成功单 |
+| 有预览门禁 | `--dry` 与 `--confirm` 分离，避免未经确认直接写店铺 |
+
+#### 限制与处理
+
+| 限制或现象 | 正确处理 |
+|---|---|
+| 源商品已复制过，出现 `600102` | 换一个本店同类目源商品，不要连续重试同一个源 |
+| `brand_limit=true` 类目的品牌/属性校验失败 | 先按「四、类目模板与品牌」采集该类目模板，使用对应 `propertys_tid`、`template_module_id` 与品牌 `vid`；不要把页面路径描述成可以绕过必填校验 |
+| 需要商详装修，`detail_gallery` 或 `decorationDetail` 不完整 | 同时处理详情图与装修楼层；脚本在 `action/edit` 后打开草稿页尝试「保存草稿」重建装修，再提交。保存按钮经常找不到，**自动处理未验证为稳定成功** |
+| 纯 HTTP 调用 `file/create` 上传新主图 | **已知失败**：恒返回 `40002 操作太过频繁`；Node 直连、页面内执行、补浏览器头、换 Anti-Content、4 种参数组合及三个账号均未成功 |
+| 换主图 | 规范仅记录 `1026511479126` 换图 5 张成功一次，之后无法复现；不能当成稳定能力 |
+| `commit/detail` 与 `goodsCommit/action/edit` body 混用 | 不混用。以 `harvest-native-props.mjs` 保存的原生提交 body 为底座，只改业务字段；schema 差异见第四章 |
+
+#### 规范记录的成功 goods_id（6 单）
+
+| goods_id | 当次图片情况 |
+|---|---|
+| `1026511479126` | 换图 5 张；此后无法复现 |
+| `1026569086908` | 源图 |
+| `1026569940637` | 源图 |
+| `1026574634568` | 无图 |
+| `1026709254803` | 无图（退化 body） |
+| `1026710800048` | 源图 |
+
+证据：`_CLEANUP_SPEC.md`「publish-by-copy.mjs 真实成功记录（6 单）」。`artifacts/pdd-publish-by-copy/run-*.log` 当前未找到，原始日志**未复核**。
+
+### 1.2 页面全流程提交：`publish-flow.mjs`
+
+#### 用途
+
+在发布页按既定顺序填写标题、参考价、主图、详情图、规格、SKU 价格库存、商品属性、发货售后，再由提交组件点击发布并核验结果。它适合需要明确走页面表单、页面图片上传和属性交互的场景。
+
+**入口关系必须分清：**`publish-flow.mjs` 导出 `publishFlow(page, product, opts)`，是表单编排组件，不是带 `--product-file` 参数的独立命令行入口；当前由 `publish-v2.mjs` 导入并调用。下面给的是当前可调用的 `publish-v2.mjs` 命令。
+
+#### 前提
+
+1. 浏览器账号已登录，`--account <shopKey>` 对应有效账号 Profile。
+2. 准备符合第四章 schema 的 `product.json`；需要主图/详情图时提供可访问的本地图片。
+3. 新类目需要先确认类目及必填属性；品牌与模板参数按目标类目采集，不能复用其他类目的值。
+4. 页面路径不是规避平台校验的通道：品牌必填、详情图数量、规格及 SKU 完整性仍由平台校验。
+5. `--confirm true` 会执行真实发布；需先预览/人工核对并取得用户明确同意。
+
+#### 命令
+
+以下命令在 `skills/pdd-publish-http/` 目录执行：
+
+```bash
+# 填到提交前，保留页面供人工核对，不点击发布
+node scripts/publish-v2.mjs --product-file <product.json> --account <shopKey> --confirm true --no-submit true
+
+# 页面全流程真实发布：L2，须取得用户明确同意
+node scripts/publish-v2.mjs --product-file <product.json> --account <shopKey> --confirm true
+```
+
+代码结构核对：`publish-v2.mjs` 第 144 行动态导入 `./publish-flow.mjs`，第 314 行调用 `publishFlow(...)`；`publish-flow.mjs` 本身只导出组件函数。
+
+#### 优点
+
+| 优点 | 说明 |
+|---|---|
+| 页面原生交互 | 由页面自己处理图片上传、属性级联及提交，不依赖纯 HTTP `file/create` |
+| 表单覆盖完整 | 组件覆盖标题、参考价、主图/详情图、规格、价格库存、属性、发货售后 |
+| 可停在提交前 | `--no-submit true` 支持人工核对，避免直接发布 |
+| 属性级联可补填 | 多轮采集新出现字段，再补新增 SKU 行的价格库存和预览图 |
+
+#### 限制
+
+| 限制 | 说明与处理 |
+|---|---|
+| 比复制路径步骤多 | 需要打开发布入口、选择类目并完成整页表单，不把复制路径的耗时记录套用到页面路径 |
+| 属性级联与异步渲染 | 填完一轮需重新采集；带「重要」的必填项仍要逐项复核，不能只看首轮字段数 |
+| 新增 SKU 行可能缺值 | 属性填写后补价格库存及 SKU 预览图，否则提交会被平台拦截 |
+| 图片与详情仍受平台约束 | 页面路径的 4 单记录全是源图，不能据此宣称换主图或任意详情装修已稳定验证 |
+| 滑块、会话与限流 | 仍需按「五、限流与风控」处理；页面路径不等于免风控 |
+
+#### 规范记录的成功 goods_id（4 单）
+
+| goods_id | 当次图片情况 |
+|---|---|
+| `1025462371503` | 源图 |
+| `1025846514486` | 源图 |
+| `1026312995086` | 源图 |
+| `1026321720727` | 源图 |
+
+证据：`_CLEANUP_SPEC.md`「publish-flow.mjs 真实成功记录（4 单）」。`pdd_js_analysis/reports/flow-*.log` 当前未找到，原始日志**未复核**。
+
+### 1.3 选择结论与证据边界
+
+| 问题 | 结论 |
+|---|---|
+| 默认选哪条？ | 本店有合适的同类目源商品时优先复制路径；需要完整页面表单与页面图片操作时选页面路径 |
+| 能否用页面路径绕过品牌必填？ | 不能。仍需目标类目正确的模板与品牌参数 |
+| 能否宣称换主图已稳定解决？ | 不能。只有复制路径 `1026511479126` 一次成功记录，之后无法复现；纯 HTTP 新主图上传明确失败 |
+| 能否由这两条路径的成功外推批量成功？ | 不能。`batch-publish.mjs` 仍标为**未验证** |
+| 成功记录的证据强度 | 10 个编号均来自整理规范；当前工作区没有规范点名的原始日志，不能写成「本章已复核日志」 |
+
+---
+
+## 二、脚本清单
+
+按用途分组。每个脚本只做一件事，由主流程编排。
+
+### 2.1 主流程（入口）
+
+| 脚本 | 作用 | 何时用 |
+|---|---|---|
+| `publish-by-copy.mjs` | **主路径**：复制本店商品 → 改 SKU/标题/价格 → 提交 | 店里已有同类目商品，且不需要换主图 |
+| `publish-flow.mjs` | 页面全流程编排：选类目 → 填基础 → 填规格 → 填价格 → 提交 | 需要换主图，或 `publish-by-copy` 被属性校验拦住 |
+| `publish-v2.mjs` | 页面流程 v2（含图片预上传、AI 视觉填表） | 类目属性复杂、需要 AI 看图填 |
+| `publish.mjs` | 页面流程 v1（保留兼容） | 老脚本线性编排，一般不用 |
+| `batch-publish.mjs` | 批量：遍历目录下多个 `product.json` 顺序发布 | 一次发多个商品 |
+
+### 2.2 类目与属性
+
+| 脚本 | 作用 |
+|---|---|
+| `harvest-native-props.mjs` | **关键**：拦截页面提交时的 `action/edit` body，拿到权威 `propertys_tid` / `template_module_id` / 品牌 `vid` / 全量属性值 |
+| `category-template.mjs` | 类目模板库：成功上架后沉淀模板，同目录下次直接复用 |
+| `attr-harvest.mjs` | 采集类目属性清单入库 |
+| `attr-fill-generic.mjs` | 通用属性填写（v3，基于真机验证） |
+| `attr-composite.mjs` | 复合字段处理（「添加XX」类多行） |
+
+### 2.3 表单填写（DOM 流程内部使用）
+
+| 脚本 | 作用 |
+|---|---|
+| `stage-nav.mjs` | 段1 导航 + 段2 选类目 |
+| `stage-submit.mjs` | 点「提交并上架」+ 判定结果 |
+| `field-basic.mjs` | 基础字段（标题 / 通用字段 / 类目读回） |
+| `field-images.mjs` | 图片上传（主图 / 详情图 / 计数） |
+| `field-service.mjs` | 服务承诺（7天无理由 / 假一赔十 等） |
+| `field-shipping.mjs` | 发货与售后 + 运费模板 |
+| `spec-dims.mjs` | 规格维度（specs） |
+| `spec-row-fill.mjs` | 规格值逐行填写（v2） |
+| `sku-table.mjs` | SKU 价格表 |
+| `sku-thumb.mjs` | SKU 预览图 |
+
+### 2.4 图片
+
+| 脚本 | 作用 |
+|---|---|
+| `img-prep.mjs` | 图片预处理（尺寸归一 + 压缩到平台上限） |
+| `compress-images.mjs` | 单独压缩图片 |
+| `imgprep.py` | Python 版图片预处理 |
+
+### 2.5 视觉辅助
+
+| 脚本 | 作用 |
+|---|---|
+| `vision-fill.mjs` | AI 看截图填规格 |
+| `vision-cache.mjs` | 视觉分析结果缓存 |
+| `analyze_spec_ui.py` | 规格区 UI 结构分析 |
+
+### 2.6 依赖关系
+
+```
+publish-by-copy.mjs
+  └── harvest-native-props.mjs（产物在 artifacts/pdd-native-props/）
+
+publish-flow.mjs
+  ├── stage-nav.mjs → stage-submit.mjs
+  ├── field-basic.mjs / field-images.mjs / field-service.mjs / field-shipping.mjs
+  ├── spec-dims.mjs → spec-row-fill.mjs
+  ├── sku-table.mjs / sku-thumb.mjs
+  ├── attr-composite.mjs / attr-fill-generic.mjs
+  └── vision-fill.mjs → vision-cache.mjs → analyze_spec_ui.py
+
+batch-publish.mjs
+  └── publish-flow.mjs（每个商品一次）
+```
+
+### 2.7 共享依赖（技能外）
+
+| 路径 | 作用 |
+|---|---|
+| `skills/_shared/pdd-antiban.mjs` | 节流引擎（账号级 4-6s / 接口级 1.8s / 40002 冷却 240s） |
+| `skills/_shared/pdd-shadow-hook.mjs` | 破解滑块 closed shadow root |
+| `skills/_shared/pdd-slider-solver.mjs` | 滑块识别与拖拽 |
+| `skills/_shared/pdd-http.mjs` | 凭证库 HTTP 通道 |
+| `lib/pdd-image-preupload.js` | 页面内图片上传（依赖 `page.evaluate`，慢但能过 `file/create`） |
+
+---
+
+## 三、product.json 格式
+
+以下结构用于 `publish-by-copy.mjs --product <product.json>`。字段类型以该脚本的参数说明与现有文档为准；下方示例是结构说明，**不是一次已执行的平台发布记录**。
+
+### 3.1 字段表
+
+| 字段 | 类型 | 是否必填 | 说明 |
+|---|---|---|---|
+| `title` | `string` | 是 | 商品标题。脚本会统计其中的汉字数，超过 30 个汉字直接终止；平台也会拦截超长标题。旧文档写有「30 汉字 / 60 字符」，实际发布应优先满足 **30 个汉字上限**，不能把 60 字符当作保证可提交的条件。 |
+| `images` | `string[]` | 否（`publish-by-copy.mjs`） | 本地图片**绝对路径**数组；复制路径脚本注释标为 1～5 张。不传则沿用源商品主图。传新图不等于换图必然成功：换主图仅记录 goods_id `1026511479126` 成功过一次，之后无法复现；原始日志当前缺失，该记录未重新验证。 |
+| `imageUrls` | `string[]` | 未确认支持 | 本次在保留的 `skills/pdd-publish-http/scripts/*.mjs` 中未检索到 `imageUrls` / `image_urls` 读取点。不要把它当作已验证的 `images` 替代品；远程 URL 输入支持状态标为**未验证**，实际使用本地绝对路径的 `images`。 |
+| `price` | `string`（兼容数字值未单独验证） | 否 | 商品参考价，建议用十进制字符串避免精度歧义。显式值仍需通过平台校验；参考价必须大于商品最大单买价。 |
+| `stock` | `string` | 否 | 默认库存，在 SKU 行未提供库存时作为默认值。旧文档统一结构还记录过默认 `1000`，但复制路径的参数说明未给出固定默认值，因此不要依赖隐式默认，建议每个 SKU 明写 `stock`。 |
+| `specs` | `Array<{name:string, values:Array<{value:string, image?:string}>}>` | 是（复制路径要求至少 1 维） | 规格维度，最多 2 维。`name` 是维度名，`values` 是该维度全部取值；每个取值放在 `{ "value": "..." }` 对象中，不能直接把 `values` 写成字符串数组。旧统一结构的预览图扩展允许第 1 维取值带 `image`，复制路径中的实际效果未单独验证。 |
+| `skus` | `Array<{specs:Object, price:string, stock:string, itemNo?:string}>` | 是 | SKU 行。每行 `specs` 用「维度名 → 维度值」标识组合，`price` 是该 SKU 拼单价，`stock` 是该行库存，`itemNo` 是可选规格编码。必须覆盖 `specs` 产生的全部笛卡尔积组合，且不得重复或引用未声明的维度值。 |
+
+> `images` 与 `imageUrls` 不是已确认的同义字段。这里保留 `imageUrls` 一行是为了明确当前证据边界，而不是新增输入能力或承诺兼容。
+
+### 3.2 完整示例：2 个维度、4 个 SKU
+
+示例使用「颜色」2 个值 × 「容量」2 个值，共 4 个组合；每行都显式给出价格、库存和规格编码。图片路径需替换为发布机器上真实存在的绝对路径。
 
 ```json
 {
-  "title": "≤30 汉字 / 60 字符",
-  "images": ["本地绝对路径"],
-  "price": "参考价（可选）",
-  "stock": "500",
+  "title": "一次性纸杯家用加厚饮水杯多规格可选",
+  "images": [
+    "D:/pdd-images/paper-cup/main-01.jpg",
+    "D:/pdd-images/paper-cup/main-02.jpg"
+  ],
+  "price": "24.92",
+  "stock": "100",
   "specs": [
-    { "name": "款式", "values": [{"value":"A"},{"value":"B"}] },
-    { "name": "容量", "values": [{"value":"14oz"},{"value":"16oz"}] }
+    {
+      "name": "颜色",
+      "values": [
+        { "value": "原木色" },
+        { "value": "白色" }
+      ]
+    },
+    {
+      "name": "容量",
+      "values": [
+        { "value": "250ml" },
+        { "value": "350ml" }
+      ]
+    }
   ],
   "skus": [
-    { "specs": {"款式":"A","容量":"14oz"}, "price":"19.9", "stock":"100", "itemNo":"A1" }
+    {
+      "specs": { "颜色": "原木色", "容量": "250ml" },
+      "price": "19.90",
+      "stock": "100",
+      "itemNo": "CUP-NATURAL-250"
+    },
+    {
+      "specs": { "颜色": "原木色", "容量": "350ml" },
+      "price": "22.90",
+      "stock": "100",
+      "itemNo": "CUP-NATURAL-350"
+    },
+    {
+      "specs": { "颜色": "白色", "容量": "250ml" },
+      "price": "19.90",
+      "stock": "100",
+      "itemNo": "CUP-WHITE-250"
+    },
+    {
+      "specs": { "颜色": "白色", "容量": "350ml" },
+      "price": "22.90",
+      "stock": "100",
+      "itemNo": "CUP-WHITE-350"
+    }
   ]
 }
 ```
 
-- `title` **超 30 汉字会被平台拦**（`商品标题最多填写30个汉字`）
-- `specs` 最多 2 维，`skus` 需覆盖全部维度组合
-- `images` 不传则沿用源商品图
+示例中最大拼单价为 `22.90`。按现有脚本文档的单买价计算规则 `拼单价 + 1.01`，最大单买价为 `23.91`；示例参考价 `24.92` 大于该值。这里展示的是数值关系，**不代表该示例商品已实际上架**。
 
-### ⚠ 已知限制
+### 3.3 校验规则与发布前检查
 
-| 情况 | 现象 | 处理 |
+| 检查项 | 规则 | 不满足时怎么处理 |
 |---|---|---|
-| 需要商详装修的类目 | `commit/submit` 报「商品详情图数量必须在1-50张」 | 脚本已内置「页面补详情图」步骤（打开草稿页点保存草稿），自动处理 |
-| 该类目不需要品牌（如门贴）| 纯 HTTP 直接通，**最快 3 秒/单** | 用 `--confirm` 直跑 |
+| 标题 | `title` 中汉字数不得超过 30；平台会拦截超长标题 | 缩短标题后重新生成 JSON，不要用截断 SKU 或图片的方式规避 |
+| 规格维度数 | `specs` 最多 2 维；复制路径还要求不能为空 | 合并多余维度，或重新设计 SKU；无规格商品不能直接套用本示例 |
+| 维度结构 | 每维必须有非空 `name` 和 `values`；值必须来自对应维度 | 修正维度名、取值及类型，避免空值和重名造成组合歧义 |
+| SKU 覆盖 | 若第 1 维有 `m` 个值、第 2 维有 `n` 个值，则二维商品应有 `m × n` 行；一维商品应有 `m` 行 | 补齐缺失组合；对不售卖的组合不能静默省略，应先确认业务及页面是否支持停用 |
+| SKU 唯一性 | 每行 `specs` 必须包含全部维度，组合不可重复 | 以维度名和值逐行核对；不要仅靠 `itemNo` 区分重复组合 |
+| 价格与参考价 | 每个 SKU 的 `price` 应明确填写；参考价必须大于最大单买价 | 先计算全部 SKU 的单买价，再设置合规参考价，不要直接照抄示例金额 |
+| 库存 | 建议逐 SKU 明写 `stock`，不要依赖各路径可能不同的默认值 | 使用非负整数库存字符串，并检查缺项是否意外继承 `product.stock` |
+| 图片 | `images` 使用真实本地绝对路径；不传会继承源商品主图 | 发布前检查文件存在、路径可读；需要换主图时优先走页面路径并保留失败预期 |
+| 远程图字段 | `imageUrls` 支持情况未验证，保留脚本中未找到读取点 | 不要仅提供 `imageUrls`；需要图片时提供已确认的 `images` 本地路径 |
 
-### ★ 品牌问题的正确解法（2026-11 实测）
+### 3.4 证据与适用范围
 
-品牌校验失败有三个典型错误信息：
+- 字段结构与校验依据：`scripts/publish-by-copy.mjs` 顶部参数说明及商品校验代码、旧版 `SKILL.md` 的 product 统一结构说明。
+- 本次文档只校验 JSON 结构和规格组合，不调用平台接口，不宣称新增发布成功记录。
+- `_CLEANUP_SPEC.md` 点名的 `artifacts/pdd-publish-by-copy/run-*.log` 与 `pdd_js_analysis/reports/flow-*.log` 当前工作树中缺失，历史成功结论均不作为本次实测。
 
-```
-属性[品牌]校验错误：该属性必填，需在编辑页确认后重新提交
-输入的属性值'倾听果'不可用,请更换！
-```
+---
 
-**根因不是没填品牌，而是类目属性模板参数错了。** 必须用这三个值：
+## 四、类目模板与品牌
 
-| 字段 | 含义 | 纸杯类目实测值 |
+### 4.1 为什么需要类目模板
+
+`propertys_tid` 是类目的**属性模板 ID**，必须与目标类目匹配。
+
+| 现象 | 原因 | 处理 |
 |---|---|---|
-| `propertys_tid` | **属性模板 ID**（最关键）| `63387` |
-| `template_module_id` | 属性模块 ID | `91765` |
-| `goods_properties[ref_pid=310].vid` | **品牌值 ID** | `157882` |
+| `输入的属性值XXX不可用，请更换！`（如「倾听果」） | `propertys_tid` 用了别的类目的值，平台回退到默认模板，带出错误类目的品牌值 | 用目标类目重新采集模板，替换 `propertys_tid` / `template_module_id` / 品牌 `vid` |
+| `属性[品牌]校验错误：该属性必填，需在编辑页确认后重新提交` | 品牌条目的 `vid` 或模板字段不符合该类目 | 按该类目的 `brandRule` 填写，不能复用别的类目的品牌参数 |
 
-> ⚠ `vid` **不是** `/draco-ms/mms/brand/audit/record` 返回的 `brand_id`（那个是 143701），两者不同。
->
-> ⚠ `propertys_tid` 填错（比如用别的类目的值）→ 平台回退到默认模板 → 带出「倾听果」这种别的类目的品牌值。
+**根因不是简单地「没填品牌」，而是类目属性模板参数错了。** 不同类目的模板值不能混用。
 
-### 怎么拿到这些值：harvest-native-props.mjs
+### 4.2 `harvest-native-props.mjs` 用法与产物
+
+#### 用法
 
 ```bash
+# 已有草稿：直接打开草稿页采集
+node scripts/harvest-native-props.mjs --shop <shopKey> --catId <类目ID> --goods <goods_id> --commit <goods_commit_id>
+
+# 没有草稿：复制一个源商品，让它走一次页面提交
 node scripts/harvest-native-props.mjs --shop <shopKey> --catId <类目ID> --source <源商品ID>
 ```
 
-原理：打开草稿页 → 点「提交并上架」→ **拦截页面自己发出的 `action/edit`** → 保存整个 body。
-页面自己算出来的值是平台认可的权威值，比自己拼可靠。
+- `--shop` 必填，对应浏览器账号 Profile。
+- `--goods` / `--commit` 与 `--source` 二选一；不传前者时必须传 `--source`。
+- 脚本会打开草稿页、填写参考价、点击「提交并上架」，拦截**页面自己发出的 `goodsCommit/action/edit`**。
 
-产物：
-
-```
-artifacts/pdd-native-props/cat<catId>_<shopKey>.json              ← 属性模板 + brandRule
-artifacts/pdd-native-props/cat<catId>_<shopKey>_native-body.json  ← 完整 157 字段 body
-```
-
-脚本会直接打印判定结果：
+#### 原理
 
 ```
-══════════ 品牌判定 ══════════
-  ✅ 需要品牌（必填）
-     品牌名: 爱绿森
-     vid:   157882
-     template_pid: 661648
-     template_module_id: 91765
-
-══════════ 关键类目参数 ══════════
-  propertys_tid: 63387
+页面提交 → 前端调 template/mall 拉权威类目模板
+        → 重建 goods_properties（template_pid / template_module_id / vid）
+        → 发 action/edit
+        → 脚本拦截 body 并保存
 ```
 
-**每个类目跑一次，之后永久复用。** `publish-by-copy.mjs` 会自动读取这个文件。
+页面自己算出的值是平台认可的权威值，比手工拼字段可靠。
 
-### 两个 body schema 不一样（易踩坑）
+#### 产物
 
-| 接口 | 字段数 | 用途 |
-|---|---|---|
-| `commit/detail`（草稿读取）| 174 | 含大量展示字段（`id`/`owner`/`mall_id`…），**不能直接当提交体** |
-| `goodsCommit/action/edit`（提交）| 157 | 提交必需（含 `propertys_tid`/`isbn_properties_related`/`must_have_spu`…）|
-
-**直接用 `commit/detail` 提交会报「请求method,argument,body错误」。**
-正确做法：用 `harvest-native-props.mjs` 存下的原生 157 字段 body 当底座。
-
-### 详情图字段
-
-平台校验的是 **`detail_gallery`**（1-50 张），不是 `decorationDetail`。
-
-`decorationDetail` 是商详装修楼层（结构复杂，`floor_id`/`key`/`content_list`），由页面根据 `goods_id` 从服务端实时拉取，**纯 HTTP 传不进去**。
-
-脚本的处理：`action/edit` 之后，重新打开草稿页点一次「保存草稿」，让页面写入装修楼层，再用 `commit/submit` 提交。
-
-### 实测记录
-
-| 类目 | 规格形态 | 结果 |
-|---|---|---|
-| 门贴（cat 9683）| 1维1值 / 1维3值 / 2维2×2 / 2维3×3 | ✅ 全部成功，最快 3 秒 |
-| 纸杯（cat 16675）| 2维2×2（4行）| ✅ `1026511479126` 混合模式约 106 秒 |
-
-### 限流处理
-
-脚本已内置 `pdd-antiban` 节流（官方 SDK 实测参数）：
-
-- 账号级间隔 **4-6 秒**（含随机抖动）
-- 同接口最小间隔 **1.8 秒**
-- `40002 操作太过频繁` → **冷却 240 秒**后重试
-- `54001 命中风控` → 冷却 60 秒
-- `43001 会话过期` → 立即停止，提示重新登录
-
-> `40002` 是**按接口**计的，不同接口互相独立。`template/mall` 阈值极低（正常商家一天只调几次），测试时最容易被限。
-
----
-
-## 一、推荐入口
-
-```bash
-# 填到提交前（人工核对，浏览器保留 30 分钟）
-node scripts/publish-v2.mjs --product-file <product.json> --account <shopKey> --confirm true --no-submit true
-
-# 真正上架
-node scripts/publish-v2.mjs --product-file <product.json> --account <shopKey> --confirm true
-```
-
----
-
-## 一点五、批量上架（batch-publish.mjs）
-
-### 用法
-
-```bash
-# 目录结构：每个子目录一个 product.json
-# batches/
-#   ├── item1/product.json
-#   ├── item2/product.json
-#   └── item3/product.json
-
-# 仅填表（人工核对，不提交）
-node scripts/batch-publish.mjs --dir <目录> --account <shopKey> --no-submit
-
-# 真实提交
-node scripts/batch-publish.mjs --dir <目录> --account <shopKey> --confirm
-```
-
-### 行为
-
-```
-for each product.json:
-  ① 查类目模板（命中则用 catId 直达 + 属性补全）
-  ② 启动独立浏览器（避免 Profile 锁冲突）
-  ③ 段1→段4 完整填表
-  ④ （--confirm 时）提交并验证
-  ⑤ 沉淀模板
-  ⑥ 关闭浏览器 + 清理 Profile 锁
-  ⑦ 等 3 秒再处理下一个
-```
-
-### 输出
-
-- 每个商品的耗时/已填项数/结果
-- 汇总 `成功 N/M`
-- `batch-results.json`（结构化结果）
-
-### 实测（3 个商品）
-
-```
-✅ bottle: 110s | 已填 34 项
-✅ box:     41s | 已填 35 项
-✅ towel:   92s | 已填 30 项
-成功 3/3
-```
-
-### 注意
-
-- **每个商品独立浏览器进程**：Profile 是互斥的，不能多开
-- **串行执行**：不并行，因为共用同一个店铺账号
-- 单个失败不影响后续（catch 后继续）
-
----
-
-## 二、段4 正确顺序（不可改）
-
-```
-① 规格（逐行 + 补勾）→ ② 价格库存 → ③ SKU 预览图 → ④ 属性（多轮级联）
-→ ⑤ 【补】价格库存（新增行）→ ⑥ 【补】SKU 预览图（新增行）
-→ ⑦ 发货售后 → ⑧ 服务承诺 → 段5 提交
-```
-
-**为什么要有 ⑤⑥**：属性级联会让 SKU 表**新增行**（抱枕 2→3 行）。
-新行没有价格/预览图 → 提交报「请输入第3行规格的库存」「请上传第3行规格的预览图」。
-
----
-
-## 三、规格填写（spec-row-fill.mjs）
-
-### 真机结构
-
-```html
-<div id="newSpec">
-  <input type="checkbox" checked>                 <!-- 平台自动勾选 -->
-  <input placeholder="自定义容量" value="250">     <!-- 值必须纯数字 -->
-  <div class="IPT_appendCell">mL</div>            <!-- 单位，固定不可填 -->
-  <input placeholder="备注">
-</div>
-```
-
-### 三条铁律
-
-| 规则 | 说明 |
+| 文件 | 内容 |
 |---|---|
-| **值必须纯数字** | `250` 不是 `250ml`。单位在 `[class*="appendCell"]` 里 |
-| **逐行模式** | 填**最后一个空框** → Enter/失焦 → 平台追加新行 → 继续。**不能按索引依次填** |
-| **补勾 checkbox** | 最后一个值的 checkbox 常不自动勾 → SKU 表少 1 行。填完必须补勾所有「有值未勾」的行 |
+| `artifacts/pdd-native-props/cat<catId>_<shopKey>.json` | 属性模板：`propertys_tid`、`catProperties`、`goods_properties_tpl`、`template_module_id_candidates`、`brandRule` |
+| `artifacts/pdd-native-props/cat<catId>_<shopKey>_native-body.json` | 页面实际提交的完整 157 字段 `action/edit` body，作为后续提交的底座 |
 
-### 单位剥离（通用，无白名单）
+脚本还会打印品牌判定：该类目是否需要品牌、品牌 `vid`、`template_pid`、`template_module_id`，以及 `propertys_tid`。**每个类目采集一次，之后复用该文件。**
 
-```js
-stripUnit(raw, pageUnit)
-// ① 页面有单位 → 精确剥离该单位
-// ② 页面无单位 → 剥离末尾非数字（保留 40x40 的 x）
-```
+状态：cat16675（纸杯）与 cat22278（门贴）已采到，见 `_CLEANUP_SPEC.md`。
 
-实测：
-```
-250ml+mL→250   1.5kg+kg→1.5   65W+W→65   110码+码→110
-40x40cm+无→40x40   256GB+GB→256   3.5寸+寸→3.5   100件+件→100
-```
+### 4.3 品牌字段对照表
 
-### 焦点定位
-
-**必须用 XPath**，纯坐标点击键不进去：
-```js
-document.evaluate('.//input[contains(@placeholder,"自定义")]', root, ...)
-// → focus() + click()
-```
-
----
-
-## 四、价格库存（sku-table.mjs）
-
-### 列映射（真机 dump 定论）
-
-```
-表头：[容量, *库存, *拼单价(元), *单买价(元), *预览图, 规格编码, 状态]
-每行 input（排除 file）：
-  inputs[0] = 库存
-  inputs[1] = 拼单价
-  inputs[2] = 单买价
-  inputs[3] = 规格编码（不填）
-```
-
-**容量列是纯文本不是 input** —— 之前全部错位就是因为按 `[0]=库存` 算。
-
-### 单买价规则
-
-平台要求 **单买价 ≥ 拼单价 + 1 元**：
-```js
-single = (price + 1.01).toFixed(2)
-```
-
-### 补填模式
-
-`fillPriceTable` 支持 **skip-existing**：已有值不覆盖，只补空行（用于属性后补填新增行）。
-
----
-
-## 五、SKU 预览图（sku-thumb.mjs）
-
-| 坑 | 解法 |
-|---|---|
-| 上传后 DOM 重排 | **每行重新查 file input**，不缓存 handle |
-| 有图时 file input 消失 | 完成判据用背景图 `computedStyle.backgroundImage` 含 `url(` |
-| 行数异步增长 | 等行数到预期（补勾后 2→3 行） |
-
-**二维场景**：平台会自动把同色的图下发给同色的各行，所以只上传缺图的行即可。
-
----
-
-## 六、属性填写（attr-fill-generic.mjs）
-
-### 真机结构
-
-```html
-<div class="property-item">
-  <label>重要适用型号</label>
-  <div id="basic.propertys.7.value">
-    <input data-testid="beast-core-select-htmlInput">
-  </div>
-</div>
-```
-
-### 两种控件（必须区分）
-
-| 类型 | 行为 | 校验判据 |
+| 字段 | 纸杯 cat16675 | 门贴 cat22278 |
 |---|---|---|
-| 单选下拉 | 点后自动关闭，`input.value` 写入 | `inputValue` 包含值 |
-| **多选下拉** | 点后**面板不关闭**，`input.value` 仍空，`box.innerText` 显示已选值 | **`boxText`** 包含值 |
+| `propertys_tid` | `63387` | `39060` |
+| `template_module_id` | `91765` | `50716` |
+| 品牌 `vid`（`goods_properties` 中 `ref_pid=310` 那一条） | `157882` | 不需要品牌 |
+| `brand_limit` | `true` | `false` |
 
-只校验 `inputValue` → 多选全部误报失败。
-
-### ★ 属性级联（最关键的坑）
-
-**「适用型号」必须等「适用品牌」填完后才会出现**（实测 7 → 8 个字段）。
-抱枕的「平方克重」同理（15 → 16 个字段）。
-
-**解法：填一轮 → 重新采集 → 补齐新出现的字段，最多 3 轮**
-
-```
-第 1 轮：填 7 个字段
-第 2 轮：属性区从 7 个增加到 8 个（级联字段出现）
-        「适用型号」= iPhone 15 ✅
-第 3 轮：无可填字段，结束
-```
-
-### 「重要」= 必填
-
-带「重要」标记的字段必须填，否则平台拦。流程：
-1. `harvestAttributes()` 返回 `required` 标记
-2. 填完后 `checkFieldFilled()` 逐项复核
-3. 必填未填 → 明确报错 `★必填未填：xxx`
-4. **AI 没选中的必填字段 → 强制取候选第一个可用值**（跳过「请选择/其他」）
-
-实测必填数：纸杯 4、手机壳 6、抱枕 12、毛巾 6。
-
-### 字段采集（异步渲染，会漏）
-
-属性区异步渲染，`basic.propertys.N.value` 出现时间不一致。双路径采集：
-
-```
-路径 A：扫 [id^="basic.propertys."]，从 box 内部/向上找 label
-路径 B：扫所有 <label>，找它后面的 select box（补齐 A 漏掉的）
-```
-
-加渲染稳定等待（连续 4 次数量不变 **且** 已等 ≥3 秒）。
-
-### 值的选择优先级
-
-```
-① 用户提供（product.attributes）→ 清洗脏后缀（（缓存命中）（显式指定））
-② 用户没给的字段 → AI 从**真实候选**里选（pickAttrValuesByAI）
-③ 必须命中候选原值（防 AI 编造）
-④ AI 没选中且必填 → 兜底取第一个可用候选
-```
-
-**字段名匹配必须严格**：`填充物` 不能匹配到 `填充物净重`（只允许「页面字段名 = 用户字段名 + ≤2字后缀」）。
-
-### AI 选值（pickAttrValuesByAI）
-
-- 模型：`cn:glm-5.3-flash`（文本，快）
-- **prompt 写临时 JSON 文件**传给 Python（直接拼 `-c` 会因换行/引号报语法错误）
-- 配置来源：`pajama/imgkit.py` 的 `BASE/KEY`（**不是** aiimgnew1 的 .env）
-- 实测：4/4、6/6 全部命中
-
-### 点击选项（clickOption）
-
-```
-严格顺序：精确 > 去空格精确 > 最短包含匹配
-「纸」不能匹配到「纸+PE膜」→ 取最短候选
-```
-
-失败**重试一次**（材质这类带特殊字符的候选，首次点击可能没落到正确项）。
-
-### checkFieldFilled 判定
-
-必须剔除所有**提示文字**，否则会把提示误判成已填值：
-```
-误判案例：✅ 平方克重 = 重要 / ✅ 填充物 = 重要请确保该商品中含有所选材质
-剔除清单：重要 / 必填 / 请选择 / 请输入 / 点击申请 / 未找到需要的品牌
-         / 请确保该商品中含有所选材质 / 标点符号
-```
-8/8 单元测试通过。
-
----
-
-## 七、参考价与默认值
-
-| 项 | 规则 |
-|---|---|
-| **参考价** | **默认 = `max(SKU 拼单价) + 1.02`**<br>原因：平台校验「参考价应大于商品最大**单买价**」，而单买价 = 拼单价 + 1.01<br>例：毛巾 SKU 价 19.9/29.9 → 最大单买价 30.91 → 参考价 **30.92**<br>`product.price` 显式给了且合规就用显式的，否则自动修正 |
-| 默认库存 | **100**（每 SKU） |
-| 默认发货时间 | **48 小时** |
-| 主图数量 | **按输入全量**（1-10 张，不写死 5） |
-| 提交判定 | `错误（0）` 不算错，只有 `错误（N>0）` 才停 |
-
----
-
-## 七点五、服务承诺（field-service.mjs）
-
-### 为什么需要
-
-某些类目**强制要求**勾选「7天无理由退货」，不勾提交报：
-```
-该类商品，必须支持【7天无理由退换货】服务
-```
-纸杯/手机壳/抱枕默认已勾选，**毛巾类目需要手动勾**（2026-10-31 实测）。
-
-### 真机结构（beast-core checkbox）
-
-```html
-<label class="CBX_outerWrapper CBX_checkbox CBX_active CBX_disabled"
-       data-testid="beast-core-checkbox" data-checked="1">
-  <input type="checkbox" checked disabled style="display:none">
-  ...
-</label>
-```
-
-**关键**：`input` 是**隐藏的**（`w=0 h=0`），真实选中状态在 `data-checked` 属性上。
-- `data-checked="1"` + `CBX_disabled` → 平台强制勾选且禁用（视为已完成）
-- `data-checked="0"` 且未禁用 → 需要勾选
-
-### 判定逻辑
-
-```js
-const dataChecked = wrapper?.getAttribute('data-checked')
-const isChecked = dataChecked === '1' || cb.checked
-const isDisabled = cb.disabled || /CBX_disabled/.test(wrapper?.className)
-```
-
-### 扫描方式（通用，不写死文案）
-
-```
-① 找所有含「必须支持/强制要求/必须勾选/该类商品」的提示
-② 从提示向上找 5 层容器，找该容器内的 checkbox
-③ 未勾选 + 未禁用 → 点击 label（不是 input）
-④ 校验 data-checked 变为 "1"
-```
-
----
-
-## 八、发货售后（field-shipping.mjs）
-
-lib 版写死服装类目文案，非服装类目填 0 项。改为：
-
-```
-① 先试 lib 版
-② 没命中 → 通用模糊匹配
-   发货方式：非预售 / 现货 / 48小时内发货 / 现货发售
-   发货时间：48小时发货及揽收 / 48小时发货 / 当日发货 / 24小时发货
-```
-
----
-
-## 九、类目模板（category-template.mjs）
-
-### 模板结构
+纸杯品牌条目的关键字段（采集脚本实测打印）：
 
 ```json
 {
-  "毛巾": {
-    "catId": "205041314615",
-    "catePath": "...",
-    "dims": [{"user":"尺寸","page":"尺寸","type":"text-input"}, ...],
-    "requiredAttrs": [{"name":"品牌","value":"无品牌/无注册商标"}, ...],
-    "price": "", "stock": "", "successCount": 2
-  }
+  "ref_pid": 310,
+  "template_pid": 661648,
+  "template_module_id": 91765,
+  "vid": 157882,
+  "content": "爱绿意",
+  "value": ""
 }
 ```
 
-### 模板的两大作用
+> **`vid` ≠ `brand_id`**：`/draco-ms/mms/brand/audit/record` 返回的 `brand_id`（实测 `143701`）不是提交时要带的值。提交体 `goods_properties[ref_pid=310].vid` 必须填 `157882`；两者不是同一个 ID，不能互换。
 
-1. **catId 直达**：跳过类目搜索，直接跳表单页（省 5s）
-2. **属性补全**：模板里有值的属性直接填，不用 AI 再选一遍
+### 4.4 两个 body schema 的差异（不能混用）
 
-### ★ `--no-submit` 也沉淀模板
+| 接口 | 字段数 | 用途 | 注意事项 |
+|---|---|---|---|
+| `commit/detail`（草稿读取） | 174 | 读取草稿详情 | 含大量展示字段（`id` / `owner` / `mall_id` 等），**不能直接当提交体** |
+| `goodsCommit/action/edit`（提交） | 157 | 保存/提交编辑 | 含提交必需字段（`propertys_tid` / `isbn_properties_related` / `must_have_spu` 等） |
 
-之前只在真正发布成功时才保存模板 → 第 2 次同类目还从零开始。
-现在 `--no-submit` 填完也保存（字段已填对，值得复用）。
+直接拿 `commit/detail` 的 174 字段 body 去提交，会报 `请求method,argument,body错误`。
 
-### 模板失效条件
-
-- 属性结构变化（`checkSchemaFingerprint` 检测）
-- 类目路径变化
+**正确做法：用 `harvest-native-props.mjs` 保存的原生 157 字段 body 当底座，只改业务字段；不要把两个 schema 的字段互相拼接。**
 
 ---
 
+## 五、限流与风控
 
-## 图片预处理（img-prep.mjs，2026-11-01）
+### 5.1 错误码与处理
 
-### 为什么必须做
+先读接口返回的 `error_code`，不要只凭「操作太过频繁」一类文案判断。处理入口参见 `skills/_shared/pdd-error.mjs`，账号冷却与健康分记录参见 `skills/_shared/pdd-antiban.mjs`。
 
-拼多多主图/详情图**单张 ≤ 3MB**。AI 生成的 PNG 常在 3-4MB，直接上传的结果：
+| 错误码 | 含义 | 处理 |
+|---|---|---|
+| `40002` | 高频限流（`rate_limit`），常见提示为「操作太过频繁」或「系统繁忙」 | 停止连续重试，进入 **240 秒**冷却；冷却后仍受限就换时间段，或改用独立的降级路径。补请求头、换签名、反复重放都不是通用修复办法。尤其是 `file/create` 纯 HTTP 上传，仓库记录为持续 `40002`，不要靠本表承诺重试即可成功。 |
+| `54001` | 平台风控 / 需要安全验证（`risk_control`） | 先冷却并停止批量操作。可走的既有自愈流程是「清旧 token → 从验证响应提取新 token → 有值才重放」；仍失败时暂停自动发布，人工打开商家后台完成滑块。不要把它当成会话过期而反复重新登录。基础冷却为 **60 秒**，`pdd-antiban.mjs` 会按当日次数退避。 |
+| `43001` | 会话过期（`token_expired`），**不是风控** | 立即停止请求，到「账号连接」重新扫码登录；登录成功前不要继续提交。优先使用浏览器当前 Cookie，避免旧凭证快照造成误判。 |
+| `40001` | 未登录（`token_expired`） | 到「账号连接」重新扫码登录，并确认实际使用的是 `pdd_mms` 商家后台会话。不要通过重复发布来探测登录态。 |
+| `40010` | 无权限（`no_permission`） | 核对账号类型、店铺权限以及是否应使用主店号；权限未解决前不要重试或换参数硬顶。旧文档提到可能涉及诚信通/实力商家，但是否需要该资质取决于具体账号与接口。 |
+| `48143` | 非法请求（`api_error`），该接口依赖页面 SDK 的请求上下文，如签名头或 Referer 状态 | 不要继续在 Node 或 `page.evaluate(fetch)` 中机械复刻。让真实页面通过 DOM 操作自行发请求，并抓取页面原生请求/响应；先确认当前页面与登录态有效。 |
 
-- `publish-v2` 走了 `--no-submit` 时可能**静默通过**（校验在 lib 层，preview 阶段没拦住）
-- 真提交时被平台拒，或 lib 层直接 return 错误，整单失败
+**最容易误判的两点：**
 
-实测这批 15 张 AI 图：**7 张超 3MB**（最大 3.76MB）。
+- `54001` 是风控/验证问题，`43001` 与 `40001` 才是登录态问题；三者处理不能互换。
+- `40002` 与 `48143` 都不等于「随便再发一次」。前者先限频冷却，后者先回到页面原生上下文。
 
-### 自动处理（已接入）
+### 5.2 节流参数
 
-`publish-v2` 和 `batch-publish` 在填表前自动跑 `prepareImages()`：
+`publish-by-copy.mjs` 的 `post()` 在每次请求前调用 `reserveSlot(shopKey, endpoint)`，参数实现在 `skills/_shared/pdd-antiban.mjs` 的 `THROTTLE`：
 
-```
-图片预处理 → 压缩 7/15 张（上限 3MB/张）
-```
+| 参数 | 当前值 | 作用 |
+|---|---:|---|
+| 账号级基础间隔 | 4000 ms | 同一店铺账号的请求时间槽基础间隔 |
+| 账号级随机抖动 | 0～2000 ms | 与基础间隔叠加，实际账号级间隔为 **4～6 秒** |
+| 同接口最小间隔 | 1800 ms | 对去掉域名和 query 的接口路径单独限频 |
+| `40002` 后冷却 | **240000 ms（240 秒）** | 命中高频限流后暂停，期间不要持续重放 |
+| `54001` 基础冷却 | 60000 ms（60 秒） | 风控后的基础冷却，实际时长按当日次数退避 |
 
-**实测效果**：
+节流按**账号**而不是单个 Node 进程计算，状态持久化在 `~/.dsh/pdd-throttle-state.json`。账号级与接口级时间槽取较晚者，并在等待前预留时间槽，避免并发同时穿透。即使增加并发进程，也不能绕过店铺级节流。
 
-| 原图 | 处理后 | 压缩率 | 策略 |
-|---|---|---|---|
-| 3.35MB PNG | 0.37MB | **-89%** | jpeg q=92 |
-| 3.58MB PNG | 0.39MB | -89% | jpeg q=92 |
-| 3.76MB PNG | 0.39MB | -90% | jpeg q=92 |
+`publish-by-copy.mjs` 对 `40002` 有等待 240 秒后重试的实现，但这**不是解除限流的保证**：共享排障记录明确记载过「冷却 240 秒零请求后仍受限」。自动化任务应设置上限并报告失败，不能无限等待或无限重试。
 
-耗时 1.6 秒处理 7 张。**q=92 是高质量 JPEG，画质几乎无损**。
+#### 40002 按接口计
 
-### 压缩策略（按顺序尝试直到达标）
+`40002` 的触发与接口有关，**不同接口相互独立**：一个接口受限，不代表另一个接口必然受限。可以切换到确属不同业务路径的降级方案（例如搜索受限时使用 feed），但不要换参数反复打同一个接口，也不要借「接口独立」绕开账号冷却继续批量发布。
 
-1. **PNG → JPEG q=92**（通常这一步就够了，体积降 90%）
-2. JPEG q=85 → q=78
-3. 尺寸缩到长边 1440px + q=78
-4. 长边 1440 + q=72
-5. 长边 1200 + q=72
-6. 长边 1000 + q=68
-7. 仍超标 → 保留原图并告警
+特别注意 **`template/mall` 阈值极低**。旧 `SKILL.md` 的说明是正常商家一天只调用几次，测试时最容易被限；这里没有额外的实测阈值数字。因此：
 
-**关键**：PNG 转 JPEG 是最大杀器。AI 生成的 PNG 是无损压缩，白底图转 JPEG q=92 后肉眼几乎无差别，但体积差 9 倍。
+1. 类目模板优先复用已缓存的原生模板，不要每次预演都重新采集。
+2. `--dry` / `--no-submit` 也会产生真实请求，不能把它们当作零风险循环测试。
+3. 一旦 `template/mall` 返回 `40002`，停止本轮模板采集；不要连续换类目重试来寻找阈值。
+4. `file/create` 的 `40002` 还应结合「已知失败清单」处理，不能把它误当成仅等待 240 秒即可恢复的普通节流。
 
-### 工具链
+### 5.3 滑块与 closed Shadow DOM
 
-优先 `sharp`，没有则用 Python PIL：
+滑块弹窗可能渲染在 **`#shadow-root (closed)`** 内。closed 模式下，从外部读取 `element.shadowRoot` 会得到 `null`，所以：
 
 ```js
-const sharp = getSharp()          // 尝试 require('sharp')
-const py = sharp ? null : findPython()   // 兜底找带 PIL 的 Python
+document.querySelector('#slide-captcha-dialog') // 可能查不到实际存在的弹窗
 ```
 
-PIL 兜底脚本做了同样的事（白底填充 → JPEG → 逐级降质/缩放 → 达标即止）。
+「查不到弹窗」因此不等于「没有弹窗」。仓库对应实现为 **`skills/_shared/pdd-shadow-hook.mjs`**：
 
-### 产物位置
+1. 在页面脚本执行前，用 `page.evaluateOnNewDocument()` 注入。
+2. 劫持 `Element.prototype.attachShadow`；当调用方传入 `{ mode: 'closed' }` 时，复制配置并改为 `open`，让后续深度查询能穿透该 shadow root。
+3. 通过 `window.__pddDeepQuery()` / `__pddDeepQueryAll()` 递归查询 open shadow root。
+4. 用 `detectSliderDeep(page)` 区分普通 DOM 命中、仅在 shadow 内命中，以及仍无法确认的情况。
 
-压缩后的图写到 **`<原图目录>/.publish-ready/`**，文件名改为 `.jpg`。
-**原图不动**（避免破坏素材）。
+以 `skills/pdd-publish-http/scripts/` 下的脚本为例，安装顺序如下：
 
-### 独立使用
+```js
+import { installShadowHook, detectSliderDeep } from '../../_shared/pdd-shadow-hook.mjs'
 
-```bash
-# 只检查（不处理）
-node scripts/compress-images.mjs --dir ./img --check
-
-# 压缩到默认 .publish-ready/
-node scripts/compress-images.mjs --dir ./img
-
-# 指定上限和输出目录
-node scripts/compress-images.mjs --dir ./img --max-mb 5 --out ./compressed
-
-# 指定文件
-node scripts/compress-images.mjs --files a.png,b.png
+await installShadowHook(page) // 必须在 goto 之前
+await page.goto(goodsUrl)
+const slider = await detectSliderDeep(page)
 ```
 
-### 平台上限参考
+`publish-by-copy.mjs` 与 `harvest-native-props.mjs` 中则有通过 `PLUGIN` 拼绝对路径后动态导入的实际示例。
 
-| 平台 | 主图上限 | 详情图上限 |
-|---|---|---|
-| 拼多多 | **3MB** | 3MB |
-| 淘宝/天猫 | 5MB | 5MB |
+**时机是关键：**必须在 `goto` 前安装。页面加载后再补装，只能影响之后新建的 shadow root，已经创建的 closed root 无法回溯打开。该 hook 解决的是「如何看到滑块 DOM」，**不代表已经实现自动滑块识别或保证验证通过**；检测到滑块后应暂停自动发布并交由人工完成验证，不要连续刷新、重登录或重复提交。
 
-### 压缩失败怎么办
+### 5.4 批量发布时的风控顺序
 
-代码里会明确列出仍超标的文件：
+1. 每个商品使用同一账号串行处理，保留账号级 4～6 秒与接口级 1.8 秒间隔。
+2. 请求前检查账号是否仍在冷却或需要重新登录，不在冷却期强行发单。
+3. `40002`：记录受限接口，停止连续重试，按 240 秒冷却处理；模板接口直接终止本轮采集。
+4. `54001` 或发现滑块：暂停本账号的后续批量提交；必要时人工验证，不能靠下一单继续试探。
+5. `43001` / `40001`：整批停止并重新登录，避免把后续失败误记成商品数据问题。
+6. `40010` / `48143`：分别核对权限、回到页面原生请求上下文，不以增加重试次数代替修复。
 
-```
-⚠ 仍有 2 张超过 3MB，请手工处理：
-  - E:/path/to/detail_5.jpg
-```
-
-手工处理的选项：
-- 用 Photoshop / 在线工具降到 3MB 以下
-- 调低分辨率（1440px 长边足够电商用）
-- 换更简单的构图（纯白底比复杂背景小得多）
-
-## 十、性能
-
-### 实测耗时（毛巾，2026-10-31 优化后）
-
-| 场景 | 耗时 | 说明 |
-|---|---|---|
-| 新类目（第 1 次） | 215-239s | 从头探测 + 沉淀模板 |
-| **老类目（第 2 次起）** | **63s** | 命中模板 + catId 直达 |
-
-**累计提速 137s → 63s（54%）**
-
-### 63 秒构成
-
-| 阶段 | 耗时 | 性质 |
-|---|---|---|
-| 段1 打开列表 | 5s | 页面加载 |
-| 标题+参考价 | 4s | — |
-| **主图 5 张** | **13s** | **平台硬限制**（每张 ~2.6s，含平台生成缩略图） |
-| **详情图 10 张** | **12s** | **平台硬限制**（每张 ~1.2s） |
-| 规格 2 维 | 8s | 视觉缓存 |
-| 价格库存 12 项 | 2s | — |
-| SKU 预览图 | 1s | 快速检查跳过 |
-| **属性 35 项** | **13s** | 两阶段 + 批量校验 |
-| 补填+发货+模板 | 5s | — |
-
-**图片上传占 25s（40%），是平台硬限制**（批量 uploadFile 会被静默丢弃，必须逐张）。
-
-### 优化清单（省 74s）
-
-| 优化 | 节省 | 说明 |
-|---|---|---|
-| **主图无计数改用缩略图判断** | **23s** | 计数器读不到时读 `img` 数量，避免重试 3 次 × 8s |
-| **属性两阶段 + 批量校验** | **20s** | 先全点选（每字段 100ms），再一次 `evaluate` 批量校验 |
-| 跳过模板字段候选读取 | 11s | `harvestAttributes({skipOptions})` |
-| 图片轮询 2000ms → 300ms | 9s | 正常上传 1-2s 内完成 |
-| 预览图快速检查 | 9s | 所有行已有图时立即返回，不等行数稳定 |
-| 等页面稳定 6433ms → 259ms | 6s | 250ms 轮询 + 双重判据（按钮出现 或 规格行数达预期） |
-| 段间/交互 sleep 压缩 | 12s | 价格→预览图 2000→600ms；预览图→属性 1200→400ms；clickOption 300→80ms |
-
-### 其他优化（前期）
-
-- 视觉分析结果缓存（`vision-cache.mjs`，同类目第 2 单起省 8s）
-- 老类目 catId 直达（省 5s）
-- 规格填值 JS setter 优先 → 键盘兜底
-- 属性预建 `fieldName → boxId` 映射（省 143 次 DOM 遍历）
-
-### 剩余瓶颈
-
-| 项 | 耗时 | 能否优化 |
-|---|---|---|
-| 图片上传（主图+详情图） | 25s | ❌ 平台逐张处理 |
-| 属性填写 | 13s | ⚠️ 边际收益递减 |
-| 规格填写 | 8s | ⚠️ 视觉缓存已生效 |
-
-**理论下限约 55s。**
+以上阈值和参数的证据为当前仓库实现与旧 `SKILL.md`；未另行进行线上压测，不应把「等待一个冷却周期」表述为已验证必然恢复。
 
 ---
 
-## 十一、组件清单
+## 六、已知失败清单（不要重复踩）
 
-| 文件 | 职责 |
-|---|---|
-| `publish-v2.mjs` | 主入口（参数解析 + 浏览器 + 5 段编排 + 模板沉淀） |
-| `batch-publish.mjs` | 批量上架（扫描目录 + 逐个处理 + 汇总） |
-| `field-service.mjs` | 服务承诺（7天无理由等强制勾选项） |
-| `publish-flow.mjs` | 段3+段4 组件编排 |
-| `stage-nav.mjs` | 段1 打开列表 + 段2 选类目 |
-| `stage-submit.mjs` | 段5 提交 + 校验 |
-| `spec-row-fill.mjs` | 规格逐行填写 + 单位剥离 + 补勾 |
-| `spec-dims.mjs` | 规格维度（scanDims / alignDims） |
-| `sku-table.mjs` | 库存/拼单价/单买价（列映射 + skip-existing） |
-| `sku-thumb.mjs` | 每行预览图 |
-| `attr-fill-generic.mjs` | 属性采集 + 填写 + AI 选值 + 必填复核 |
-| `attr-harvest.mjs` | 属性候选采集入库（attr-schema.json） |
-| `category-template.mjs` | 类目模板读写 |
-| `field-basic.mjs` | 标题 / 参考价 |
-| `field-images.mjs` | 主图 / 详情图 |
-| `field-shipping.mjs` | 发货售后（通用模糊匹配） |
-| `vision-fill.mjs` | 视觉分析规格区 |
-| `vision-cache.mjs` | 视觉分析结果缓存 |
-| `analyze_spec_ui.py` | 视觉模型调用（截图 → JSON） |
-| `imgprep.py` | 图片规整 |
+这一节记录**试过但失败**的路，避免下次重复。
+
+| # | 问题 | 现象 | 试过什么 | 结论 |
+|---|---|---|---|---|
+| 1 | **纯 HTTP 上传新主图** | `file/create` 恒返回 `{"error_code":40002,"error_msg":"操作太过频繁，请稍后再试！"}` | ① Node 直连 fetch ② `page.evaluate` 页面内执行 ③ 补全 `sec-fetch-*` / `sec-ch-ua` 浏览器特征头 ④ 每张图重新生成 Anti-Content ⑤ 4 种参数组合（原始 / 加 `pic_operations` / 加 `width`+`height`+`size` / 换 CDN 域名）⑥ 3 个不同店铺账号 ⑦ 重试 3 次 × 间隔 8-10s | ❌ **全部失败**。三个账号同时 40002，不是账号配额问题。`get_signature` 和 `store_image` 都能过，只有 `file/create` 挂。**该接口拒绝程序化调用，原因未查明** |
+| 2 | **换主图** | 偶尔成功，多数失败 | 见 #1 | 只在 `publish-by-copy.mjs` 里成功过 1 次（`1026511479126`，走 `publish-by-copy.mjs` 但当时 `preuploadProductImages` 恰好成功），之后无法复现。**要换图请用 `publish-flow.mjs`（页面控件传图）** |
+| 3 | **详情图纯 HTTP** | `commit/submit` 报 `商品详情图数量必须在1-50张之间` | ① 只带 `decorationDetail`（14 楼层）② 只带 `detail_gallery`（10 张）③ 两个都带 ④ 换图后重读 `commit/detail` 回写 ⑤ 调 `/gorse/mms/goods/decoration/commit/save` 保存楼层 | ⚠️ **部分可行**：`detail_gallery` + `decorationDetail` 都带时，**不换主图可过**。但换主图后必须让页面点一次「保存草稿」重建装修楼层，那个按钮经常找不到（草稿页加载慢） |
+| 4 | **跨店复制** | `该商品不属于该店铺` | — | `copyGoodsCommit` 只能复制**本店**商品。跨店无解 |
+| 5 | **同一源商品复制第二次** | `600102 该商品已被新建过,请勿连续新建` | 换 `goods_commit_id` 重试 | 源商品复制一次后即被锁。**必须准备多个源商品轮换** |
+| 6 | **标题超长** | `商品标题最多填写30个汉字（60个字符）` | — | 脚本已前置校验。中文按 1 字算，超 30 直接拒 |
+| 7 | **参考价缺失/过小** | `商品参考价必须填写！` 或 `规格单买价格必须小于参考价格` | — | `market_price` 必须 > 最大 SKU 单买价。脚本已自动算 `max(单买价)+1` |
+| 8 | **body schema 混用** | `请求method,argument,body错误` | 用 `commit/detail` 的 174 字段直接提交 | `commit/detail`（174 字段，含大量展示字段）≠ `action/edit`（157 字段）。**必须用 `harvest-native-props.mjs` 存的原生 body 做底座** |
+| 9 | **`propertys_tid` 填错** | `输入的属性值'XXX'不可用,请更换！`（XXX 是别的类目的品牌名） | 用 `53475`（童装类目）| 平台按 `propertys_tid` 选属性模板。填错类目的值 → 回退到默认模板 → 带出别的类目的品牌。**必须用 `harvest-native-props.mjs` 采到的真实值** |
+| 10 | **品牌 `vid` 用成 `brand_id`** | `属性[品牌]校验错误：该属性必填` | 用 `/draco-ms/mms/brand/audit/record` 返回的 `brand_id: 143701` | ❌ 两者不同。纸杯类目提交要用 `vid: 157882`。**`brand_id` 是审核记录 ID，`vid` 是品牌值 ID** |
+| 11 | **`page.evaluate` 超时** | `Runtime.callFunctionOn timed out` / 挂 120s+ | 加 Chrome 防节流 flags | ⚠️ 缓解但没根治。**关键接口（`commit/submit`）改用 Node 直连 fetch + 传浏览器 Cookie，167ms 返回** |
+| 12 | **滑块查不到** | `没找到弹窗：#slide-captcha-dialog 不存在` | 常规 `document.querySelector` | 滑块在 `#shadow-root (closed)` 内。**必须先装 `pdd-shadow-hook.mjs` 劫持 `attachShadow`（`goto` 之前装）** |
+| 13 | **`template/mall` 限流** | `40002 操作太过频繁` | 重试 | 该接口阈值极低（正常商家一天调几次）。**用 `harvest-native-props.mjs` 存本地模板，之后不再调** |
 
 ---
 
-## 十二、组件化铁律
+## 七、排障速查
 
-**组件化 = 结构化拆分，不是重写逻辑。**
+先记录**脚本名、源商品 `goods_id`、失败接口、完整错误码与错误文案**，再按下表处理。不要只靠最后一次报错重试；同一源商品或同一接口反复失败时，先核对是否命中已知限制。证据行号以当前工作树文件为准；没有成功记录的处理均明确标为「未验证」。
 
-已验证的函数直接 re-export，只改真正需要改的。
-之前把验证过的属性/规格逻辑重写，导致上架全线崩，浪费了大量时间。
-
-<!-- RISK-CHEATSHEET:START（由 dev/inject-risk-cheatsheet.mjs 注入，请勿手改） -->
-
-## ⚠ 风控速查（先读这里再排查）
-
-> 完整机制与历史踩坑记录在**知识库**，遇到风控问题**先查库**：
-> ```
-> dsagent_wiki_search(keyword="风控")                                     # 全部风控页
-> dsagent_wiki_search(path="平台/entities/拼多多风控机制与应对.md")        # 机制总览
-> dsagent_wiki_search(path="平台/entities/拼多多签名注入范围（Anti-Content vs crawlerInfo）.md") # 该不该带签名
-> ```
-
-### 错误码 → 处置
-
-| 错误码 | failureKind | 含义 | 正确处置 |
-|---|---|---|---|
-| `54001` | `risk_control` | 操作太过频繁（风控） | **可自愈**：清旧 token → 提新票 → 重放。失败则人工过一次滑块，通过后有 10 分钟通行证。**不要**重新登录 |
-| `40002` | `rate_limit` | 高频限流（**接口级**） | **不可本地修复**，重试无效、只会延长封禁。等待冷却，或降级（如 search → feed） |
-| `100001` | `rate_limit` | 活动写操作频控（请 2 小时后重试） | **不可本地修复**。等待 2 小时或换时间段 |
-| `43001` | `token_expired` | 会话过期（**不是风控**） | 重新扫码登录。注意凭证库快照可能是旧票，优先用浏览器当前 Cookie |
-| `40001` | `token_expired` | 未登录 | 重新扫码登录 |
-| `310120000` | `reload_required` | **页面上下文失效**（403 专用码） | 官方处置是 `window.location.reload()`：重开/刷新页面后重试。**不是登录失效，不要跳登录页** |
-| `40010` | `no_permission` | 无权限 | 可能是账号类型不对（需诚信通/实力商家），或换主店号 |
-| `2000000` | `no_permission` | 账号不适合发布 | 权限问题，换号或到后台查违规记录 |
-| `48143` | `api_error` | 非法请求 | 该接口依赖页面 SDK 的请求上下文，需让页面自己发请求（DOM 触发） |
-| `3000000` | `api_error` | 参数错误或灰度未开放 | 检查入参（日期/页码/queryType 等） |
-| HTTP `430` | `rate_limit` | 网关级频率惩罚（Cookie 有效） | 等 15~30s 重试。**不要**误判成 session_expired |
-| `detached Frame` / `Target closed` | `risk_control` | 平台主动关掉页面 | 等 3~5 分钟再试，别连续重试 |
-
-### 四条铁律
-
-1. **不要把 54001 当 token_expired** —— 前者需要过一次滑块，后者才需要重新登录。误判会让用户反复登录，每次登录还刷新一次风控基线。
-2. **不要重试 40002** —— 它是接口级持久限流，实测冷却 240s 零请求后仍空。
-3. **不要在冷却期内连续调用** —— 拼多多按「累计行为分数」延长封禁，越打越久。
-4. **分清两个签名条件，别合并** —— 平台有两套独立判断：**域名正则**（mms/ims/... 命中就带 `header Anti-Content`）+ **162 条路径白名单**（命中才在 body 里塞 `crawlerInfo`）。只要域名是 `mms.pinduoduo.com`，**头就必须带**；把「不在 162 名单」当成「不用签名」会稳定打出 54001（我已真机踩过）。判据统一用 `_shared/pdd-sign-scope.mjs` 的 `signPlan(url)`。
-
-### 其他已知坑
-
-- **两个登录态不通用**：`pdd`（H5 买家态，`.yangkeduo.com`）与 `pdd_mms`（商家后台态，`mms.pinduoduo.com`）是两套独立账号，各跑一套风控评分。
-- **`Failed to launch the browser process!`** 大概率是 Profile 被孤儿 Chrome 占用（SingletonLock 残留），不是 Chrome 坏了。清理：`~/.dsh/pdd-account-locks` 无关，要杀占用该 Profile 的 chrome 进程 + 删 `SingletonLock`。
-- **账号级并发**：两个任务同时打同一个号会显著提高被封概率，`_shared/pdd-risk.mjs` 的账号锁会拦住，看到「正被其他任务占用」就等等。
-- **签名兜底字面量**：平台自己的兜底值是 `"getRisckInfoError"`（注意 `Risck` 是平台拼写）。带它发请求 = 自报「我拿不到环境指纹」，比不带更可疑。
-
-<!-- RISK-CHEATSHEET:END -->
-
-
-
-> **重要:** 上架是**不可撤销的真实操作（L2）**。必须两步走：先拿「上架预览」给用户看，用户**明确同意**后才真正提交。
-> 绝不要在一次调用里直接传 `--confirm true`。
-
-## 何时使用
-
-- 用户说「拼多多上架」「拼多多发布」「拼多多HTTP上架」→ 用本技能
-- 用户给出一件商品的**统一 JSON**（标题 + 图片 + 规格 + SKU 行）要求发到拼多多 → 用本技能
-- 商品规格是**二维**（颜色 × 尺码）→ 用本技能（原生支持矩阵）
-- 想让**图片/价格/SKU 全部走 HTTP**（不依赖 DOM 逐格填表，快且抗页面结构变动）→ 用本技能
-- 用户明确要求「逆向」「改包」「HTTP 提交」→ 用本技能
-
-## 前置条件
-
-调用本技能前必须满足：
-
-1. **账号已绑定**：「账号连接」页已绑定**拼多多商家后台**（mms.pinduoduo.com）。
-   ★ 它与买家端拼多多是两套完全独立的登录态，买家账号不能用于上架。
-2. **登录态有效**：`dsagent_check_account_health(platform=pdd_mms)` 返回 valid；
-   失效时引导用户到「账号连接」重新登录（需商家版 App 扫码）。
-3. **图片就绪**：主图 1~10 张（单张 ≤3MB、JPG/PNG）；如发带规格商品，第 1 维每个规格值
-   都要有预览图（宽高比 1:1、宽高 >480px）——否则 submit 报「请上传规格缩略图」。
-4. **规格池就绪**（可选但推荐）：`assets/spec-pool.json` 或 workspace 的
-   `artifacts/pdd-re/spec-pool.json`。没有也能发（平台按 spec_value 自解析），但规格 ID
-   可能与店铺历史不一致。
-5. **Chrome 可用**：本机装有 Chrome/Edge（浏览器驱动用）。
-6. **无并发**：同一时刻不要跑两个拼多多发布任务（浏览器 Profile 独占锁会互斥）。
-
-## 能力
-
-| 项 | 说明 |
-|---|---|
-| 图片上传 | **纯 HTTP**：`get_signature` → `file.pinduoduo.com/v3/store_image` → `garner/mms/file/create` → `queryFileDetail`，主图/详情图/SKU 预览图全走 CDN |
-| 规格矩阵 | 颜色×尺码二维，`skus[]` 按 `sku_key` **行数重建**（页面只建 1 行空壳也能改成 8 行） |
-| spec_id | **规格池**（`assets/spec-pool.json`，店铺历史商品采集）本地查表，含 cm 归一匹配 |
-| SKU 预览图 | `upload_spec_img_map`（颜色值 → CDN URL+fileId）→ 写入 `skus[].thumb_url` |
-| 商品属性 | `draco-ms` 模板查询 + 改包写 `goods_properties[]`（vid/content） |
-| 提交 | 拦截 `goodsCommit/action/edit` → 改包 → **abort 原请求** → 页面 fetch 带签名重放 |
-| 确认上架 | `POST /glide/v2/mms/edit/commit/submit`（6 字段：commit_id/goods_id/is_onsale/third_type/if_allow_submit_mall_checking/crawlerInfo） |
-
-## 边界
-
-- **不做商品采集与比价** → 用 `pdd-crawl`
-- **不做订单 / 售后 / 库存 / 客服 / 数据分析** → 用对应平台技能
-- **不做淘宝 / 天猫 / 闲鱼发布** → 用 `taobao-publish` / `xianyu-publish`
-- ★ **Anti-Content 签名必须由页面生成**（风控 SDK 采集浏览器行为，Node 算不出）——这是唯一必须开浏览器的原因
-- ★ **提交会话必须由页面注册**（点「发布新商品」→ URL 分配 commit_id/goods_id）
-- ★ **品牌默认填「无」**：商品 JSON 未给 `attributes` 里的品牌时，自动补 `品牌=无`（DEFAULT_BRAND 可改）。
-  若某类目要求真实品牌资质，「无」可能仍被审核拦，需人工补品牌授权
-- ★ **图片会自动规整**（`scripts/imgprep.py`，Python+PIL）：
-  详情图统一到 750 宽，超高（>1500）按均分切分（不切断文字/人脸）；
-  主图/规格图 → 补白成 1:1（不裁切商品）；>3MB → 质量阶梯压缩
-- ★ **规格值完全自定义**（`scripts/dom-fill-spec.mjs` + `scripts/spec-resolve.mjs`）：
-  - **自由维度**（款式/型号/容量/尺寸/口味/器型/材质/适用人群等）→ 值原样提交，**写什么就是什么**
-  - **字典维度**（颜色分类/参考分类）→ 必须命中规格池，否则报错中止
-  - 全类目通用：不硬编码「颜色分类」，读页面预置行 + 按维度名匹配（`specTypeScore` 扩展 10+ 类维度）
-  - DOM 填规格 7 步流程：
-    ① 打开类目 → 表单页
-    ② 等任意规格容器（`detectAnySpecRow`，不再只等「颜色分类」）
-    ③ 读页面实际有哪些预置行
-    ④ 用户 specs 按维度名匹配页面行（`specTypeScore` 模糊匹配）
-    ⑤ 逐个值：键入 → 失焦 → 等平台分配 spec_id
-    ⑥ 价格表逐行填价 + 参考价
-    ⑦ commit/submit
-  - 维度 parent_id 来自 `assets/dim-parent.json`（来源：`POST /glide/v2/mms/query/spec/name/list`）
-  - 单维 SKU 和二维 SKU 都支持
-  - ❌ 废弃：`preflight.mjs → borrowSpecIds`（借位会让平台按 id 还原成别人的名字）
-- ★ **商品资质**仍需人工补全（平台因类目而异）
-
-## 输入
-
-脚本入口 `{baseDir}/scripts/publish.mjs`，对话内也可直接调 host 工具 `dsagent_pdd_publish2`。
-
-★ **2026-10-28：`mode2` 改包不再是默认路径。** `publish.mjs` 按"商品是否有规格维度"
-自动决定提交模式：
-
-| 商品形态 | 提交模式 | 说明 |
+| 症状 | 可能原因 | 处理 |
 |---|---|---|
-| 有 `specs`（颜色/尺码等） | **DOM 全填，mode2 关闭** | 规格/价格/预览图/参考价全部由页面填，走页面自然提交 |
-| 无 `specs`（单 SKU） | **mode2 改包** | 注入 gallery/skus，无需建规格 |
-
-原因：改包会和页面状态冲突（参考价被覆盖回商品 price）导致提交被拦/超时，
-而平台校验的就是页面状态。所以带规格的商品一律走 DOM 路线。
-
-| 参数 | 类型 | 必需 | 说明 |
-|------|------|------|------|
-| `--product-file` | string | 是* | 统一商品数据 JSON 文件路径（*与 `--product`/`--from-pack` 三选一） |
-| `--product` | string | 是* | 统一商品数据 JSON 字符串 |
-| `--from-pack` | string | 是* | **1688 素材包目录**（含 `product.json` + `src/`）：自动组装商品并上架 |
-| `--gen` | string | 否 | AI 生图输出目录（含 `main_1..5` / `detail_1..10`）；`--from-pack` 时必填 |
-| `--price-factor` | number | 否 | 价格系数（1688 均价 × 该系数），默认 `2` |
-| `--max-colors` | number | 否 | 最多取几个颜色，默认 `3` |
-| `--max-sizes` | number | 否 | 最多取几个尺码，默认 `3` |
-| `--category` | string | 否 | 拼多多类目搜索词，`--from-pack` 时用于组装，默认 `儿童睡衣` |
-| `--confirm` | flag | 否 | 省略 → **只返回预览，不产生任何写操作**；带 `true` → 真正上架 |
-| `--account` | string | 否 | 账号 shopKey；多账号未绑定时先向用户确认 |
-
-### `--from-pack` 模式（1688 抓货 → AI 生图 → 上架 一条龙）
-
-```bash
-node scripts/publish.mjs \
-  --from-pack "<1688素材包目录>" \
-  --gen "<AI生图输出目录>" \
-  --category 儿童睡衣 --price-factor 2 \
-  --account <shopKey> --confirm true
-```
-
-组装规则（全自动，无需手写 product.json）：
-
-| 字段 | 来源 |
-|---|---|
-| 颜色 / 尺码 / SKU 行（价格+库存） | **1688 真实 `skus[]`** 命中筛选，不造假 |
-| 标题 | 1688 `product.title`（截 60 字） |
-| 主图 5 + 详情 10 | AI 生图目录 `main_1..5` / `detail_1..10` |
-| 规格/SKU 预览图 | **按颜色分配**（第 i 个颜色用第 i 张主图） |
-| 价格 | 1688 均价 × `--price-factor` + `.9` 尾数 |
-| 属性 | 1688 原始属性名直传 → `fillAttributes` 里 `ATTR_ALIAS` 21 组别名映射 |
-
-### `product` 统一结构
-
-```jsonc
-{
-  "title": "儿童摇粒绒家居服套装 男童女童加厚保暖睡衣",   // 必填，≤60 字符
-  "images": ["D:\\imgs\\main1.jpg", "D:\\imgs\\main2.jpg"], // 必填，本地绝对路径，1~10 张，单张 ≤3MB
-  "detailImages": ["D:\\imgs\\d1.jpg"],                  // 选填，详情图，≤50 张，单张 ≤3MB
-                                                        // ★ 平台硬规则：宽 480~1200px，高 ≤1500px
-                                                        // ★ 逐张单图按顺序传，不要拼长图
-  "category": "儿童家居服 家居服套装",                    // 选填，类目关键词；不传从标题推断
-  "price": "69.9",                                        // 选填，参考价
-  "stock": "1000",                                        // 选填，默认库存（SKU 行缺项回落）
-
-  // ── 规格维度（选填，≤2 维；与 skus 配合）──
-  "specs": [
-    { "name": "颜色", "values": [
-        { "value": "格蕾灰", "image": "D:\\imgs\\c1.jpg" },  // 第1维可带预览图（宽高比1:1、>480px、JPG/PNG）
-        { "value": "银河蓝", "image": "D:\\imgs\\c2.jpg" }
-    ] },
-    { "name": "尺码", "values": [ { "value": "110cm" }, { "value": "120cm" } ] }
-  ],
-
-  // ── SKU 行（每行 specs 覆盖全部维度）──
-  "skus": [
-    { "specs": { "颜色": "格蕾灰", "尺码": "110cm" }, "price": "69.9", "stock": "200" },
-    { "specs": { "颜色": "格蕾灰", "尺码": "120cm" }, "price": "69.9", "stock": "200" }
-  ],
-
-  // ── 商品属性（显式 name→value；命中页面选项才生效）──
-  "attributes": [ { "name": "主面料成分", "value": "棉" } ],
-
-  "account": "pdd_mms_xxxx"                              // 选填，指定账号 shopKey
-}
-```
-
-**字段规则**
-
-- `title` 必填 ≤60 字符；`images` 必填 1~10 张、单张 ≤3MB、本机绝对路径且真实存在
-- `specs` ≤2 维；仅第 1 维的值可带 `image`（SKU 预览图）
-- `skus` 每行 `specs` 覆盖全部维度；`price` 正数、`stock` 非负整数
-- 兼容富格式：`colors[]` + `sizes[]` 会自动合成两维
-
-**默认值**（用户没提就照此，不要追问）：库存省略 → 1000；单买价 → 拼单价 +1 元；货号 → 不写。
-
-## 输出
-
-| 字段 | 类型 | 含义 |
-|------|------|------|
-| `ok` | boolean | 业务是否成功。★ **预览时是 `ok=false` + `needConfirm=true`，正常流程不是报错** |
-| `needConfirm` | boolean? | `true` 表示等用户确认 |
-| `text` | string | 面向用户的中文文案（预览/成功详情/失败原因），原样转述 |
-| `failureKind` | string? | `not_bound` / `need_account_choice` / `token_expired` / `risk_control` / `api_error` |
-| `accounts` | array? | 仅 `need_account_choice` 时出现 |
-| `shopKey` / `finalUrl` | string? | 实际账号 / 当时页面 URL |
-
-三种典型返回：**① 预览**（无 `--confirm`）→ `ok=false` + `needConfirm=true`；**② 成功** → `ok=true` + text 含「已确认上架」；**③ 失败** → `ok=false` + `failureKind`。
-
-## 工作流
-
-### W1：上架一个新商品（标准链路）
-
-```
-① 从用户话提取商品信息，组装 product JSON
-   （title + images 必需；缺 title 或 images 要主动问，不要猜）
-② 先取预览：不带 --confirm
-   → 返回 ok=false + needConfirm=true + 预览文案（不启浏览器、零写操作）
-③ 把预览完整展示给用户，征求明确同意（L2 门禁，不可跳过、不可自行假设同意）
-   同时提醒：品牌已自动填「无」；商品资质（如 3C/A类检测报告）仍需在弹出窗口内人工补全
-④ 用户明确同意后，带 --confirm true 重新调用
-⑤ 报告结果：ok=true → 告知已上架 + 商品 ID + 平台仍会审核；
-   failureKind → 按「错误处理」表走
-```
-
-### W2：批量上架同款多链接
-
-```
-① 为每个链接准备独立 product JSON（标题/主图差异化，避免被判重复铺货）
-② 逐个走 W1（每次都要单独拿用户同意，不要一次同意批量执行）
-③ 或改用 pdd-link-matrix 技能（一图多发主图变体）
-```
-
-### W3：规格/价格与历史商品对齐（省事路径）
-
-```
-① 有同类历史商品 → 走「三层查一复用」L2：拉 on_shop/detail 拿规格池，改 values 后提交
-② 没有历史商品 → 走 L3：draco-ms 属性树 + cabernet 尺码树
-③ 类目已知 → L1 直接命中 cat-memory.json
-```
-
-## 执行流程
-
-```
-① 组装 product JSON（从用户话提取；title + images 必需，缺了主动问）
-② 先取预览：不带 --confirm          → ok=false + needConfirm=true（不启浏览器、零写操作）
-③ 把预览完整展示给用户，征求明确同意（L2 门禁，不可跳过、不可自行假设同意）
-   同时提醒：品牌已自动填「无」；商品资质（如 3C/A类检测报告）仍需在弹出窗口内人工补全
-④ 用户同意后带 --confirm true 重新调用
-⑤ 报告结果：ok=true → 告知已上架 + 商品 ID + 平台仍会审核；
-   failureKind → 按「错误处理」走
-```
-
-### 内部执行链（`--confirm true` 时，约 60~90 秒）
-
-```
-① HTTP  图片预上传      主图/详情图/预览图 → CDN URL（0.8s/张）
-② 本地 规格池查表       规格值 → spec_id（assets/spec-pool.json；空池自动跳过）
-③ 页面 点「发布新商品」  → URL 拿 goods_commit_id / goods_id
-④ 页面 选类目并确认     （会话注册）
-⑤ 页面 DOM 逐张传主图   全部主图（最多 5 张），每张 CDP 兜底
-⑥ 页面 DOM 填规格       有 specs 时：建/填维度 → 预览图 → 价格表 → 参考价
-   （无 specs 则跳过，改由 mode2 改包注入 gallery/skus）
-⑦ 页面 点提交           有 DOM 全填 → mode2 关闭，走页面自然提交
-   （无 DOM 填 → mode2 改包：拦截 + 页面 fetch 重放）
-⑧ 页面 fetch 调 commit/submit → 确认上架
-```
-
-### 全类目通用适配（2026-10-29 定稿）
-
-**规格维度按页面结构自动适配，不假设固定名字：**
-
-| 页面有什么 | 怎么填 |
-|---|---|
-| `input[placeholder*="主色"]` | 颜色输入框：真实键盘键入 → blur |
-| `input[placeholder="自定义尺码"]` | 尺码：走自定义输入（不勾预设 S/M），取最后一个空框 → 键入 → blur |
-| 待勾 checkbox `.package-item-container` | 精确匹配 → 语义匹配（110↔110cm/110-120）→ 自定义输入添加 |
-| 都没有（新维度） | 点「添加规格类型」→ 下拉选词 → 输入框填值 |
-
-**关键约束（改代码前先读）**
-
-1. **规格值必须 `page.keyboard.type`** —— 平台只认真实键盘事件才注册 spec_id。JS setter 写入值但**不生成 SKU 行**（实测 0/6）。
-2. **点击一律用 `jsClick`**（`document.elementFromPoint(x,y).click()`），不用 `page.mouse.click`；blur 用 `jsBlur`（`document.activeElement.blur()`）。
-3. **价格/库存用 JS setter**（纯数字，React setter + input/change 事件足够）。
-4. **图片路径必须短 ASCII** —— 中文长路径会让 `uploadFile` 静默失败（报「商品轮播图不能为空」）。`publish.mjs` 已自动复制到 `tmpdir/pddupl/`。
-5. **主图 input 是隐藏控件** —— `uploadFile` 可能不生效（计数 `0/N`），必须读计数并 CDP `DOM.setFileInputFiles` 兜底。
-6. **属性先填、规格后填** —— 属性下拉重渲染会把规格勾选/预览图状态冲掉。
-7. **材质成分是 IngredientList** —— 按钮「添加材质成分(N/7)」+ 弹窗多选 + 「确定(N/7)」，不是下拉也不是输入框。
-8. **尺码表要停用两次** —— 填规格前一次（如已存在）、填完尺码后一次（尺码值填完才生成）。
-
-### 多类目实测结果（2026-10-29）
-
-| 类目 | 结果 |
-|---|---|
-| 童装/儿童家居服 | ✅ 9 SKU（3 色 × 3 码） |
-| 纸杯 | ✅ 1 维度 |
-| 手机壳 | ✅ 2 个新建维度（色号 × 型号） |
-| 连衣裙 | ✅ 4 SKU（颜色 + 尺码自定义输入） |
-| 保温杯 / 零食 / 蓝牙耳机 / 抱枕 | ✅ 各 2-4 SKU |
-
-**连续批量**：10 个不同款式全自动上架，成功率 10/10（单批 ~4 分钟/款）。
-
-
-## 平台硬规则（实测踩坑记录，回答用户时可引用）
-
-| 规则 | 说明 |
-|------|------|
-| `goodsCommit/action/edit` 只**暂存** | 返回 success 但**不落库**；必须再调 `commit/submit` 才上架 |
-| 提交前页面校验轮播图非空 | 「商品轮播图不能为空」→ 必须 DOM 传至少 1 张主图 |
-| 标题必须进提交体 | DOM `fillTitle` 偶发不被 React 受理 → 改包时按 `detail.title` **强制写** `goods_name` |
-| SKU 预览图提交必填 | 「请上传规格缩略图」→ 第 1 维每个值的 `image` 都要提供（宽高比 1:1、>480px、<3MB、JPG/PNG） |
-| 单买价 ≥ 拼单价 +1 元 | 两列同值必被拦；工具自动按拼单价 +1 填 |
-| `upload_sign` 一次性 | 每张图都要重新 `get_signature`（第 2 张起复用会 48005「签名已过期」） |
-| anti_content 会失效 | 连续复用同一签名后续请求被拒；每次请求前重新生成 |
-| 两种签名不可混用 | `upload_sign`（~620字符）只给 `store_image` 表单字段；`Anti-Content`（~500字符）只给请求头 |
-| **详情图尺寸** | **宽 480~1200px，高 ≤1500px，逐张单图按顺序传**。**绝对不要自己拼长图** —— 把 9 屏拼成 750×9240 再传必被驳回「请重新上传第1张详情图」 |
-| **新规格值直接键入即可** | 2026-10-27 实测：往页面「主色/自定义」输入框键入任意新值（如「清紫梅花」）平台直接接受，**不需要 spec_id、不需要借位**。借位反而会让平台按 id 还原成别人的名字 |
-
-## 详情图正确做法
-
-**拼多多详情图 = 多张独立单图，按顺序上传。** 不要拼长图。
-
-```jsonc
-"detailImages": [
-  "D:\\imgs\\01-首屏.jpg",     // 750×960
-  "D:\\imgs\\02-卖点.jpg",     // 750×900
-  "D:\\imgs\\03-面料.jpg",     // 750×960
-  "D:\\imgs\\04-花色.jpg"      // 750×1340
-]
-```
-
-| 做法 | 结果 |
-|------|------|
-| ✅ 每屏单独出图，逐张按顺序传 | 合规，一次过 |
-| ❌ 先拼成一张长图再传 | 驳回：高度超 1500px 上限 |
-
-> 长图只在**淘宝详情 / 小红书**用，拼多多不吃。
-
-## 图片规整（imgprep.py，自动执行）
-
-`publish.mjs` 上传前自动调用 `scripts/imgprep.py`，无需手工处理。
-**它的定位是「兜底」而不是「主流程」** —— 主流程应该是你直接出合规单图。
-
-### 详情图处理顺序（固定，不跳步）
-
-```
-① 宽度统一到 750
-   超宽（>750）→ 等比压到 750
-   过窄（<750）→ 等比放大到 750
-② 再看高度：高 > 1500 → 切分（宽度始终 750，绝不缩窄）
-③ 高 ≤ 1500 → 直接用
-```
-
-**为什么不「压缩高度」**：750×1800 若按高缩到 1500，宽度会跟着变成 625 —— 竖版图被压窄、比例失真。平台要的是**宽度保持 750**，超高的唯一正确解法是切分。
-
-### 切分规则：均分
-
-`n = ceil(高 / 1500)`，每段高 ≈ 高/n。
-
-| 输入 | 输出 |
-|------|------|
-| 750×1800 | 2 张（824 / 976） |
-| 750×6000 | 4 张（1500 × 4） |
-| 750×1501 | 2 张（660 / 841） |
-| 1500×3000 | 先压 750×1500 → 正好合规，不切 |
-| 1500×6000 | 先压 750×3000 → 切 2 张（1500 × 2） |
-
-**均分而非「找平坦行切」**：均分后每段高度接近、没有碎片，切点固定不漂移。实测拼回原图逐像素比对，均值差仅 1.1（JPEG 重编码误差），**上下完全连贯**。
-
-> 仅在均分点 ±12% 段高的小窗口内微调以避开切断文字/人脸，且强制每段 ≤1500。
-
-### 其他图片
-
-| 情况 | 处理 |
-|------|------|
-| 主图非 1:1 或边长 < 800 | **补白成正方形**（不裁切，避免切掉商品） |
-| 规格图非 1:1 或边长 < 480 | 补白 + 放大到 480 |
-| 体积 > 3MB | JPEG 质量阶梯压缩，必要时降分辨率 |
-
-## 规格池维护
-
-规格池是「规格值 → spec_id」映射（店铺内稳定复用），位于：
-1. `<workspace>/artifacts/pdd-re/spec-pool.json`（优先）
-2. `{baseDir}/assets/spec-pool.json`（技能自带兜底）
-
-**★ 2026-10-28 修：空池不再遮蔽兜底池。**
-`publish.mjs` 以前"找到第一个文件就用"，而 workspace 里那份常是采集失败留下的
-空壳（`pool:{}` / `goodsScanned:0`），会把 `assets/spec-pool.json` 里有货的池
-整个盖住，导致运行时永远拿到空池。现在按"有货"判定：`pool` 里至少 1 个维度、
-1 个带 `spec_id` 的值；空文件会被跳过并打印 `规格池无货，跳过：…`。
-
-**采集方式**（推荐，一条命令）：
-
-```bash
-node {baseDir}/../pdd-works/scripts/query.mjs --mode spec-pool
-```
-
-它遍历店铺全部历史商品，拉 SKU 详情抽出 `{颜色分类: {格蕾灰: {spec_id, parent_spec_id}}, 参考分类: {110: {...}}}`。
-**新增颜色/尺码时**：先把带新规格的商品发布一次，再重跑采集，池子就更新了。
-
-### spec_id 借位（已废弃）
-
-**实测结论：DOM 填规格路线下「值写什么就是什么」，借位会让平台按 id 还原成别人的名字。**
-
-- ❌ 2026-10-27 起 `borrowSpecIds` 已从 `preflight.mjs` 删除，不再自动借位。
-- ❌ 不要再教用户"借 spec_id 让新花色过审"——那会把商品显示成别人的花色。
-- ✅ 新规格值直接键入，平台会按文本自行注册。
-
-## 三层查一复用（发布加速）
-
-同类目重复发布时，可跳过「选类目 + 建规格」：
-
-```bash
-node {baseDir}/scripts/reuse.mjs --category "儿童家居服 家居服套装"
-```
-
-- **L1** 类目记忆（`artifacts/pdd-re/cat-memory.json`）→ 直接用该类目
-- **L2** 存量商品（`/glide/v2/mms/query/commit/on_shop/detail`）→ 170 字段完整提交体 + 规格池提取
-- **L3** 新类目 → 拉属性树（`draco-ms` 模板 + `cabernet` 尺码树）
-
-## 错误处理
-
-| 场景 | failureKind | 引导动作 |
-|------|-------------|---------|
-| 未绑定拼多多商家后台账号 | `not_bound` | 引导到「账号连接」添加**拼多多商家后台**（mms.pinduoduo.com）；★ 买家端拼多多账号不能用于发布 |
-| 平台多账号且会话未绑定 | `need_account_choice` | **把候选列表给用户选**，把选定 shopKey 填 `--account` 重调；★ 绝不要自己挑 |
-| 登录态失效 | `token_expired` | 引导到「账号连接」重新登录拼多多商家后台 |
-| 命中滑块 | `risk_control` | 调用 `dsagent_risk_verify(platform=pdd_mms)` 拉验证页，用户拖完滑块后重试 |
-| product 非法 / 缺 title/images / 图超 3MB | `api_error` | 按文案修正后重试（校验在浏览器启动前，零写操作） |
-| 提交被拦（校验错误） | `api_error` | text 里有平台原文（如「商品标题必须填写」「请上传规格缩略图」）；按提示补 product 字段重试 |
-| commit/submit 失败 | `api_error` | text 含 error_code + error_msg；常见 100027（标题空，已自动强制写）/100055（缩略图缺） |
-| 页面结构变更导致找不到入口 | `api_error` | 让用户在窗口内手动点「发布新商品」后重试；或检查插件 `lib/pdd-publish.js` 的锚点配置是否需更新 |
-
-## 已知稳定现象（不要当故障）
-
-- 发布全程约 60~90 秒（图片 HTTP 上传 ~22s + 页面链路 ~40s）
-- 提交后跳转 `goods_add/success?...&wait_audit=false` 表示**免审直接上架**；`wait_audit=true` 则等平台审核
-- 商品列表接口有索引延迟，发完立刻查可能查不到，等 1~2 分钟
-- 「SKU 预览图上传未确认」是 DOM 回读探测的误报，提交体里 thumb_url 实际已注入（以 submit 结果为准）
-
-## 技术背景
-
-本技能是拼多多发布链路的 HTTP 化重构（原 DOM 逐格填表方案已废弃）。核心实现位于插件 lib：
-
-| 模块 | 职责 |
-|------|------|
-| `lib/pdd-image-preupload.js` | 图片批量预上传编排（去重/校验/回填 URL） |
-| `lib/pdd-image-space.js` | `store_image` 四步链（照抄觅千手原文） |
-| `lib/pdd-mode2.js` | 改包引擎（行数重建/规格池/预览图/价格匹配/submit） |
-| `lib/pdd-publish.js` | 页面链路（会话注册/最小石填/拦截/兜底） |
-
-## 知识库
-
-完整逆向笔记（含全部踩坑记录、接口清单、错误码攻关录）：
-`E:\360MoveData\Users\Administrator\Documents\Obsidian Vault\逆向\平台\拼多多商品提交HTTP逆向.md`
-
+| 未登录、跳转登录页，或接口提示会话失效 | 浏览器中的拼多多商家会话已过期；脚本读取到的 Cookie 已不能用于商家后台 | 在脚本使用的浏览器配置中重新登录商家后台，确认能打开商品列表后再运行；重新执行当前流程，不要沿用失效会话中的请求结果继续提交。具体有效期：**未验证** |
+| 拿不到维度表，提示「维度不在候选表」 | 当前类目的候选规格维度与 `product.json` 的 `specs` 不一致；也可能是页面尚未加载完成，读取到了空候选集 | 先确认已进入正确的发布类目，再读取页面实际候选维度，按候选名称修正 `specs` 后重跑。`specs` 最多 2 维，且 `skus` 必须覆盖全部维度组合；不要用其他类目的维度模板硬套。页面加载与候选维度映射是否均已验证：**未验证** |
+| `action/edit` 报「请求 body 错误」 | 把 `commit/detail` 返回的完整 body 直接用于 `action/edit`；两者字段集合不同，混用会带出不接受或缺失的字段 | 以 `action/edit` 自身读取到的草稿结构为基础，只修改目标字段后原样回传。不要把 `commit/detail` 的 174 字段 schema 与 `action/edit` 的 157 字段 schema 互相替代；同时检查 `goods_id`、`goods_commit_id` 是否属于同一份草稿。字段数的原始日志证据：**未验证** |
+| `commit/submit` 报「属性必填」 | 类目属性未采全、必填项为空，或沿用其他类目的属性模板 | 对当前类目运行 `harvest-native-props.mjs` 重新采集，逐项补齐必填属性后再提交；不要只删除报错字段或留空字符串绕过校验。真实采集记录：cat16675、cat22278（见 `_CLEANUP_SPEC.md`「类目模板采集」） |
+| `commit/submit` 报「输入的属性值 XXX 不可用」或「属性值不可用」 | `propertys_tid` 填错，带出了其他类目的品牌值；也可能把品牌接口返回的 `brand_id` 当成属性 `vid` | 按当前类目的采集结果同时修正 `propertys_tid`、`template_module_id` 和品牌 `vid`。纸杯 cat16675 使用 `propertys_tid=63387`、`template_module_id=91765`、品牌 `vid=157882`；门贴 cat22278 使用 `39060`、`50716`，不需要品牌。`vid` 不等于 `brand/audit/record` 返回的 `brand_id=143701`（证据：`_CLEANUP_SPEC.md`「品牌字段」） |
+| `commit/submit` 报详情图数量不对 | `detail_gallery` 缺失、为空或张数不符合平台要求；只提交 `decorationDetail` 不能代替详情图数组 | 检查提交 body 的 `detail_gallery`，保留源详情图或填入有效详情图，数量控制在 1–50 张；`decorationDetail` 仍需同时携带。换图后回页面点「保存草稿」重建装修楼层再提交。证据：`publish-by-copy.mjs:315-321`（空数组回退到源详情图）、`SKILL.md:167`（平台校验 1–50 张）；换图稳定复现情况：**未验证** |
+| `copyGoodsCommit` 报 `600102` | 同一源商品已复制过一次，被平台锁定，不能再次作为复制源 | 停止对同一源商品重试，换用本店内另一个可复制的源商品；继续提交不会解除锁定。证据：`SKILL.md:56` 记录完整文案「600102 该商品已被新建过,请勿连续新建」；解锁条件：**未验证** |
+| `copyGoodsCommit` 报「该商品不属于该店铺」 | 源商品不在当前登录店铺，或复制请求中的 `goods_id` / `goods_commit_id` 与当前账号不匹配 | 先在当前账号的商品列表确认源商品存在且可编辑，并使用该商品当前草稿对应的两个 ID；跨店商品改用本店商品作为源。不要通过更换接口参数绕过店铺归属校验。接口实际提交这两个 ID 的证据：`publish-by-copy.mjs:243`；该错误文案的实测日志：**未验证** |
+| 页面 `page.evaluate` 超时 | 后台窗口失焦或被遮挡，Chrome 冻结/节流渲染器；也可能是页面尚未就绪或导航中断 | 将浏览器窗口置前，避免最小化和遮挡，重新打开目标页面后重试。`publish-by-copy.mjs:101` 已设置 `protocolTimeout: 600000`；`stage-nav.mjs:101` 的 `safeEval` 封装页面求值。不要仅把超时时间继续调大来代替恢复页面。窗口置前能解决超时的实测记录：**未验证** |
+| 换详情图后找不到「保存草稿」按钮 | 装修楼层尚未重建，页面状态或按钮位置与脚本预期不一致；这是已记录的页面路径不稳定点 | 回到该商品的页面编辑流程，等待页面完整加载后查找并点击「保存草稿」，确认保存成功再提交；不要用连续点击或重复 `commit/submit` 代替保存。若仍找不到，保留现状并改用已验证的源详情图路径。证据：`_CLEANUP_SPEC.md`「明确的已知失败」记录该按钮经常找不到；稳定修复方法：**未验证** |
+
+### 重试前的最小检查
+
+1. **账号与商品归属一致**：当前浏览器账号能看到并编辑源商品。
+2. **类目与模板一致**：属性、品牌和规格维度都来自当前类目，而非旧商品或其他类目的缓存。
+3. **接口与 schema 一致**：`commit/detail` 和 `action/edit` 的 body 不混用；复制请求使用同一份草稿的 ID。
+4. **页面状态可见**：需要 DOM 操作时保持窗口前台，先恢复导航，再执行填写或保存。
+5. **已知失败不硬撞**：跨店复制、同一源商品重复复制及不稳定的换主图流程，不因增加重试次数而变得可用。纯 HTTP 上传新主图恒返回 `40002 操作太过频繁` 时，不要继续换参数重试；证据：`_CLEANUP_SPEC.md`「明确的已知失败」。
