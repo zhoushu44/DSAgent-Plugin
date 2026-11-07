@@ -14,9 +14,20 @@
 import { createRequire } from 'node:module'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
+import { join } from 'node:path'
 import { homedir } from 'node:os'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import { tmpdir } from 'node:os'
 
-const require = createRequire('E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/package.json')
+// ★ 2026-10-27：base 从 import.meta.url 推导，不再硬编码绝对路径。
+//   本文件在 skills/_shared/ 下，上推两层到插件根。
+const HERE = path.dirname(fileURLToPath(import.meta.url))
+const PLUGIN_ROOT = path.resolve(HERE, '..', '..')
+const PKG_BASE = [
+  path.join(PLUGIN_ROOT, 'package.json'),
+  path.join(HERE, 'package.json'),
+].find(p => fs.existsSync(p)) || path.join(tmpdir(), 'pdd-slider-solver-base.json')
+const require = createRequire(PKG_BASE)
 
 /**
  * 是否作为「被 import 的模块」运行（而非直接 node 执行）。
@@ -35,8 +46,10 @@ const argOf = (n) => { const i = process.argv.indexOf(`--${n}`); return i >= 0 &
 const emit = (obj) => { process.stdout.write('__DSAGENT_RESULT__' + JSON.stringify(obj) + '\n') }
 
 const DRY = process.argv.includes('--dry-run')
+/** ★ 2026-11-05 新增：只读诊断模式（不拖动、不提交、不改任何状态） */
+const DIAGNOSE = process.argv.includes('--diagnose')
 const TYPE_ID = argOf('type-id') || '2002'
-const OUT = 'E:/360MoveData/Users/Administrator/Desktop/童装/artifacts/pdd-re'
+const OUT = join(PLUGIN_ROOT, 'artifacts', 'pdd-re')
 
 // yydsocr 配置
 const OCR_ENDPOINT = 'https://www.yydsocr.com/api/verify_api'
@@ -283,6 +296,123 @@ function humanTrajectory(startX, targetX, startY) {
 }
 
 /**
+ * ★ 2026-11-05 新增：只读诊断（零拖动、零提交）。
+ *
+ * 用途：把「验证码过不了」拆成可定位的一步，而不是直接盲拖。
+ *
+ * 检查项（全部对照源码）：
+ *   ① 弹窗在不在 —— `#slide-captcha-dialog` / `.captcha-wrapper__slider`
+ *      旧代码用 [class*="Modal"|"Dialog"] 找不到，这一步会直接暴露
+ *   ② 两张图 load 完没有 —— `img.complete && naturalWidth > 0`
+ *      没 load 完 → SDK 的 el 采集器是 0×0 → 轨迹被整段丢弃
+ *   ③ scale 对不对 —— 背景 DOM 宽 / PNG 宽，正常 ≈0.85
+ *   ④ pieceOffset —— 拼图块 PNG 内图形左偏移（正常 10）
+ *   ⑤ slidePathLength —— 背景右缘 − 拼图块右缘（SDK 位移夹取上限）
+ *   ⑥ deltaRef 预估 —— verify_code 会是 (deltaRef + 滑块宽/2)
+ *   ⑦ 门闩状态 —— isSlidable 是否已经被打成 false（只能刷新复位）
+ *
+ * @returns Promise<{ ok, findings: Array<{level,msg}>, raw }>
+ */
+export async function diagnoseSlider(page) {
+  const findings = []
+  const add = (level, msg) => findings.push({ level, msg })
+
+  const raw = await page.evaluate(() => {
+    const pick = (sel) => document.querySelector(sel)
+    const rect = (el) => {
+      if (!el) return null
+      const r = el.getBoundingClientRect()
+      return { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height), right: Math.round(r.right) }
+    }
+    const pngSize = (src) => {
+      try {
+        const b64 = String(src || '').replace(/^data:image\/\w+;base64,/, '')
+        if (!b64) return { pngW: 0, pngH: 0 }
+        const head = atob(b64.slice(0, 40))
+        if (head.slice(1, 4) !== 'PNG') return { pngW: 0, pngH: 0 }
+        const rd = (o) => (head.charCodeAt(o) << 24) | (head.charCodeAt(o + 1) << 16) | (head.charCodeAt(o + 2) << 8) | head.charCodeAt(o + 3)
+        return { pngW: Math.abs(rd(16)), pngH: Math.abs(rd(20)) }
+      } catch { return { pngW: 0, pngH: 0 } }
+    }
+    const dlg = pick('#slide-captcha-dialog') || pick('.captcha-wrapper__slider') || pick('.captcha-wrapper')
+    const imgs = dlg ? Array.from(dlg.querySelectorAll('img')) : []
+    const bg = imgs.find(i => /slider-img-bg/.test(i.className)) || imgs.find(i => i.getBoundingClientRect().width > 200) || imgs[0]
+    const blk = imgs.find(i => /slider-item/.test(i.className)) || imgs.find(i => { const w = i.getBoundingClientRect().width; return w > 30 && w < 100 })
+    const btn = dlg ? dlg.querySelector('#slide-button') : null
+    const handlebar = dlg ? dlg.querySelector('.slide-handlebar') : null
+    const refresh = dlg ? dlg.querySelector('.captcha-refresh img, .captcha-refresh') : null
+    const txt = dlg ? (dlg.innerText || '').replace(/\n/g, ' ').slice(0, 120) : ''
+    return {
+      hasDialog: !!dlg,
+      dialogId: dlg ? dlg.id : '',
+      dialogCls: dlg ? String(dlg.className || '').slice(0, 80) : '',
+      text: txt,
+      imgCount: imgs.length,
+      imgs: imgs.map(i => ({
+        cls: String(i.className || ''),
+        complete: !!i.complete,
+        natW: i.naturalWidth || 0,
+        dom: rect(i),
+        ...pngSize(i.src),
+      })),
+      bg: bg ? { dom: rect(bg), ...pngSize(bg.src), loaded: !!(bg.complete && bg.naturalWidth) } : null,
+      blk: blk ? { dom: rect(blk), ...pngSize(blk.src), loaded: !!(blk.complete && blk.naturalWidth) } : null,
+      btn: rect(btn),
+      handlebar: rect(handlebar),
+      hasRefresh: !!refresh,
+      pageUrl: location.href,
+      captchaType: (window.__CAPTCHA_LAST_TYPE__ || null),
+    }
+  }).catch(e => ({ err: String(e.message || e).slice(0, 200) }))
+
+  if (raw.err) { add('fatal', `evaluate 失败：${raw.err}`); return { ok: false, findings, raw } }
+
+  // ① 弹窗
+  if (!raw.hasDialog) {
+    add('fatal', '没找到弹窗：`#slide-captcha-dialog` 不存在 → 要么还没触发 54001，要么弹窗已被关掉/被踢到登录页')
+    if (/\/login/i.test(raw.pageUrl || '')) add('fatal', '当前 URL 已在登录页 → 验证失败被踢出，需重新登录')
+    return { ok: false, findings, raw }
+  }
+  add('ok', `弹窗存在：id="${raw.dialogId}" class="${raw.dialogCls}" 文案「${raw.text}」`)
+
+  // ② 图 load
+  if (raw.imgCount < 2) add('fatal', `弹窗内只有 ${raw.imgCount} 张图（SDK 要求 ≥2：背景 + 拼图块）`)
+  const unloaded = (raw.imgs || []).filter(i => !i.complete || !i.natW)
+  if (unloaded.length) add('fatal', `有 ${unloaded.length} 张图未 load 完 → SDK 的 el 采集器是 0×0，轨迹会被整段丢弃`)
+
+  // ③ scale
+  if (raw.bg && raw.bg.pngW) {
+    const scale = raw.bg.dom.w / raw.bg.pngW
+    if (Math.abs(scale - 1) < 0.02) add('ok', `scale=${scale.toFixed(3)}（DOM ${raw.bg.dom.w} / PNG ${raw.bg.pngW}）`)
+    else if (scale > 0.5 && scale < 1.2) add('ok', `scale=${scale.toFixed(3)}（正常区间，PDD 常见 0.85）`)
+    else add('warn', `scale=${scale.toFixed(3)} 异常（DOM ${raw.bg.dom.w} / PNG ${raw.bg.pngW}）`)
+  } else {
+    add('fatal', '拿不到背景图 PNG 尺寸 → 无法算 scale（图可能不是 PNG dataURL）')
+  }
+
+  // ④ slidePathLength
+  if (raw.bg && raw.blk) {
+    const spl = (raw.bg.dom.right) - (raw.blk.dom.right)
+    add(spl > 50 ? 'ok' : 'warn', `slidePathLength=${spl}px（背景右缘 ${raw.bg.dom.right} − 拼图块右缘 ${raw.blk.dom.right}）= SDK 位移夹取上限`)
+  }
+
+  // ⑤ 按钮
+  if (!raw.btn) add('fatal', '`#slide-button` 不存在 → SDK 的 del 采集器容器比对必失败，手势全丢')
+  else add('ok', `#slide-button ${raw.btn.w}x${raw.btn.h} @ (${raw.btn.x},${raw.btn.y})`)
+
+  // ⑥ 刷新按钮
+  add(raw.hasRefresh ? 'ok' : 'warn', raw.hasRefresh ? '刷新按钮存在（失败后必须点它复位 isSlidable）' : '没找到 .captcha-refresh → 失败后将无法复位门闩')
+
+  // ⑦ 预估
+  if (raw.btn && raw.bg) {
+    add('info', `verify_code 将是 (deltaRef + ${raw.btn.w / 2})，即拼图块中心 X`)
+  }
+
+  const fatal = findings.filter(f => f.level === 'fatal').length
+  return { ok: fatal === 0, findings, raw }
+}
+
+/**
  * 在**已打开的 page** 上跑滑块求解（不新起浏览器，避免 profile 锁冲突）。
  * 由 pdd-risk.mjs 的 autoSolveSlider(page) 调用。
  *
@@ -308,10 +438,25 @@ export async function solveSliderInPage(page, shopKey, opts = {}) {
     return null
   }
   const findSlider = () => safeEval(() => {
-    const ms = Array.from(document.querySelectorAll('[class*="Modal"], [class*="modal"], [class*="MDL"], [class*="Dialog"]'))
+    // ★ 2026-11-05 修（源码级，第一号根因）
+    //   SDK 真实锚点是 `id="slide-captcha-dialog"` + 类名
+    //   `captcha-wrapper captcha-wrapper__slider`（msfe SlideCaptcha.render 里写死）。
+    //   原实现只查 [class*="Modal"|"modal"|"MDL"|"Dialog"] —— PDD 这个弹窗
+    //   **一个类名都不含这些词**，于是 findSlider 恒为 null，
+    //   上层就报「未找到滑块（可能遮罩已消失）」——看起来像算法问题，其实根本没抓到元素。
+    const ANCHOR = '#slide-captcha-dialog, .captcha-wrapper__slider, .captcha-wrapper, .slide-handlebar'
+    const dq = typeof window.__pddDeepQueryAll === "function" ? window.__pddDeepQueryAll : function (sel) { return Array.from(document.querySelectorAll(sel)) }
+    const ms = Array.from(new Set([
+      ...dq(ANCHOR),
+      ...dq('[class*="Modal"], [class*="modal"], [class*="MDL"], [class*="Dialog"]'),
+    ]))
       .filter(m => { const r = m.getBoundingClientRect(); return r.width > 200 && r.height > 150 })
     for (const m of ms) {
-      if (!/滑块|拼图|向右|验证/.test((m.innerText || '').slice(0, 60))) continue
+      // 命中真实锚点时不再强制文案匹配：type 22/23/24/61/71 文案各不相同
+      // （请向右滑块 / 拖动圆形滑块 / 点击与…），旧的正则会把后几种全过滤掉。
+      const isAnchor = m.id === 'slide-captcha-dialog'
+        || /captcha-wrapper|slide-handlebar/.test(String(m.className || ''))
+      if (!isAnchor && !/滑块|拼图|向右|验证/.test((m.innerText || '').slice(0, 60))) continue
       const imgs = Array.from(m.querySelectorAll('img'))
         .map(el => {
           const b = el.getBoundingClientRect()
@@ -329,7 +474,7 @@ export async function solveSliderInPage(page, shopKey, opts = {}) {
               }
             }
           } catch { /* ignore */ }
-          return { src, w: Math.round(b.width), h: Math.round(b.height), x: Math.round(b.x), y: Math.round(b.y), pngW: Math.abs(pngW), pngH: Math.abs(pngH) }
+          return { src, cls: String(el.className || ''), w: Math.round(b.width), h: Math.round(b.height), x: Math.round(b.x), y: Math.round(b.y), pngW: Math.abs(pngW), pngH: Math.abs(pngH) }
         })
         .filter(o => /^data:image/.test(o.src) && o.w > 0)
       const handle = Array.from(m.querySelectorAll('.slide-button, [class*="slide-button"], [class*="slideButton"]'))
@@ -338,21 +483,139 @@ export async function solveSliderInPage(page, shopKey, opts = {}) {
       if (!imgs.length || !handle.length) continue
       // ★ 计算拼图块的「块内图形左偏移」（PNG 像素基准）
       //   PDD 块 PNG 60x160，图形实际只占 x[10,49]；不减去这 10px 会恒差 8.5px(DOM)
+      //
+      // ★★ 2026-11-05 修（真实 54001 实测，连续踩两个坑）：
+      //
+      //   坑①：`decodePng` / `findPieceOffset` 是 **Node 模块顶层函数**，
+      //        而这段代码跑在 `page.evaluate` 的**浏览器上下文**里 ——
+      //        根本拿不到它们，直接抛 `decodePng is not defined`，
+      //        被 catch 吃掉 → pieceOffset 静默 = 0。
+      //        日志证据：`块内偏移=0（来源=error:decodePng is not defined）`
+      //        → 必须把解码逻辑**内联**进 evaluate。
+      //
+      //   坑②：选块图原来只看 `w>30 && w<100`（DOM 宽），
+      //        与后面 `blk` 的筛选条件不一致，可能选到不同对象。
+      //        现在统一优先按 SDK 真实类名 `.slider-item`。
+      //
+      //   PNG 解码（8bit 非交错，支持 RGB/RGBA/Gray）内联版，
+      //   只解到「能读到 alpha 列」为止，不做完整像素还原。
+      function inlinePngInfo(dataUrl) {
+        try {
+          const b64 = String(dataUrl || '').replace(/^data:image\/\w+;base64,/, '')
+          if (!b64) return null
+          const bin = atob(b64)
+          const bytes = new Uint8Array(bin.length)
+          for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+          if (bytes[0] !== 0x89 || bytes[1] !== 0x50) return null
+          let p = 8, w = 0, h = 0, bitDepth = 8, colorType = 6
+          const idat = []
+          const rd32 = (o) => (bytes[o] << 24) | (bytes[o + 1] << 16) | (bytes[o + 2] << 8) | bytes[o + 3]
+          while (p + 8 <= bytes.length) {
+            const len = rd32(p)
+            const type = String.fromCharCode(bytes[p + 4], bytes[p + 5], bytes[p + 6], bytes[p + 7])
+            if (type === 'IHDR') {
+              w = rd32(p + 8) >>> 0; h = rd32(p + 12) >>> 0
+              bitDepth = bytes[p + 16]; colorType = bytes[p + 17]
+            } else if (type === 'IDAT') {
+              idat.push(bytes.subarray(p + 8, p + 8 + len))
+            } else if (type === 'IEND') break
+            p += 12 + len
+          }
+          if (!w || !h || bitDepth !== 8) return null
+          const ch = colorType === 6 ? 4 : colorType === 2 ? 3 : colorType === 0 ? 1 : 0
+          if (!ch) return null
+          // 拼 zlib 流 → 用浏览器原生 DecompressionStream 解（Chrome 80+ 支持）
+          const total = idat.reduce((a, b) => a + b.length, 0)
+          const z = new Uint8Array(total)
+          let zo = 0
+          for (const c of idat) { z.set(c, zo); zo += c.length }
+          return { w, h, ch, z }   // 交给下面异步解压
+        } catch { return null }
+      }
+
+      // 由于 DecompressionStream 是异步的，这里用同步方式：调用页面已有的 pako 或
+      // 退化为「只按 IHDR + 透明图约定推断」。实测 PDD 块图 alpha 列固定从 10 起，
+      // 且这是 SDK 常量（60x160 块，图形 40x40 居中 → 左偏移 (60-40)/2 = 10）。
+      // 所以：拿不到像素时，用几何推导兜底（比 0 准得多）。
       let pieceOffsetPng = 0
+      let pieceOffsetSource = 'none'
       try {
-        const blkImg = imgs.find(i => i.w > 30 && i.w < 100)
-        if (blkImg?.src) {
-          const png = decodePng(blkImg.src.replace(/^data:image\/\w+;base64,/, ''))
-          if (png) { pieceOffsetPng = findPieceOffset(png); blkImg.pieceOffsetPng = pieceOffsetPng }
+        const blkImg = imgs.find(i => /slider-item/.test(String(i.cls || '')))
+          || imgs.find(i => i.w > 30 && i.w < 100 && !/slider-img-bg/.test(String(i.cls || '')))
+        if (!blkImg?.src) {
+          pieceOffsetSource = 'no-blk-img'
+        } else if (!/^data:image\//.test(blkImg.src)) {
+          pieceOffsetSource = 'src-not-dataurl'
+        } else {
+          const info = inlinePngInfo(blkImg.src)
+          if (info) {
+            // 几何推导：拼图块 PNG 宽 w，图形宽约 40（PDD 固定），左偏移 = (w - 40) / 2
+            // 60 → 10；实测样本 alpha 有内容列 x∈[10,54]，与 (60-40)/2=10 吻合。
+            const derived = Math.max(0, Math.round((info.w - 40) / 2))
+            pieceOffsetPng = derived
+            blkImg.pieceOffsetPng = derived
+            pieceOffsetSource = `geom(${info.w}x${info.h} → ${derived})`
+          } else {
+            pieceOffsetSource = 'decode-failed'
+          }
         }
-      } catch { /* ignore */ }
-      return { imgs, handle, pieceOffsetPng, text: (m.innerText || '').replace(/\n/g, ' ').slice(0, 80) }
+      } catch (e) {
+        pieceOffsetSource = 'error:' + String(e?.message || e).slice(0, 40)
+      }
+      return { imgs, handle, pieceOffsetPng, pieceOffsetSource, text: (m.innerText || '').replace(/\n/g, ' ').slice(0, 80) }
     }
     return null
   })
   const sliderGone = async () => !(await findSlider())
   const handle0 = await findSlider().then(s => s?.handle?.[0] || { x: 0, y: 0, w: 0, h: 0 })
   if (!handle0.x) return { ok: false, text: '当前页面未找到滑块（可能遮罩已消失）' }
+
+  /**
+   * ★ 2026-11-05 新增：等两张图真正 load 完。
+   *
+   * 源码依据（msfe SlideCaptcha.handleImageLoad）：
+   *
+   *   handleImageLoad: function(t){
+   *     e.imageQueue.push(t)
+   *     setTimeout(function(){
+   *       if (e.imageQueue.length >= 2) {
+   *         slidePathLength = verifyImg.right - sliderImg.right
+   *         f().set({captcha:'slide-captcha-dialog', slider:'slide-button', type:22})
+   *       }
+   *     }, 350)
+   *   }
+   *
+   * 两个后果：
+   *   ① `f().set()` 没执行 → SDK 的 `el` 采集器拿到的是 0×0 rect，
+   *      `del` 采集器里 `w.indexOf(n)>=0` 的容器比对**恒为 false**，
+   *      整段 mousedown/mousemove 手势被丢弃 → 服务端收到空轨迹 → 必判失败。
+   *   ② `slidePathLength` 没算出来 = 0 → handleTouchMove 里
+   *      `n = Math.min(slidePathLength, n)` 会把位移夹成 0，拖了等于没拖。
+   *
+   * 所以：必须先等 imageQueue>=2 且图片 complete，再动手。
+   */
+  const waitImagesReady = async (timeoutMs = 15000) => {
+    const t0 = Date.now()
+    while (Date.now() - t0 < timeoutMs) {
+      const ok = await safeEval(() => {
+        const dlg = document.querySelector('#slide-captcha-dialog, .captcha-wrapper__slider, .captcha-wrapper')
+        if (!dlg) return { ok: false, why: 'no-dialog' }
+        const imgs = Array.from(dlg.querySelectorAll('img'))
+        if (imgs.length < 2) return { ok: false, why: `imgs=${imgs.length}` }
+        const bad = imgs.filter(i => !i.complete || i.naturalWidth === 0)
+        if (bad.length) return { ok: false, why: `unloaded=${bad.length}` }
+        return { ok: true, n: imgs.length }
+      })
+      if (ok?.ok) {
+        // 再给 SDK 那个 350ms setTimeout 留足余量，让 f().set() 真正跑完
+        await new Promise(r => setTimeout(r, 600))
+        return true
+      }
+      await new Promise(r => setTimeout(r, 800))
+    }
+    return false
+  }
+  const imagesReady = await waitImagesReady()
 
   /**
    * 主动刷新验证码（点滑块遮罩里的刷新按钮）。
@@ -375,11 +638,32 @@ export async function solveSliderInPage(page, shopKey, opts = {}) {
   const refreshCaptcha = async () => {
     const clicked = await safeEval(() => {
       const NEG = /close|shut|cancel|dismiss|exit/i
-      const ms = Array.from(document.querySelectorAll('[class*="Modal"], [class*="modal"], [class*="MDL"], [class*="Dialog"]'))
+      // ★ 2026-11-05 修：与 findSlider 同步，改用真实锚点。
+      //   原来只查 [class*="Modal"|"Dialog"|"MDL"] —— PDD 弹窗没这些类名，
+      //   于是 refreshCaptcha **从来没点到过刷新**，每轮都在拖同一张死图。
+      const ANCHOR = '#slide-captcha-dialog, .captcha-wrapper__slider, .captcha-wrapper, .slide-handlebar'
+      const dq = typeof window.__pddDeepQueryAll === "function" ? window.__pddDeepQueryAll : function (sel) { return Array.from(document.querySelectorAll(sel)) }
+      const ms = Array.from(new Set([
+        ...dq(ANCHOR),
+        ...dq('[class*="Modal"], [class*="modal"], [class*="MDL"], [class*="Dialog"]'),
+      ]))
         .filter(m => { const r = m.getBoundingClientRect(); return r.width > 200 && r.height > 150 })
       for (const m of ms) {
-        if (!/滑块|拼图|向右|验证/.test((m.innerText || '').slice(0, 60))) continue
+        const isAnchor = m.id === 'slide-captcha-dialog'
+          || /captcha-wrapper|slide-handlebar/.test(String(m.className || ''))
+        if (!isAnchor && !/滑块|拼图|向右|验证/.test((m.innerText || '').slice(0, 60))) continue
         // ① 只认 refresh / reload / change / switch 语义
+        //    ★ SDK 的刷新按钮无专门类名，只有一张 png：
+        //      <div class="captcha-refresh"><img src=".../e23bcb7c-....png" onClick={refreshCaptcha}/></div>
+        //    所以先按 `.captcha-refresh img` 精确命中（这是源码里的真实结构）。
+        const exact = m.querySelector('.captcha-refresh img, .captcha-refresh')
+        if (exact) {
+          const r = exact.getBoundingClientRect()
+          if (r.width > 8 && r.height > 8) {
+            exact.click()
+            return { via: 'captcha-refresh', cls: String(exact.className || exact.tagName).slice(0, 60) }
+          }
+        }
         const cands = Array.from(m.querySelectorAll('[class*="refresh" i], [class*="reload" i], [class*="change" i], [class*="switch" i]'))
           .filter(e => !NEG.test(String(e.className)))
           .filter(e => { const r = e.getBoundingClientRect(); return r.width > 8 && r.height > 8 && r.width < 80 && r.height < 80 })
@@ -447,7 +731,10 @@ export async function solveSliderInPage(page, shopKey, opts = {}) {
     //   但指纹完全相同。只看 ΔgapX 会被骗，必须结合指纹。
     if (!imgRefreshed && prevGapX >= 0) {
       const dGap = solved.x - prevGapX
-      const dTarget = (handle.x + solved.x) - prevTargetX
+      // ★ 2026-11-05 修：同上，`handle` 此处尚未初始化（TDZ）。
+      //   这一段只用于日志与「是否刷新」判断，用 slider.handle[0] 现取即可。
+      const hNow = slider.handle?.[0] || { x: 0 }
+      const dTarget = (hNow.x + solved.x) - prevTargetX
       console.error(`[slider] 位移计算：ΔgapX=${dGap}px  ΔtargetX=${dTarget}px（图未刷新 → 位置不该变）`)
       if (Math.abs(dGap) < 2 && attempt > 1) {
         console.error('[slider] 缺口位置未变但上次失败 → 主动刷新验证码')
@@ -492,7 +779,13 @@ export async function solveSliderInPage(page, shopKey, opts = {}) {
         prevBgHash = ''
         continue
       }
-      return { ok: false, gapX: solved.x, targetX: Math.round(handle.x + solved.x), text: `缺口位置可疑（X=${solved.x}，${(ratio * 100).toFixed(1)}%），拒绝拖动` }
+      // ★ 2026-11-05 修：这里原来用 `handle.x`，但 `handle` 是在下面（复位块之后）
+      //   用 `const` 声明的 —— 走进这个分支时 `handle` 还在 TDZ（暂时性死区），
+      //   直接抛 `Cannot access 'handle' before initialization`。
+      //   实测第 2 轮缺口 6.6% 被判可疑 → 走这里 → 整轮崩掉。
+      //   该分支本来就要「拒绝拖动」，用 slider.handle[0] 现取即可。
+      const hForMsg = slider.handle?.[0] || { x: 0 }
+      return { ok: false, gapX: solved.x, targetX: Math.round(hForMsg.x + solved.x), text: `缺口位置可疑（X=${solved.x}，${(ratio * 100).toFixed(1)}%），拒绝拖动` }
     }
 
     // ★ 滑块复位：失败后平台不一定把滑块弹回原点。
@@ -541,13 +834,38 @@ export async function solveSliderInPage(page, shopKey, opts = {}) {
     //   ④ 本案：handle.x + (gapX − pieceOffset)×scale
     // ══════════════════════════════════════════════════════════════════
     const scale = bg.w && bg.pngW ? bg.w / bg.pngW : 1
-    const pieceOffset = blk?.pieceOffsetPng ?? 0
+    // ★★ 2026-11-05 修（数据流断裂）：
+    //   原写法 `blk?.pieceOffsetPng ?? 0` 依赖「blk 刚好是 findSlider 里设置过属性的那个对象」。
+    //   但两处用的是**不同筛选条件**：
+    //     findSlider 内：`/slider-item/` 类名优先，回退 `w>30 && w<100`
+    //     这里：        `w>30 && w<100`（不看类名）
+    //   一旦两者选中不同对象，`pieceOffsetPng` 就是 undefined → `?? 0` → 静默退回 0。
+    //   实测就是这样：块图明明能算出 10，日志却一直显示 `块内偏移=0`。
+    //
+    //   修：直接读外层权威值 `slider.pieceOffsetPng`（findSlider 的返回值），
+    //   不再依赖对象属性碰运气。
+    const pieceOffset = Number.isFinite(slider.pieceOffsetPng) ? slider.pieceOffsetPng : (blk?.pieceOffsetPng ?? 0)
     const drag = Math.round((solved.x - pieceOffset) * scale)
     const targetX = handle.x + drag
     const realDist = targetX - handle.x
     const dFromPrev = prevTargetX >= 0 ? targetX - prevTargetX : null
+    // ★★ 2026-11-05 新增：`slidePathLength` 断言（源码级）。
+    //   SDK 里位移被硬夹：
+    //     n = Math.min(e.slidePathLength, n); n = Math.max(n, 0)
+    //   slidePathLength = verifyImg.right − sliderImg.right
+    //     verifyImg = 背景图 <img class="slider-img-bg">
+    //     sliderImg = 拼图块 <img class="slider-item">   ← 不是拖拽按钮 #slide-button！
+    //   一旦 drag 超过它，**实际只走了 slidePathLength，但你以为是 drag**，
+    //   于是永远差最后那几像素、日志上还看不出来。这里先算出来告警。
+    const slidePathLength = (bg.x != null && blk?.x != null)
+      ? Math.round((bg.x + bg.w) - (blk.x + blk.w))
+      : Math.round(bg.w - (blk?.w || 0))
+    if (drag > slidePathLength) {
+      console.error(`[slider] ⚠️ drag ${drag} > slidePathLength ${slidePathLength}（背景右缘 − 拼图块右缘），会被 SDK 夹掉`)
+    }
     console.error(`[slider] 位移：gap=${solved.x} − 块内偏移=${pieceOffset} = ${solved.x - pieceOffset}（PNG）× scale ${scale.toFixed(3)} = drag ${drag}px → 目标 ${Math.round(targetX)}`
-      + (dFromPrev != null ? `（与上轮差 ${Math.round(dFromPrev)}px）` : ''))
+      + (dFromPrev != null ? `（与上轮差 ${Math.round(dFromPrev)}px）` : '')
+      + (pieceOffset === 0 ? `  ⚠️ 块内偏移=0（来源=${slider.pieceOffsetSource || 'unknown'}）` : ''))
     if (DRY) return { ok: true, gapX: solved.x, targetX: Math.round(targetX), text: `[dry-run] gap ${solved.x} − offset ${pieceOffset} → drag ${drag}px → targetX ${Math.round(targetX)}` }
 
     // ★ CDP session 容错：page.target() 在页面导航后可能失效（Connection closed）。
@@ -566,10 +884,13 @@ export async function solveSliderInPage(page, shopKey, opts = {}) {
       await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: handle.x, y: handle.y, button: 'left', clickCount: 1 })
       for (const p of traj) {
         await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: p.x, y: p.y, button: 'left' })
-        // ★ per-step delay：起步犹豫（100-250ms）/ 中段停顿（40-120ms）；
-        //   常规间隔收窄到 12+random*8（原 12+random*22 的 CV≈0.65，
-        //   真人鼠标间隔 CV<0.3，太散会被判机器）
-        await new Promise(r => setTimeout(r, p.delay != null ? p.delay : (12 + Math.random() * 8)))
+        // ★ 2026-11-05 修：步距必须 ≥15ms。
+        //   SDK 采集器 z() 里有一道硬门槛：
+        //     if (n.timeStamp > 0) { if (t.preTimeStamp && n.timeStamp - t.preTimeStamp < 15) return }
+        //   原来用 12 + Math.random()*8（12~20ms），**约 40% 的点被直接丢弃**，
+        //   轨迹变成稀疏跳点，既有机器特征又让速度曲线失真。
+        //   改 25~45ms（均值 35，CV≈0.2），既过门槛又贴合真人节奏。
+        await new Promise(r => setTimeout(r, p.delay != null ? p.delay : (25 + Math.random() * 20)))
       }
       await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: targetX, y: handle.y, button: 'left', clickCount: 1 })
     } catch (e) {
@@ -597,7 +918,25 @@ export async function solveSliderInPage(page, shopKey, opts = {}) {
     if (attempt === MAX) {
       return { ok: false, gapX: solved.x, targetX: Math.round(targetX), text: `⚠️ ${MAX} 轮尝试后仍未通过（缺口 X=${solved.x}）` }
     }
-    await new Promise(r => setTimeout(r, 3000))
+    // ★★ 2026-11-05 修（第二号根因，必改）
+    //   SDK 组件里 `isSlidable` 是拖动门闩：
+    //     handleTouchStart: function(t){ e.isSlidable && ( ... ) }
+    //   handleTouchEnd 里把它置 false，而**失败回调只重置 deltaRef / sliding**：
+    //     l && ("mobile"===c ? n() : (e.deltaRef = 0, e.setState({sliding:!1})))
+    //   唯一把它恢复成 true 的地方是 resetSlider()，而 resetSlider 只由
+    //   refreshCaptcha() 触发：`0===t && (e.imageQueue=[], e.resetSlider())`
+    //
+    //   → 第一次拖动失败后如果不点刷新，后续所有 mousePressed 全部落在
+    //     `isSlidable` 短路里，**一次手势都发不出去**。表现为「疯狂重试但毫无反应」，
+    //     极易被误判成「距离算错 / OCR 不准」。
+    //
+    //   所以：每轮失败后必须强制刷新（等图换新 + 门闩复位），不能裸重试。
+    await refreshCaptcha()
+    await new Promise(r => setTimeout(r, 2500))
+    // 刷新会换图，重置指纹，避免下一轮把新图误判为「未刷新」
+    prevBgHash = ''
+    // 等新图 load 完再进下一轮
+    await waitImagesReady(10000)
   }
   return { ok: false, text: '超过最大尝试次数' }
 }
@@ -605,7 +944,7 @@ export async function solveSliderInPage(page, shopKey, opts = {}) {
 // 被 import 时跳过主流程（只导出 solveSliderInPage）
 if (!IS_IMPORTED) (async () => {
   const puppeteer = require('puppeteer-core')
-  const { CredentialStore } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/lib/services/credential-store.js`)
+  const { CredentialStore } = await import(pathToFileURL(join(PLUGIN_ROOT, 'lib/services/credential-store.js')).href)
   const store = new CredentialStore(path.join(homedir(), '.dsh', 'dsagent-accounts.json'))
   const SHOP = argOf('shop') || argOf('account') || store.findByPlatform('pdd_mms')?.shop_key
   if (!SHOP) { emit({ ok: false, failureKind: 'not_bound', text: '未绑定拼多多商家后台账号' }); process.exit(2) }
@@ -657,12 +996,55 @@ if (!IS_IMPORTED) (async () => {
   }
   await new Promise(r => setTimeout(r, 10000))
 
+  // ── ①.5 只读诊断模式（--diagnose）：跑完即退，绝不拖动 ──
+  if (DIAGNOSE) {
+    const d = await diagnoseSlider(page)
+    console.error('\n════ 滑块诊断 ════')
+    for (const f of d.findings) console.error(`  [${f.level.toUpperCase()}] ${f.msg}`)
+    console.error('══════════════════\n')
+    fs.mkdirSync(OUT, { recursive: true })
+    fs.writeFileSync(path.join(OUT, 'slider-diagnose.json'), JSON.stringify(d, null, 2))
+    console.error('[solver] 诊断结果已存 artifacts/pdd-re/slider-diagnose.json')
+    if (d.raw?.bg?.dom) {
+      try {
+        // 顺手把两张图存盘，便于人工核对缺口位置
+        const srcs = await page.evaluate(() => {
+          const dlg = document.querySelector('#slide-captcha-dialog, .captcha-wrapper__slider, .captcha-wrapper')
+          return dlg ? Array.from(dlg.querySelectorAll('img')).map(i => i.src) : []
+        }).catch(() => [])
+        srcs.forEach((s, i) => {
+          const b64 = String(s || '').replace(/^data:image\/\w+;base64,/, '')
+          if (b64) fs.writeFileSync(path.join(OUT, i === 0 ? 'diag-bg.png' : `diag-img${i}.png`), Buffer.from(b64, 'base64'))
+        })
+        console.error('[solver] 图片已存 artifacts/pdd-re/diag-*.png')
+      } catch { /* ignore */ }
+    }
+    emit({ ok: d.ok, mode: 'diagnose', findings: d.findings, raw: d.raw })
+    await browser.close()
+    process.exit(d.ok ? 0 : 2)
+  }
+
   // ── ② 拿滑块 DOM（完整 dataURL + 手柄坐标）──
   const findSlider = () => safeEval(() => {
-    const ms = Array.from(document.querySelectorAll('[class*="Modal"], [class*="modal"], [class*="MDL"], [class*="Dialog"]'))
+    // ★ 2026-11-05 修（源码级，第一号根因）
+    //   SDK 真实锚点是 `id="slide-captcha-dialog"` + 类名
+    //   `captcha-wrapper captcha-wrapper__slider`（msfe SlideCaptcha.render 里写死）。
+    //   原实现只查 [class*="Modal"|"modal"|"MDL"|"Dialog"] —— PDD 这个弹窗
+    //   **一个类名都不含这些词**，于是 findSlider 恒为 null，
+    //   上层就报「未找到滑块（可能遮罩已消失）」——看起来像算法问题，其实根本没抓到元素。
+    const ANCHOR = '#slide-captcha-dialog, .captcha-wrapper__slider, .captcha-wrapper, .slide-handlebar'
+    const dq = typeof window.__pddDeepQueryAll === "function" ? window.__pddDeepQueryAll : function (sel) { return Array.from(document.querySelectorAll(sel)) }
+    const ms = Array.from(new Set([
+      ...dq(ANCHOR),
+      ...dq('[class*="Modal"], [class*="modal"], [class*="MDL"], [class*="Dialog"]'),
+    ]))
       .filter(m => { const r = m.getBoundingClientRect(); return r.width > 200 && r.height > 150 })
     for (const m of ms) {
-      if (!/滑块|拼图|向右|验证/.test((m.innerText || '').slice(0, 60))) continue
+      // 命中真实锚点时不再强制文案匹配：type 22/23/24/61/71 文案各不相同
+      // （请向右滑块 / 拖动圆形滑块 / 点击与…），旧的正则会把后几种全过滤掉。
+      const isAnchor = m.id === 'slide-captcha-dialog'
+        || /captcha-wrapper|slide-handlebar/.test(String(m.className || ''))
+      if (!isAnchor && !/滑块|拼图|向右|验证/.test((m.innerText || '').slice(0, 60))) continue
       const imgs = Array.from(m.querySelectorAll('img'))
         .map(el => {
           const b = el.getBoundingClientRect()
@@ -680,7 +1062,7 @@ if (!IS_IMPORTED) (async () => {
               }
             }
           } catch { /* ignore */ }
-          return { src, w: Math.round(b.width), h: Math.round(b.height), x: Math.round(b.x), y: Math.round(b.y), pngW: Math.abs(pngW), pngH: Math.abs(pngH) }
+          return { src, cls: String(el.className || ''), w: Math.round(b.width), h: Math.round(b.height), x: Math.round(b.x), y: Math.round(b.y), pngW: Math.abs(pngW), pngH: Math.abs(pngH) }
         })
         .filter(o => /^data:image/.test(o.src) && o.w > 0)
       const handle = Array.from(m.querySelectorAll('.slide-button, [class*="slide-button"], [class*="slideButton"]'))
@@ -689,15 +1071,86 @@ if (!IS_IMPORTED) (async () => {
       if (!imgs.length || !handle.length) continue
       // ★ 计算拼图块的「块内图形左偏移」（PNG 像素基准）
       //   PDD 块 PNG 60x160，图形实际只占 x[10,49]；不减去这 10px 会恒差 8.5px(DOM)
+      //
+      // ★★ 2026-11-05 修（真实 54001 实测，连续踩两个坑）：
+      //
+      //   坑①：`decodePng` / `findPieceOffset` 是 **Node 模块顶层函数**，
+      //        而这段代码跑在 `page.evaluate` 的**浏览器上下文**里 ——
+      //        根本拿不到它们，直接抛 `decodePng is not defined`，
+      //        被 catch 吃掉 → pieceOffset 静默 = 0。
+      //        日志证据：`块内偏移=0（来源=error:decodePng is not defined）`
+      //        → 必须把解码逻辑**内联**进 evaluate。
+      //
+      //   坑②：选块图原来只看 `w>30 && w<100`（DOM 宽），
+      //        与后面 `blk` 的筛选条件不一致，可能选到不同对象。
+      //        现在统一优先按 SDK 真实类名 `.slider-item`。
+      //
+      //   PNG 解码（8bit 非交错，支持 RGB/RGBA/Gray）内联版，
+      //   只解到「能读到 alpha 列」为止，不做完整像素还原。
+      function inlinePngInfo(dataUrl) {
+        try {
+          const b64 = String(dataUrl || '').replace(/^data:image\/\w+;base64,/, '')
+          if (!b64) return null
+          const bin = atob(b64)
+          const bytes = new Uint8Array(bin.length)
+          for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+          if (bytes[0] !== 0x89 || bytes[1] !== 0x50) return null
+          let p = 8, w = 0, h = 0, bitDepth = 8, colorType = 6
+          const idat = []
+          const rd32 = (o) => (bytes[o] << 24) | (bytes[o + 1] << 16) | (bytes[o + 2] << 8) | bytes[o + 3]
+          while (p + 8 <= bytes.length) {
+            const len = rd32(p)
+            const type = String.fromCharCode(bytes[p + 4], bytes[p + 5], bytes[p + 6], bytes[p + 7])
+            if (type === 'IHDR') {
+              w = rd32(p + 8) >>> 0; h = rd32(p + 12) >>> 0
+              bitDepth = bytes[p + 16]; colorType = bytes[p + 17]
+            } else if (type === 'IDAT') {
+              idat.push(bytes.subarray(p + 8, p + 8 + len))
+            } else if (type === 'IEND') break
+            p += 12 + len
+          }
+          if (!w || !h || bitDepth !== 8) return null
+          const ch = colorType === 6 ? 4 : colorType === 2 ? 3 : colorType === 0 ? 1 : 0
+          if (!ch) return null
+          // 拼 zlib 流 → 用浏览器原生 DecompressionStream 解（Chrome 80+ 支持）
+          const total = idat.reduce((a, b) => a + b.length, 0)
+          const z = new Uint8Array(total)
+          let zo = 0
+          for (const c of idat) { z.set(c, zo); zo += c.length }
+          return { w, h, ch, z }   // 交给下面异步解压
+        } catch { return null }
+      }
+
+      // 由于 DecompressionStream 是异步的，这里用同步方式：调用页面已有的 pako 或
+      // 退化为「只按 IHDR + 透明图约定推断」。实测 PDD 块图 alpha 列固定从 10 起，
+      // 且这是 SDK 常量（60x160 块，图形 40x40 居中 → 左偏移 (60-40)/2 = 10）。
+      // 所以：拿不到像素时，用几何推导兜底（比 0 准得多）。
       let pieceOffsetPng = 0
+      let pieceOffsetSource = 'none'
       try {
-        const blkImg = imgs.find(i => i.w > 30 && i.w < 100)
-        if (blkImg?.src) {
-          const png = decodePng(blkImg.src.replace(/^data:image\/\w+;base64,/, ''))
-          if (png) { pieceOffsetPng = findPieceOffset(png); blkImg.pieceOffsetPng = pieceOffsetPng }
+        const blkImg = imgs.find(i => /slider-item/.test(String(i.cls || '')))
+          || imgs.find(i => i.w > 30 && i.w < 100 && !/slider-img-bg/.test(String(i.cls || '')))
+        if (!blkImg?.src) {
+          pieceOffsetSource = 'no-blk-img'
+        } else if (!/^data:image\//.test(blkImg.src)) {
+          pieceOffsetSource = 'src-not-dataurl'
+        } else {
+          const info = inlinePngInfo(blkImg.src)
+          if (info) {
+            // 几何推导：拼图块 PNG 宽 w，图形宽约 40（PDD 固定），左偏移 = (w - 40) / 2
+            // 60 → 10；实测样本 alpha 有内容列 x∈[10,54]，与 (60-40)/2=10 吻合。
+            const derived = Math.max(0, Math.round((info.w - 40) / 2))
+            pieceOffsetPng = derived
+            blkImg.pieceOffsetPng = derived
+            pieceOffsetSource = `geom(${info.w}x${info.h} → ${derived})`
+          } else {
+            pieceOffsetSource = 'decode-failed'
+          }
         }
-      } catch { /* ignore */ }
-      return { imgs, handle, pieceOffsetPng, text: (m.innerText || '').replace(/\n/g, ' ').slice(0, 80) }
+      } catch (e) {
+        pieceOffsetSource = 'error:' + String(e?.message || e).slice(0, 40)
+      }
+      return { imgs, handle, pieceOffsetPng, pieceOffsetSource, text: (m.innerText || '').replace(/\n/g, ' ').slice(0, 80) }
     }
     return null
   })
@@ -734,14 +1187,27 @@ if (!IS_IMPORTED) (async () => {
     process.exit(2)
   }
 
-  // 目标 X = 滑块把手起点 + 缺口 X（PDD 线性 1:1，2026-10-23 黑盒标定验证）
-  const targetX = handle.x + solved.x
+  // ★ 2026-11-05 修：CLI 分支原用 `handle.x + solved.x`（1:1 + 不含块内偏移），
+  //   与实际生效的 solveSliderInPage 公式不一致 → 命令行跑总是差 15%+8.5px。
+  //   统一为：drag = (gapPngX − pieceOffsetPng) × scale
+  const scale = bg.w && bg.pngW ? bg.w / bg.pngW : 1
+  // ★ 2026-11-05 修：同 solveSliderInPage，改读外层权威值，不靠对象属性碰运气
+  const pieceOffset = Number.isFinite(slider.pieceOffsetPng) ? slider.pieceOffsetPng : (blk?.pieceOffsetPng ?? 0)
+  const drag = Math.round((solved.x - pieceOffset) * scale)
+  const targetX = handle.x + drag
+  const slidePathLength = (bg.x != null && blk?.x != null)
+    ? Math.round((bg.x + bg.w) - (blk.x + blk.w))
+    : Math.round(bg.w - (blk?.w || 0))
+  console.error(`[solver] 位移：gap=${solved.x} − offset=${pieceOffset}（PNG）× scale ${scale.toFixed(3)} = drag ${drag}px`)
+  if (drag > slidePathLength) {
+    console.error(`[solver] ⚠️ drag ${drag} > slidePathLength ${slidePathLength}，会被 SDK 夹掉`)
+  }
   const result = {
     ok: true, mode: DRY ? 'dry-run' : 'solve', shopKey: SHOP,
-    gapX: solved.x, targetX, handleX: handle.x,
+    gapX: solved.x, targetX, handleX: handle.x, drag, scale, pieceOffset, slidePathLength,
     text: DRY
-      ? `[dry-run] 识别成功：缺口 X=${solved.x}px，应从 ${handle.x} 拖到 ${Math.round(targetX)}\n背景图 ${bg.w}x${bg.h}，已存盘 slider-bg.png / slider-block.png\n去掉 --dry-run 即执行拖动。`
-      : `识别成功：缺口 X=${solved.x}px`,
+      ? `[dry-run] 缺口 X=${solved.x}px，块内偏移=${pieceOffset}px，scale=${scale.toFixed(3)} → drag=${drag}px，应从 ${handle.x} 拖到 ${Math.round(targetX)}\n背景图 DOM ${bg.w}x${bg.h} / PNG ${bg.pngW}x${bg.pngH}，已存盘 slider-bg.png / slider-block.png\n去掉 --dry-run 即执行拖动。`
+      : `识别成功：缺口 X=${solved.x}px → drag ${drag}px`,
   }
   if (DRY) { emit(result); await browser.close(); process.exit(0) }
 
@@ -751,8 +1217,8 @@ if (!IS_IMPORTED) (async () => {
   await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: handle.x, y: handle.y, button: 'left', clickCount: 1 })
   for (const p of traj) {
     await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: p.x, y: p.y, button: 'left' })
-    // ★ 同上：常规间隔 12+random*8（CV 对齐真人 <0.3）
-    await new Promise(r => setTimeout(r, p.delay != null ? p.delay : (12 + Math.random() * 8)))
+    // ★ 2026-11-05：步距 ≥15ms（SDK 采集器硬门槛，低于直接丢点）
+    await new Promise(r => setTimeout(r, p.delay != null ? p.delay : (25 + Math.random() * 20)))
   }
   await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: targetX, y: handle.y, button: 'left', clickCount: 1 })
   console.error('[solver] 拖动完成，等待验证结果...')
@@ -774,3 +1240,4 @@ if (!IS_IMPORTED) (async () => {
   emit({ ok: false, failureKind: 'api_error', text: `执行异常：${e?.message || String(e)}` })
   process.exit(1)
 })
+

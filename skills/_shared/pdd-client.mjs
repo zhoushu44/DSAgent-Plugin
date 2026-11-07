@@ -17,25 +17,72 @@
  *   · 账号健康分
  */
 
+import { createRequire } from 'node:module'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
-import { homedir } from 'node:os'
-import { createRequire } from 'node:module'
+import { tmpdir } from 'node:os'
+import { fileURLToPath } from 'node:url'
+
+// ★ 2026-10-27：createRequire 的 base 从 import.meta.url 推导，不再硬编码绝对路径。
+//   本文件在 skills/_shared/ 下，上推两层到插件根（那里有 package.json 与 lib/）。
+const HERE = path.dirname(fileURLToPath(import.meta.url))
+const PLUGIN_ROOT = path.resolve(HERE, '..', '..')
+const PKG_BASE = [
+  path.join(PLUGIN_ROOT, 'package.json'),
+  path.join(HERE, 'package.json'),
+].find(p => fs.existsSync(p)) || path.join(tmpdir(), 'pdd-client-base.json')
+const require = createRequire(PKG_BASE)
 import { getAntiString } from './pdd-antistring.mjs'
+import { signPlan } from './pdd-sign-scope.mjs'
 import { decodePua, hasPua, buildPuaMap, RISK_SDK_INJECT } from './pdd-risksdk.mjs'
 import {
   reserveSlot, recordResult, canUse, getAccountState,
   ERR, THROTTLE, fmtRemain, backoffWait, clearCooldown,
 } from './pdd-antiban.mjs'
 
-const require = createRequire('E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/package.json')
-const TOKEN_FILE = path.join(homedir(), '.dsh', 'pdd-captcha-tokens.json')
 
-const DEFAULT_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36'
+/**
+ * ★ 2026-10-27：UA 与 sec-ch-ua 的主版本号从**实际 chrome.exe** 推导。
+ *
+ *   原来两处都硬编码 `Chrome/155.0.0.0`，而 `pdd-http.mjs` 的 sec-ch-ua 更是
+ *   写着 `v="128"` —— 同一次请求的两个头自相矛盾，本身即是风控信号。
+ *   硬编码还会在 Chrome 自动升级后立刻失效。
+ *
+ *   推导失败时退到 '155'（保证 UA 与 sec-ch-ua 至少彼此一致）。
+ */
+function detectChromeMajor() {
+  const { execFileSync } = require('node:child_process')
+  const candidates = [
+    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+    process.env.CHROME_PATH,
+  ].filter(Boolean)
+  for (const p of candidates) {
+    try {
+      if (!fs.existsSync(p)) continue
+      const out = execFileSync('powershell', ['-NoProfile', '-Command',
+        `(Get-Item -LiteralPath '${p}').VersionInfo.ProductVersion`], { encoding: 'utf8', timeout: 8000 })
+      const major = String(out).trim().split('.')[0]
+      if (/^\d+$/.test(major)) return major
+    } catch { /* 试下一个 */ }
+  }
+  return '155'
+}
 
-/* ── 54001 token 持久化 ── */
-function readTokens() { try { return JSON.parse(fs.readFileSync(TOKEN_FILE, 'utf8')) || {} } catch { return {} } }
-function writeTokens(d) { try { fs.mkdirSync(path.dirname(TOKEN_FILE), { recursive: true }); fs.writeFileSync(TOKEN_FILE, JSON.stringify(d, null, 1), 'utf8') } catch { /* ignore */ } }
+const CHROME_MAJOR = detectChromeMajor()
+const DEFAULT_UA = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${CHROME_MAJOR}.0.0.0 Safari/537.36`
+const SEC_CH_UA = `"Google Chrome";v="${CHROME_MAJOR}", "Chromium";v="${CHROME_MAJOR}", "Not(A:Brand";v="24"`
+
+/* ── 54001 token 持久化 ──
+ *
+ * ★ 2026-10-27：改为复用 pdd-risk 的存储实现（原子写），不再自带一套裸 writeFileSync。
+ *   三个模块原本各自「读整个→改→写整个」同一个文件，并发时互相覆盖 token → 又弹滑块。
+ *   数据结构与 TTL 三者本就一致（{token, savedAt, expiresAt}，10 分钟），收敛无行为变化。
+ */
+import { readCaptchaStore, writeCaptchaStore } from './pdd-risk.mjs'
+
+function readTokens() { return readCaptchaStore() }
+function writeTokens(d) { writeCaptchaStore(d) }
 export function saveVerifyToken(shopKey, token) { if (!token) return; const d = readTokens(); d[shopKey] = { token, savedAt: Date.now(), expiresAt: Date.now() + 6e5 }; writeTokens(d) }
 export function getVerifyToken(shopKey) { const d = readTokens(); const r = d[shopKey]; if (!r?.token) return null; if (Date.now() > r.expiresAt) { delete d[shopKey]; writeTokens(d); return null } return r.token }
 export function clearVerifyToken(shopKey) { const d = readTokens(); if (d[shopKey]) { delete d[shopKey]; writeTokens(d) } }
@@ -116,7 +163,43 @@ export async function createSession(shopKey, opts = {}) {
       ...(opts.extraArgs || []),
     ],
   }
-  const browser = await puppeteer.launch(launchOptions(shopKey, launchExtra))
+  // ★ 2026-10-27 修：启动前清「孤儿进程 + Profile 锁」，失败后再清一次重试。
+  //
+  //   实测坑：`browser.close()` 只关 puppeteer 连接的主进程，Chrome 的渲染/GPU/
+  //   工具子进程**偶发残留**（实测一次 close 后仍有 10 个 chrome 进程指向同一
+  //   Profile，另一次 0 个 —— 与 Chrome 内部时序有关，不可预测）。
+  //   残留进程继续持有 SingletonLock → 下次 launch 报
+  //   `Failed to launch the browser process!`，而该报错**指不到真正原因**
+  //   （既不说 Profile 被占用，也不说哪个进程）。
+  //
+  //   只删锁文件不够：锁能删，但占用它的进程还在，删了立刻被重建。
+  //   必须先杀孤儿进程（pdd-proc-clean，只杀命令行含 --user-data-dir
+  //   且指向本 Profile 的，绝不碰用户日常浏览器），再删锁。
+  //
+  //   `pdd-crawl.ts` 侧同样只有 clearProfileLocks，一并补上。
+  const lo = launchOptions(shopKey, launchExtra)
+  const cleanBeforeLaunch = async () => {
+    try {
+      const mod = await import('./pdd-proc-clean.mjs')
+      if (typeof mod.cleanProfileForLaunch === 'function') {
+        mod.cleanProfileForLaunch(lo.userDataDir, { quiet: true })
+        return
+      }
+    } catch { /* 模块缺失时退化为只删锁 */ }
+    try {
+      const { clearProfileLocks } = await import('./pdd-launch.mjs')
+      clearProfileLocks(lo.userDataDir)
+    } catch { /* ignore */ }
+  }
+  await cleanBeforeLaunch()
+  let browser
+  try {
+    browser = await puppeteer.launch(lo)
+  } catch (e) {
+    console.warn('[pdd-client] 首次启动失败，清理孤儿进程与 Profile 锁后重试:', e instanceof Error ? e.message : String(e))
+    await cleanBeforeLaunch()
+    browser = await puppeteer.launch(lo)
+  }
   const page = (await browser.pages())[0] || await browser.newPage()
 
   // ★★★ 必须在第一次 goto 前注入 ★★★
@@ -186,27 +269,26 @@ export async function createSession(shopKey, opts = {}) {
      * 才注入会漏掉模块，所以这里改成「现场扫 window.webpackJsonp*」。
      */
     /**
-     * ★ 取真签名
+     * ★ 取真签名（每次现场生成，**绝不缓存**）
      *
-     * 优先读页面缓存 __pddSigCache（注入器后台预热生成的），
-     * 缓存没有再现场生成。这样绝大多数情况下不需要 evaluate，
-     * 从根本上避开 `detached Frame`。
+     * ★ 2026-10-27 修：原来会先读页面缓存 `window.__pddSigCache`（TTL 5 分钟），
+     *   命中就直接复用同一个签名。这是**反向优化**：
+     *
+     *   · `pdd-http.mjs:130` 的注释自己写着「官方：绝不可缓存」；
+     *   · `messagePack(10 域)` 的入参里含 `touchEventData / clickEventData /
+     *     focusblurEventData / locationInfo / referrer / browserSize / token /
+     *     fingerprint` —— 全是**每次请求都应该不同**的行为数据；
+     *   · 复用同一签名 5 分钟，等于告诉平台「这个会话 5 分钟内没有产生任何交互」，
+     *     是典型的机器特征。
+     *
+     *   代价：每次多一次 evaluate。但 evaluate 失败可以靠下面的重试兜底，
+     *   而签名复用是**主动向平台暴露机器身份**，不可接受。
+     *
+     *   保留的重试策略：短等待（长等待会让风控把页面关掉）；
+     *   只试 1 次缓存探测已删除，避免反复 evaluate 正在关闭的页面。
      */
     async genSig() {
-      // ① 先读缓存（零 evaluate，绕过 detached Frame）
-      //   ★ 只试 1 次，失败立刻走现场生成——不要反复 evaluate
-      //     一个正在关闭的页面上，多次 evaluate 会放大失败概率
-      try {
-        const c = await page.evaluate(() => {
-          const s = window.__pddSigCache
-          if (!s || !s.sig) return null
-          if (Date.now() - s.at > 5 * 60 * 1000) return null
-          return { sig: s.sig, len: s.len, at: s.at }
-        })
-        if (c?.sig) return { ok: true, sig: c.sig, len: c.len, via: 'cache' }
-      } catch { /* 落到下面 */ }
-
-      // ② 现场生成：短等待（长等待会让风控把页面关掉）
+      // 现场生成：短等待（长等待会让风控把页面关掉）
       let lastErr = null
       for (let i = 0; i < 3; i++) {
         if (page.isClosed()) return { err: 'page closed' }
@@ -268,7 +350,21 @@ export async function createSession(shopKey, opts = {}) {
       }
       return false
     },
-    async close() { try { await browser.close() } catch { /* ignore */ } },
+    /**
+     * 关闭会话：先 browser.close()，再兜底杀孤儿 chrome + 删锁。
+     *
+     * ★ 2026-10-27：browser.close() 只关主进程，Chrome 子进程偶发残留并持有
+     *   SingletonLock，导致下一次 launch 失败（报错还指不到原因）。
+     *   这里在 close 后补一次清理，让「关会话」这件事真正干净。
+     *   注意：只有确认是自己的 Profile 才会杀（pdd-proc-clean 的安全边界）。
+     */
+    async close() {
+      try { await browser.close() } catch { /* ignore */ }
+      try {
+        const mod = await import('./pdd-proc-clean.mjs')
+        mod.cleanProfileForLaunch(lo.userDataDir, { quiet: true })
+      } catch { /* ignore */ }
+    },
     /**
      * ★ 页面自愈：页面被风控关掉后，自动开新页并重注签名能力
      * @returns {Promise<boolean>} 是否恢复成功
@@ -338,12 +434,20 @@ export async function call(o) {
   const I = String(url)
   let tier = o.tier
   if (!tier) {
-    if (/queryGoodsDetailVOListForMMS|queryGoodsPageOverView(\?|$)/.test(I)) tier = 't3'
-    else if (/\/vodka\/|\/glide\/|queryGoodsPageOverViewReadyDate|queryGoodsReadyDate/.test(I)) tier = 't2'
-    else tier = 't1'
+    // ★ 2026-11-05：通道判断收归基座 pdd-transport.pickTier（唯一真源）
+    //   原来这里有一套内联正则，与 pickTier 重复；两处口径一旦分叉，
+    //   同一接口在不同调用路径上会走不同通道 → 风控表现不可预测。
+    //   已把原特例（ReadyDate 系列、ForMMS 别名）并入 pickTier，行为等价。
+    const { pickTier } = await import('./pdd-transport.mjs')
+    tier = pickTier(I)
   }
 
   // t2/t3 必须有 session
+  // ★ 2026-11-04 说明：这里**故意不做「白名单外自动降级 t1」**。
+  //   降级虽然能省一次浏览器，但 pdd-works 等技能长期把 /glide/ /vodka/ 走 t2，
+  //   一旦白名单匹配口径与平台有偏差（路径归一、大小写、版本前缀），就会把
+  //   「本来能跑」的调用降成 cookie-only 而稳定失败 —— 省时间不值这个风险。
+  //   签名是否注入由 pdd-sign-scope.mjs 单独控制（不影响通道选择）。
   if ((tier === 't2' || tier === 't3') && !session) {
     return { ok: false, kind: 'config_error', hint: `${tier} 通道需要 session（先 createSession）` }
   }
@@ -362,9 +466,20 @@ export async function call(o) {
     if (slot.waitMs > 0) await sleep(slot.waitMs)
 
     // ── ④ 生成签名 ──
+    // ★★ 2026-11-04 二次修正：两个独立条件——
+    //   ① 162 条路径白名单 → body.crawlerInfo
+    //   ② 域名正则（mms|ims|...）→ header Anti-Content
+    //   只要域名是 mms.pinduoduo.com 就必须签名；「不在名单」只代表 body 不用塞 crawlerInfo。
+    //   详见 pdd-sign-scope.mjs 顶部注释（含真机反例 goodsList → 54001）。
+    const plan = signPlan(I)
+    const shouldSign = plan.headerAnti
+    const shouldSendCrawlerInfo = plan.bodyCrawlerInfo
+    const whitelistHit = plan.whitelistRule
     let anti = null
     let sigMeta = null
-    if (tier === 't1') {
+    if (!shouldSign) {
+      sigMeta = { type: 'none', reason: 'host-not-in-anti-content-scope' }
+    } else if (tier === 't1') {
       anti = getAntiString()
       sigMeta = { type: 'simple', len: anti.length }
     } else {
@@ -396,17 +511,18 @@ export async function call(o) {
       'content-type': 'application/json',
       'origin': 'https://mms.pinduoduo.com',
       'priority': 'u=1, i',
-      'sec-ch-ua': '"Google Chrome";v="155", "Chromium";v="155", "Not(A:Brand";v="24"',
+      'sec-ch-ua': SEC_CH_UA,
       'sec-ch-ua-mobile': '?0',
       'sec-ch-ua-platform': '"Windows"',
       'sec-fetch-dest': 'empty',
       'sec-fetch-mode': 'cors',
       'sec-fetch-site': 'same-origin',
-      'anti-content': anti,
       'cookie': cookies,
       'user-agent': DEFAULT_UA,
       'referer': referer || 'https://mms.pinduoduo.com/',
     }
+    // ★ 2026-11-04：仅在签名范围内注入（见 pdd-sign-scope.mjs）
+    if (shouldSign && anti) headers['anti-content'] = anti
     // t3 需要 webSpiderRule
     if (tier === 't3') {
       const sr = session?.spiderRule || o.webSpiderRule
@@ -419,7 +535,7 @@ export async function call(o) {
     // ── ⑦ 发请求 ──
     const reqOpts = { method, headers, signal: AbortSignal.timeout(25000) }
     if (method === 'POST') {
-      reqOpts.body = JSON.stringify({ ...body, crawlerInfo: anti })
+      reqOpts.body = JSON.stringify(shouldSendCrawlerInfo && anti ? { ...body, crawlerInfo: anti } : body)
     }
 
     let resp, text, json

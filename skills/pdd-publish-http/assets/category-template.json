@@ -1,7 +1,7 @@
 {
   "儿童睡衣": {
-    "catId": "205133764345",
-    "catePath": "商品分类 童装/婴儿装/亲子装 > 儿童家居服 > 家居服套装 修改分类",
+    "catId": "",
+    "catePath": "童装/婴儿装/亲子装",
     "dims": [
       {
         "user": "颜色分类",
@@ -12,792 +12,187 @@
         "user": "参考分类",
         "page": "参考分类",
         "type": ""
-      },
-      {
-        "user": "尺码",
-        "page": "尺码",
-        "type": ""
       }
     ],
     "requiredAttrs": [
       {
         "name": "材质成分",
-        "value": "聚酯纤维（涤纶）:100%",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "聚酯纤维（涤纶）:100%"
       },
       {
         "name": "品牌",
-        "value": "其他",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "其他"
       },
       {
         "name": "适用性别",
-        "value": "女",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "中性/男女均可"
       },
       {
         "name": "安全等级",
-        "value": "A类",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "A类"
       },
       {
         "name": "面料名称",
-        "value": "莫代尔",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "莫代尔"
       },
       {
         "name": "适用年龄段",
-        "value": "中小童(3~8岁，100~140cm)",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "中小童(3~8岁，100~140cm)"
       },
       {
         "name": "风格",
-        "value": "休闲",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "休闲"
       },
       {
         "name": "厚薄",
-        "value": "加厚",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "普通"
       },
       {
         "name": "流行元素",
-        "value": "潮范",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "潮范"
       },
       {
         "name": "货源类别",
-        "value": "现货",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "现货"
       },
       {
         "name": "上市时节",
-        "value": "2026年秋季",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "2026年秋季"
       },
       {
         "name": "主面料成分含量",
-        "value": "95",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "95"
       },
       {
         "name": "产地",
-        "value": "浙江",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "浙江"
       },
       {
         "name": "图案",
-        "value": "纯色",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "纯色"
       },
       {
         "name": "商品货号",
-        "value": "童衣童缘&25102豹纹毛毛睡衣套装",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "童衣童缘&25102豹纹毛毛睡衣套装"
       },
       {
         "name": "功能",
-        "value": "吸湿排汗、其他",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "吸湿排汗、其他"
       },
       {
         "name": "面料工艺",
-        "value": "柔软处理",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "柔软处理"
       },
       {
         "name": "适用季节",
-        "value": "冬季、秋季",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "冬季、秋季"
       },
       {
         "name": "是否库存",
-        "value": "否",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "否"
       },
       {
         "name": "适用场景",
-        "value": "居家",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "居家"
       },
       {
         "name": "袖长",
-        "value": "长袖",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "长袖"
       },
       {
         "name": "领型",
-        "value": "立领",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "圆领（显式指定）"
       },
       {
         "name": "主面料成分",
-        "value": "粘纤",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "粘纤"
       },
       {
         "name": "适合年龄段",
-        "value": "中大童(8岁以上，140cm以上)",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "中大童(8岁以上，140cm以上)"
       },
       {
         "name": "元素",
-        "value": "套装、潮范、糖果",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "套装、潮范、糖果"
       },
       {
         "name": "上市年份季节",
-        "value": "2025年春季",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "2025年春季"
       },
       {
         "name": "平车针距12~14针/3cm",
-        "value": "否",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "否"
       },
       {
         "name": "货号",
-        "value": "MHJ-拼接袖莫代尔套装",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "MHJ-拼接袖莫代尔套装"
       },
       {
         "name": "适合季节",
-        "value": "春秋、夏季",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "春秋、夏季"
       },
       {
         "name": "图片实拍",
-        "value": "实拍无模特",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "实拍无模特"
       },
       {
         "name": "毛头/杂余线头是否修剪",
-        "value": "全部修剪干净",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "全部修剪干净"
       },
       {
         "name": "AQL抽检标准",
-        "value": "无",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "无"
       },
       {
         "name": "主要销售地区",
-        "value": "其他",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "其他"
       },
       {
         "name": "主要下游平台",
-        "value": "其他",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "其他"
       },
       {
         "name": "是否跨境出口专供货源",
-        "value": "否",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "否"
       },
       {
         "name": "有可授权的自有品牌",
-        "value": "是",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "是"
       },
       {
         "name": "是否IP授权",
-        "value": "1",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "1"
       },
       {
         "name": "内衣内裤类别",
-        "value": "长袖长裤",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "长袖长裤"
       },
       {
         "name": "领标",
-        "value": "有领标",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "有领标"
       },
       {
         "name": "货源类型",
-        "value": "源头工厂",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "源头工厂"
       },
       {
         "name": "吊牌",
-        "value": "无吊牌",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "无吊牌"
       },
       {
         "name": "袖型设计",
-        "value": "落肩袖",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "落肩袖"
       },
       {
         "name": "颜色",
-        "value": "粉色、黄色、灰色、蓝色、绿色、天蓝色",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "面料俗称",
-        "value": "珊瑚绒",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "下装长",
-        "value": "长款",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "衣门襟",
-        "value": "套头",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "平方克重",
-        "value": "300g/m²及以上",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "服务承诺",
-        "value": "假一赔十",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "粉色、黄色、灰色、蓝色、绿色、天蓝色"
       }
     ],
-    "price": "94.9",
-    "stock": "100",
-    "goodsId": "1023974144424",
-    "updatedAt": "2026-11-01T09:12:40.639Z",
-    "successCount": 34,
-    "attrs": [
-      {
-        "name": "材质成分",
-        "value": "聚酯纤维（涤纶）:100%",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "品牌",
-        "value": "其他",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "适用性别",
-        "value": "女",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "安全等级",
-        "value": "A类",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "面料名称",
-        "value": "莫代尔",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "适用年龄段",
-        "value": "中小童(3~8岁，100~140cm)",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "风格",
-        "value": "休闲",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "厚薄",
-        "value": "加厚",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "流行元素",
-        "value": "潮范",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "货源类别",
-        "value": "现货",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "上市时节",
-        "value": "2026年秋季",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "主面料成分含量",
-        "value": "95",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "产地",
-        "value": "浙江",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "图案",
-        "value": "纯色",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "商品货号",
-        "value": "童衣童缘&25102豹纹毛毛睡衣套装",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "功能",
-        "value": "吸湿排汗、其他",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "面料工艺",
-        "value": "柔软处理",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "适用季节",
-        "value": "冬季、秋季",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "是否库存",
-        "value": "否",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "适用场景",
-        "value": "居家",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "袖长",
-        "value": "长袖",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "领型",
-        "value": "立领",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "主面料成分",
-        "value": "粘纤",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "适合年龄段",
-        "value": "中大童(8岁以上，140cm以上)",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "元素",
-        "value": "套装、潮范、糖果",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "上市年份季节",
-        "value": "2025年春季",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "平车针距12~14针/3cm",
-        "value": "否",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "货号",
-        "value": "MHJ-拼接袖莫代尔套装",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "适合季节",
-        "value": "春秋、夏季",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "图片实拍",
-        "value": "实拍无模特",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "毛头/杂余线头是否修剪",
-        "value": "全部修剪干净",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "AQL抽检标准",
-        "value": "无",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "主要销售地区",
-        "value": "其他",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "主要下游平台",
-        "value": "其他",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "是否跨境出口专供货源",
-        "value": "否",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "有可授权的自有品牌",
-        "value": "是",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "是否IP授权",
-        "value": "1",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "内衣内裤类别",
-        "value": "长袖长裤",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "领标",
-        "value": "有领标",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "货源类型",
-        "value": "源头工厂",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "吊牌",
-        "value": "无吊牌",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "袖型设计",
-        "value": "落肩袖",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "颜色",
-        "value": "粉色、黄色、灰色、蓝色、绿色、天蓝色",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "面料俗称",
-        "value": "珊瑚绒",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "下装长",
-        "value": "长款",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "衣门襟",
-        "value": "套头",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "平方克重",
-        "value": "300g/m²及以上",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "服务承诺",
-        "value": "假一赔十",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      }
-    ],
-    "_schema": "v2",
-    "version": 2
+    "price": "44.9",
+    "stock": "300",
+    "goodsId": "1023092233824",
+    "updatedAt": "2026-10-30T08:34:57.522Z",
+    "successCount": 31
   },
   "纸杯": {
     "catId": "",
@@ -806,8 +201,7 @@
       {
         "user": "容量",
         "page": "容量",
-        "type": "",
-        "checkboxCount": 0
+        "type": ""
       }
     ],
     "requiredAttrs": [
@@ -817,11 +211,7 @@
       },
       {
         "name": "使用对象",
-        "value": "咖啡",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "咖啡"
       },
       {
         "name": "产地",
@@ -846,93 +236,13 @@
       {
         "name": "是否接触食品",
         "value": "是"
-      },
-      {
-        "name": "容量",
-        "value": "500"
       }
     ],
     "price": "19.9",
     "stock": "500",
-    "goodsId": "1024483997604",
-    "updatedAt": "2026-11-02T08:22:41.367Z",
-    "successCount": 52,
-    "attrs": [
-      {
-        "name": "适用场景",
-        "value": "家用",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "使用对象",
-        "value": "咖啡",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "产地",
-        "value": "中国大陆",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "材质",
-        "value": "纸",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "品牌",
-        "value": "无品牌/无注册商标",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "功能特点",
-        "value": "多层",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "是否支持定制",
-        "value": "不支持定制",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "是否接触食品",
-        "value": "是",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "容量",
-        "value": "500",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      }
-    ],
-    "_schema": "v2",
-    "version": 2
+    "goodsId": "1023381759702",
+    "updatedAt": "2026-10-30T20:39:56.952Z",
+    "successCount": 5
   },
   "手机壳": {
     "catId": "",
@@ -952,468 +262,65 @@
     "requiredAttrs": [
       {
         "name": "风格",
-        "value": "简约",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "简约"
       },
       {
         "name": "品牌",
-        "value": "无品牌/无注册商标",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "无品牌/无注册商标"
       },
       {
         "name": "适用品牌",
-        "value": "Apple/苹果",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "Apple/苹果"
       },
       {
         "name": "保护套质地",
-        "value": "其它",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "其它"
       },
       {
         "name": "流行元素",
-        "value": "气囊",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "气囊"
       },
       {
         "name": "包装方式",
-        "value": "简装",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "简装"
       },
       {
         "name": "适用型号",
-        "value": "iPhone 15",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "iPhone 15"
       }
     ],
     "price": "29.9",
     "stock": "300",
     "goodsId": "1023382208344",
     "updatedAt": "2026-10-30T20:46:40.606Z",
-    "successCount": 2,
-    "attrs": [
-      {
-        "name": "风格",
-        "value": "简约",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "品牌",
-        "value": "无品牌/无注册商标",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "适用品牌",
-        "value": "Apple/苹果",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "保护套质地",
-        "value": "其它",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "流行元素",
-        "value": "气囊",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "包装方式",
-        "value": "简装",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "适用型号",
-        "value": "iPhone 15",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      }
-    ],
-    "_schema": "v2",
-    "version": 2
+    "successCount": 2
   },
   "抱枕": {
-    "version": 2,
     "catId": "",
     "catePath": "",
     "dims": [
       {
         "user": "尺寸",
         "page": "尺寸",
-        "type": "",
-        "checkboxCount": 0
-      }
-    ],
-    "attrs": [
-      {
-        "name": "适用场景",
-        "value": "客厅",
-        "required": false,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "面料材质",
-        "value": "棉",
-        "required": false,
-        "kind": "select",
-        "options": [
-          "棉",
-          "麻",
-          "蚕丝",
-          "其它",
-          "亚麻",
-          "帆布",
-          "莫代尔纤维",
-          "竹浆纤维",
-          "无纺布",
-          "皮革"
-        ],
-        "optionCount": 10
-      },
-      {
-        "name": "填充物净重",
-        "value": "300g",
-        "required": false,
-        "kind": "select",
-        "options": [
-          "300g以下",
-          "300g（含）-400g（不含）",
-          "400g（含）-500g（不含）",
-          "500g（含）-600g（不含）",
-          "600g（含）-700g（不含）",
-          "700g（含）-800g（不含）",
-          "800g（含）-900g（不含）",
-          "900g（含）-1000g（不含）",
-          "1000g（含）-1100g（不含）",
-          "1100g（含）-1200g（不含）"
-        ],
-        "optionCount": 10
-      },
-      {
-        "name": "图案",
-        "value": "纯色",
-        "required": true,
-        "kind": "select",
-        "options": [
-          "条纹",
-          "格子",
-          "卡通动漫",
-          "纯色",
-          "豹纹",
-          "几何图案",
-          "人物",
-          "植物花卉",
-          "骷髅/骨头",
-          "风景",
-          "字母数字",
-          "心形",
-          "迷彩",
-          "动物图案",
-          "喜字",
-          "生肖"
-        ],
-        "optionCount": 16
-      },
-      {
-        "name": "产地",
-        "value": "中国大陆",
-        "required": false,
-        "kind": "select",
-        "options": [
-          "中国大陆",
-          "其他海外地区",
-          "日本",
-          "欧洲",
-          "韩国",
-          "美国",
-          "港澳台",
-          "东南亚"
-        ],
-        "optionCount": 8
-      },
-      {
-        "name": "适用性别",
-        "value": "通用",
-        "required": false,
-        "kind": "select",
-        "options": [
-          "通用",
-          "男",
-          "女"
-        ],
-        "optionCount": 3
-      },
-      {
-        "name": "包装方式",
-        "value": "简装",
-        "required": false,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "品牌",
-        "value": "无品牌/无注册商标",
-        "required": false,
-        "kind": "select",
-        "options": [
-          "无品牌/无注册商标",
-          "THEBEAST/野兽派",
-          "Uchino/内野",
-          "NITORI/宜得利家居",
-          "Brother/兄弟",
-          "Zara Home",
-          "MUJI/无印良品",
-          "VERSACE/范思哲",
-          "Mtg",
-          "SINGER/胜家"
-        ],
-        "optionCount": 10
-      },
-      {
-        "name": "产品类型",
-        "value": "午睡枕",
-        "required": false,
-        "kind": "select",
-        "options": [
-          "普通抱枕",
-          "玩偶抱枕",
-          "午睡枕",
-          "抱枕芯",
-          "抱枕被",
-          "抱枕套",
-          "抱睡枕",
-          "暖手枕"
-        ],
-        "optionCount": 8
-      },
-      {
-        "name": "填充物",
-        "value": "PP棉",
-        "required": false,
-        "kind": "select",
-        "options": [
-          "海绵",
-          "记忆棉",
-          "羽绒",
-          "竹炭",
-          "其他",
-          "蚕丝",
-          "PP棉",
-          "冰晶",
-          "棉花",
-          "涤纶（聚酯纤维）"
-        ],
-        "optionCount": 10
-      },
-      {
-        "name": "风格",
-        "value": "简约现代",
-        "required": false,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "形状",
-        "value": "方形",
-        "required": false,
-        "kind": "select",
-        "options": [
-          "心形",
-          "方形",
-          "异形",
-          "长条形",
-          "骨头",
-          "新月形",
-          "花形",
-          "球形",
-          "皇冠",
-          "蝴蝶结"
-        ],
-        "optionCount": 10
-      },
-      {
-        "name": "工艺",
-        "value": "印花",
-        "required": false,
-        "kind": "select",
-        "options": [
-          "提花",
-          "刺绣",
-          "印花",
-          "平纹",
-          "贡缎",
-          "斜纹",
-          "磨毛",
-          "水洗",
-          "丝光",
-          "色织"
-        ],
-        "optionCount": 10
-      },
-      {
-        "name": "安全等级",
-        "value": "B类",
-        "required": false,
-        "kind": "select",
-        "options": [
-          "A类",
-          "B类",
-          "C类"
-        ],
-        "optionCount": 3
-      },
-      {
-        "name": "适用季节",
-        "value": "不限季节",
-        "required": false,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "平方克重",
-        "value": "110g/m²",
-        "required": false,
-        "kind": "select",
-        "options": [
-          "300g/m²（含）—310g/m²（不含）",
-          "310g/m²（含）—320g/m²（不含）",
-          "280g/m²（含）—290g/m²（不含）",
-          "290g/m²（含）—300g/m²（不含）",
-          "260g/m²（含）—270g/m²（不含）",
-          "270g/m²（含）—280g/m²（不含）",
-          "240g/m²（含）—250g/m²（不含）",
-          "250g/m²（含）—260g/m²（不含）",
-          "220g/m²（含）—230g/m²（不含）",
-          "170g/m²（含）—180g/m²（不含）"
-        ],
-        "optionCount": 10
-      },
-      {
-        "name": "尺寸",
-        "value": "50x50cm",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "type": ""
       }
     ],
     "requiredAttrs": [
       {
         "name": "适用场景",
-        "value": "客厅",
-        "required": false,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "客厅"
       },
       {
         "name": "面料材质",
-        "value": "棉",
-        "required": false,
-        "kind": "select",
-        "options": [
-          "棉",
-          "麻",
-          "蚕丝",
-          "其它",
-          "亚麻",
-          "帆布",
-          "莫代尔纤维",
-          "竹浆纤维",
-          "无纺布",
-          "皮革"
-        ],
-        "optionCount": 10
+        "value": "棉"
       },
       {
         "name": "填充物净重",
-        "value": "300g",
-        "required": false,
-        "kind": "select",
-        "options": [
-          "300g以下",
-          "300g（含）-400g（不含）",
-          "400g（含）-500g（不含）",
-          "500g（含）-600g（不含）",
-          "600g（含）-700g（不含）",
-          "700g（含）-800g（不含）",
-          "800g（含）-900g（不含）",
-          "900g（含）-1000g（不含）",
-          "1000g（含）-1100g（不含）",
-          "1100g（含）-1200g（不含）"
-        ],
-        "optionCount": 10
+        "value": "300g"
       },
       {
         "name": "图案",
-        "value": "纯色",
-        "required": true,
-        "kind": "select",
-        "options": [
-          "条纹",
-          "格子",
-          "卡通动漫",
-          "纯色",
-          "豹纹",
-          "几何图案",
-          "人物",
-          "植物花卉",
-          "骷髅/骨头",
-          "风景",
-          "字母数字",
-          "心形",
-          "迷彩",
-          "动物图案",
-          "喜字",
-          "生肖"
-        ],
-        "optionCount": 16
+        "value": "纯色"
       },
       {
         "name": "产地",
@@ -1421,23 +328,11 @@
       },
       {
         "name": "适用性别",
-        "value": "通用",
-        "required": false,
-        "kind": "select",
-        "options": [
-          "通用",
-          "男",
-          "女"
-        ],
-        "optionCount": 3
+        "value": "通用"
       },
       {
         "name": "包装方式",
-        "value": "简装",
-        "required": false,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "简装"
       },
       {
         "name": "品牌",
@@ -1445,156 +340,42 @@
       },
       {
         "name": "产品类型",
-        "value": "午睡枕",
-        "required": false,
-        "kind": "select",
-        "options": [
-          "普通抱枕",
-          "玩偶抱枕",
-          "午睡枕",
-          "抱枕芯",
-          "抱枕被",
-          "抱枕套",
-          "抱睡枕",
-          "暖手枕"
-        ],
-        "optionCount": 8
+        "value": "午睡枕"
       },
       {
         "name": "填充物",
-        "value": "PP棉",
-        "required": false,
-        "kind": "select",
-        "options": [
-          "海绵",
-          "记忆棉",
-          "羽绒",
-          "竹炭",
-          "其他",
-          "蚕丝",
-          "PP棉",
-          "冰晶",
-          "棉花",
-          "涤纶（聚酯纤维）"
-        ],
-        "optionCount": 10
+        "value": "其他"
       },
       {
         "name": "风格",
-        "value": "简约现代",
-        "required": false,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "简约现代"
       },
       {
         "name": "形状",
-        "value": "方形",
-        "required": false,
-        "kind": "select",
-        "options": [
-          "心形",
-          "方形",
-          "异形",
-          "长条形",
-          "骨头",
-          "新月形",
-          "花形",
-          "球形",
-          "皇冠",
-          "蝴蝶结"
-        ],
-        "optionCount": 10
+        "value": "方形"
       },
       {
         "name": "工艺",
-        "value": "印花",
-        "required": false,
-        "kind": "select",
-        "options": [
-          "提花",
-          "刺绣",
-          "印花",
-          "平纹",
-          "贡缎",
-          "斜纹",
-          "磨毛",
-          "水洗",
-          "丝光",
-          "色织"
-        ],
-        "optionCount": 10
+        "value": "平纹"
       },
       {
         "name": "安全等级",
-        "value": "B类",
-        "required": false,
-        "kind": "select",
-        "options": [
-          "A类",
-          "B类",
-          "C类"
-        ],
-        "optionCount": 3
+        "value": "B类"
       },
       {
         "name": "适用季节",
-        "value": "不限季节",
-        "required": false,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "不限季节"
       },
       {
         "name": "平方克重",
-        "value": "110g/m²",
-        "required": false,
-        "kind": "select",
-        "options": [
-          "300g/m²（含）—310g/m²（不含）",
-          "310g/m²（含）—320g/m²（不含）",
-          "280g/m²（含）—290g/m²（不含）",
-          "290g/m²（含）—300g/m²（不含）",
-          "260g/m²（含）—270g/m²（不含）",
-          "270g/m²（含）—280g/m²（不含）",
-          "240g/m²（含）—250g/m²（不含）",
-          "250g/m²（含）—260g/m²（不含）",
-          "220g/m²（含）—230g/m²（不含）",
-          "170g/m²（含）—180g/m²（不含）"
-        ],
-        "optionCount": 10
-      },
-      {
-        "name": "尺寸",
-        "value": "50x50"
-      },
-      {
-        "name": "功能特点",
-        "value": "多层"
-      },
-      {
-        "name": "是否支持定制",
-        "value": "不支持定制"
-      },
-      {
-        "name": "材质",
-        "value": "塑料"
-      },
-      {
-        "name": "使用对象",
-        "value": "茶水"
-      },
-      {
-        "name": "是否接触食品",
-        "value": "否"
+        "value": "120g/m²"
       }
     ],
     "price": "39.9",
     "stock": "200",
-    "goodsId": "1024331488131",
-    "updatedAt": "2026-11-02T07:39:14.623Z",
-    "successCount": 52,
-    "_schema": "v2"
+    "goodsId": "1023385539665",
+    "updatedAt": "2026-10-30T21:05:11.364Z",
+    "successCount": 2
   },
   "毛巾": {
     "catId": "205041314615",
@@ -1616,788 +397,184 @@
     "requiredAttrs": [
       {
         "name": "材质",
-        "value": "棉",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "棉"
       },
       {
         "name": "品牌",
-        "value": "无品牌/无注册商标",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "无品牌/无注册商标"
       },
       {
         "name": "成分含量",
-        "value": "100%",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "100%"
       },
       {
         "name": "产品类型",
-        "value": "可洗式",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "可洗式"
       },
       {
         "name": "风格",
-        "value": "简约",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "简约"
       },
       {
         "name": "适用场景",
-        "value": "家用",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "家用"
       },
       {
         "name": "安全等级",
-        "value": "B类",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "B类"
       },
       {
         "name": "工艺",
-        "value": "无捻纱",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "无捻纱"
       },
       {
         "name": "质检标准",
-        "value": "优等品",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "优等品"
       },
       {
         "name": "适用人群",
-        "value": "通用",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "通用"
       },
       {
         "name": "抗菌等级",
-        "value": "1A抗菌",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "1A抗菌"
+      },
+      {
+        "name": "尺寸",
+        "value": "80x160cm"
+      },
+      {
+        "name": "颜色",
+        "value": "蓝色"
       },
       {
         "name": "功能",
-        "value": "透气",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "透气"
       },
       {
         "name": "流行元素",
-        "value": "纯色",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "纯色"
       },
       {
-        "name": "材质成分",
-        "value": "棉",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "产地",
-        "value": "中国大陆",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "功能特点",
-        "value": "多层",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "name": "使用对象",
+        "value": "纸巾"
       }
     ],
     "price": "",
     "stock": "100",
-    "updatedAt": "2026-11-02T08:21:51.637Z",
-    "successCount": 17,
-    "goodsId": "1023496708207",
-    "attrs": [
-      {
-        "name": "材质",
-        "value": "棉",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "品牌",
-        "value": "无品牌/无注册商标",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "成分含量",
-        "value": "100%",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "产品类型",
-        "value": "可洗式",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "风格",
-        "value": "简约",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "适用场景",
-        "value": "家用",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "安全等级",
-        "value": "B类",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "工艺",
-        "value": "无捻纱",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "质检标准",
-        "value": "优等品",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "适用人群",
-        "value": "通用",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "抗菌等级",
-        "value": "1A抗菌",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "功能",
-        "value": "透气",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "流行元素",
-        "value": "纯色",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "材质成分",
-        "value": "棉",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "产地",
-        "value": "中国大陆",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "功能特点",
-        "value": "多层",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      }
-    ],
-    "_schema": "v2",
-    "version": 2
+    "updatedAt": "2026-10-31T08:39:04.173Z",
+    "successCount": 15,
+    "goodsId": ""
   },
   "水杯": {
-    "catId": "",
+    "catId": "205049623165",
     "catePath": "",
     "dims": [
       {
         "user": "容量",
         "page": "容量",
-        "type": "",
+        "type": "custom-input",
         "checkboxCount": 0
       }
     ],
     "requiredAttrs": [
       {
         "name": "产地",
-        "value": "中国大陆",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "中国大陆"
       },
       {
         "name": "品牌",
-        "value": "无品牌/无注册商标",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "无品牌/无注册商标"
       },
       {
         "name": "外身材质",
-        "value": "201不锈钢",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "201不锈钢"
       },
       {
         "name": "内胆材质种类",
-        "value": "201不锈钢",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "201不锈钢"
       },
       {
         "name": "保温时长",
-        "value": "6h以下",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "6h以下"
       },
       {
         "name": "风格",
-        "value": "简约现代",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "运动"
       },
       {
         "name": "是否带茶隔",
-        "value": "不带茶隔",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "不带茶隔"
       },
       {
         "name": "杯盖款式",
-        "value": "弹跳式",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "弹跳式"
       },
       {
         "name": "杯子种类",
-        "value": "大肚杯",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "大肚杯"
       },
       {
         "name": "是否显示温度",
-        "value": "不显示温度",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "不显示温度"
       },
       {
         "name": "适用场景",
-        "value": "车载",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "运动"
       },
       {
         "name": "附加功能",
-        "value": "防滑",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "防滑"
       },
       {
         "name": "包装方式",
-        "value": "普通盒装",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "普通盒装"
       },
       {
         "name": "服务承诺",
-        "value": "假一赔十",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "假一赔十"
       },
       {
         "name": "容量",
-        "value": "1000ml",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "1000ml"
       },
       {
         "name": "材质",
-        "value": "皮革",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "皮革"
       },
       {
         "name": "功能",
-        "value": "可折叠",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "可折叠"
       },
       {
         "name": "流行元素",
-        "value": "透明",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "透明"
       },
       {
         "name": "使用对象",
-        "value": "碗筷",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "产品类型",
-        "value": "普通抱枕",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "面料材质",
-        "value": "其它",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "填充物净重",
-        "value": "300g以下",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "形状",
-        "value": "异形",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "图案",
-        "value": "纯色",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "工艺",
-        "value": "印花",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "安全等级",
-        "value": "B类",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "适用性别",
-        "value": "通用",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "适用季节",
-        "value": "不限季节",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "平方克重",
-        "value": "70g/m²以下",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "填充物",
-        "value": "其他",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "碗筷"
       }
     ],
     "price": "",
     "stock": "100",
-    "updatedAt": "2026-11-02T00:54:53.931Z",
-    "successCount": 41,
-    "goodsId": "1024321798961",
-    "attrs": [
-      {
-        "name": "产地",
-        "value": "中国大陆",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "品牌",
-        "value": "无品牌/无注册商标",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "外身材质",
-        "value": "201不锈钢",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "内胆材质种类",
-        "value": "201不锈钢",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "保温时长",
-        "value": "6h以下",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "风格",
-        "value": "简约现代",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "是否带茶隔",
-        "value": "不带茶隔",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "杯盖款式",
-        "value": "弹跳式",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "杯子种类",
-        "value": "大肚杯",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "是否显示温度",
-        "value": "不显示温度",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "适用场景",
-        "value": "车载",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "附加功能",
-        "value": "防滑",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "包装方式",
-        "value": "普通盒装",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "服务承诺",
-        "value": "假一赔十",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "容量",
-        "value": "1000ml",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "材质",
-        "value": "皮革",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "功能",
-        "value": "可折叠",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "流行元素",
-        "value": "透明",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "使用对象",
-        "value": "碗筷",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "产品类型",
-        "value": "普通抱枕",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "面料材质",
-        "value": "其它",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "填充物净重",
-        "value": "300g以下",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "形状",
-        "value": "异形",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "图案",
-        "value": "纯色",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "工艺",
-        "value": "印花",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "安全等级",
-        "value": "B类",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "适用性别",
-        "value": "通用",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "适用季节",
-        "value": "不限季节",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "平方克重",
-        "value": "70g/m²以下",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "填充物",
-        "value": "其他",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      }
-    ],
-    "_schema": "v2",
-    "version": 2
+    "updatedAt": "2026-10-31T08:36:44.503Z",
+    "successCount": 2,
+    "goodsId": ""
   },
   "收纳盒": {
-    "catId": "",
+    "catId": "205049841846",
     "catePath": "",
     "dims": [
       {
         "user": "尺寸",
         "page": "尺寸",
-        "type": "",
+        "type": "custom-input",
         "checkboxCount": 0
       },
       {
         "user": "颜色",
         "page": "颜色",
-        "type": "",
+        "type": "custom-input",
         "checkboxCount": 0
       }
     ],
@@ -2408,11 +585,7 @@
       },
       {
         "name": "功能",
-        "value": "分格",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "分格"
       },
       {
         "name": "流行元素",
@@ -2428,11 +601,7 @@
       },
       {
         "name": "服务承诺",
-        "value": "假一赔十",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
+        "value": "假一赔十"
       },
       {
         "name": "材质",
@@ -2445,312 +614,12 @@
       {
         "name": "颜色",
         "value": "灰色"
-      },
-      {
-        "name": "产地",
-        "value": "中国大陆",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "产品类型",
-        "value": "普通抱枕",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "面料材质",
-        "value": "其它",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "填充物",
-        "value": "其他",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "填充物净重",
-        "value": "300g以下",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "风格",
-        "value": "简约现代",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "形状",
-        "value": "方形",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "图案",
-        "value": "纯色",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "工艺",
-        "value": "平纹",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "安全等级",
-        "value": "C类",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "适用性别",
-        "value": "通用",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "适用季节",
-        "value": "不限季节",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "包装方式",
-        "value": "普通袋装",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "平方克重",
-        "value": "70g/m²以下",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
       }
     ],
     "price": "",
     "stock": "100",
-    "updatedAt": "2026-11-02T08:21:31.965Z",
-    "successCount": 47,
-    "goodsId": "1024482453070",
-    "attrs": [
-      {
-        "name": "品牌",
-        "value": "无品牌/无注册商标",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "功能",
-        "value": "分格",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "流行元素",
-        "value": "透明",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "使用对象",
-        "value": "文具",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "适用场景",
-        "value": "办公室",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "服务承诺",
-        "value": "假一赔十",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "材质",
-        "value": "皮革",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "尺寸",
-        "value": "大号",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "颜色",
-        "value": "灰色",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "产地",
-        "value": "中国大陆",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "产品类型",
-        "value": "普通抱枕",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "面料材质",
-        "value": "其它",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "填充物",
-        "value": "其他",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "填充物净重",
-        "value": "300g以下",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "风格",
-        "value": "简约现代",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "形状",
-        "value": "方形",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "图案",
-        "value": "纯色",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "工艺",
-        "value": "平纹",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "安全等级",
-        "value": "C类",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "适用性别",
-        "value": "通用",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "适用季节",
-        "value": "不限季节",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "包装方式",
-        "value": "普通袋装",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      },
-      {
-        "name": "平方克重",
-        "value": "70g/m²以下",
-        "required": true,
-        "kind": "select",
-        "options": [],
-        "optionCount": 0
-      }
-    ],
-    "_schema": "v2",
-    "version": 2
+    "updatedAt": "2026-10-31T08:37:28.638Z",
+    "successCount": 4,
+    "goodsId": ""
   }
 }

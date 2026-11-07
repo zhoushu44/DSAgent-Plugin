@@ -50,20 +50,88 @@ node scripts/uni-prom.mjs --mode awemes                            # 已授权�
 node scripts/uni-prom.mjs --mode perm                              # 写权限自检
 node scripts/uni-prom.mjs --mode material-report                   # 素材分析报表
 node scripts/uni-prom.mjs --mode material-report --material_type 3 --limit 20
+
+# ── 利润与涨价建议（只读，纯本地计算，不开浏览器、零平台副作用）──
+node scripts/uni-prom.mjs --mode margin --price 39.9 --cost 33
+node scripts/uni-prom.mjs --mode margin --price 39.9 --cost 33 --net-roi 2.8
 ```
+
+### `margin` 模式：什么时候用、怎么算
+
+规则见 [_shared/margin-price-advice.md](../_shared/margin-price-advice.md)，计算器
+`_shared/margin_price.mjs`，与 `pdd-promo` / `taobao-promo` **三平台同口径**。
+
+**触发时机（商品后期 + 在做提高利润 / 优化）**：
+
+| # | 条件 | 判定 |
+|---|---|---|
+| ① | 商品后期 | 连续 ≥7 天有消耗且累计订单 ≥30（或日均 ≥3 单） |
+| ② | 优化诉求 | 用户在提利润 / 优化价格 / 优化投产（`--want_profit false` 可关） |
+| ③ | 非商品承接问题 | 转化率、素材质量无异常 |
+
+> ⚠️ **利润低不是门槛，只决定优先级**：🔴 高 = 毛利率 ≤20% 或 净ROI < 保本线；
+> 🟡 常规 = 利润尚可，但**安全垫更小（掉量容忍度低）**，要更小步、观察更密。
+
+**计算口径**（`m` = 毛利率，`k` = 涨价幅度）：
+
+```
+利润变化倍数     = 1 + k/m
+等效营业额增幅   = k/m
+最多可掉销量     = k/(m+k)
+保本投产比       = 1/m          ← 注意：不是 1/(1-m)（那是成本加成率）
+```
+
+**实跑样例**（单价 ¥39.9、成本 ¥33 → 毛利率 17.29%）：
+
+```
+【利润与涨价建议】
+
+触发条件自检：
+  商品后期：是
+  利润低：是（毛利率 17.29% ≤ 20%）
+  商品侧异常阻断：否
+  → ✅ 满足触发条件，可给涨价建议
+
+建议动作：先涨 +1%~+2% 小步试涨，观察 3~5 个自然日
+观察指标：转化率、净ROI、订单数
+回滚条件：掉量 > 该幅度对应的安全垫 → 调回原价
+假设：单位成本不变、成本随销量等比例变动；掉量还受客户流失与竞品比价影响
+
+单价 ¥39.9｜单位成本 ¥33
+毛利率 17.29%｜单件利润 ¥6.9｜保本投产比 5.78
+
+涨价幅度   新单价   单件利润   利润变化   等效营业额/销量   最多可掉销量
++1%       ¥40.3     ¥7.3      +5.8%     +5.8%           5.5%
++2%       ¥40.7     ¥7.7      +11.6%    +11.6%          10.4%
++3%       ¥41.1     ¥8.1      +17.3%    +17.3%          14.8%
++5%       ¥41.9     ¥8.9      +28.9%    +28.9%          22.4%
+```
+
+**三条边界**：
+
+1. **单位成本平台取不到**（`douyin-shop` 只有售价），必须商家提供；缺成本时只提示去取数，**不得**默认毛利率下结论。
+2. `margin` 模式在账号校验后、浏览器启动前就返回，**不占 profile、不开浏览器、无任何平台副作用**。
+3. 素材维度问题走 `douyin-material-report`；计划启停走 `douyin-plan-ops`；本模式只回答「该不该动价格」。
 
 ### 参数
 
 | 参数 | 说明 |
 |---|---|
-| `--mode` | `overview`（默认）/ `report` / `plans` / `materials` / `awemes` / `perm` / `material-report` |
+| `--mode` | `overview`（默认）/ `report` / `plans` / `materials` / `awemes` / `perm` / `material-report` / `margin` |
 | `--start` / `--end` | `YYYY-MM-DD`，默认今天 |
 | `--mar_goal` | `1`=推商品（默认）/ `2`=推直播间 |
 | `--material_type` | material-report 专用：`3`=视频素材（默认）/ `1`=直播间画面 / `2`=图片 / `4`=图文 / `5`=标题 |
 | `--dimensions` | report 维度，逗号分隔，如 `stat_time_day,marketing_goal` |
 | `--metrics` | report 指标，逗号分隔 |
-| `--offset` | material-report 分页偏移，默认 0 |
+| `--offset` | material-report 专用分页偏移，默认 0 |
 | `--limit` | 条数上限，默认 20，最大 100 |
+| `--price` | **margin 专用**：商品单价（元，必填） |
+| `--cost` | **margin 专用**：单位成本（元，必填，商家提供） |
+| `--net-roi` | margin 专用：当前净ROI，用于和保本线 `1/毛利率` 对比 |
+| `--steps` | margin 专用：自定义涨价幅度，逗号分隔，如 `0.01,0.02,0.05` |
+| `--days` / `--orders` | margin 专用：商品已投产天数 / 累计订单（触发条件自检） |
+| `--error-label` | margin 专用：`true` 表示有异常标签（命中则不触发涨价建议） |
+| `--want-profit` | margin 专用：`false` 关闭（默认 true，即后期 + 优化诉求即触发） |
 | `--account` | 账号 shopKey（可选） |
 
 ## 能力清单
@@ -77,6 +145,7 @@ node scripts/uni-prom.mjs --mode material-report --material_type 3 --limit 20
 | `awemes` | 已授权抖音号列表 |
 | `perm` | 写权限自检（能否上传/启停/新建） |
 | `material-report` | 素材分析报表（数据-全域数据-素材数据-视频素材） |
+| `margin` | ★ 利润率 → 涨价安全垫（纯本地计算，不开浏览器、零副作用，三平台同口径） |
 
 ## 已知踩坑（2026-10-24 实测）
 

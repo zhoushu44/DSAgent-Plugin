@@ -14,6 +14,8 @@
  *   48143  非法请求        → api_error       （依赖页面 SDK 上下文）
  *   2000000 账号不适合发布  → no_permission   （视频域）
  *   3000000 参数/灰度错误   → api_error
+ *   54003  安全验证未通过  → security_blocked（停号等待，重扫无效）
+ *   310120000 页面上下文失效 → reload_required（reload，不跳登录）
  *   HTTP 430 网关级频率惩罚 → rate_limit
  *
  * ══════════════════════════════════════════════════════════════════
@@ -35,6 +37,8 @@ const KIND_MAP = {
   exception: 'exception',
   config_error: 'api_error',
   not_bound: 'not_bound',
+  reload_required: 'reload_required',
+  security_blocked: 'security_blocked',
 }
 
 /** 官方错误码 → failureKind */
@@ -47,6 +51,19 @@ const EC_MAP = {
   48143: 'api_error',
   2000000: 'no_permission',
   3000000: 'api_error',
+  // ★ 2026-10-27 补：100001（活动写操作「请2小时后重试」）原不在表内，
+  //   会走 kind 兜底 → 归一结果不稳定。它与 40002 同属平台侧限流，
+  //   在 pdd-risk.mjs 的 RISK_CODES 里也是 2 小时冷却，故显式映射为 rate_limit。
+  100001: 'rate_limit',
+  // ★ 2026-11-04 新增：403 + 310120000 = 页面上下文失效（官方语义是 reload），
+  //   不是登录失效。证据：推广域 msfe-9d32834f5061ec2a.js@529922/@531800。
+  310120000: 'reload_required',
+  // ★ 2026-11-05 新增：54003 = 安全验证未通过，暂时无法登录。
+  //   它与 43001/40001 的关键区别：**重扫码无效**，只能等。
+  //   若不单独归类，会被当成普通 api_error 吞掉 → 上层立刻重试 → 进一步加重。
+  //   ⚠️ 语义来自需求方描述，本项目日志中尚无该码的真实样本（grep 全项目 0 次），
+  //     故 failureKind 用独立的 'security_blocked'，处理策略=停号等待，不做自动重试。
+  54003: 'security_blocked',
 }
 
 /** 官方错误码 → 人类可读说明 */
@@ -61,6 +78,10 @@ const EC_HINT = {
   ],
   40001: ['40001 = 未登录。', '请到「账号连接」重新扫码登录。'],
   40010: ['40010 = 无权限。', '可能是账号类型不对（需诚信通/实力商家），或换主店号。'],
+  100001: [
+    '100001 = 活动写操作频控（请 2 小时后重试）。',
+    '官方实测此码无法本地修复，只能等待或换时间段。',
+  ],
   40002: [
     '40002 = 高频限流。',
     '官方实测此码无法本地修复，只能等待或降级（如搜索接口 → feed）。',
@@ -75,6 +96,16 @@ const EC_HINT = {
     '这是权限问题不是技术问题。用 --mode permission 查带货/内容权限。',
   ],
   3000000: ['3000000 = 参数错误或灰度未开放。'],
+  54003: [
+    '54003 = 安全验证未通过，暂时无法登录。',
+    '⚠️ 这不是普通掉登录：**重新扫码也登不上**，只能等平台解除。',
+    '正确处置：立即停用该账号（建议 24h），不要重试、不要重扫、不要换 profile 硬顶。',
+    '反复尝试会按累计行为分延长封禁。',
+  ],
+  310120000: [
+    '310120000 = 页面上下文已失效（不是登录失效）。',
+    '官方处置是 window.location.reload()，请重开/刷新页面后重试；不要跳登录页。',
+  ],
 }
 
 /**
@@ -187,15 +218,56 @@ export async function recordToAntiban(shopKey, ec, kind) {
   let mod
   try {
     mod = await import('./pdd-antiban.mjs')
-  } catch { return null }
+  } catch (e) {
+    // ★ 2026-10-27 修：原为 catch { return null } 静默降级，
+    //   antiban 模块加载失败 → 健康分/冷却全不记，无人知晓。
+    console.error(`[pdd-error] ⚠ 账号健康分模块加载失败，本次不记健康分：${String(e && e.message || e).slice(0, 120)}`)
+    return null
+  }
+
+  // ★ 2026-10-27 补（第三十一轮健康分量化发现）：kind 参数存在**两套体系**，
+  //   原实现只认 pdd-client/pdd-http 那套（captcha / session_expired / rate_limit /
+  //   blocked / api_error...），不认 pdd-error 自己的 failureKind 体系
+  //   （risk_control / token_expired / rate_limit / no_permission / api_error）。
+  //   后果：`recordToAntiban(k, null, 'risk_control')` 会**什么都不记** ——
+  //   命中风控却不扣健康分、不进冷却，静默丢失（"盲目重试"的温床）。
+  //   现有调用方都传的是能匹配的值，故尚未暴露；但这是健壮性缺口，
+  //   新增调用方极易踩。这里把两套体系都归一。
+  const KIND_ALIAS = {
+    // failureKind 体系 → antiban kind
+    risk_control: 'captcha',
+    token_expired: 'session',
+    rate_limit: 'rate_limit',
+    no_permission: 'other',
+    api_error: 'other',
+    not_bound: 'session',
+    need_account_choice: 'other',
+    ok: 'ok',
+    // 已在本体系的原样透传
+    captcha: 'captcha',
+    session_expired: 'session',
+    login_needed: 'session',
+    blocked: 'rate_limit',
+    network: 'other',
+    unknown: 'other',
+  }
+  const k = KIND_ALIAS[kind] ?? (kind === 'ok' ? 'ok' : null)
 
   try {
-    if (ec === 54001 || kind === 'captcha') mod.recordResult(shopKey, 'captcha')
-    else if (ec === 43001 || ec === 40001 || kind === 'session_expired' || kind === 'login_needed') mod.recordResult(shopKey, 'session')
-    else if (ec === 40002 || kind === 'rate_limit' || kind === 'blocked') mod.recordResult(shopKey, 'rate_limit')
+    if (ec === 54001 || k === 'captcha') mod.recordResult(shopKey, 'captcha')
+    else if (ec === 43001 || ec === 40001 || k === 'session') mod.recordResult(shopKey, 'session')
+    else if (ec === 40002 || k === 'rate_limit') mod.recordResult(shopKey, 'rate_limit')
+    else if (k === 'other') mod.recordResult(shopKey, 'other')
     else if (ec != null && ec !== 1000000) mod.recordResult(shopKey, 'other')
-    else if (kind === 'ok') mod.recordResult(shopKey, 'ok')
-  } catch { /* ignore */ }
+    else if (k === 'ok') mod.recordResult(shopKey, 'ok')
+    // ★ 2026-10-27 补：k 为 null（kind 无法归一）时显式告警，
+    //   不再静默跳过 —— 否则"命中风控却没记账"这类问题无人知晓。
+    else if (kind != null && kind !== 'ok') {
+      console.error(`[pdd-error] ⚠ 无法归一的 kind：${JSON.stringify(kind)}（ec=${ec}），未记健康分`)
+    }
+  } catch (e) {
+    console.error(`[pdd-error] ⚠ 记录风控健康分失败：${String(e && e.message || e).slice(0, 120)}`)
+  }
   return mod
 }
 
@@ -208,7 +280,13 @@ export async function recordToAntiban(shopKey, ec, kind) {
  */
 export async function checkAccountUsable(shopKey, label = '') {
   let mod
-  try { mod = await import('./pdd-antiban.mjs') } catch { return { blocked: false } }
+  try { mod = await import('./pdd-antiban.mjs') }
+  catch (e) {
+    // ★ 2026-10-27 修：原为 catch { return { blocked: false } } 静默放行，
+    //   模块加载失败 → 冷却中/健康分过低的账号会被放过去打 → 盲打。
+    console.error(`[pdd-error] ⚠ 账号健康分模块加载失败，跳过可用性检查（有盲打风险）：${String(e && e.message || e).slice(0, 120)}`)
+    return { blocked: false }
+  }
 
   try {
     const st = mod.canUse(shopKey)

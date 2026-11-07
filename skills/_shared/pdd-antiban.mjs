@@ -156,10 +156,21 @@ export function recordResult(shopKey, kind, detail = {}) {
     acct.health = Math.max(0, acct.health + HEALTH.captchaHit)
     acct.cooldownUntil = now + THROTTLE.cooldownAfterRiskMs
     acct.cooldownReason = `54001 风控（今日第 ${acct.captchaCount} 次）`
-    // 今日 ≥3 次 → 长冷却
+    // ★ 2026-10-27 修（第三十轮量化测量发现）：原为「今日 ≥3 次 → 硬跳 2 小时」，
+    //   与 pdd-risk.mjs 的「24h 内指数退避 ×1/×2/×4/×8」**策略不一致**。
+    //   两套规则并存时谁后写谁生效 → 冷却时长不可预测，
+    //   这是第 1 轮「四套错误码矛盾」的残留。
+    //
+    //   统一为**指数退避**（与 pdd-risk.mjs 一致，pdd-risk 是实际生效的那套）：
+    //     第 1 次 ×1 = 60s，第 2 次 ×2 = 120s，第 3 次 ×4 = 240s，第 4 次起 ×8 = 480s
+    //   比硬跳 2 小时更平滑（一次误判不会冻结账号半天），且仍随累计次数加严。
+    //   保留 dailyCaptchaThreshold 常量供健康分/告警判断用，不再用于硬跳时长。
+    const mult = Math.min(8, Math.pow(2, acct.captchaCount - 1))
+    acct.cooldownUntil = now + THROTTLE.cooldownAfterRiskMs * mult
+    acct.cooldownReason = `54001 风控（今日第 ${acct.captchaCount} 次，退避 ×${mult}）`
     if (acct.captchaCount >= HEALTH.dailyCaptchaThreshold) {
-      acct.cooldownUntil = now + THROTTLE.cooldownLongMs
-      acct.cooldownReason = `今日 54001 已达 ${acct.captchaCount} 次，冷却 2 小时`
+      // 仅作告警标记，不再改冷却时长（时长已由退避倍数决定）
+      acct.heavyRiskToday = true
     }
   } else if (kind === 'session') {
     acct.stats.session++
@@ -227,12 +238,14 @@ export async function backoffWait(retry, baseMs = 1800) {
 }
 
 /** 可读剩余时间 */
-export function fmtRemain(ms) {
-  const m = Math.ceil(ms / 60000)
-  if (m < 60) return `${m} 分钟`
-  const h = Math.floor(m / 60)
-  return `${h} 小时 ${m % 60} 分钟`
-}
+/**
+ * 可读剩余时间。
+ *
+ * ★ 2026-10-27：改为从 pdd-risk 复用，删掉本文件里逐字重复的实现。
+ *   原先两个模块各有一份完全相同的 fmtRemain，属于"改一处漏一处"的隐患。
+ *   pdd-risk 不依赖本模块，故无循环依赖风险。
+ */
+export { fmtRemain } from './pdd-risk.mjs'
 
 /** 节流统计（调试用） */
 export function getStats(shopKey) {

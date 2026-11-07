@@ -16,11 +16,19 @@
 import { createRequire } from 'node:module'
 import * as fs from 'node:fs'
 import { homedir } from 'node:os'
+import * as path from 'node:path'
 import { join } from 'node:path'
-const require = createRequire('E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/package.json')
+import { fileURLToPath } from 'node:url'
+import { tmpdir } from 'node:os'
+// ★ 2026-10-27：base 与根目录从 import.meta.url 推导，不再硬编码绝对路径。
+const HERE = path.dirname(fileURLToPath(import.meta.url))
+const PLUGIN_ROOT = path.resolve(HERE, '..', '..')
+const PKG_BASE = [
+  path.join(PLUGIN_ROOT, 'package.json'),
+  path.join(HERE, 'package.json'),
+].find(p => fs.existsSync(p)) || path.join(tmpdir(), 'pdd-captcha-token-base.json')
+const require = createRequire(PKG_BASE)
 const puppeteer = require('puppeteer-core')
-
-const PLUGIN_ROOT = 'E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin'
 const {
   saveCaptchaToken, getCaptchaToken, clearCaptchaToken, extractCaptchaToken,
   recordCaptchaPass, fmtRemain,

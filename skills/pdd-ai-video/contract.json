@@ -1,0 +1,101 @@
+{
+  "schema": "dsagent/skill-contract@1",
+  "id": "pdd-ai-video",
+  "entry": {
+    "form": "script",
+    "script": "scripts/gen-video.mjs"
+  },
+  "input": {
+    "args": [
+      {
+        "name": "mode",
+        "description": "run=上传+生成一条龙(默认)；upload=只上传图片到图片空间并生成 manifest；gen=从 manifest 生成；quota=查剩余额度；status=查当前任务；refresh-token=刷新 ptj_token"
+      },
+      {
+        "name": "dir",
+        "description": "图片目录（png/jpg/jpeg），upload/run 用；与 --file 二选一",
+        "flag": "--dir"
+      },
+      {
+        "name": "file",
+        "description": "图片文件绝对路径，多张用英文逗号分隔；gen 模式下可传 img.pddpic.com 的 URL",
+        "flag": "--file"
+      },
+      {
+        "name": "manifest",
+        "description": "gen 模式必填：upload 阶段产出的 manifest.json 路径",
+        "flag": "--manifest"
+      },
+      {
+        "name": "limit",
+        "description": "只生成前 N 个（默认全部）；额度不足会自动截断",
+        "flag": "--limit"
+      },
+      {
+        "name": "concurrency",
+        "description": "并发数，默认 2，上限 2（服务端只有 2 个槽位，超过必失败且扣额度）",
+        "flag": "--concurrency"
+      },
+      {
+        "name": "gap",
+        "description": "同一批次内两次提交的间隔毫秒，默认 2200；小于 2000 会互相踢槽",
+        "flag": "--gap"
+      },
+      {
+        "name": "maxwait",
+        "description": "单个任务最长等待毫秒，默认 420000",
+        "flag": "--maxwait"
+      },
+      {
+        "name": "out",
+        "description": "视频输出目录，默认 skills/pdd-ai-video/artifacts",
+        "flag": "--out"
+      },
+      {
+        "name": "uid",
+        "description": "mallId（可选，默认从 ptj_token 缓存里取）",
+        "flag": "--uid"
+      },
+      {
+        "name": "dry",
+        "description": "演练模式：只做图片预检，不上传不生成",
+        "flag": "--dry"
+      },
+      {
+        "name": "publish",
+        "description": "生成后自动发布到多多视频（默认关闭，只生成）。必须同时传 --goods-id",
+        "flag": "--publish"
+      },
+      {
+        "name": "goods_id",
+        "description": "--publish 时必填：带货商品 ID（发布必须带商品，否则会被拒）",
+        "flag": "--goods-id"
+      },
+      {
+        "name": "declaration",
+        "description": "内容声明类型：11=内容无需标注(默认) / 1=含AI生成内容 / 5=含虚构演绎 / 7=含营销信息 / 3=转载 / 8=个人观点",
+        "flag": "--declaration"
+      },
+      {
+        "name": "video_title",
+        "description": "发布到多多视频时的标题前缀（可选，多个时自动加序号）",
+        "flag": "--video-title"
+      },
+      {
+        "name": "video_desc",
+        "description": "发布到多多视频时的描述（可选）",
+        "flag": "--video-desc"
+      },
+      {
+        "name": "account",
+        "description": "账号 shopKey（可选）；默认取第一个 pdd_mms 账号",
+        "flag": "--account"
+      }
+    ]
+  },
+  "output": {
+    "protocol": "dsagent-result",
+    "resultPrefix": "__DSAGENT_RESULT__",
+    "filesMarker": "---[OUTPUT_FILES]"
+  }
+}

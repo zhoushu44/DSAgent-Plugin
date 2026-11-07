@@ -1,3 +1,18 @@
+import { createRequire } from 'node:module'
+import * as fs from 'node:fs'
+import * as path from 'node:path'
+import { homedir } from 'node:os'
+import { tmpdir } from 'node:os'
+import { fileURLToPath } from 'node:url'
+import { pathToFileURL } from 'node:url'
+
+// ★ 路径推导（替代原硬编码绝对路径）：本文件在 skills/<name>/scripts/ 下，上推三层到插件根
+const HERE = path.dirname(fileURLToPath(import.meta.url))
+const PLUGIN_ROOT = path.resolve(HERE, '..', '..', '..')
+const PKG_BASE = [
+  path.join(PLUGIN_ROOT, 'package.json'),
+  path.join(HERE, 'package.json'),
+].find(p => fs.existsSync(p)) || path.join(tmpdir(), 'pdd-script-base.json')
 /**
  * 拼多多 · 多多视频（pdd-video）
  *
@@ -51,11 +66,7 @@
  *   删除：POST /mms/amco/prePublish/delete  {urlList, vidList}
  *         （{videoId}/{vid} 不生效）
  */
-import { createRequire } from 'node:module'
-import * as fs from 'node:fs'
-import * as path from 'node:path'
-import { homedir } from 'node:os'
-const require = createRequire('E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/package.json')
+const require = createRequire(PKG_BASE)
 
 const argOf = (n) => {
   const i = process.argv.indexOf(`--${n}`)
@@ -73,8 +84,8 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
 
 ;(async () => {
   const puppeteer = require('puppeteer-core')
-  const { launchOptions, STEALTH_SCRIPT } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-launch.mjs`)
-  const { CredentialStore } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/lib/services/credential-store.js`)
+  const { launchOptions, STEALTH_SCRIPT } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-launch.mjs')))
+  const { CredentialStore } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/lib/services/credential-store.js')))
   const store = new CredentialStore(path.join(homedir(), '.dsh', 'dsagent-accounts.json'))
   // ★ 默认账号：取最近更新的、有 PASS_ID 的 pdd_mms 账号
   //   不能简单 slice(-1) —— 凭证库顺序不稳定，可能取到没登录 live 域的号
@@ -88,6 +99,41 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
   if (mmsAccs.length > 1 && !argOf('account')) {
     console.error(`[pdd-video] 多个账号可用，默认取 ${SHOP}；可用 --account 指定：\n` + mmsAccs.map(a => `  ${a.shop_key}  ${a.display_label || ''}`).join('\n'))
   }
+
+  // ★ 2026-11-04 迁移到统一风控闸门（pdd-guard）
+  //   原实现只有账号锁，**入口没有冷却检查**（只在出错后的提示里读一次冷却剩余时间），
+  //   所以账号已经在 54001/40002 冷却中时，仍会照常启动浏览器、打开页面、
+  //   甚至发上传请求——然后才发现被风控，等于白白多打一次风控分。
+  //   闸门把「冷却检查 + 健康分 + 账号锁」收敛成一次 openTask，且顺序正确（先判后开）。
+  //   ⚠️ 闸门内部已经持有账号锁，**不要再自己 tryAcquireAccountLock**（会自己锁死自己）。
+  const { openTask, getVerifyAuthToken } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-guard.mjs')).href)
+  const { API: PDD_API } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-api.mjs')).href)
+  // 原字面路径 → 注册表逻辑名
+  const VIDEO_PATH_MAP = {
+    '/mms/amco/prePublish/query': 'video.list',
+    '/mms/amco/prePublish/delete': 'video.prePublishDelete',
+    '/api/backbone/video/query': 'video.query',
+    '/api/backbone/video/publish': 'video.publish',
+    '/api/backbone/video/publish_qualification': 'video.publishQualification',
+    '/api/backbone/video/publish/page/query': 'video.publishPage',
+    '/api/backbone/video/signed_contract/query': 'video.signedContract',
+    '/api/backbone/goods/stats/overview': 'video.statsOverview',
+    '/api/backbone/goods/stats/trend': 'video.statsTrend',
+    '/api/backbone/goods/mall/weekly_report': 'video.weeklyReport',
+    '/api/backbone/goods/mall/diagnosis_and_suggest': 'video.mallDiagnosis',
+    '/api/orpheus-obs/topic/list': 'video.topicList',
+  }
+  const guard = await openTask('pdd-video', SHOP, { lockWaitMs: 300_000 })
+  if (guard.blocked) {
+    emit({
+      ok: false, failureKind: 'rate_limit',
+      text: `账号 ${SHOP} 当前不可执行：${guard.reason}。期间请勿重复调用（会延长封禁）。`,
+    })
+    process.exit(2)
+  }
+  guard.startHeartbeat()
+  // 收尾统一走 guard.close()（放锁 + 打印汇总）
+  process.on('exit', () => { try { guard.close() } catch { /* ignore */ } })
 
   // ── upload：文件校验（不启浏览器）──
   const file = argOf('file')
@@ -172,21 +218,53 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
     return []
   }
   /** 统一 POST（走页面会话） */
-  const api = (p, bd) => page.evaluate(async (p2, b2) => {
-    try {
-      const resp = await fetch('https://live.pinduoduo.com' + p2, {
-        method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b2 || {}),
-      })
-      return { status: resp.status, json: await resp.json().catch(() => null) }
-    } catch (e) { return { status: 0, json: null, err: String(e).slice(0, 100) } }
-  }, p, bd || {})
+  // ★ 2026-11-04：接入闸门的 beforeCall —— 每次真实请求前做账号级节流（落盘跨进程）。
+  //   原来这两个函数是裸发：没有任何间隔，连续调 N 次就是 N 次连发。
+  //   闸门不可用时会 fail-open（allow=true），不阻断业务。
+  // ★ 2026-11-05 补 VerifyAuthToken：credentials:'include' 只带 Cookie，
+  //   而 VerifyAuthToken 是**请求头**。page.evaluate 的 fetch 绕过了 msfe 插件链，
+  //   所以必须手动从页面 cookie 读出来塞进头 —— 否则 cookie 有票但请求不带 = 票白拿。
+  // ★ 2026-11-05：路径由基座注册表管理。调用方仍传原字面路径，
+  //   这里统一查表替换 —— 这样 PDD 改版只改 pdd-api.mjs，17 个调用点都不用动。
+  const resolvePath = (p) => {
+    const hit = VIDEO_PATH_MAP[p]
+    if (!hit) return p
+    const spec = PDD_API[hit]
+    return spec ? spec.path : p
+  }
+  const api = async (p, bd, opts = {}) => {
+    p = resolvePath(p)
+    const pre = await guard.beforeCall('https://live.pinduoduo.com' + p)
+    if (!pre.allow) throw Object.assign(new Error(`账号不可用：${pre.reason}`), { __blocked: true })
+    // ★ 2026-11-06：部分接口（如 backbone/video/publish）页面发请求时**不带 VerifyAuthToken**，
+    //   带上反而被判定为异常请求 → 2000000。用 opts.noVtk 关闭。
+    const vtk = opts.noVtk ? null : await getVerifyAuthToken(page, SHOP)
+    return page.evaluate(async (p2, b2, vt) => {
+      try {
+        const resp = await fetch('https://live.pinduoduo.com' + p2, {
+          method: 'POST', credentials: 'include',
+          headers: { 'Content-Type': 'application/json', ...(vt ? { VerifyAuthToken: vt } : {}) },
+          body: JSON.stringify(b2 || {}),
+        })
+        return { status: resp.status, json: await resp.json().catch(() => null) }
+      } catch (e) { return { status: 0, json: null, err: String(e).slice(0, 100) } }
+    }, p, bd || {}, vtk)
+  }
   /** 统一 GET */
-  const apiGet = (p) => page.evaluate(async (p2) => {
-    try {
-      const resp = await fetch('https://live.pinduoduo.com' + p2, { credentials: 'include' })
-      return { status: resp.status, json: await resp.json().catch(() => null) }
-    } catch (e) { return { status: 0, json: null, err: String(e).slice(0, 100) } }
-  }, p)
+  const apiGet = async (p) => {
+    p = resolvePath(p)
+    const pre = await guard.beforeCall('https://live.pinduoduo.com' + p)
+    if (!pre.allow) throw Object.assign(new Error(`账号不可用：${pre.reason}`), { __blocked: true })
+    const vtk = await getVerifyAuthToken(page, SHOP)
+    return page.evaluate(async (p2, vt) => {
+      try {
+        const resp = await fetch('https://live.pinduoduo.com' + p2, {
+          credentials: 'include', ...(vt ? { headers: { VerifyAuthToken: vt } } : {}),
+        })
+        return { status: resp.status, json: await resp.json().catch(() => null) }
+      } catch (e) { return { status: 0, json: null, err: String(e).slice(0, 100) } }
+    }, p, vtk)
+  }
   /** 取待发布队列 */
   const getQueue = async () => {
     const r = await api('/mms/amco/prePublish/query', { pageSize: 50, pageNum: 1 })
@@ -290,39 +368,264 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
 
       // 可选：直接发布
       if (out.ok && has('publish') && argOf('publish') !== 'false') {
-        const L = ['', '▶ 执行发布...']
-        const feed = {
-          desc: argOf('desc') || '',
-          scheduleTime: null,
-          goodsIdList: goodsId ? [goodsId] : [],
-          outVideoUrl: '',
-          useRecRelatedGoods: false,
-          anchorDeclarationType: Number(argOf('declaration') || 11),
-          cover: item?.coverUrl || '',
-          cutStartTime: null,
-          cutEndTime: null,
-          vid,
-          topicId: null,
-          syncVideo: false,
-          needCreateCoverUrl: null,
-          newPushPxq: null,
-        }
-        const pubR = await api('/api/backbone/video/publish', { feeds: [feed] })
-        out.publish = pubR.json?.result ?? pubR.json
-        out.publishCode = pubR.json?.errorCode
-        out.publishMsg = pubR.json?.errorMsg
-        if (pubR.json?.success) {
-          L.push('✅ 发布成功！视频已提交审核，通过后对外展示。')
-          try { await api('/mms/amco/prePublish/delete', { urlList: [], vidList: [vid] }) } catch { /* ignore */ }
-        } else {
-          L.push(`⚠️ 发布返回：errorCode=${out.publishCode ?? '?'} ${out.publishMsg || ''}`)
-          if (out.publishCode === 2000000) {
-            L.push('')
-            L.push('「账号被系统判定不适合发布」→ 权限问题。')
-            L.push('用 --mode permission 查带货/内容权限。')
+        const L = ['', '▶ 执行发布（CDP 点击，绕过 anti-content 强校验）...']
+
+        // ══════════════════════════════════════════════════════════════
+        // ★★ 2026-11-06 重大修正：publish 必须走「页面真实点击」，不能用 fetch 直调
+        //
+        //   根因（已逆向确认）：/api/backbone/video/publish 是强校验接口，
+        //   页面点「发布」时浏览器拦截器会注入 anti-content 头（SDK 实时指纹+时间戳），
+        //   而 page.evaluate + fetch 走不到那条链路 → 稳定 2000000「账号被判定不适合发布」。
+        //
+        //   实测对比（同一 vid / 同一 body / 同一 cookie）：
+        //     UI 点击  → 带 anti-content: 0aqWfxUk... → ✅ success
+        //     fetch 直调 → 无 anti-content             → ❌ 2000000
+        //
+        //   已验证 3 次成功：7042181647350667660 / 7042221151805764909 / 7042234237740759493
+        //
+        //   另外两个必要前置（也在此修正）：
+        //     ① prePublish/add 绑商品：goodsList:[{goodsId:"字符串", specialType:2}]
+        //        ★ specialType=2 对应「商品ID」tab；用 1 或 null 会导致 goodsItemList 仍为空
+        //     ② 内容声明必须选（anchorDeclarationType 11=无无需标注）
+        // ══════════════════════════════════════════════════════════════
+        const declaration = Number(argOf('declaration') || 11)
+        const DECL_TEXT = {
+          11: '内容无需标注',
+          1: '含AI生成内容',
+          5: '含虚构演绎内容',
+          7: '内容含营销信息',
+          3: '内容为转载',
+          8: '个人观点，仅供参考',
+        }[declaration] || '内容无需标注'
+
+        const sleep2 = (ms) => new Promise((r) => setTimeout(r, ms))
+        /** evaluate 带重试（页面重渲染会销毁执行上下文） */
+        const ev = async (fn, ...a) => {
+          for (let i = 0; i < 12; i++) {
+            try { return await page.evaluate(fn, ...a) } catch (e) {
+              if (/Execution context|detached|Target closed|Cannot find context/i.test(String(e))) { await sleep2(2500); continue }
+              throw e
+            }
           }
+          return null
+        }
+        const mouseClick = async (x, y) => { await page.mouse.click(x, y) }
+
+        try {
+          await ev(() => { document.querySelectorAll('textarea').forEach((t) => t.blur()) })
+          await sleep2(1500)
+
+          // ① 关遮罩/弹窗
+          await ev(() => {
+            const masks = [...document.querySelectorAll('[class*=mask]')]
+            masks.forEach((m) => { if (m.style) m.style.display = 'none' })
+            const cls = [...document.querySelectorAll('[class*=close]')].filter((e) => e.offsetParent)
+            cls.slice(0, 3).forEach((e) => { try { e.click() } catch {} })
+          })
+          await sleep2(1500)
+
+          // ② 填描述
+          if (argOf('desc')) {
+            await ev((d) => {
+              const ta = document.querySelector('textarea')
+              if (ta) {
+                Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set.call(ta, d)
+                ta.dispatchEvent(new Event('input', { bubbles: true }))
+                ta.dispatchEvent(new Event('change', { bubbles: true }))
+              }
+            }, argOf('desc'))
+            await sleep2(1200)
+          }
+
+          // ③ 绑定商品（走「商品ID」tab → specialType 2）
+          if (goodsId) {
+            L.push(`  绑定商品 ${goodsId}…`)
+            await ev(() => {
+              const c = [...document.querySelectorAll('*')].filter((e) => (e.innerText || '').trim() === '添加商品' && e.children.length <= 3)
+              if (c.length) c[c.length - 1].click()
+            })
+            await sleep2(5000)
+            // 切到「商品ID」tab
+            await ev(() => {
+              const t = [...document.querySelectorAll('*')].filter((e) => (e.innerText || '').trim() === '商品ID' && e.children.length <= 2)
+              if (t.length) t[0].click()
+            })
+            await sleep2(2000)
+            // 填商品ID
+            await ev((g) => {
+              const ins = [...document.querySelectorAll('input')].filter((i) => i.offsetParent && !i.readOnly)
+              const t = ins.find((i) => /商品|ID|请输入/i.test(i.placeholder || '')) || ins[0]
+              if (t) {
+                Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set.call(t, String(g))
+                t.dispatchEvent(new Event('input', { bubbles: true }))
+                t.dispatchEvent(new Event('change', { bubbles: true }))
+              }
+            }, goodsId)
+            await sleep2(1800)
+            // 查询
+            await ev(() => {
+              const b = [...document.querySelectorAll('button,span,div')].filter((e) => /^(查询|搜索)$/.test((e.innerText || '').trim()) && !e.children.length)
+              if (b.length) b[0].click()
+            })
+            await sleep2(4000)
+            // 勾选
+            await ev(() => {
+              const r = [...document.querySelectorAll('input[type=radio]')].filter((x) => x.offsetParent)
+              if (r.length) r[0].click()
+            })
+            await sleep2(1200)
+            // 下一步
+            await ev(() => {
+              const b = [...document.querySelectorAll('button,span,div')].filter((e) => (e.innerText || '').trim() === '下一步' && !e.children.length)
+              if (b.length) b[0].click()
+            })
+            await sleep2(5000)
+            // 验证绑定
+            const q2 = await api('/mms/amco/prePublish/query', { pageSize: 20, pageNum: 1 }).catch(() => null)
+            const l2 = q2?.json?.result?.result?.list || q2?.json?.result?.list || []
+            const bound = (l2[0]?.goodsItemList || []).length > 0
+            L.push(bound ? `  ✅ 商品已绑定（${l2[0].goodsItemList.map((g) => g.goodsId).join(',')}）` : '  ⚠ 商品绑定未生效')
+          }
+
+          // ④ 选内容声明（必须，否则发布按钮点不动）
+          //   ★ 2026-11-07 加固：选择器会因页面改版/滚动偏移失效，改成
+          //     ① 多轮重试（每次重新取坐标）
+          //     ② 选完必须校验 input.value / 容器文字真的变了
+          //     ③ 兜底用键盘（点开后 ArrowDown + Enter）
+          let declOk = false
+          for (let tryN = 0; tryN < 4 && !declOk; tryN++) {
+            const declPos = await ev(() => {
+              const ph = [...document.querySelectorAll('input')].find((i) => /请选择/.test(i.placeholder || '') && i.offsetParent)
+              if (!ph) return null
+              ph.scrollIntoView({ block: 'center' })
+              const r = ph.getBoundingClientRect()
+              return { x: r.x + r.width / 2, y: r.y + r.height / 2 }
+            })
+            if (!declPos) { await sleep2(1500); continue }
+
+            await mouseClick(declPos.x, declPos.y)
+            await sleep2(2500)
+
+            // 方式 A：JS 事件点击选项
+            await ev((txt) => {
+              const c = [...document.querySelectorAll('div,li,span')].filter((e) => {
+                const t = (e.innerText || '').trim()
+                const r = e.getBoundingClientRect()
+                return t.startsWith(txt) && r.width > 100
+              })
+              if (!c.length) return null
+              const el = c[c.length - 1]
+              const o = { bubbles: true, cancelable: true, view: window }
+              el.dispatchEvent(new MouseEvent('mousedown', o))
+              el.dispatchEvent(new MouseEvent('mouseup', o))
+              el.dispatchEvent(new MouseEvent('click', o))
+              return true
+            }, DECL_TEXT)
+            await sleep2(1800)
+
+            // 校验
+            declOk = await ev((txt) => {
+              const ins = [...document.querySelectorAll('input')].filter((i) => i.offsetParent)
+              if (ins.some((i) => (i.value || '').includes(txt) || (i.value || '').length > 0 && !/请选择/.test(i.value))) {
+                if (ins.some((i) => (i.value || '').includes(txt))) return true
+              }
+              const all = [...document.querySelectorAll('*')]
+              const lab = all.find((e) => (e.innerText || '').trim() === '内容声明')
+              if (lab) {
+                let p = lab.parentElement
+                for (let k = 0; k < 5 && p; k++) {
+                  if ((p.innerText || '').includes(txt)) return true
+                  p = p.parentElement
+                }
+              }
+              return false
+            }, DECL_TEXT)
+
+            // 方式 B：键盘兜底
+            if (!declOk) {
+              await mouseClick(declPos.x, declPos.y)
+              await sleep2(1200)
+              await page.keyboard.press('ArrowDown')
+              await sleep2(600)
+              await page.keyboard.press('Enter')
+              await sleep2(1800)
+              declOk = await ev((txt) => {
+                const all = [...document.querySelectorAll('*')]
+                const lab = all.find((e) => (e.innerText || '').trim() === '内容声明')
+                if (lab) {
+                  let p = lab.parentElement
+                  for (let k = 0; k < 5 && p; k++) {
+                    if ((p.innerText || '').includes(txt)) return true
+                    p = p.parentElement
+                  }
+                }
+                return [...document.querySelectorAll('input')].some((i) => (i.value || '').includes(txt))
+              }, DECL_TEXT)
+            }
+
+            L.push(declOk ? `  内容声明: ${DECL_TEXT} ✅` : `  ⚠ 内容声明第 ${tryN + 1} 次未选中`)
+          }
+          if (!declOk) L.push('  ⚠⚠ 内容声明最终未选中，发布大概率无响应')
+
+          // ⑤ ★ 点「发布」—— 必须真实鼠标点击，触发 anti-content 注入
+          const pubPos = await ev(() => {
+            // ★ 只认文字正好是「发布」或「一键发布」的元素，且可见
+            //   不能用 !children.length 过滤（真实按钮内部有 span）
+            //   也不能取最后一个（可能点到「取消发布」）
+            const cands = [...document.querySelectorAll('button,div,span,a')].filter((e) => {
+              const t = (e.innerText || '').trim()
+              if (t !== '发布' && t !== '一键发布') return false
+              const r = e.getBoundingClientRect()
+              if (r.width <= 0 || r.height <= 0) return false
+              const st = getComputedStyle(e)
+              if (st.display === 'none' || st.visibility === 'hidden') return false
+              return true
+            })
+            if (!cands.length) return null
+            // 优先「一键发布」，其次「发布」；同文本取最靠下的（在页面底部按钮区）
+            const ones = cands.filter((e) => (e.innerText || '').trim() === '一键发布')
+            const pool = ones.length ? ones : cands
+            pool.sort((a, b) => b.getBoundingClientRect().y - a.getBoundingClientRect().y)
+            const el = pool[0]
+            el.scrollIntoView({ block: 'center' })
+            const r = el.getBoundingClientRect()
+            return { x: r.x + r.width / 2, y: r.y + r.height / 2, text: (el.innerText || '').trim(), count: cands.length }
+          })
+          if (!pubPos) throw new Error('找不到发布按钮')
+
+          // 监听 publish 响应
+          let pubResp = null
+          const onResp = async (res) => {
+            if (/backbone\/video\/publish$/.test(res.url())) {
+              try { pubResp = await res.json() } catch { /* ignore */ }
+            }
+          }
+          page.on('response', onResp)
+
+          await mouseClick(pubPos.x, pubPos.y)
+          L.push(`  已点击「${pubPos.text}」，等待结果…`)
+          // 等响应（最多 30s）
+          for (let i = 0; i < 30 && !pubResp; i++) await sleep2(1000)
+          page.off('response', onResp)
+
+          out.publish = pubResp?.result ?? pubResp
+          out.publishCode = pubResp?.errorCode
+          out.publishMsg = pubResp?.errorMsg
+          out.feedIds = pubResp?.result?.feedIds || []
+
+          if (pubResp?.success) {
+            L.push(`✅ 发布成功！feedId: ${out.feedIds.join(',')}`)
+            L.push('   视频已提交审核，通过后对外展示。')
+            try { await api('/mms/amco/prePublish/delete', { urlList: [], vidList: [vid] }) } catch { /* ignore */ }
+          } else {
+            L.push(`⚠️ 发布返回：errorCode=${out.publishCode ?? '?'} ${out.publishMsg || '(无响应)'}`)
+            out.ok = false
+            out.failureKind = out.publishCode === 2000000 ? 'no_permission' : 'api_error'
+          }
+        } catch (e) {
+          L.push(`❌ 发布流程异常: ${String(e.message || e).slice(0, 200)}`)
           out.ok = false
-          out.failureKind = 'no_permission'
+          out.failureKind = 'exception'
         }
         out.text += '\n' + L.join('\n')
       } else if (out.ok) {
@@ -734,12 +1037,12 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
     }
   } catch (e) {
     // ★ 错误归一 + 冷却提示 + 账号健康分（2026-10-24 补）
-    const { normalizeError, recordToAntiban } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-error.mjs`)
+    const { normalizeError, recordToAntiban } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-error.mjs')))
     const n = normalizeError(e, `多多视频 ${mode}`)
     await recordToAntiban(SHOP, null, n.failureKind === 'risk_control' ? 'captcha' : null).catch(() => {})
     // 附加冷却剩余
     try {
-      const { checkCooldown, fmtRemain } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-risk.mjs`)
+      const { checkCooldown, fmtRemain } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-risk.mjs')))
       const cd = checkCooldown(SHOP)
       if (cd?.remainMs > 0) {
         n.text += `\n\n账号冷却剩余 ${fmtRemain(cd.remainMs)}，期间请勿重复调用（会延长封禁）。`
@@ -754,7 +1057,7 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
   emit(out)
   process.exit(out.ok ? 0 : 2)
 })().catch(async (e) => {
-  const { normalizeError } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-error.mjs`).catch(() => ({}))
+  const { normalizeError } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-error.mjs'))).catch(() => ({}))
   const n = normalizeError ? normalizeError(e, '多多视频') : { failureKind: 'exception', text: `异常：${e?.message?.slice(0, 200)}` }
   emit({ ok: false, failureKind: n.failureKind, text: n.text })
   process.exit(2)

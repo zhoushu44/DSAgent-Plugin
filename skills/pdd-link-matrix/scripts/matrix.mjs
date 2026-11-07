@@ -1,3 +1,17 @@
+import { createRequire } from 'node:module'
+import * as fs from 'node:fs'
+import * as path from 'node:path'
+import { homedir } from 'node:os'
+import { fileURLToPath } from 'node:url'
+import { tmpdir } from 'node:os'
+
+// ★ 路径推导（替代原硬编码绝对路径）：本文件在 skills/<name>/scripts/ 下，上推三层到插件根
+const HERE = path.dirname(fileURLToPath(import.meta.url))
+const PLUGIN_ROOT = path.resolve(HERE, '..', '..', '..')
+const PKG_BASE = [
+  path.join(PLUGIN_ROOT, 'package.json'),
+  path.join(HERE, 'package.json'),
+].find(p => fs.existsSync(p)) || path.join(tmpdir(), 'pdd-script-base.json')
 /**
  * 拼多多 · 一款多链接批量铺（pdd-link-matrix）
  *
@@ -17,15 +31,9 @@
  *
  *   --variants: [{title, images, desc?}, ...]
  */
-import { createRequire } from 'node:module'
-import * as fs from 'node:fs'
-import * as path from 'node:path'
-import { homedir } from 'node:os'
-import { fileURLToPath } from 'node:url'
 
-const require = createRequire('E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/package.json')
+const require = createRequire(PKG_BASE)
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const PLUGIN_ROOT = path.resolve(__dirname, '../../..')
 
 const argOf = (n) => {
   const i = process.argv.indexOf(`--${n}`)
@@ -80,7 +88,7 @@ if (!confirm) {
     L.push(`     主图 ${(v.images || []).length} 张${v.desc ? ` | 描述 ${String(v.desc).slice(0, 30)}` : ''}`)
   })
   L.push('')
-  L.push(`风控策略：每条间隔 30~40s，共约 ${Math.ceil(variants.length * 35 / 60)} 分钟。`)
+  L.push(`风控策略：每条间隔 45s（--gap 可调，下限 20s），共约 ${Math.ceil(variants.length * 45 / 60)} 分钟。`)
   L.push('遇到风控立即停止（不继续铺，越铺越封）。')
   L.push('')
   L.push('确认后请带 --confirm true 重新调用。注意：这是不可撤销的真实操作（L2）。')
@@ -97,22 +105,65 @@ if (!confirm) {
   let SHOP = account || store.listAccounts().filter(a => a.platform === 'pdd_mms' && a.cookies?.['PASS_ID']).slice(-1)[0]?.shop_key
   if (!SHOP) { emit({ ok: false, failureKind: 'not_bound', text: '未绑定拼多多商家后台账号' }); process.exit(2) }
 
-  // 前置检查
-  const chk = await checkAccountUsable(SHOP, '批量铺货')
-  if (chk.blocked) { emit({ ok: false, failureKind: chk.failureKind, text: chk.text }); process.exit(2) }
+  // ★ 2026-11-04 迁移到统一风控闸门（pdd-guard）
+  //   原实现：checkAccountUsable（前置检查）+ 手写 tryAcquireAccountLock 块。
+  //   收敛后：冷却/健康分/锁由 openTask 一次搞定；批次内间隔仍保留（见下方 GAP_MS）。
+  //   ⚠️ 闸门内部已持锁，**不要保留旧的 tryAcquireAccountLock**（会自己锁死自己）。
+  const { openTask } = await import(`file:///${PLUGIN_ROOT}/skills/_shared/pdd-guard.mjs`)
+// ★ 2026-11-05：接口路径由基座注册表管理
+const { API: _API } = await import('file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-api.mjs')
+  const guard = await openTask('pdd-link-matrix', SHOP, { lockWaitMs: 300_000 })
+  if (guard.blocked) {
+    emit({
+      ok: false, failureKind: 'rate_limit',
+      text: `账号 ${SHOP} 当前不可执行：${guard.reason}。\n`
+        + '批量铺货风险最高，切勿与其他任务同时打同一个号。\n'
+        + '请等待当前任务结束后再试。',
+    })
+    process.exit(2)
+  }
+  guard.startHeartbeat()
+  process.on('exit', () => { try { guard.close() } catch { /* ignore */ } })
 
   const results = []
   let stopped = false
+
+  // ★ 2026-11-04 修（P0）：矩阵铺货是**频率放大最严重**的场景——
+  //   一次调用 = N 次真实商品发布，且全部落在 /glide/ /vodka/（最严的发布域）。
+  //   原实现只有「每条前检查冷却」，**没有任何间隔**：上一条刚提交完，
+  //   立刻发下一条，平台侧看就是纯脚本节奏。
+  //   这里加批次内强制间隔（默认 45s，--gap 可调，下限 20s），
+  //   并且间隔后重新确认账号可用（上一条可能已经触发 54001）。
+  //
+  //   ⚠️ 解析要点：`process.argv.indexOf('--gap')` 未命中时返回 -1，
+  //   直接拿 argv[-1+1]=argv[0]（node 可执行路径）会得到 NaN。
+  //   必须先判 `>= 0` 再取值。
+  const _gapEq = process.argv.find(a => a.startsWith('--gap='))
+  const _gapIdx = process.argv.indexOf('--gap')
+  const _gapRaw = _gapEq
+    ? Number(_gapEq.split('=')[1])
+    : (_gapIdx >= 0 ? Number(process.argv[_gapIdx + 1]) : 45)
+  const GAP_MS = Math.max(20_000, (Number.isFinite(_gapRaw) && _gapRaw > 0 ? _gapRaw : 45) * 1000)
+  console.error(`[matrix] 风控间隔：每条之间 ${(GAP_MS / 1000).toFixed(0)}s（--gap 可调，下限 20s）`)
 
   for (let i = 0; i < variants.length; i++) {
     const v = variants[i]
     console.error(`[matrix] ${i + 1}/${variants.length} ${v.title}`)
 
-    // 每条前都检查（可能上一条触发了风控）
-    const c = await checkAccountUsable(SHOP, '批量铺货')
-    if (c.blocked) {
+    // ★ 2026-11-04：批次内强制间隔（第 2 条起）
+    if (i > 0) {
+      console.error(`[matrix] [风控间隔] 等待 ${(GAP_MS / 1000).toFixed(0)}s…`)
+      await new Promise(r => setTimeout(r, GAP_MS))
+    }
+
+    // 每条前都检查（可能上一条触发了风控 / 或刚刚等间隔的这段时间里被别处打了）
+    // ★ 2026-11-04：改用闸门 beforeCall（内部 reserveSlot 会顺带占一个时间槽，
+    //   所以在批次间隔之外还有账号级最小间隔兜底）。
+    // ★ 2026-11-05：节流 key 从注册表取
+    const pre = await guard.beforeCall('https://mms.pinduoduo.com' + _API['goods.commitSubmit'].path)
+    if (!pre.allow) {
       stopped = true
-      results.push({ i: i + 1, title: v.title, ok: false, reason: c.text })
+      results.push({ i: i + 1, title: v.title, ok: false, reason: pre.reason })
       break
     }
 

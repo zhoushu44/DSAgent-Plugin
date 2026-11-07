@@ -1,3 +1,18 @@
+import { createRequire } from 'node:module'
+import * as fs from 'node:fs'
+import * as path from 'node:path'
+import { homedir } from 'node:os'
+import { tmpdir } from 'node:os'
+import { fileURLToPath } from 'node:url'
+import { pathToFileURL } from 'node:url'
+
+// ★ 路径推导（替代原硬编码绝对路径）：本文件在 skills/<name>/scripts/ 下，上推三层到插件根
+const HERE = path.dirname(fileURLToPath(import.meta.url))
+const PLUGIN_ROOT = path.resolve(HERE, '..', '..', '..')
+const PKG_BASE = [
+  path.join(PLUGIN_ROOT, 'package.json'),
+  path.join(HERE, 'package.json'),
+].find(p => fs.existsSync(p)) || path.join(tmpdir(), 'pdd-script-base.json')
 /**
  * 拼多多商品查询（pdd-works）—— 只读，无平台副作用
  *
@@ -14,15 +29,9 @@
  *   node scripts/query.mjs --mode detail --goods-id 1018993401073
  *   node scripts/query.mjs --mode spec-pool
  */
-import { createRequire } from 'node:module'
-const { CHROME_PATH, STEALTH_ARGS, STEALTH_SCRIPT } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-launch.mjs`)
-import * as fs from 'node:fs'
-import * as path from 'node:path'
-import { homedir } from 'node:os'
+const { CHROME_PATH, STEALTH_ARGS, STEALTH_SCRIPT } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-launch.mjs')))
 
-const require = createRequire('E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/package.json')
-const PLUGIN_ROOT = 'E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin'
-
+const require = createRequire(PKG_BASE)
 const argOf = (n) => { const i = process.argv.indexOf(`--${n}`); return i >= 0 && i + 1 < process.argv.length ? process.argv[i + 1] : undefined }
 const emit = (obj) => { process.stdout.write('__DSAGENT_RESULT__' + JSON.stringify(obj) + '\n') }
 
@@ -34,53 +43,61 @@ const wantCsv = process.argv.includes('--csv')
 ;(async () => {
   const puppeteer = require('puppeteer-core')
   const { ensureAntiContent, getAntiContent } = await import(`file:///${PLUGIN_ROOT}/lib/pdd-mode2.js`)
-  const { checkCooldown, detectSlider, autoSolveSlider, fmtRemain, tryAcquireAccountLock, releaseAccountLock, heartbeatAccountLock, throttleRequest, detectRiskCode, getCaptchaToken, saveCaptchaToken, extractCaptchaToken } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-risk.mjs`)
+  const { checkCooldown, detectSlider, autoSolveSlider, fmtRemain, tryAcquireAccountLock, releaseAccountLock, heartbeatAccountLock, throttleRequest, detectRiskCode, getCaptchaToken, saveCaptchaToken, extractCaptchaToken } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-risk.mjs')))
   // 简写
   const getTok = getCaptchaToken, saveTok = saveCaptchaToken, extractTok = extractCaptchaToken
 
   // 账号选择：优先 --account，否则按平台自动找
   const { CredentialStore } = await import(`file:///${PLUGIN_ROOT}/lib/services/credential-store.js`)
   const store = new CredentialStore(path.join(homedir(), '.dsh', 'dsagent-accounts.json'))
-  const SHOP = argOf('account') || store.findByPlatform('pdd_mms')?.shop_key
-  if (!SHOP) { emit({ ok: false, failureKind: 'not_bound', text: '未绑定拼多多商家后台账号，请到「账号连接」添加。' }); process.exit(2) }
-
-  // ★ 风控 L4：冷却期内直接拒绝，不再打接口（避免加重封禁）
-  const cd = checkCooldown(SHOP)
-  if (cd.cooling) {
-    emit({
-      ok: false, failureKind: 'rate_limit',
-      text: `账号 ${SHOP} 命中平台频控，冷却剩余 ${fmtRemain(cd.remainMs)}（${cd.reason}）。\n`
-        + '期间请勿重复调用。若已在浏览器窗口手动过完滑块验证，可等待冷却结束或稍后重试。',
-    })
-    process.exit(2)
-  }
-
-  // 账号级并发锁：同一时刻只允许一个技能打这个号（等最多 5 分钟）
-  const lock = await tryAcquireAccountLock(SHOP, 'pdd-works', 300000)
-  if (!lock.ok) {
-    emit({ ok: false, failureKind: 'rate_limit', text: '账号 ' + SHOP + ' 正被其他任务占用' + (lock.holder ? '（' + lock.holder + '）' : '') + '，请稍后再试。' })
-    process.exit(2)
-  }
-  const releaseLock = () => { try { releaseAccountLock(SHOP) } catch (e) {} }
-  process.on('exit', releaseLock)
-  process.on('SIGINT', () => { releaseLock(); process.exit(130) })
-  process.on('SIGTERM', () => { releaseLock(); process.exit(143) })
-  const hb = setInterval(() => heartbeatAccountLock(SHOP, 'pdd-works'), 180000)
-
-
-  // profile：新 shopKey 目录优先，旧目录兜底（票据已注入）
-  let profile = path.join(homedir(), '.dsh', 'browser-profiles', 'accounts', SHOP)
-  if (!fs.existsSync(profile)) {
-    profile = path.join(homedir(), '.dsh', 'browser-profiles', 'accounts', 'pdd_mms_de55c3e159072dfb5297b234eaa487c3')
-  }
-  const browser = await puppeteer.launch({
-    executablePath: CHROME_PATH,
-    userDataDir: profile,
-    headless: false,
-    defaultViewport: null,        // ★ 用真实窗口尺寸（SDK 会采集 innerWidth/screen.*）
-    ignoreDefaultArgs: ['--enable-automation'],
-    args: STEALTH_ARGS,
+  // ★ 2026-11-05：多账号时必须让用户选，不能静默取第一个（写错店的代价不可逆）
+  const { pickAccount, toEmit } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/account-picker.mjs')))
+  const _pick = pickAccount(store, {
+    platform: 'pdd_mms',
+    want: argOf('account'),
+    wantName: argOf('shop-name') || argOf('shopName'),
+    skill: 'pdd-works',
   })
+  if (!_pick.ok) { emit(toEmit(_pick)); process.exit(2) }
+  const SHOP = _pick.shopKey
+
+  // ★ 2026-11-04 迁移到统一风控闸门（pdd-guard）
+  //   原实现是手写四件套（checkCooldown + tryAcquireAccountLock + heartbeat + release 钩子）。
+  //   ⚠️ 闸门内部已持锁，**不要保留旧的 tryAcquireAccountLock**（会自己锁死自己）。
+  const { openTask, getVerifyAuthToken } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-guard.mjs')))
+  // ★ 2026-11-05：接口路径与签名由基座管理，PDD 升级只改 _shared/pdd-api.mjs
+  const { api: pddApi } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-api.mjs')))
+  const guard = await openTask('pdd-works', SHOP, { lockWaitMs: 300_000 })
+  if (guard.blocked) {
+    emit({ ok: false, failureKind: 'rate_limit', text: `账号 ${SHOP} 当前不可执行：${guard.reason}。期间请勿重复调用。` })
+    process.exit(2)
+  }
+  guard.startHeartbeat()
+  process.on('exit', () => { try { guard.close() } catch { /* ignore */ } })
+
+
+  // ★ 2026-10-27 修：改用 pdd-launch 的统一 profile 解析，删掉硬编码兜底。
+  //
+  //   原代码：
+  //     let profile = path.join(homedir(), '.dsh', 'browser-profiles', 'accounts', SHOP)
+  //     if (!fs.existsSync(profile)) {
+  //       profile = path.join(homedir(), '.dsh', 'browser-profiles', 'accounts', 'pdd_mms_de55c3e...')
+  //     }
+  //
+  //   问题：shopKey 目录缺失时会静默落到那个固定目录 → 用未知账号的登录态操作，
+  //   查到的可能是别的店铺数据。现在 launchOptions 内建「显式候选链」，
+  //   找不到就抛 PDD_PROFILE_MISSING，绝不静默借用。
+  const { launchOptions } = await import(`file:///${PLUGIN_ROOT}/skills/_shared/pdd-launch.mjs`)
+  let browser
+  try {
+    browser = await puppeteer.launch(launchOptions(SHOP))
+  } catch (e) {
+    if (e?.code === 'PDD_PROFILE_MISSING') {
+      emit({ ok: false, failureKind: 'not_bound', text: e.message })
+      process.exit(2)
+    }
+    throw e
+  }
   const page = (await browser.pages())[0] || await browser.newPage()
   // ★ 注入反检测（webdriver / plugins / languages / chrome.runtime）
   await page.evaluateOnNewDocument(STEALTH_SCRIPT);
@@ -131,7 +148,7 @@ const wantCsv = process.argv.includes('--csv')
 
   // ★ 风控 L1：接口级节流（落盘跨进程）+ L2：遇控即停
   //   2026-10-24：切到 pdd-client 统一入口（t1 简化签名 / t2 真签名自动选）
-  const { call: clientCall, createSession, ERR: CLIENT_ERR } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-client.mjs`)
+  const { call: clientCall, createSession, ERR: CLIENT_ERR } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-client.mjs')))
   const accForT1 = store.listAccounts().find(a => a.shop_key === SHOP)
   let COOKIES_T1 = accForT1 ? Object.entries(accForT1.cookies || {}).map(([k, v]) => `${k}=${v}`).join('; ') : ''
 
@@ -173,7 +190,7 @@ const wantCsv = process.argv.includes('--csv')
       try {
         console.warn('[pdd-works] 建立 t2 会话（真签名）第 ' + attempt + ' 次...')
         const s = await createSession(SHOP)
-        await s.goto('https://mms.pinduuduo.com/goods/goods_list'.replace('pinduuduo', 'pinduoduo'), 15000)
+        await s.goto('https://mms.pinduoduo.com/goods/goods_list', 15000)
         // 等 webpack 模块 eDaA（签名器）就绪
         await new Promise(r => setTimeout(r, 4000))
         const url = await s.url?.().catch(() => '') || ''
@@ -195,12 +212,17 @@ const wantCsv = process.argv.includes('--csv')
   const call = async (url, body) => {
     // ★ 通道选择：vodka/glide 走 t2（真签名），其余 t1（简化签名）
     const needT2 = /\/vodka\/|\/glide\//.test(url)
+    // ★ 2026-11-04：节流统一走闸门 beforeCall（账号级时间槽，落盘跨进程）。
+    //   原来用 throttleRequest（频率上限 20/60 次每分钟），与 reserveSlot 是不同维度；
+    //   现在 beforeCall 内部已包含 reserveSlot，throttleRequest 仅作兜底保留在 import 里。
+    const pre = await guard.beforeCall(url)
+    if (!pre.allow) throw Object.assign(new Error(`账号不可用：${pre.reason}`), { __blocked: true })
     try {
       const r = needT2
         ? await (async () => {
             const s = await ensureT2Session()
             if (!s) return { ok: false, kind: 'signature_error', hint: 't2 会话建立失败（页面被风控关掉或未登录）' }
-            return await clientCall({ shopKey: SHOP, session: s, url, body, referer: 'https://mms.pinduuduo.com/goods/goods_list'.replace('pinduuduo', 'pinduoduo') })
+            return await clientCall({ shopKey: SHOP, session: s, url, body, referer: 'https://mms.pinduoduo.com/goods/goods_list' })
           })()
         : await clientCall({ shopKey: SHOP, cookies: COOKIES_T1, url, body })
 
@@ -214,12 +236,17 @@ const wantCsv = process.argv.includes('--csv')
         }
       }
 
-      // 54001 → 自动重试已内建；这里只归一错误
+      // 成功 → 直接返回 json
       if (r.ok) return r.json
       const code = r.ec
+
+      // 54001 → pdd-client 已内建自愈重试；这里只归一错误
       if (code === 54001) {
-        markCooldown(SHOP, 54001, r.hint)
-        const err = new Error(`RISK_54001`); err.riskCode = 54001; err.riskMsg = r.hint || ''
+        markCooldown(SHOP, 54001, r.hint || '54001 需人工过一次滑块验证')
+        const err = new Error(`RISK_54001`)
+        err.riskCode = 54001
+        err.riskMsg = r.hint || ''
+        err.needManualCaptcha = true
         throw err
       }
       if (code === 43001 || r.kind === 'session_expired') {
@@ -227,7 +254,9 @@ const wantCsv = process.argv.includes('--csv')
         throw err
       }
       if (code === 40002) {
-        markCooldown(SHOP, 40002, '高频限流')
+        // ★ 2026-10-27 修：40002 现已补进 pdd-risk 的 RISK_CODES（240s），
+        //   不再被 markCooldown 的 `if (!base) return` 静默吞掉。
+        markCooldown(SHOP, 40002, '40002 高频限流（官方实测无法本地修复，只能降级或等待）')
         const err = new Error(`RISK_40002`); err.riskCode = 40002; err.riskMsg = r.hint || ''
         throw err
       }
@@ -308,27 +337,19 @@ const wantCsv = process.argv.includes('--csv')
       // ① 前置校验（页面同款：resourceValidate）
       await call('https://mms.pinduoduo.com/vodka/v2/mms/pc/resourceValidate', { goodsIdList: [gid], checkItem: ['if_in_bidding_check', 'if_in_goods_decoration', 'if_in_combine_buy'] }).catch(() => null)
       // ② 下架
-      const a = await getAntiContent(page, { force: true })
-      const vtk0 = getTok(SHOP)
-      const r = await safeEval(async (u, bd, av, vt) => {
-        const resp = await fetch(u, { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', 'Anti-Content': av, ...(vt ? { VerifyAuthToken: vt } : {}) }, body: JSON.stringify(bd) })
-        return await resp.json().catch(() => null)
-      }, 'https://mms.pinduoduo.com/vodka/v2/mms/pc/offSale', { goodsId: gid }, a.data, vtk0?.token || null)
-      const ok = r?.success === true
+      // ★ 2026-11-05：改走基座（路径 / 签名头 / 节流 / 错误归因全由 pdd-api 负责）
+      const rr = await pddApi(page, 'goods.offSale', { goodsId: gid }, { shopKey: SHOP, guard })
+      const ok = rr.ok
       emit({
         ok, mode: 'offsale', goodsId,
         text: ok
           ? `商品 ${gid} 已下架。可在「已下架」列表确认。`
-          : `下架失败：${r?.error_msg || JSON.stringify(r).slice(0, 200)}`,
+          : `下架失败：${rr.ec || ''} ${(rr.hint || '').slice(0, 160)}`,
       })
     } else if (mode === 'onsale') {
-      const a = await getAntiContent(page, { force: true })
-      const vtk1 = getTok(SHOP)
-      const r = await safeEval(async (u, bd, av, vt) => {
-        const resp = await fetch(u, { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', 'Anti-Content': av, ...(vt ? { VerifyAuthToken: vt } : {}) }, body: JSON.stringify(bd) })
-        return await resp.json().catch(() => null)
-      }, 'https://mms.pinduoduo.com/vodka/v2/mms/pc/onSale', { goodsId: gid }, a.data, vtk1?.token || null)
-      const ok = r?.success === true
+      // ★ 2026-11-05：改走基座
+      const rr = await pddApi(page, 'goods.onSale', { goodsId: gid }, { shopKey: SHOP, guard })
+      const ok = rr.ok
       emit({
         ok, mode: 'onsale', goodsId,
         text: ok
@@ -461,22 +482,49 @@ const wantCsv = process.argv.includes('--csv')
 })().catch(async (e) => {
   if (typeof sessForT2 !== 'undefined' && sessForT2) await sessForT2.close().catch(() => {})
   // ★ 风控异常 → 友好提示（而不是裸的 RISK_54001）
+  // ★ 2026-10-27 修：原来所有 riskCode 一律标成 failureKind='rate_limit'，
+  //   导致 54001（需过滑块）与 40002（限流）在模型眼里是同一种错误，
+  //   模型只能盲目重试。现在按错误码分开：
+  //     54001 → risk_control：引导人工过一次滑块，**不要**重新登录、不要立即重试
+  //     43001 → token_expired：会话过期，重新登录
+  //     40002 → rate_limit：官方实测无法本地修复，降级或等待
   const { checkCooldown, fmtRemain } = await import(`file:///${PLUGIN_ROOT}/skills/_shared/pdd-risk.mjs`).catch(() => ({}))
   if (e?.riskCode && checkCooldown) {
     const cd = checkCooldown(SHOP)
+    const remain = cd?.remainMs > 0 ? fmtRemain(cd.remainMs) : ''
+    if (e.riskCode === 54001) {
+      emit({
+        ok: false, failureKind: 'risk_control',
+        text: `账号命中平台风控（54001：操作太过频繁）${e.riskMsg ? `：${e.riskMsg}` : ''}${remain ? `，已记冷却 ${remain}` : ''}。\n`
+          + '★ 这不是登录态失效，**不要**去「账号连接」重新登录（那只会刷新风控基线）。\n'
+          + '★ 也不要在冷却期内反复调用（会延长封禁）。\n'
+          + '正确做法：打开浏览器窗口手动完成滑块/拼图验证；通过后会拿到 10 分钟通行证，届时重试即可。',
+      })
+      process.exit(2)
+    }
+    if (e.riskCode === 43001) {
+      emit({
+        ok: false, failureKind: 'token_expired',
+        text: `会话已过期（43001）。请到「账号连接」页面重新扫码登录拼多多商家后台。\n`
+          + '注：凭证库里的 Cookie 快照可能是旧的，重新登录会同步刷新。',
+      })
+      process.exit(2)
+    }
     emit({
       ok: false, failureKind: 'rate_limit',
-      text: `命中平台频控（code=${e.riskCode}${e.riskMsg ? `：${e.riskMsg}` : ''}），已记冷却 ${fmtRemain(cd.remainMs)}。\n`
-        + '期间请勿重复调用（会延长封禁）。\n'
-        + '若急需使用，可在浏览器窗口手动过滑块验证，然后重试。',
+      text: `命中平台频控（code=${e.riskCode}${e.riskMsg ? `：${e.riskMsg}` : ''}）${remain ? `，已记冷却 ${remain}` : ''}。\n`
+        + '★ 40002 是接口级限流，官方实测无法本地修复，重试无效、只会延长封禁。\n'
+        + '请等待冷却结束，或换用其他数据来源。',
     })
     process.exit(2)
   }
   // ★ 2026-10-24 补：detached Frame → 风控关页面 + 记账号健康分
   try {
-    const { normalizeError, recordToAntiban } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-error.mjs`)
+    const { normalizeError, recordToAntiban } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-error.mjs')))
     const n = normalizeError(e, '商品管理')
-    await recordToAntiban(SHOP, null, n.failureKind === 'risk_control' ? 'captcha' : null).catch(() => {})
+    // ★ 2026-10-27 修：原为 .catch(() => {}) 静默吞掉，健康分丢失无人知晓
+    await recordToAntiban(SHOP, null, n.failureKind === 'risk_control' ? 'captcha' : null)
+      .catch((e2) => console.error(`[pdd-works] ⚠ 记录风控健康分失败：${String(e2 && e2.message || e2).slice(0, 120)}`))
     emit({ ok: false, failureKind: n.failureKind, text: n.text })
     process.exit(2)
   } catch { /* ignore */ }

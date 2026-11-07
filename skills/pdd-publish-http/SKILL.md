@@ -1,6 +1,6 @@
 ---
 name: pdd-publish-http
-description: "拼多多商品上架（HTTP 逆向模式）：统一 JSON 描述商品，图片全部 HTTP 上传到 CDN，提交体在浏览器层拦截改包后以页面身份（带 Anti-Content 签名）HTTP 重放，并调 commit/submit 确认上架。数据传输 100% HTTP，浏览器只做「签名生成+会话注册+最小石填」。支持颜色×尺码矩阵、SKU 预览图、属性显式指定。触发：拼多多上架、拼多多发布、拼多多HTTP上架、改包上架、拼多多批量上架准备。排除：采集比价（pdd-crawl）、订单/库存/客服/分析、淘宝/闲鱼发布。需绑定拼多多商家后台账号；上架为 L2，须先给预览并获同意。"
+description: "拼多多商品上架【首选：复制本店商品改包】。publish-by-copy.mjs 复制本店同类目已有商品为草稿，改 SKU（1~2 维、任意自定义规格名与数量）/标题/主图/价格后提交；免选类目、免填属性、免填品牌，通用所有类目，实测最快 3 秒/单。product.json：title(≤30汉字)/images/price/stock/specs/skus。已知限制：brand_limit=true 的类目（如纸杯）纯 HTTP 提交会被属性校验拦，改用 publish-flow.mjs 页面提交。内置 pdd-antiban 节流（账号级 4-6s、接口级 1.8s、40002 冷却 240s）。触发：拼多多上架、拼多多发布、拼多多批量上架、复制商品上架、改包上架、拼多多改SKU。排除：采集比价（pdd-crawl）、订单/库存/客服/分析、淘宝/闲鱼/抖店发布。需绑定拼多多商家后台账号；发布为 L2，须先 --dry 预览并获用户同意后才加 --confirm。"
 metadata:
   builtin_skill_version: "1.1"
   dsagent:
@@ -32,6 +32,162 @@ metadata:
         主图 5 张 6s / 详情图 10 张 12s / 属性 35 项 13s
         总耗时 63s（原 137s，提速 54%）
 ```
+
+---
+
+## ★★ 首选路径：复制本店商品发布（publish-by-copy.mjs）
+
+> **2026-11 起，拼多多上架默认走这条路径。** 不走空白发布页，而是复制本店已有商品再改包。
+
+### 为什么用它
+
+| 好处 | 说明 |
+|---|---|
+| 免选类目 | 类目跟着源商品走 |
+| 免填属性 | 属性结构继承源商品 |
+| **免填品牌** | 品牌继承源商品，绕过 `brand_limit=true` 类目的必填校验 |
+| 快 | 复制 1-3 秒，全流程 40-90 秒 |
+| **通用** | 不限于某个类目，店里有什么类目就能发什么类目 |
+
+### 使用前提（缺一不可）
+
+1. **本店必须已有【同类目】商品**作为复制源
+   - 跨店复制会报 `该商品不属于该店铺`
+2. **源商品复制一次后会被锁**，再复制报 `600102 该商品已被新建过,请勿连续新建`
+   - 需准备多个源商品轮换
+3. 账号已登录拼多多商家后台（浏览器 profile 有效）
+
+### 三步用法
+
+```bash
+# ① 先看本店有哪些商品可作复制源
+node scripts/publish-by-copy.mjs --shop <shopKey> --list
+
+# ② 预览（零写操作）
+node scripts/publish-by-copy.mjs --shop <shopKey> --product <product.json> --source <goodsId> --dry
+
+# ③ 真实发布（L2，需用户明确同意）
+node scripts/publish-by-copy.mjs --shop <shopKey> --product <product.json> --source <goodsId> --confirm
+```
+
+### product.json 格式
+
+```json
+{
+  "title": "≤30 汉字 / 60 字符",
+  "images": ["本地绝对路径"],
+  "price": "参考价（可选）",
+  "stock": "500",
+  "specs": [
+    { "name": "款式", "values": [{"value":"A"},{"value":"B"}] },
+    { "name": "容量", "values": [{"value":"14oz"},{"value":"16oz"}] }
+  ],
+  "skus": [
+    { "specs": {"款式":"A","容量":"14oz"}, "price":"19.9", "stock":"100", "itemNo":"A1" }
+  ]
+}
+```
+
+- `title` **超 30 汉字会被平台拦**（`商品标题最多填写30个汉字`）
+- `specs` 最多 2 维，`skus` 需覆盖全部维度组合
+- `images` 不传则沿用源商品图
+
+### ⚠ 已知限制
+
+| 情况 | 现象 | 处理 |
+|---|---|---|
+| 需要商详装修的类目 | `commit/submit` 报「商品详情图数量必须在1-50张」 | 脚本已内置「页面补详情图」步骤（打开草稿页点保存草稿），自动处理 |
+| 该类目不需要品牌（如门贴）| 纯 HTTP 直接通，**最快 3 秒/单** | 用 `--confirm` 直跑 |
+
+### ★ 品牌问题的正确解法（2026-11 实测）
+
+品牌校验失败有三个典型错误信息：
+
+```
+属性[品牌]校验错误：该属性必填，需在编辑页确认后重新提交
+输入的属性值'倾听果'不可用,请更换！
+```
+
+**根因不是没填品牌，而是类目属性模板参数错了。** 必须用这三个值：
+
+| 字段 | 含义 | 纸杯类目实测值 |
+|---|---|---|
+| `propertys_tid` | **属性模板 ID**（最关键）| `63387` |
+| `template_module_id` | 属性模块 ID | `91765` |
+| `goods_properties[ref_pid=310].vid` | **品牌值 ID** | `157882` |
+
+> ⚠ `vid` **不是** `/draco-ms/mms/brand/audit/record` 返回的 `brand_id`（那个是 143701），两者不同。
+>
+> ⚠ `propertys_tid` 填错（比如用别的类目的值）→ 平台回退到默认模板 → 带出「倾听果」这种别的类目的品牌值。
+
+### 怎么拿到这些值：harvest-native-props.mjs
+
+```bash
+node scripts/harvest-native-props.mjs --shop <shopKey> --catId <类目ID> --source <源商品ID>
+```
+
+原理：打开草稿页 → 点「提交并上架」→ **拦截页面自己发出的 `action/edit`** → 保存整个 body。
+页面自己算出来的值是平台认可的权威值，比自己拼可靠。
+
+产物：
+
+```
+artifacts/pdd-native-props/cat<catId>_<shopKey>.json              ← 属性模板 + brandRule
+artifacts/pdd-native-props/cat<catId>_<shopKey>_native-body.json  ← 完整 157 字段 body
+```
+
+脚本会直接打印判定结果：
+
+```
+══════════ 品牌判定 ══════════
+  ✅ 需要品牌（必填）
+     品牌名: 爱绿森
+     vid:   157882
+     template_pid: 661648
+     template_module_id: 91765
+
+══════════ 关键类目参数 ══════════
+  propertys_tid: 63387
+```
+
+**每个类目跑一次，之后永久复用。** `publish-by-copy.mjs` 会自动读取这个文件。
+
+### 两个 body schema 不一样（易踩坑）
+
+| 接口 | 字段数 | 用途 |
+|---|---|---|
+| `commit/detail`（草稿读取）| 174 | 含大量展示字段（`id`/`owner`/`mall_id`…），**不能直接当提交体** |
+| `goodsCommit/action/edit`（提交）| 157 | 提交必需（含 `propertys_tid`/`isbn_properties_related`/`must_have_spu`…）|
+
+**直接用 `commit/detail` 提交会报「请求method,argument,body错误」。**
+正确做法：用 `harvest-native-props.mjs` 存下的原生 157 字段 body 当底座。
+
+### 详情图字段
+
+平台校验的是 **`detail_gallery`**（1-50 张），不是 `decorationDetail`。
+
+`decorationDetail` 是商详装修楼层（结构复杂，`floor_id`/`key`/`content_list`），由页面根据 `goods_id` 从服务端实时拉取，**纯 HTTP 传不进去**。
+
+脚本的处理：`action/edit` 之后，重新打开草稿页点一次「保存草稿」，让页面写入装修楼层，再用 `commit/submit` 提交。
+
+### 实测记录
+
+| 类目 | 规格形态 | 结果 |
+|---|---|---|
+| 门贴（cat 9683）| 1维1值 / 1维3值 / 2维2×2 / 2维3×3 | ✅ 全部成功，最快 3 秒 |
+| 纸杯（cat 16675）| 2维2×2（4行）| ✅ `1026511479126` 混合模式约 106 秒 |
+
+### 限流处理
+
+脚本已内置 `pdd-antiban` 节流（官方 SDK 实测参数）：
+
+- 账号级间隔 **4-6 秒**（含随机抖动）
+- 同接口最小间隔 **1.8 秒**
+- `40002 操作太过频繁` → **冷却 240 秒**后重试
+- `54001 命中风控` → 冷却 60 秒
+- `43001 会话过期` → 立即停止，提示重新登录
+
+> `40002` 是**按接口**计的，不同接口互相独立。`template/mall` 阈值极低（正常商家一天只调几次），测试时最容易被限。
 
 ---
 
@@ -101,33 +257,6 @@ for each product.json:
 
 ---
 
-
-## 一点六、标题长度校验（提交前必查，2026-11-01）
-
-### 关键：拼多多的「60 字符」= 30 个汉字
-
-汉字算 **2 字符**。所以两个判据都要查：
-
-```js
-const hanziCount = (t.match(/[一-龥]/g) || []).length
-const asPddLen = hanziCount * 2 + (t.length - hanziCount)   // 汉字算 2
-if (hanziCount > 30 || asPddLen > 60) → 拦截
-```
-
-**踩过的坑**：只查 `t.length > 60`，遇到 33 字符但 31 汉字的标题会放过去，批量跑到第 3 个才在提交时被平台拒，白跑几分钟。
-
-**现在**：`publish-v2` 在数据校验阶段就拦住：
-
-```
-商品数据校验未通过：标题汉字超限（31 个汉字，上限 30）
-```
-
-### 批量场景尤其重要
-
-100 个商品里只要有一个标题超限，那个商品会失败但不影响后续（catch 后继续）。不过提前拦住能省下整个浏览器启动 + 填表的时间（约 2 分钟/个）。
-
----
-
 ## 二、段4 正确顺序（不可改）
 
 ```
@@ -185,7 +314,6 @@ document.evaluate('.//input[contains(@placeholder,"自定义")]', root, ...)
 ```
 
 ---
-
 
 ## 四、价格库存（sku-table.mjs）
 
@@ -323,84 +451,7 @@ single = (price + 1.01).toFixed(2)
 
 ---
 
-
-## 六点五、复合字段与搜索式下拉（attr-composite.mjs，2026-11-01）
-
-真机上架睡衣时踩到的两类字段，形状和普通属性完全不同。**判断错交互模型就会一直填不上，而且看不出原因**。
-
-### 类型 A：弹窗勾选型（材质成分）
-
-**错误认知**：以为它是「加行 + 输入框」结构 → 点了按钮，等输入框出现，等不到 → 判失败。
-
-**真实结构**（截图实证）：
-
-```
-点「添加材质成分(0/7)」→ 弹出选择面板：
-  搜索框：请输入搜索内容
-  ☐ 棉   ☐ 麻   ☐ 蚕丝   ☐ 羊毛   ☐ 羊绒   ☐ 其它
-  ☐ 亚麻  ☐ 氨纶  ☐ 涤纶（聚酯纤维）  ...
-  [确定(0/7)]  [取消]
-```
-
-**正确流程**：
-
-```
-① 点「添加XX」按钮 → 等弹窗（判据：出现「确定(N/M)」按钮 + ≥3 个 checkbox）
-② （可选）在搜索框键入关键词过滤
-③ 找目标选项的 checkbox → 点击勾选
-④ 点「确定」
-⑤ 校验：看「确定」按钮的计数变化 0 → 1，以及弹窗是否关闭
-```
-
-**★ 校验判据必须是「计数变化」，不能是「字段文本包含成分名」**
-平台会改写名称：输入「聚酯纤维（涤纶）」，勾选后显示「涤纶（聚酯纤维）」。
-字符串匹配 `text.includes('聚酯纤维')` 会因为顺序颠倒而失败，但实际已经填好了。
-
-### 类型 B：搜索式下拉（品牌）
-
-**结构**：
-
-```html
-<input placeholder="请输入品牌名称搜索">
-「未找到需要的品牌？点击申请」
-```
-
-**必须先键入搜索，等候选出现，再点选**。直接 `input.value = '其他'` 不会触发候选加载，也不会被平台接受。
-
-流程：
-
-```
-① 点击搜索框 → Ctrl+A → Delete 清空
-② 键入品牌名（delay 55ms，太快候选来不及出）
-③ 等 1.5s 让候选加载
-④ 精确匹配 → 包含匹配 → 「其他/其它/无」时取第一个
-⑤ 点选后校验 input.value 或容器文本包含品牌名
-```
-
-### 判断规则（看 label 文本就知道是哪种）
-
-| label 特征 | 交互模型 | 处理方式 |
-|---|---|---|
-| 有 input，placeholder 含「搜索」 | 搜索式下拉 | 键入 → 等候选 → 点选 |
-| 文本形如 `添加XX(N/M)`，**无 input** | 弹窗勾选 | 点按钮 → 弹窗 → 勾选 → 确定 |
-| 有 input，placeholder 含「请选择」 | 普通下拉 | 点开 → 点选项 |
-| 有 input，可自由输入 | 文本型 | 直接填 |
-
-**排查口诀**：字段无 input 时，不要以为它坏了 —— 先看 label 里有没有「添加XX(N/M)」。
-
----
-
-
 ## 七、参考价与默认值
-
-### 标题（新增约束）
-
-| 规则 | 值 |
-|---|---|
-| 汉字数上限 | **30** |
-| 拼多多算法字符上限 | **60**（汉字算 2） |
-| 校验时机 | `publish-v2` 数据校验阶段（提交前） |
-
 
 | 项 | 规则 |
 |---|---|
@@ -596,129 +647,65 @@ node scripts/compress-images.mjs --files a.png,b.png
 - 调低分辨率（1440px 长边足够电商用）
 - 换更简单的构图（纯白底比复杂背景小得多）
 
-
 ## 十、性能
 
-### 实测耗时（2026-11-02 优化后，模板复用）
+### 实测耗时（毛巾，2026-10-31 优化后）
 
-| 场景 | 耗时 |
-|---|---|
-| **老类目（模板 + catId）** | **13 秒** ⬇️ |
-| 新类目（首次探测） | 215-239s |
-
-**累计提速：134s → 13s（90%）**
-
-### 13 秒构成
-
-| 阶段 | 耗时 |
-|---|---|
-| 模板补全属性 | 1s |
-| catId 直达表单页 | 2s |
-| **主图 5 张**（批量投递 306ms + 渲染） | **3s** |
-| 建规格维度 | 1s |
-| 视觉填规格（缓存命中） | 3s |
-| 价格库存 | 1s |
-| SKU 预览图 | 1s |
-| **属性直填**（15 项，必填 9/9） | **2.5s** |
-| 其他 | 0.5s |
-
-### 提速清单（省 121 秒）
-
-| 优化 | 效果 | 省时 |
+| 场景 | 耗时 | 说明 |
 |---|---|---|
-| **图片批量投递** | 主图 6s→0.3s，详情图 10s→2.5s | **-10s** |
-| **模板直填** | 属性环节 79s→2.7s（零扫描） | **-76s** |
-| **catId 直达** | 段1+2：6s→2s（跳过商品列表） | **-4s** |
-| 详情图轮询 500→200ms | 更早发现计数增长 | -3s |
-| 图片自动压缩 | 7 张超 3MB 自动处理，上传更顺 | -3s（顺带） |
-| 等页面稳定轮询 | 6433ms→259ms | -6s |
-| 属性两阶段 + 批量校验 | 先全点选再统一校验 | -20s |
+| 新类目（第 1 次） | 215-239s | 从头探测 + 沉淀模板 |
+| **老类目（第 2 次起）** | **63s** | 命中模板 + catId 直达 |
 
-### ★ 批量投递（推翻旧结论，2026-11-02）
+**累计提速 137s → 63s（54%）**
 
-**旧认知**：「批量 uploadFile 会被页面静默丢弃」—— 那是**原图 1-3MB** 时的情况。
+### 63 秒构成
 
-**现在**：图片已被 `img-prep` 压到 0.3-0.4MB，一次性投递毫无压力。
+| 阶段 | 耗时 | 性质 |
+|---|---|---|
+| 段1 打开列表 | 5s | 页面加载 |
+| 标题+参考价 | 4s | — |
+| **主图 5 张** | **13s** | **平台硬限制**（每张 ~2.6s，含平台生成缩略图） |
+| **详情图 10 张** | **12s** | **平台硬限制**（每张 ~1.2s） |
+| 规格 2 维 | 8s | 视觉缓存 |
+| 价格库存 12 项 | 2s | — |
+| SKU 预览图 | 1s | 快速检查跳过 |
+| **属性 35 项** | **13s** | 两阶段 + 批量校验 |
+| 补填+发货+模板 | 5s | — |
 
-```js
-// 主图：一次投递全部
-const h = await page.$(preferredSelector)
-await h.uploadFile(...images)          // 5 张 → 306ms
-// 等计数达到 target（不是每张都等）
+**图片上传占 25s（40%），是平台硬限制**（批量 uploadFile 会被静默丢弃，必须逐张）。
 
-// 详情图：同理
-await hBulk.uploadFile(...files)       // 10 张 → 2.5s
-```
+### 优化清单（省 74s）
 
-**保底**：批量失败或计数不达标 → 自动回退逐张补齐。
+| 优化 | 节省 | 说明 |
+|---|---|---|
+| **主图无计数改用缩略图判断** | **23s** | 计数器读不到时读 `img` 数量，避免重试 3 次 × 8s |
+| **属性两阶段 + 批量校验** | **20s** | 先全点选（每字段 100ms），再一次 `evaluate` 批量校验 |
+| 跳过模板字段候选读取 | 11s | `harvestAttributes({skipOptions})` |
+| 图片轮询 2000ms → 300ms | 9s | 正常上传 1-2s 内完成 |
+| 预览图快速检查 | 9s | 所有行已有图时立即返回，不等行数稳定 |
+| 等页面稳定 6433ms → 259ms | 6s | 250ms 轮询 + 双重判据（按钮出现 或 规格行数达预期） |
+| 段间/交互 sleep 压缩 | 12s | 价格→预览图 2000→600ms；预览图→属性 1200→400ms；clickOption 300→80ms |
 
-### ★ 模板直填（零扫描，2026-11-02）
+### 其他优化（前期）
 
-**问题**：v1 模板只存 `{name, value}`，没存 options，导致每次都要重新扫描读候选（3 次 × 3-6s = 10-18s）。
+- 视觉分析结果缓存（`vision-cache.mjs`，同类目第 2 单起省 8s）
+- 老类目 catId 直达（省 5s）
+- 规格填值 JS setter 优先 → 键盘兜底
+- 属性预建 `fieldName → boxId` 映射（省 143 次 DOM 遍历）
 
-**v2 模板结构**：
-```json
-{
-  "attrs": [
-    {
-      "name": "品牌",
-      "value": "其他",
-      "required": true,
-      "kind": "select",
-      "options": ["其他", "无品牌/无注册商标", "..."],
-      "optionCount": 10
-    }
-  ]
-}
-```
+### 剩余瓶颈
 
-**直填流程**（`attr-template-direct.mjs`）：
-```
-① 一次 DOM 索引（~50ms）建立「字段名 → boxId」
-② 逐字段直接点选（不读候选）
-③ 必填填充率 <80% 或必填字段缺失 → 才回落通用流程
-```
+| 项 | 耗时 | 能否优化 |
+|---|---|---|
+| 图片上传（主图+详情图） | 25s | ❌ 平台逐张处理 |
+| 属性填写 | 13s | ⚠️ 边际收益递减 |
+| 规格填写 | 8s | ⚠️ 视觉缓存已生效 |
 
-实测：15 项 / 2.5 秒，必填 9/9。
+**理论下限约 55s。**
 
-### ★ catId 直达（跳过商品列表）
+---
 
-模板里有 catId 时，直接 `goto` 表单页：
-
-```js
-if (!connected && catIdDirect) {
-  await page.goto(`https://mms.pinduoduo.com/goods/goods_add/index?type=add&from=category&id=${catIdDirect}`)
-  // 等表单就绪（出现 basic.propertys.* 或标题输入框）
-}
-```
-
-省掉：打开商品列表（3s）+ 等加载（3s）+ 点发布新商品（2s）+ 等跳转（2s）。
-
-### 失败快速检测（2026-11-02）
-
-原逻辑无脑轮询 90 秒。现在 5 秒后开始检测明确失败信号：
-
-| 信号 | 判定 |
-|---|---|
-| 跳到 `/login/` 或出现「扫码登录」 | 登录失效，立即失败 |
-| 「请先完成/无权访问/操作频繁/系统繁忙」 | 页面拦截，立即失败 |
-| 「加载失败/出错了/网络异常」 | 加载失败 |
-| 白屏连续 5 次（2.5s） | 立即失败 |
-
-**批次级登录预检**：批量开始前先检查一次，失效则立即 `exit(2)`，不让 200 个商品逐个失败（5 小时 → 5 秒）。
-
-### 回滚记录（失败尝试）
-
-**模板 dims 直建规格维度** —— 不可行
-```
-[tpl] 第 1/1 维「尺寸」用模板 type=custom-input 直接建
-（卡 29 秒）[spec-row] 读取规格区失败：no #newSpec
-```
-原因：模板记录的 type 是**上次的页面状态**，但页面每次渲染结构不同。
-结论：规格维度必须走视觉探测（缓存后仅 3s）。
-
-
-## 十点五、组件清单
+## 十一、组件清单
 
 | 文件 | 职责 |
 |---|---|
@@ -726,248 +713,41 @@ if (!connected && catIdDirect) {
 | `batch-publish.mjs` | 批量上架（扫描目录 + 逐个处理 + 汇总） |
 | `field-service.mjs` | 服务承诺（7天无理由等强制勾选项） |
 | `publish-flow.mjs` | 段3+段4 组件编排 |
-| `stage-nav.mjs` | 段1 打开列表 + 段2 选类目（catId 直达） |
-| `stage-submit.mjs` | 段5 提交 + 校验（loading 遮罩检测 + 快照比对） |
-| `attr-template-direct.mjs` | **模板直填**（零扫描，按 name→value 直接点选，2026-11-02 新增） |
-| `category-template-v2.mjs` | **类目模板 v2**（带 options + pageFields 防污染，2026-11-02 新增） |
+| `stage-nav.mjs` | 段1 打开列表 + 段2 选类目 |
+| `stage-submit.mjs` | 段5 提交 + 校验 |
 | `spec-row-fill.mjs` | 规格逐行填写 + 单位剥离 + 补勾 |
 | `spec-dims.mjs` | 规格维度（scanDims / alignDims） |
 | `sku-table.mjs` | 库存/拼单价/单买价（列映射 + skip-existing） |
 | `sku-thumb.mjs` | 每行预览图 |
 | `attr-fill-generic.mjs` | 属性采集 + 填写 + AI 选值 + 必填复核 |
-| `attr-composite.mjs` | **复合字段**（弹窗勾选型 / 搜索式下拉，2026-11-01 新增） |
 | `attr-harvest.mjs` | 属性候选采集入库（attr-schema.json） |
-| `category-template.mjs` | 类目模板读写（旧版，已被 v2 取代） |
+| `category-template.mjs` | 类目模板读写 |
 | `field-basic.mjs` | 标题 / 参考价 |
 | `field-images.mjs` | 主图 / 详情图 |
 | `field-shipping.mjs` | 发货售后（通用模糊匹配） |
 | `vision-fill.mjs` | 视觉分析规格区 |
 | `vision-cache.mjs` | 视觉分析结果缓存 |
 | `analyze_spec_ui.py` | 视觉模型调用（截图 → JSON） |
-| `img-prep.mjs` | **图片自动压缩**（3MB 上限，PNG→JPEG q92，2026-11-01 新增） |
-| `compress-images.mjs` | **独立压缩工具**（--dir / --files / --check，2026-11-01 新增） |
-| `imgprep.py` | 图片规整（旧版，Python） |
-
-### 新增组件说明（2026-11-01）
-
-**`attr-composite.mjs`** —— 处理两类「看起来是属性、实际交互完全不同」的字段：
-
-| 导出函数 | 用途 |
-|---|---|
-| `fillCompositeAttr(page, boxId, name, value, opts)` | 弹窗勾选型（材质成分）：点按钮 → 弹窗 → 勾 checkbox → 点确定 |
-| `fillBrandSearch(page, boxId, brand, opts)` | 搜索式下拉（品牌）：键入搜索 → 等候选 → 点选 |
-| `parseCompositeValue(raw)` | 值解析（`'聚酯纤维（涤纶）'` → `{name, pct}`） |
-
-**`img-prep.mjs`** —— 上传前自动压缩：
-
-| 导出函数 | 用途 |
-|---|---|
-| `prepareImages(files, {maxBytes, log})` | 批量预处理（达标复用，超标压缩），返回 `{files, detail, stats}` |
-| `checkImageSizes(files, maxBytes)` | 只检查不处理 |
-
-**`compress-images.mjs`** —— 命令行入口：
-
-```bash
-node scripts/compress-images.mjs --dir ./img --check
-node scripts/compress-images.mjs --dir ./img --max-mb 3
-```
+| `imgprep.py` | 图片规整 |
 
 ---
 
-
-## 十一、200 批量实测（2026-11-03 完成）
-
-### 结果
-
-| 指标 | 值 |
-|---|---|
-| 处理商品 | **200/200** |
-| **技术失败** | **0** ✅ |
-| 真实上架 | **52 个** |
-| 平台拒绝（重复铺货） | 146 个 |
-
-成功分布：`cup 11 / pillow 14 / bottle 13 / box 14 / towel 0`
-
-### ★ 核心结论：重复铺货会被静默拒绝
-
-**现象**：
-```
-[17:44:05]   15s 未跳转，补点一次提交
-[17:44:19]   错误（0）：页面未跳转但无校验错误，查商品列表确认…
-[17:44:24]   ⚠ 商品列表未找到新商品，判定为未成功
-```
-
-**特征**：
-- 必填项全部通过（前端校验 OK）
-- 提交后页面停在 `goods_add`，出现 `goods-loading-contain` 遮罩
-- 显示 `错误（0）`（= 无校验错误）
-- 商品列表查不到新商品
-
-**根因**：**平台防重复铺货**。同一店铺提交高度相似的商品（同款睡衣 200 个变体，
-仅标题后缀 + 图片顺序不同），后端静默拒绝，**不返回任何错误信息**。
-
-**不是代码问题**：
-- 毛巾 0 成功（同款重复）
-- 其他类目各 11-14 个成功（每个类目的前几个变体）
-- 技术失败 0
-
-**业务建议**：真实场景用**不同商品**（不同款式/图片），预期接近 100% 成功率。
-
-### 毛巾 0 成功的原因
-
-毛巾是测试数据里最先跑完的类目，200 个变体里毛巾占 40 个，全部被拒。
-其他类目因为发布顺序靠后，前面的变体已经消耗了「同类配额」，反而各成功 11-14 个。
-
----
-
-## 十二、本轮实战修复清单（2026-11-02 ~ 11-03）
-
-### 1. SKU 规格编码列必须填
-
-实测表头 8 列：
-```
-0:尺寸  1:颜色  2:*库存  3:*拼单价(元)  4:*单买价(元)  5:*预览图  6:规格编码  7:状态
-```
-每行 input（排除 file）：`[库存, 拼单价, 单买价, 规格编码]`
-
-原来注释写「inputs[3] = 规格编码（不填）」→ 一直空着。
-现在：加入填写清单，编码规则 = `product.skus[].itemNo` 或自动生成 `SKU001/SKU002...`。
-
-### 2. 属性输入后必须点选弹出的下拉
-
-```js
-// ❌ 错：键入 → Tab（候选消失，字段没写入）
-await page.keyboard.type(want)
-await page.keyboard.press('Tab')
-
-// ✅ 对：键入 → 轮询等候选（100ms 间隔，最多 900ms）→ 真实鼠标点选 → 校验
-await page.keyboard.type(want)
-// 轮询等候选出现
-await page.mouse.click(picked.x, picked.y)
-```
-候选匹配顺序：**精确 → 前缀 → 短候选优先 → 通用值兜底**。
-候选里没有匹配 → 明确报 `no-match` + 列出可选值，**不要 Tab 蒙**。
-
-### 3. 品牌填成功却报失败（隐蔽 bug）
-
-**日志**：
-```
-品牌 = 无品牌/无注册商标 ✅
-已填 3 项，未填 0 项          ← 4 个字段只算 3 个
-「品牌」本轮失败，下一轮重试    ← 品牌被排除
-```
-
-**根因**：special 字段（品牌/材质成分）走 `fillBrandSearch`/`fillCompositeAttr`，
-结果合并进了 `filled`，但 `okNames` 只从 `fillAttributesGeneric` 的返回值取，
-**不含 special** → 品牌误判失败 → 下一轮重试（浪费 10 秒）。
-
-**修复**：
-```js
-const okNames = new Set((r.filled || []).map(f => String(f).split('=')[0]))
-for (const k of Object.keys(special)) {
-  if (filled.some(x => String(x).split('=')[0] === k)) okNames.add(k)  // ★ 补 special
-}
-```
-
-### 4. 类目模板必须防污染
-
-**现象**：毛巾模板累积到 33 个属性，其中 17 个是**睡衣**的（袖长/下装长/衣门襟/领型/平方克重）。
-毛巾实际只有 13-16 个字段 → 直填时 23 项白跑 + 回落通用流程。
-
-**根因**：`saveTemplate` 合并时取并集，把其他类目字段也累积进来。
-
-**修复**：
-- `saveTemplate` 新增 `pageFields` 参数，只保留页面上真实存在的字段
-- 页面字段数 < 已有 attrs 的 50% → 判定类目结构变化，**直接重建**
-- 新增 `pruneStaleAttrs(cat, fields)` 工具函数
-
-### 5. 服务承诺勾选（beast-core checkbox）
-
-```js
-// ❌ 错 1：返回坐标但调用方当布尔用 → 永远走 cb.click()（JS click 无效）
-// ❌ 错 2：校验读 cb.checked —— beast-core 的 input 是隐藏的，永远 false
-// ✅ 对：真实鼠标点击 wrapper，校验读 data-checked
-const wrapper = cb.closest('[data-testid="beast-core-checkbox"]') || cb.closest('label')
-const dataChecked = wrapper?.getAttribute('data-checked')   // '0' | '1'
-await page.mouse.click(x, y)                                // 真实点击
-return dataChecked === '1' || dataChecked === 'true' || cb.checked === true
-```
-
-### 6. 回落判据只看「必填有无值」
-
-```js
-// ❌ 原判据：fillRate < 0.8 → 回落
-//    必填 8 个填了 6 个（75%）就回落，缺的 2 个可能是非必填 → 白走通用流程 +40s
-// ✅ 新判据：只看有没有必填完全没值
-const requiredEmpty = requiredNames.filter(rn => !filledNames.has(rn.replace(/\s+/g, '')))
-const needFallback = requiredEmpty.length > 0
-```
-
-### 7. 模糊匹配要加长度差限制
-
-「工艺」定位错字段 → `no-match` 显示「家用/家用」。
-```js
-const cands = indexNames.map(k => ({ k, kn: k.replace(/\s+/g, '') }))
-  .filter(x => x.kn.includes(normName) || normName.includes(x.kn))
-  .sort((a, b) => Math.abs(a.kn.length - normName.length) - Math.abs(b.kn.length - normName.length))
-const best = cands[0]
-if (best && Math.abs(best.kn.length - normName.length) <= 3) boxId = index[best.k].id   // 长度差 ≤3
-```
-
-### 8. goods-loading-contain 遮罩不拦截点击
-
-实测：遮罩在**提交前**不会消失，且 `elementFromPoint` 显示按钮可达。
-等它纯属浪费 → 等待从 20s → 6s → **1s**。
-
----
-
-## 十三、性能基线（2026-11-03 最终）
-
-### 单商品耗时
-
-| 场景 | 耗时 |
-|---|---|
-| **模板命中 + catId + 属性齐全** | **13 秒** ⬇️ |
-| 模板命中 + 部分属性要 AI 选 | 30-70 秒 |
-| 批量平均（属性不全的测试数据） | 150-178 秒 |
-| 新类目（首次探测） | 215-239 秒 |
-
-### 提速历程（134s → 13s，累计 90%）
-
-| 优化 | 单商品 | 关键改动 |
-|---|---|---|
-| 原始 | 134s | — |
-| 图片自动压缩 | 119s | 3MB 上限 |
-| **模板 v2 + 直填** | **35s** | 属性 79s → 2.7s |
-| 详情图轮询 500→200ms | 32s | — |
-| **catId 直达** | **26s** | 跳过商品列表 |
-| **图片批量投递** | **13s** | 主图 6s→0.3s |
-
-### 图片批量投递（推翻旧结论）
-
-旧认知：「批量 uploadFile 会被页面静默丢弃」—— 那是**原图 1-3MB** 时的情况。
-现在图片已被 `img-prep` 压到 0.3-0.4MB，一次性投递毫无压力。
-
-```js
-await h.uploadFile(...images)        // 5 张主图 → 306ms
-// 等计数达 target（一次等待，不是每张都等）
-// 保底：批量失败或计数不达标 → 自动回退逐张补齐
-```
-
-
-## 十四、组件化铁律
+## 十二、组件化铁律
 
 **组件化 = 结构化拆分，不是重写逻辑。**
 
 已验证的函数直接 re-export，只改真正需要改的。
 之前把验证过的属性/规格逻辑重写，导致上架全线崩，浪费了大量时间。
 
+<!-- RISK-CHEATSHEET:START（由 dev/inject-risk-cheatsheet.mjs 注入，请勿手改） -->
+
 ## ⚠ 风控速查（先读这里再排查）
 
 > 完整机制与历史踩坑记录在**知识库**，遇到风控问题**先查库**：
 > ```
-> dsagent_wiki_search(keyword="风控")            # 两页都列出来
-> dsagent_wiki_search(path="平台/entities/拼多多风控机制与应对.md")
+> dsagent_wiki_search(keyword="风控")                                     # 全部风控页
+> dsagent_wiki_search(path="平台/entities/拼多多风控机制与应对.md")        # 机制总览
+> dsagent_wiki_search(path="平台/entities/拼多多签名注入范围（Anti-Content vs crawlerInfo）.md") # 该不该带签名
 > ```
 
 ### 错误码 → 处置
@@ -979,6 +759,7 @@ await h.uploadFile(...images)        // 5 张主图 → 306ms
 | `100001` | `rate_limit` | 活动写操作频控（请 2 小时后重试） | **不可本地修复**。等待 2 小时或换时间段 |
 | `43001` | `token_expired` | 会话过期（**不是风控**） | 重新扫码登录。注意凭证库快照可能是旧票，优先用浏览器当前 Cookie |
 | `40001` | `token_expired` | 未登录 | 重新扫码登录 |
+| `310120000` | `reload_required` | **页面上下文失效**（403 专用码） | 官方处置是 `window.location.reload()`：重开/刷新页面后重试。**不是登录失效，不要跳登录页** |
 | `40010` | `no_permission` | 无权限 | 可能是账号类型不对（需诚信通/实力商家），或换主店号 |
 | `2000000` | `no_permission` | 账号不适合发布 | 权限问题，换号或到后台查违规记录 |
 | `48143` | `api_error` | 非法请求 | 该接口依赖页面 SDK 的请求上下文，需让页面自己发请求（DOM 触发） |
@@ -986,19 +767,22 @@ await h.uploadFile(...images)        // 5 张主图 → 306ms
 | HTTP `430` | `rate_limit` | 网关级频率惩罚（Cookie 有效） | 等 15~30s 重试。**不要**误判成 session_expired |
 | `detached Frame` / `Target closed` | `risk_control` | 平台主动关掉页面 | 等 3~5 分钟再试，别连续重试 |
 
-### 三条铁律
+### 四条铁律
 
 1. **不要把 54001 当 token_expired** —— 前者需要过一次滑块，后者才需要重新登录。误判会让用户反复登录，每次登录还刷新一次风控基线。
 2. **不要重试 40002** —— 它是接口级持久限流，实测冷却 240s 零请求后仍空。
 3. **不要在冷却期内连续调用** —— 拼多多按「累计行为分数」延长封禁，越打越久。
+4. **分清两个签名条件，别合并** —— 平台有两套独立判断：**域名正则**（mms/ims/... 命中就带 `header Anti-Content`）+ **162 条路径白名单**（命中才在 body 里塞 `crawlerInfo`）。只要域名是 `mms.pinduoduo.com`，**头就必须带**；把「不在 162 名单」当成「不用签名」会稳定打出 54001（我已真机踩过）。判据统一用 `_shared/pdd-sign-scope.mjs` 的 `signPlan(url)`。
 
 ### 其他已知坑
 
 - **两个登录态不通用**：`pdd`（H5 买家态，`.yangkeduo.com`）与 `pdd_mms`（商家后台态，`mms.pinduoduo.com`）是两套独立账号，各跑一套风控评分。
 - **`Failed to launch the browser process!`** 大概率是 Profile 被孤儿 Chrome 占用（SingletonLock 残留），不是 Chrome 坏了。清理：`~/.dsh/pdd-account-locks` 无关，要杀占用该 Profile 的 chrome 进程 + 删 `SingletonLock`。
 - **账号级并发**：两个任务同时打同一个号会显著提高被封概率，`_shared/pdd-risk.mjs` 的账号锁会拦住，看到「正被其他任务占用」就等等。
+- **签名兜底字面量**：平台自己的兜底值是 `"getRisckInfoError"`（注意 `Risck` 是平台拼写）。带它发请求 = 自报「我拿不到环境指纹」，比不带更可疑。
 
 <!-- RISK-CHEATSHEET:END -->
+
 
 
 > **重要:** 上架是**不可撤销的真实操作（L2）**。必须两步走：先拿「上架预览」给用户看，用户**明确同意**后才真正提交。
@@ -1421,3 +1205,4 @@ node {baseDir}/scripts/reuse.mjs --category "儿童家居服 家居服套装"
 
 完整逆向笔记（含全部踩坑记录、接口清单、错误码攻关录）：
 `E:\360MoveData\Users\Administrator\Documents\Obsidian Vault\逆向\平台\拼多多商品提交HTTP逆向.md`
+

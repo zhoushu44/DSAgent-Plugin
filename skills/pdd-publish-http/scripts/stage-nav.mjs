@@ -8,7 +8,9 @@
  */
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 
-const LIST_URL = 'https://mms.pinduoduo.com/goods/goods_list'
+// ★ 2026-11-05：页面 URL 统一从基座注册表取（PDD 改版只改 _shared/pdd-api.mjs）
+const { pageUrl } = await import('file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-api.mjs')
+const LIST_URL = pageUrl('page.goodsList')
 
 /**
  * 段1：打开商品列表并点「发布新商品」
@@ -110,31 +112,12 @@ export async function selectCategory(page, category, opts = {}) {
     return null
   }
 
-  // ★ 2026-11-03 修复：选类目页是异步渲染的，第一次检测可能还没加载出来
-  //   实测手机壳：段2 检测不到搜索框就跳过 → 属性区 0 字段 → 假成功
-  //   现在：轮询最多 15 秒等搜索框出现
-  let hasSearch = false
-  for (let w = 0; w < 30; w++) {
-    hasSearch = await safeEval(() =>
-      !!document.querySelector('input[placeholder*="搜索分类"]')
-    ).catch(() => false)
-    if (hasSearch) break
-    // 如果已经在表单页（有属性区/标题框），不用等了
-    const inForm = await safeEval(() => {
-      const hasProp = document.querySelectorAll('[id^="basic.propertys."]').length > 0
-      const hasTitle = !!document.querySelector('input[placeholder*="标题"]')
-      return hasProp || hasTitle
-    }).catch(() => false)
-    if (inForm) {
-      log('  检测到表单页（有标题/属性区），跳过选类目')
-      return page
-    }
-    if (w === 5) log('  等类目搜索框出现…')
-    await sleep(500)
-  }
+  const hasSearch = await safeEval(() =>
+    !!document.querySelector('input[placeholder*="搜索分类"]')
+  ).catch(() => false)
 
   if (!hasSearch) {
-    // 真的没有搜索框 → 可能已经在表单页
+    // 没有搜索框 → 可能已经在表单页
     log('  无类目搜索框（可能已在表单页）')
     return page
   }

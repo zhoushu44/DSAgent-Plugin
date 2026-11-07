@@ -214,7 +214,7 @@ export function clearProfileLocks(dir: string): void {
  * 而闲鱼登录后 Cookie 写在 .goofish.com 域。
  * 必须指定所有相关域名才能拿到完整 Cookie 集。
  */
-async function getAllDomainCookies(page: any, platform: string): Promise<{ name: string; value: string }[]> {
+async function getAllDomainCookies(page: any, platform: string): Promise<{ name: string; value: string; domain?: string }[]> {
   const credPlatform = credentialPlatform(platform)
   const domainMap: Record<string, string[]> = {
     taobao: ['https://.taobao.com', 'https://.tmall.com'],
@@ -253,6 +253,8 @@ async function getAllDomainCookies(page: any, platform: string): Promise<{ name:
   const domains = domainMap[credPlatform] || domainMap[platform] || []
   if (domains.length > 0) {
     // Puppeteer 支持传入多个 URL 来获取对应域的 Cookie
+    // ★ 2026-11-03：返回值带上 domain 字段（Puppeteer 本来就返回），
+    //   让调用方能按域过滤（推广域票据是否真的拿到了，只有按域才判得准）。
     return await page.cookies(...domains)
   }
   return await page.cookies()
@@ -907,7 +909,8 @@ export async function doBrowserLogin(
     const useSsrCheck = credPlatform === 'xhs'
 
     let loginSuccess = false
-    let cookies: { name: string; value: string }[] = []
+    // ★ 2026-11-03：带 domain 字段（推广域票据只能按域过滤判定）
+    let cookies: { name: string; value: string; domain?: string }[] = []
     // 归因证据：区分「用户压根没登录」/「卡在滑块验证」/「登录了但没权限」
     let sawSlider = false
     let lastUrl = ''
@@ -1014,24 +1017,54 @@ export async function doBrowserLogin(
             //   yingxiao.pinduoduo.com 是**独立登录域**，扫码只写 mms 域的 Cookie，
             //   不导航过去的话 pdd-promo 打开商品推广仍要求单独登录。
             //   做法：用已登录的 mms 会话访问推广域首页，SSO 会自动换取票据。
+            //
+            //   ★ 2026-11-03 加固（实测回归）：
+            //     原实现只「导航 + 等 5s + 看 URL」就认定打通，失败仅 console.log 放过。
+            //     后果是静默失败——扫码明明成功、账号连接页显示 valid，但凭证库里
+            //     没有任何 yingxiao 域票据，pdd-promo 打开推广域被重定向到 /login/sso，
+            //     报 token_expired，从外部完全看不出卡在哪。
+            //     现在改三点：
+            //       ① 重试 3 次、单次等待 8s+6s（SSO 换票是异步链，慢的时候要 10s 以上）
+            //       ② 用**真的拿到 yingxiao 域 Cookie** 判定成功，不只看 URL 离没离开登录页
+            //          （CDP page.cookies() 返回的 Cookie 带 domain 字段，可按域过滤）
+            //       ③ 打通失败不阻断 mms 登录，但明确告警，让人知道要去单独登推广域
             if (platform === 'pdd_mms') {
-              try {
-                console.log('[dsagent-login] 打通推广域（yingxiao）登录态…')
-                await page.goto('https://yingxiao.pinduoduo.com/mains/promotionOverview', { waitUntil: 'domcontentloaded', timeout: 25000 })
-                await new Promise(r => setTimeout(r, 5000))
-                const yxUrl = page.url() || ''
-                if (/\/login|\/sso/i.test(yxUrl)) {
-                  // SSO 未自动通过 → 再等一会（可能还在跳转链中）
-                  await new Promise(r => setTimeout(r, 5000))
-                  await page.goto('https://yingxiao.pinduoduo.com/mains/promotionOverview', { waitUntil: 'domcontentloaded', timeout: 25000 }).catch(() => {})
-                  await new Promise(r => setTimeout(r, 5000))
+              const yxOf = (list: any[]) => list.filter(c => /yingxiao/i.test(c?.domain || ''))
+              let yxOk = false
+              let yxUrl = ''
+              for (let attempt = 1; attempt <= 3 && !yxOk; attempt++) {
+                try {
+                  console.log(`[dsagent-login] 打通推广域（yingxiao）登录态…（第 ${attempt}/3 次）`)
+                  await page.goto('https://yingxiao.pinduoduo.com/mains/promotionOverview', { waitUntil: 'domcontentloaded', timeout: 30000 })
+                  await new Promise(r => setTimeout(r, 8000))
+                  yxUrl = page.url() || ''
+                  // SSO 还在跳转链中 → 再等一轮，必要时重导航
+                  if (/\/login|\/sso/i.test(yxUrl)) {
+                    await new Promise(r => setTimeout(r, 6000))
+                    yxUrl = page.url() || ''
+                    if (/\/login|\/sso/i.test(yxUrl) && attempt < 3) {
+                      await page.goto('https://yingxiao.pinduoduo.com/mains/promotionOverview', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {})
+                      await new Promise(r => setTimeout(r, 6000))
+                      yxUrl = page.url() || ''
+                    }
+                  }
+                  const list = await getAllDomainCookies(page, platform)
+                  const got = yxOf(list).length
+                  console.log(`[dsagent-login] 推广域 Cookie：${got} 个｜URL：${yxUrl.slice(0, 70)}`)
+                  // 双重判据：URL 不在登录态 且 确实拿到 yingxiao 域票据
+                  if (got > 0 && !/\/login|\/sso/i.test(yxUrl)) {
+                    yxOk = true
+                    cookies = list   // 把推广域票据一并带出去入库
+                  }
+                } catch (e) {
+                  console.log(`[dsagent-login] 推广域打通第 ${attempt} 次异常：${(e as Error).message?.slice(0, 80)}`)
                 }
-                const yxFinal = page.url() || ''
-                console.log(`[dsagent-login] 推广域状态：${/\/login|\/sso/i.test(yxFinal) ? '仍需单独登录' : '已打通'}（${yxFinal.slice(0, 70)}）`)
-                // 重新取一次全量 Cookie（含推广域）
-                cookies = await getAllDomainCookies(page, platform)
-              } catch (e) {
-                console.log(`[dsagent-login] 推广域打通失败（不影响 mms 登录）：${(e as Error).message?.slice(0, 80)}`)
+              }
+              if (yxOk) {
+                console.log(`[dsagent-login] ✅ 推广域已打通（${yxOf(cookies).length} 个票据随凭证入库）`)
+              } else {
+                console.warn(`[dsagent-login] ⚠️ 推广域未打通（URL: ${yxUrl.slice(0, 70)}）。`)
+                console.warn(`[dsagent-login]    mms 登录不受影响；但 pdd-promo 等推广域技能需单独登录推广后台。`)
               }
             }
             loginSuccess = true
@@ -1115,6 +1148,10 @@ export async function doBrowserLogin(
 
     const jar: Record<string, string> = {}
     for (const c of cookies) jar[c.name] = c.value
+    // ★ 2026-11-03：按域留档，供「推广域票据到底进没进库」这类排查使用。
+    //   注意 jar 仍是扁平 name→value（credential-store 的入参契约，不能改），
+    //   域信息只作为旁证挂在 account_meta 上，不参与请求。
+    const yxDomains = [...new Set(cookies.filter(c => /yingxiao/i.test(c?.domain || '')).map(c => c.domain))]
 
     try {
       console.log(`[dsagent-login] 登录成功，准备保存凭证...${replaceShopKey ? `（替换旧账号 ${replaceShopKey}，绑定关系继承）` : ''}`)
@@ -1142,6 +1179,18 @@ export async function doBrowserLogin(
           }
         } catch (e) {
           console.warn(`[dsagent-login] 抓 PDD 店铺名失败（不影响登录）: ${(e as Error).message}`)
+        }
+      }
+
+      // ★ 2026-11-03：推广域票据落库确认。
+      //   jar 是扁平字典，域名信息在 save 时被丢掉，所以只能在这里、拿着带 domain 的
+      //   cookies 列表做一次显式核对并打日志——出问题时「凭证库里到底有没有推广域票」
+      //   这件事必须有迹可查，不能再靠猜。
+      if (platform === 'pdd_mms') {
+        if (yxDomains.length) {
+          console.log(`[dsagent-login] ✅ 推广域票据已入库（域: ${yxDomains.join(', ')}）`)
+        } else {
+          console.warn(`[dsagent-login] ⚠️ 本次凭证未包含 yingxiao 域票据，推广域技能可能仍需单独登录`)
         }
       }
 

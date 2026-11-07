@@ -1,251 +1,99 @@
 ---
 name: image-gen
-description: "AI 出图执行层：把提示词真正变成图片文件。接 NewAPI 网关（gpt-image-2.5），支持文生图、图生图（参考图）、批量逐屏生成、透明底、多尺寸档。触发：生图、出图、生成图片、画一张、改图、图生图、白底图、主图、详情页出图、批量出图、image generate、render。排除：提示词怎么写与平台合规（用 image-prompt-guide）、纯排版合成图（PIL 代码绘制，如 xianyu-listing-prep）。"
+description: "AI 出图（合并版）：提示词与出图在同一个技能里完成，提示词原样透传、不做校验、不做预览，一次性全并发（默认 200 路）出完整套图。触发：生图、出图、主图、详情页、套图、批量出图、改图、图生图、白底图、场景图、电商图片、image generate、render。"
 metadata:
-  builtin_skill_version: "1.0"
+  builtin_skill_version: "2.0"
   dsagent:
-    display_name: "AI 出图执行"
+    display_name: "AI 出图（合并·全并发）"
     emoji: "🖼️"
     requires:
       bins: [python3]
 ---
 
-# AI 出图执行层
+# AI 出图（合并版）
 
-把提示词变成真实图片文件。**本技能只负责出图与落盘**，不管提示词策略和平台合规——那两条归 `image-prompt-guide`。
+提示词和出图在同一个技能里。**不再拆成两个技能，不再做任何校验。**
 
-## 前置条件
+## 三条硬规则
 
-- Python 3（宿主自带即可，**无需 pip 装 requests**，脚本纯标准库 + Pillow）
-- 网关可达：`http://45.205.27.41:3001/v1`（实测直连，绕开系统代理）
-- 有效 key，放环境变量 `NEWAPI_KEY`
-- Pillow 仅透明底后处理需要；缺失时该步骤会被跳过，不影响出图
+1. **提示词原样透传** —— 写什么发什么。不重写、不套模板、不加块标签、不做 Prompt-Intent Gate、不询问确认。
+2. **不校验** —— 不做出图前检查、不做出图后 Result Check、不自动重试重画（只做网络层重试）、不拦截"可能不合格"的图。
+3. **一次性全并发 + 不等** —— 所有条目同时发射，默认 `--workers 200`。**起后台任务后立刻去做排版，不要轮询、不要中途读图、不要等出完才动手。**
 
-先跑一次 `probe` 确认网关与模型都在，再批量跑：
+> 第 3 条里的"不等"是等时间的一半来源。出图和排版必须并行：先发图，再写排版脚本，图回来直接渲染。
 
-```bash
-python3 {baseDir}/scripts/gen.py probe
-```
+## Preconditions
 
-## 工作流
+- Python 3（脚本纯标准库，不需要 pip 装包）
+- 网关可达：`http://45.205.27.41:3001/v1`
+- key 在 `~/.dsh/image-gen.local.json`：`{"base":"...","key":"...","model":"gpt-image-2.5-2k"}`
 
-1. **确认分工**：没有成品提示词 → 先走 `image-prompt-guide`；已有提示词 → 直接本技能
-2. **probe**：确认 `model_present: true`，避免拿错 model 白跑
-3. **单张直出**：`generate`（文生图）或 `edit`（有参考图，必须用 edit，保真度高）
-4. **批量**：把每屏/每槽写成一个 plan item，一次性 `batch`；单项失败不中断
-5. **核对产物**：读 `files` 拿路径，看 `usage.total_tokens` 确认真的出了图（不是空响应）
-6. **透明底**：带 `--background transparent` 会自动产出 `*-alpha.png`，用 `alpha_files` 里的路径
-7. **交付/上架**：出图后要发布走对应平台发布技能
+## Workflow
 
-## 错误处理
+1. **写 plan** —— 把每张图的 `name / prompt / size`（有参考图就加 `ref`）写成 `plan.json`。**size 一律 `1024x1024`（1K），不要写 2K/4K**。
+2. **一次性发射** —— `python scripts/fanout.py --plan plan.json --out ./out --workers 200`。所有条目同时发，不等前一张。
+3. **并发期间不等待** —— 起后台任务后**立刻**并行写排版脚本/准备文案，不要 `job_output(wait=true)` 反复轮询，也不要中途读图。
+4. **读结果** —— stdout 的 JSON 里 `succeeded / failed / seconds / results[].files` 就是落盘路径，直接交付。
 
-| 现象 | 原因 | 处理 |
-|---|---|---|
-| `连接失败` + `拒绝连接 127.0.0.1:8888` | 系统代理劫持 | 脚本已强制 `ProxyHandler({})`；若仍报，检查本机是否有透明代理 |
-| `HTTP 401` | key 错或过期 | 重新向用户确认 key，不要重试同一 key |
-| `HTTP 404` + `model_not_found` | model 名不对 | 先跑 `probe`，从 `image_models` 里选 |
-| 响应无 `url` 也无 `b64_json` | 网关未返回图（多因 prompt 被拒或额度不足） | 打印完整响应原文给用户，不要静默失败 |
-| 出了图但 `mode` 是 RGB 不是 RGBA | 网关吞掉 alpha | 用自动生成的 `*-alpha.png`，不要用原图当透明底 |
-| `size` 传了非 16 倍数 | 工具限制 | 脚本会等比修正并保留比例；回报里看实际尺寸 |
-| 单张跑很久 | 出图本身慢（1K 约 20–60s，2K 更久） | 交给后台任务，不要重复提交 |
+单张：`python scripts/fanout.py --prompt "..." --size 1024x1024 --name hero`
+带参考：`python scripts/fanout.py --prompt-file p.txt --ref ref.png --size 1024x1024 --name hero`
 
-## 分工（重要）
+环境变量：`NEWAPI_IMAGE_MODEL`（默认 **gpt-image-2.5-1k**）、`IMAGEGEN_WORKERS`（默认 200）、`IMAGEGEN_TIMEOUT`（默认 900s）、`IMAGEGEN_RETRIES`（默认 2）。
 
-| 层 | 谁负责 |
-|---|---|
-| 场景路由、提示词组装、平台规格与合规红线、出图后保真核对 | `image-prompt-guide` |
-| 调网关、传参、下载图片、按名字落盘、批量并发控制 | **本技能** |
+> **默认 1K（1024×1024），这是硬规则。** 2K/4K 单张耗时 100–180 秒，1K 只要 25–60 秒；电商主图/详情屏最终交付尺寸 1200×1200 / 1440×2160，1K 放大后完全够用，且省掉一半以上等待。
+> 只有用户明确要求 2K/4K 时才升级。
 
-标准链路：先用 `image-prompt-guide` 产出成品提示词 → 再用本技能执行。
+### plan.json
 
-## 什么时候直接用本技能
-
-- 已有明确提示词，只想出图
-- 要批量跑一组（主图套图、PDP 逐屏）
-- 要图生图（拿实拍图当参考，改背景 / 换场景）
-
-## 什么时候必须先走 image-prompt-guide
-
-- 用户说"做主图/详情页/白底图/SKU 图"但没给提示词
-- 涉及平台规格与合规（1688/淘宝/天猫/抖音/京东/拼多多/Amazon 等）
-- 需要保真（不能改商品本身）—— 那边有 Identity Match 条款和 Result Check
-
-## 运行
-
-```bash
-# 探测（确认网关、模型可用）
-python3 {baseDir}/scripts/gen.py --mode probe
-
-# 文生图
-python3 {baseDir}/scripts/gen.py --mode generate \
-  --prompt "..." --size 1024x1024 --out ./out --name main01
-
-# 图生图（参考图可多张）
-python3 {baseDir}/scripts/gen.py --mode edit \
-  --prompt "..." --ref ./实拍.png --out ./out --name hero
-
-# 批量（套图 / PDP 逐屏）
-python3 {baseDir}/scripts/gen.py --mode batch --plan ./plan.json --out ./out
-
-# 长提示词：写进文件避免 shell 转义
-python3 {baseDir}/scripts/gen.py --mode generate --prompt-file ./p1.txt --out ./out
-```
-
-> `--mode X` 与 `gen.py X` 两种写法都接受。**推荐 `--mode`** —— 宿主若按首条用例自动补子命令，显式 `--mode` 会优先生效。
-
-## 参数
-
-| 参数 | 说明 |
-|---|---|
-| `--mode` | `generate` / `edit` / `batch` / `probe` / `from-pack` |
-| `--prompt` / `--prompt-file` | 二选一；长提示词用文件 |
-| `--ref` | 参考图路径，可多次（= 多图参考） |
-| `--size` | `1024x1024` / `1536x1024` / `1024x1536` / `2048x2048` / `auto`；非 16 倍数或面积越界会自动等比修正并回报 |
-| `--n` | 每张提示词出几张，默认 1 |
-| `--quality` | `low` / `medium` / `high` / `auto` |
-| `--background` | `transparent`（自动补出 `*-alpha.png`）/ `opaque` / `auto` |
-| `--out` | 输出目录，默认 `./image-gen-out` |
-| `--name` | 文件名前缀，自动加时间戳与序号 |
-| `--workers` | batch / from-pack 并发线程数，默认 8 |
-| `--pack` | **from-pack**：1688 素材包目录（含 `product.json` + `src/`） |
-| `--category` | **from-pack**：品类名（拼进 prompt），默认 `儿童睡衣` |
-| `--base` / `--key` | 覆盖配置文件 |
-
-## from-pack 模式（1688 素材包 → 整套 15 张）
-
-```bash
-python3 scripts/gen.py from-pack --pack <素材包> --out <输出目录> --workers 8 --category 儿童睡衣
-```
-
-**自动做的事**：
-
-1. 读素材包 `product.json` + `src/` 原图
-2. 组装 15 条 prompt：**主图 5 张**（白底/模特/面料/做工/多色）+ **详情 10 张**（参考布局：竖排大字标题 + 副题、模特居中、左下细节小图、底部英文卖点）
-3. **双参考**：`src` 第 1 张锁款式配色 + 第 2 张锁模特脸部发型年龄（不人工挑，自动取）
-4. 8 线程并发跑（15 张约 90 秒）
-5. **顺手生成 `product.json`**（调 `build_product.py`，1688 真实 SKU + 属性别名 + 价格×系数），供 `pdd-publish-http --product-file` 直接上架
-
-**batch 模式并发**：`--workers` 默认 8，15 张从串行 8 分钟降到 74 秒。
-
-### batch 计划格式补充
-
-```jsonc
-{ "items": [
-  { "out": "main_1.jpg", "refs": ["商品图.jpg", "模特图.jpg"], "prompt": "..." },
-  { "out": "detail_1.jpg", "refs": ["...", "..."], "size": "1000x1849", "prompt": "..." }
+```json
+{"items":[
+  {"name":"01","prompt":"...","size":"2048x2048","quality":"high"},
+  {"name":"02","prompt_file":"./p2.txt","ref":"ref.png","size":"2048x2048","quality":"high"},
+  {"name":"03","prompt":"...","refs":["a.png","b.png"],"size":"1440x2160","quality":"high"}
 ]}
 ```
 
-`refs` 传多张 = 多图参考（第 1 张锁商品、第 2 张锁模特）。
+字段：`name` / `prompt` 或 `prompt_file` / `ref` 或 `refs` / `size` / `quality` / `background` / `n` / `model` / `retries`。
+有 `ref` 走 `/images/edits`，无 `ref` 走 `/images/generations`。单条失败不影响整批。
 
+## 模型与尺寸
 
-### from-pack 实战坑位（2026-10-31 真机）
+可用：`gpt-image-2-1k` `gpt-image-2-2k` `gpt-image-2-4k` `gpt-image-2.5-1k` `gpt-image-2.5-2k` `gpt-image-2.5-4k`
+**默认 `gpt-image-2.5-1k` + `1024x1024`。** 实测：1K 单张 25–60s，2K 100–180s。
+交付尺寸 1200×1200 / 1440×2160 由 1K 底图 LANCZOS 放大 + 轻锐化达成，肉眼看不出差别。
+只有用户明确说“要 2K/4K”才升级，别自作主张。
 
-#### ① 默认模型名不存在，必须显式指定
+## 电商套图提示词要点（内联，不另开技能）
 
-`DEFAULT_MODEL = "gpt-image-2.5"`，但网关只有带分辨率后缀的版本：
+写 prompt 时按这套写，一次到位，不再二次校验：
 
-```bash
-# ❌ 报 HTTP 503 model_not_found: No available channel for model gpt-image-2.5
-python gen.py --mode from-pack --pack ./pack --out ./out
+- **身份锁**：`Keep the product identity unchanged — preserve geometry, proportions, color, material, texture, prints, logo, and on-product text.`
+- **画面**：用途 / 主体数量 / 构图与占比 / 机位焦段 / 场景（6–9 个具名元素 + 材质 + 位置）/ 光线方向与阴影 / 材质与配色 / 风格（非 3D、非插画）
+- **文字**：中文尽量**不要交给模型画**。需要字的图，只出**无字底图**，文案用 PIL 排（宋体标题 + 等线黑副文），中文才清晰可控。
+- **合规**：不编造材质、尺寸、认证、功效、销量；不生成买家收不到的东西。
 
-# ✅ 显式指定
-NEWAPI_IMAGE_MODEL=gpt-image-2.5-2k python gen.py --mode from-pack --pack ./pack --out ./out
-```
+## 出图后
 
-可用的模型（查 `/v1/models`）：
-```
-gpt-image-2-1k    gpt-image-2-2k    gpt-image-2-4k
-gpt-image-2.5-1k  gpt-image-2.5-2k  gpt-image-2.5-4k
-```
+直接交付。**不做保真核对、不做文字回读、不自动返工。** 需要重画就改 prompt 再跑一次，或只重跑单条。
 
-2k 约 1.2-3.7 MB/张，15 张 8 线程约 4-6 分钟。
+## 与旧版差异
 
-#### ② 输出目录混入历史文件时，product.json 可能指向旧图
+| 项 | 旧 gen.py | 本版 fanout.py |
+|---|---|---|
+| 并发 | 默认 8，线程池 | 默认 **200**，一次性全发 |
+| 提示词 | 可被 SKILL 模板重写 | **原样透传** |
+| 校验 | Prompt Gate + Result Check | **无** |
+| 技能数 | image-gen + image-prompt-guide 两个 | **一个** |
+| 失败处理 | 中断/报错 | 网络层重试 2 次，其余照跑 |
 
-`from-pack` 生成的文件名带时间戳（`main_1.jpg-20261031-220936-1.png`），**不会覆盖旧文件**。
-如果 `--out` 目录之前跑过，`product.json` 里的 `images` / `detailImages` 可能仍指向旧批次。
+`scripts/gen.py` 保留，仅作单张调试用。
 
-**症状**：新图都生成了，但上架时用的是旧图。
+## Pitfalls
 
-**检查**：
-```bash
-# 本次生成的文件数与 product.json 引用的对比
-ls "$OUT" | grep "$(date +%Y%m%d)" | wc -l      # 应 15
-node -e "const p=require('./$OUT/product.json'); console.log(p.images.map(f=>f.split('/').pop()))"
-```
-
-**修法**：上架前按时间戳重新拼 `images` / `detailImages`，或每次用全新 `--out` 目录。
-
-#### ③ 并发 8 时等待时间不均衡
-
-日志会刷 `等待网关响应 ... 16s / 24s / 40s / 64s`，最长单张可达 80s+。
-不要在中途判定失败——进程还活着就继续等，15 张总耗时 4-6 分钟正常。
-
-#### ④ 1688 原始 SKU 需要转换
-
-`pack/product.json` 里 `skus[]` 是 1688 原始字段：
-
-```json
-{ "sku_id": 6131596372894, "color": "WJP-珊瑚绒睡衣）粉色豹纹", "size": "140cm", "price": "46.99", "stock": 8887 }
-```
-
-不是 pdd-publish-http 要的 `{ specs: {维度:值}, price, stock }`。
-且颜色值带厂家前缀（`WJP-珊瑚绒睡衣）`）、尺码带单位（`140cm`）。
-需要转换 + 清洗后才能上架。
-
-#### ⑤ 规格名不对
-
-1688 素材包生成的 `specs[].name` 可能是 `参考分类` 而不是 `尺码`。
-上架时拼多多类目模板按规范名匹配，名字不对会导致维度建不出来。
-
-## 凭据配置
-
-优先级：命令行 `--key` > 环境变量 > 配置文件。
-
-配置文件（推荐，脚本自动读取，无需每次传参）：
-
-```
-~/.dsh/image-gen.local.json
-{"base":"http://45.205.27.41:3001/v1","key":"<key>","model":"gpt-image-2.5"}
-```
-
-环境变量等价写法：`NEWAPI_BASE` / `NEWAPI_KEY` / `NEWAPI_IMAGE_MODEL`。
-
-**key 不要写进 plan.json，也不要提交进仓库。**
-
-## 批量计划格式
-
-```json
-{
-  "items": [
-    {"name": "01-hero",  "prompt": "...", "size": "1024x1024"},
-    {"name": "02-scene", "prompt": "...", "size": "1536x1024", "ref": "./实拍.png"},
-    {"name": "03-sku-red", "prompt": "...", "ref": "./实拍.png", "background": "transparent"},
-    {"name": "04-long",  "prompt_file": "./p4.txt", "size": "1024x1536"}
-  ]
-}
-```
-
-单个 item 失败不会中断整批，末尾汇总 `ok: false` 的条目。
-
-## 实测能力边界（2026-10-26）
-
-| 项 | 实测结果 |
-|---|---|
-| `/v1/images/generations` | ✅ 通 |
-| `/v1/images/edits`（multipart 单图/多图参考） | ✅ 通，`input_tokens.image_tokens≈1659` 证明确实读了参考图 |
-| `size` | ✅ `1024x1024` / `1536x1024` / `1024x1536` / `2048x2048` / `auto` 全通 |
-| `quality` | ✅ `low` / `high` 均被接受 |
-| `background=transparent` | ⚠️ 网关接受但**返回 RGB，alpha 被丢**；脚本本地补抠图，产出 `*-alpha.png`（已验证 RGBA、角部 alpha=0） |
-| `moderation=low` | ✅ 被接受（非标准参数，网关透传） |
-| 返回形态 | 远端 URL，脚本自动下载并按 magic 修正扩展名 |
-| 网络 | 网关**直连可达**；脚本已 `ProxyHandler({})` 强制绕开系统代理（本机 127.0.0.1:8888 对该网关拒绝连接） |
-| 依赖 | 纯标准库；仅透明底后处理需要 Pillow |
-| 耗时 | 1K 约 25–60s，2K 更久 —— 脚本每 8s 吐心跳，防止宿主 idle 超时 |
-
-## 边界
-
-- 不编造商品事实（尺寸、材质、认证、功效）—— 提示词里出现的事实必须来自用户或实拍图
-- 不替代 `image-prompt-guide` 的合规判断
-- 不负责平台发布；出完图要上架走对应平台发布技能
+| 现象 | 原因 | 处理 |
+|---|---|---|
+| `HTTP 400 ... cannot unmarshal string into Go struct field Alias.n` | `n` 必须传整数 | 已修：`n = int(item.get("n", 1))` |
+| `HTTP 503 model_not_found` | 模型名不带分辨率后缀 | 用 `gpt-image-2.5-1k / -2k / -4k` |
+| 输出扩展名是 `.png` 但实际是 JPEG | 网关返回 JPEG，脚本按 magic 落盘 | 正常，读图/上传都按内容识别 |
+| 200 并发下大面积超时 | 网关限流 | 降到 50–80 重跑；失败的条目单独补跑即可 |
+| 中文被画成乱码/错字 | 模型画字不可控 | 只出无字底图，文案用 PIL 排（本机有 simsun / msyh / simhei） |

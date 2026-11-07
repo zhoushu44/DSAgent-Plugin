@@ -62,12 +62,38 @@ const CAPTCHA_FILE = path.join(homedir(), '.dsh', 'pdd-captcha-tokens.json')
 const CAPTCHA_TTL_MS = 10 * 60 * 1000
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 
-/** 频控错误码 → 基础冷却时长（ms） */
+/**
+ * 频控错误码 → 基础冷却时长（ms）
+ *
+ * ★ 2026-10-27 修（两处）：
+ *
+ * (1) 补 `40002`。原表里没有它，而 `pdd-works/query.mjs` 会调
+ *     `markCooldown(SHOP, 40002, ...)` → 命中下面 `if (!base) return`
+ *     → **冷却被静默吞掉**，调用方以为记了、实际什么都没记。
+ *
+ * (2) `54001` 基础时长从 1 小时降到 60 秒，与 `pdd-antiban.mjs` 的
+ *     `THROTTLE.cooldownAfterRiskMs = 60_000` 对齐。
+ *     原值 1 小时（再乘自适应倍数最高 8 小时）与 `pdd-client.mjs` 的
+ *     「54001 可静默自愈（清 token→提新票→重放，不算严重事件）」方向相反：
+ *     `query.mjs` 在 clientCall 已自愈重试 2 次仍失败后，又记 1 小时冷却
+ *     → **一次滑块失败 = 账号冻结大半天**，而实际可能只是需要过一次滑块。
+ *
+ *     现在：54001 首击只冷却 60s（够让滑块完成），只有**当日累计**才升级
+ *     （见 markCooldown 的 hits 逻辑）——与 pdd-error.mjs 的语义一致：
+ *     54001 是「可自愈、失败要人工」，不是「直接长封」。
+ */
 const RISK_CODES = {
-  54001: 60 * 60 * 1000,        // 操作太过频繁 → 1 小时
-  100001: 2 * 60 * 60 * 1000,   // 当前请求频繁，请2小时后重试 → 2 小时
-  2000000: 30 * 60 * 1000,      // 网络繁忙，请不要频繁操作 → 30 分钟
-  600001: 5 * 60 * 1000,        // 编辑不存在 → 短冷却（可能是参数问题）
+  54001: 60 * 1000,
+  // ★ 2026-11-05 新增：54003 = 安全验证未通过、暂时无法登录。
+  //   与 54001/40002 不同，它是「停机」型：重扫码无效，只能等。
+  //   故基础时长直接给 24h，且不进指数退避（退避是给可恢复的频控用的）。
+  //   ⚠️ 如果不加进这张表，markCooldown 会在 `if (!base) return` 处静默返回，
+  //     冷却写不进去 —— 这与历史上「40002 不在 RISK_CODES 被吞掉」是同一个坑。
+  54003: 24 * 60 * 60 * 1000,           // 操作太过频繁 → 60s（对齐 pdd-antiban；当日累计≥3次仍升级）
+  40002: 240 * 1000,          // 高频限流 → 240s（官方实测此码无法本地修复，只能降级或等待）
+  100001: 2 * 60 * 60 * 1000, // 当前请求频繁，请2小时后重试 → 2 小时
+  2000000: 30 * 60 * 1000,    // 网络繁忙，请不要频繁操作 → 30 分钟
+  600001: 5 * 60 * 1000,      // 编辑不存在 → 短冷却（可能是参数问题）
 }
 
 /**
@@ -186,12 +212,37 @@ export function fmtRemain(ms) {
 function readCaptchaStore() {
   try { return JSON.parse(fs.readFileSync(CAPTCHA_FILE, 'utf8')) || {} } catch { return {} }
 }
+
+/**
+ * ★ 2026-10-27：原子写（临时文件 + rename）。
+ *
+ * 背景：`~/.dsh/pdd-captcha-tokens.json` 被**三个模块**（pdd-risk / pdd-client /
+ * pdd-http）各自以「读整个文件 → 改 → 写整个文件」的方式维护，原本都是裸
+ * `writeFileSync`。两个技能并发跑时，后写的会把前一个刚保存的 token 抹掉
+ * → 下一次又弹滑块。
+ *
+ * `renameSync` 在同一卷上是原子操作：读者要么看到旧完整内容，要么看到新完整
+ * 内容，绝不会看到写了一半的 JSON。这把「并发互相覆盖」的窗口从「整个写入
+ * 过程」缩小到「读-改的那一瞬间」。
+ *
+ * 仍无法完全消除并发丢更新（需要文件锁才能做到），但对 10 分钟 TTL 的通行证
+ * 来说，最坏情况只是多弹一次滑块，可接受。
+ */
 function writeCaptchaStore(d) {
+  const tmp = `${CAPTCHA_FILE}.${process.pid}.${Date.now()}.tmp`
   try {
     fs.mkdirSync(path.dirname(CAPTCHA_FILE), { recursive: true })
-    fs.writeFileSync(CAPTCHA_FILE, JSON.stringify(d, null, 1), 'utf8')
-  } catch { /* ignore */ }
+    fs.writeFileSync(tmp, JSON.stringify(d, null, 1), 'utf8')
+    fs.renameSync(tmp, CAPTCHA_FILE)      // ★ 原子替换
+  } catch {
+    // rename 失败（如跨卷/权限）→ 退化为直接写，至少不比原来差
+    try { fs.writeFileSync(CAPTCHA_FILE, JSON.stringify(d, null, 1), 'utf8') } catch { /* ignore */ }
+    try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp) } catch { /* ignore */ }
+  }
 }
+
+/** 导出给 pdd-client / pdd-http 复用（收敛到单一存储实现，见 P2-10） */
+export { readCaptchaStore, writeCaptchaStore, CAPTCHA_FILE, CAPTCHA_TTL_MS }
 
 /**
  * 存 captcha 通行证（SDK 里存 Cookie `msfe-pc-cookie-captcha-token`，有效期 10 分钟）
@@ -246,12 +297,64 @@ export function recordCaptchaPass(shopKey, via = 'manual') {
   const store = readCaptchaStore()
   const rec = store[shopKey] || {}
   const today = new Date().toISOString().slice(0, 10)
-  if (rec.statDate !== today) { rec.statDate = today; rec.passCount = 0 }
+  if (rec.statDate !== today) { rec.statDate = today; rec.passCount = 0; rec.failCount = 0 }
   rec.passCount = (rec.passCount || 0) + 1
   rec.lastPassAt = Date.now()
   rec.lastPassVia = via
+  rec.consecutiveFails = 0          // ★ 成功即清零连续失败
   store[shopKey] = rec
   writeCaptchaStore(store)
+}
+
+/**
+ * ★ 2026-10-27 新增：记录一次「滑块求解失败」。
+ *
+ * 原实现只统计通过次数，不统计失败 —— 于是无法回答「自动过滑块到底行不行」，
+ * 也没有"连续失败就停"的保护，导致反复自动试失败、每次都要人工介入。
+ *
+ * 现在同时记：
+ *   · 今日失败数 failCount
+ *   · 连续失败数 consecutiveFails（成功即清零）
+ */
+export function recordCaptchaFail(shopKey, reason = '') {
+  const store = readCaptchaStore()
+  const rec = store[shopKey] || {}
+  const today = new Date().toISOString().slice(0, 10)
+  if (rec.statDate !== today) { rec.statDate = today; rec.passCount = 0; rec.failCount = 0 }
+  rec.failCount = (rec.failCount || 0) + 1
+  rec.consecutiveFails = (rec.consecutiveFails || 0) + 1
+  rec.lastFailAt = Date.now()
+  rec.lastFailReason = String(reason).slice(0, 200)
+  store[shopKey] = rec
+  writeCaptchaStore(store)
+  return rec.consecutiveFails
+}
+
+/**
+ * ★ 2026-10-27 新增：当前是否应该停止自动过滑块。
+ *
+ * 规则：同一账号**连续失败 N 次**（默认 3）后，10 分钟内不再自动尝试。
+ * 理由：拼多多的滑块带行为检测（速度曲线/加速度/微停顿），OCR 方案的
+ * 成功率会持续下降；继续自动试只会反复失败 + 每次失败都可能加重风控评分。
+ * 此时正确做法是引导人工过一次，人工成功会拿到 10 分钟通行证。
+ *
+ * @param {string} shopKey
+ * @param {number} [maxConsecutive] 连续失败上限，默认 3
+ * @returns {{ stop: boolean, consecutiveFails: number, reason: string }}
+ */
+export function shouldStopAutoSlider(shopKey, maxConsecutive = 3) {
+  const rec = readCaptchaStore()[shopKey]
+  const fails = rec?.consecutiveFails || 0
+  // 10 分钟内连续失败才生效（超过 10 分钟视为新一轮）
+  const recent = rec?.lastFailAt && (Date.now() - rec.lastFailAt < 10 * 60 * 1000)
+  if (fails >= maxConsecutive && recent) {
+    return {
+      stop: true,
+      consecutiveFails: fails,
+      reason: `已连续 ${fails} 次自动过滑块失败，暂停自动尝试。请人工完成一次验证（通过后会拿到 10 分钟通行证）。`,
+    }
+  }
+  return { stop: false, consecutiveFails: fails, reason: '' }
 }
 
 /**
@@ -386,9 +489,20 @@ export function heartbeatAccountLock(shopKey, label = '') {
  */
 export async function detectSlider(page) {
   return await page.evaluate(() => {
+    // ★ 2026-11-05 修：优先用 SDK 真实锚点（与 pdd-slider-solver 保持一致）。
+    //   原实现靠 `[class*="captcha"]` 侥幸能中，但**要求文案匹配**：
+    //   /滑块|拼图|安全验证|向右/ —— type 71 旋转验证码文案是「拖动圆形滑块完成旋转拼图」，
+    //   type 61 是「请按住滑块…」，type 81 是「点击下方安全验证」——
+    //   这些都可能漏判，导致「明明有验证码却判定为没有」→ 上层不调求解器 → 卡死。
+    const ANCHOR = '#slide-captcha-dialog, .captcha-wrapper__slider, .captcha-wrapper, .slide-handlebar'
+    const anchors = Array.from(document.querySelectorAll(ANCHOR))
+      .filter(m => { const r = m.getBoundingClientRect(); return r.width > 200 && r.height > 100 })
+    if (anchors.length) return true   // 锚点存在即视为有验证码，不看文案
+
+    // 兜底：类名 + 文案双判（兼容旧版/灰度）
     const ms = Array.from(document.querySelectorAll('[class*="Modal"], [class*="modal"], [class*="MDL"], [class*="Dialog"], [class*="captcha"], [class*="Captcha"], [class*="verify"], [class*="Verify"]'))
       .filter(m => { const r = m.getBoundingClientRect(); return r.width > 200 && r.height > 150 })
-    return ms.some(m => /滑块|拼图|安全验证|向右/.test((m.innerText || '').slice(0, 60)))
+    return ms.some(m => /滑块|拼图|安全验证|向右|旋转|拖动|点击/.test((m.innerText || '').slice(0, 60)))
   }).catch(() => false)
 }
 
@@ -422,16 +536,30 @@ export async function autoSolveSlider(shopKey, page = null, opts = {}) {
     }
   }
   // ② 无 page 才起子进程（独立 CLI 场景）
-  const { execSync } = await import('node:child_process')
+  //
+  // ★ 2026-10-27 修：execSync → execFile（异步）。
+  //
+  //   原实现用同步 `execSync` 跑滑块求解器（timeout 最长 180s）。同步子进程会
+  //   **阻塞 Node 事件循环**：期间 `setInterval` 心跳、promise 回调、CDP 消息
+  //   全部停摆。而账号锁的僵尸判定是 10 分钟、心跳是 3 分钟 —— 心跳一旦被阻塞
+  //   超过 10 分钟，别的任务会判锁僵尸并强夺 → **两个浏览器同时操作同一账号**。
+  //
+  //   改为异步 `execFile` 后，等待子进程期间事件循环照常运转，心跳不停。
+  const { execFile } = await import('node:child_process')
   const solver = path.join(HERE, 'pdd-slider-solver.mjs')
   if (!fs.existsSync(solver)) return { ok: false, text: '滑块求解器不存在（pdd-slider-solver.mjs）' }
   const args = ['--shop', shopKey]
   if (opts.dryRun) args.push('--dry-run')
-  try {
-    const out = execSync(`node "${solver}" ${args.join(' ')}`, {
+  const runSolver = () => new Promise((resolve) => {
+    execFile(process.execPath, [solver, ...args], {
       encoding: 'utf8', timeout: opts.timeoutMs ?? 180000, maxBuffer: 8 * 1024 * 1024,
+    }, (err, stdout, stderr) => {
+      resolve({ stdout: stdout || String(err?.stdout || ''), stderr, err })
     })
-    const line = String(out).split('\n').find(l => l.startsWith('__DSAGENT_RESULT__')) || ''
+  })
+  try {
+    const { stdout } = await runSolver()
+    const line = String(stdout).split('\n').find(l => l.startsWith('__DSAGENT_RESULT__')) || ''
     if (!line) return { ok: false, text: '滑块求解器无结果输出' }
     const j = JSON.parse(line.replace('__DSAGENT_RESULT__', ''))
     return { ok: j.ok === true, text: j.text || JSON.stringify(j).slice(0, 200), raw: j }
@@ -475,12 +603,24 @@ export async function guard(page, shopKey, fn, opts = {}) {
       if (tk) {
         console.warn(`[pdd-risk] 有有效通行证（剩 ${fmtRemain(tk.remainMs)}），跳过滑块检测`)
       } else {
+        // ★ 2026-10-27：连续失败 N 次后暂停自动尝试，引导人工
+        const stop = shouldStopAutoSlider(shopKey)
+        if (stop.stop) {
+          const err = new Error('RISK_SLIDER_STOPPED')
+          err.riskCode = 54001
+          err.riskMsg = stop.reason
+          err.needManualCaptcha = true
+          throw err
+        }
         console.warn('[pdd-risk] 检测到滑块遮罩且无通行证，尝试自动过滑块...')
         const solved = await autoSolveSlider(shopKey, page)
         if (!solved.ok) {
+          // ★ 记失败（用于连续失败降级判断）
+          recordCaptchaFail(shopKey, solved.text || '未知原因')
           const err = new Error(`RISK_SLIDER_UNSOLVED`)
           err.riskCode = 54001
           err.riskMsg = `滑块自动过失败：${solved.text}`
+          err.needManualCaptcha = true
           throw err
         }
         console.warn(`[pdd-risk] 滑块已过：${solved.text}`)
@@ -510,13 +650,30 @@ export async function guard(page, shopKey, fn, opts = {}) {
           await new Promise(r2 => setTimeout(r2, 1800))   // SDK 最常用间隔 1800ms
           continue
         }
-      } else {
-        // 没拿到 token → 真的需要过滑块
-        console.warn('[pdd-risk] 54001 但响应无 verifyAuthToken')
+        // ★ 2026-10-27：有票但重试后仍 54001 —— 这不是"账号被长封"，
+        //   而是「这一击确实打中了」。只记短冷却（60s，够一次滑块的时间），
+        //   并把原因写清楚，别让上层看到"冷却剩余 7 小时"却不知为何。
+        markCooldown(shopKey, 54001, '54001 已提取通行证但重放仍失败，需人工过一次滑块')
+        const err = new Error('RISK_54001')
+        err.riskCode = 54001
+        err.riskMsg = r?.error_msg || r?.errorMsg || ''
+        err.riskData = r
+        err.needManualCaptcha = true     // ★ 提示上层：引导人工过滑块即可恢复
+        throw err
       }
+      // 没拿到 token → 真的需要过滑块。同样只记短冷却 + 明确原因。
+      console.warn('[pdd-risk] 54001 但响应无 verifyAuthToken，需人工过滑块')
+      markCooldown(shopKey, 54001, '54001 响应无 verifyAuthToken，需人工过一次滑块验证')
+      const err = new Error('RISK_54001')
+      err.riskCode = 54001
+      err.riskMsg = r?.error_msg || r?.errorMsg || ''
+      err.riskData = r
+      err.needManualCaptcha = true
+      throw err
     }
 
-    markCooldown(shopKey, code)
+    // 其他码（40002/100001/2000000/600001）：确实是平台侧限流，记冷却并带上原因
+    markCooldown(shopKey, code, `命中频控 code=${code}：${r?.error_msg || r?.errorMsg || '平台限流'}`)
     const err = new Error(`RISK_${code}`)
     err.riskCode = code
     err.riskMsg = r?.error_msg || r?.errorMsg || ''

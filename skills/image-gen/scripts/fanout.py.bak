@@ -1,0 +1,248 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+fanout.py — 全并发直出（复刻 Accio 生图逻辑）
+
+设计原则（与旧版 gen.py 的三个区别）：
+1. 提示词原样透传：不重写、不套模板、不校验、不出预览，写什么就发什么。
+2. 全部一次性并发发射：默认 --workers 200，不等任何一张结束再发下一张。
+3. 失败即重试，不阻塞：单张失败重试 N 次后记为 failed，其余照常跑完。
+
+用法：
+  python fanout.py --plan plan.json --workers 200
+  python fanout.py --prompt "..." --size 1536x1536 --name hero
+
+plan.json 结构（两种都吃）：
+  {"items": [{"name":"01","prompt":"...", "ref":"a.png", "size":"2048x2048"}, ...]}
+  [{"name":"01","prompt":"..."}, ...]
+
+item 字段：
+  name        输出文件名前缀（必填，重名会被加序号）
+  prompt      提示词（必填；或给 prompt_file）
+  prompt_file 提示词文件路径（长提示词用）
+  ref / refs  参考图（本地绝对路径），有 ref 走 /images/edits，无 ref 走 /images/generations
+  size        如 1024x1024 / 1536x1024 / 2048x2048 / auto；缺省 auto
+  quality     low / medium / high / auto；缺省不传（用网关默认）
+  background  transparent / opaque / auto；缺省不传
+  n           张数，缺省 1
+  model       单条覆盖模型名
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import mimetypes
+import os
+import random
+import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+
+CONFIG_PATH = Path(os.environ.get("IMAGEGEN_CONFIG", Path.home() / ".dsh" / "image-gen.local.json"))
+
+
+def _load_config() -> dict:
+    try:
+        return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+_CFG = _load_config()
+BASE = os.environ.get("NEWAPI_BASE") or _CFG.get("base") or "http://45.205.27.41:3001/v1"
+KEY = os.environ.get("NEWAPI_KEY") or _CFG.get("key") or ""
+MODEL = os.environ.get("NEWAPI_IMAGE_MODEL") or _CFG.get("model") or "gpt-image-2.5-2k"
+
+TIMEOUT = int(os.environ.get("IMAGEGEN_TIMEOUT", "900"))
+_print_lock = threading.Lock()
+
+
+def log(msg: str) -> None:
+    with _print_lock:
+        print(msg, file=sys.stderr, flush=True)
+
+
+# ------------------------------------------------------------------ HTTP
+def _opener():
+    # 每个线程独立 opener：OpenerDirector 不是线程安全的
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def _post(url: str, body: bytes, ctype: str) -> dict:
+    req = urllib.request.Request(url, data=body, method="POST",
+                                 headers={"Authorization": f"Bearer {KEY}", "Content-Type": ctype})
+    try:
+        with _opener().open(req, timeout=TIMEOUT) as r:
+            return json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode(errors="replace")[:600]
+        raise RuntimeError(f"HTTP {e.code}: {detail}")
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"连接失败: {e.reason}")
+
+
+def _multipart(fields: dict, files: list) -> tuple[bytes, str]:
+    boundary = "----dsh" + uuid.uuid4().hex
+    out = bytearray()
+    for k, v in fields.items():
+        if v is None:
+            continue
+        out += f"--{boundary}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n".encode()
+    for field, path in files:
+        path = Path(path)
+        mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        out += f"--{boundary}\r\nContent-Disposition: form-data; name=\"{field}\"; filename=\"{path.name}\"\r\n".encode()
+        out += f"Content-Type: {mime}\r\n\r\n".encode()
+        out += path.read_bytes()
+        out += b"\r\n"
+    out += f"--{boundary}--\r\n".encode()
+    return bytes(out), f"multipart/form-data; boundary={boundary}"
+
+
+def _download(url: str, dest_stem: Path) -> Path:
+    with _opener().open(url, timeout=TIMEOUT) as r:
+        data = r.read()
+    suffix = ".png"
+    if data[:3] == b"\xff\xd8\xff":
+        suffix = ".jpg"
+    elif data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        suffix = ".webp"
+    dest = dest_stem.with_suffix(suffix)
+    dest.write_bytes(data)
+    return dest
+
+
+# ------------------------------------------------------------------ 单张
+def render(item: dict, out_dir: Path, idx: int, total: int) -> dict:
+    name = item.get("name") or f"img_{idx:03d}"
+    prompt = item.get("prompt")
+    if item.get("prompt_file"):
+        prompt = Path(item["prompt_file"]).read_text(encoding="utf-8")
+    if not prompt:
+        return {"ok": False, "name": name, "error": "缺 prompt"}
+
+    refs = item.get("refs") or ([item["ref"]] if item.get("ref") else [])
+    model = item.get("model") or MODEL
+    size = item.get("size")
+    n = int(item.get("n", 1))
+    retries = int(item.get("retries", RETRIES))
+
+    fields = {"model": model, "prompt": prompt, "n": n}
+    if size and size != "auto":
+        fields["size"] = size
+    if item.get("quality"):
+        fields["quality"] = item["quality"]
+    if item.get("background"):
+        fields["background"] = item["background"]
+
+    last_err = None
+    for attempt in range(retries + 1):
+        try:
+            if refs:
+                body, ctype = _multipart(fields, [("image[]" if len(refs) > 1 else "image", r) for r in refs])
+                resp = _post(BASE + "/images/edits", body, ctype)
+            else:
+                resp = _post(BASE + "/images/generations",
+                             json.dumps(fields).encode(), "application/json")
+
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            files = []
+            for k, data in enumerate(resp.get("data", []), 1):
+                stem = out_dir / f"{name}-{stamp}-{k}"
+                if data.get("b64_json"):
+                    import base64
+                    dest = stem.with_suffix(".png")
+                    dest.write_bytes(base64.b64decode(data["b64_json"]))
+                elif data.get("url"):
+                    dest = _download(data["url"], stem)
+                else:
+                    raise RuntimeError(f"响应无 url/b64: {list(data)}")
+                files.append(str(dest))
+            if not files:
+                raise RuntimeError("空响应")
+            log(f"[{idx}/{total}] OK   {name}  -> {Path(files[0]).name}")
+            return {"ok": True, "name": name, "files": files,
+                    "usage": resp.get("usage", {}), "attempt": attempt + 1}
+        except Exception as e:
+            last_err = str(e)
+            if attempt < retries:
+                time.sleep(min(2 ** attempt, 8) + random.random())
+                continue
+    log(f"[{idx}/{total}] FAIL {name}  ({last_err})")
+    return {"ok": False, "name": name, "error": last_err}
+
+
+# ------------------------------------------------------------------ 主流程
+def fanout(items: list, out_dir: Path, workers: int) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    total = len(items)
+    log(f"fanout: {total} 张，并发 {workers}，模型 {MODEL}")
+    t0 = time.time()
+    results = [None] * total
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futs = {pool.submit(render, it, out_dir, i + 1, total): i for i, it in enumerate(items)}
+        for fut in as_completed(futs):
+            results[futs[fut]] = fut.result()
+    ok = [r for r in results if r and r.get("ok")]
+    bad = [r for r in results if not r or not r.get("ok")]
+    return {
+        "ok": not bad,
+        "total": total,
+        "succeeded": len(ok),
+        "failed": len(bad),
+        "seconds": round(time.time() - t0, 1),
+        "out_dir": str(out_dir),
+        "results": results,
+    }
+
+
+def main(argv=None) -> None:
+    ap = argparse.ArgumentParser(description="全并发直出（Accio 式：提示词原样透传）")
+    ap.add_argument("--plan", help="JSON 计划文件")
+    ap.add_argument("--prompt", help="单张模式：提示词")
+    ap.add_argument("--prompt-file", help="单张模式：提示词文件")
+    ap.add_argument("--ref", action="append", default=[], help="单张模式：参考图，可多次")
+    ap.add_argument("--size", default="auto")
+    ap.add_argument("--quality")
+    ap.add_argument("--background")
+    ap.add_argument("--model", default=None)
+    ap.add_argument("--out", default="./image-gen-out")
+    ap.add_argument("--name", default="img")
+    ap.add_argument("--workers", type=int, default=int(os.environ.get("IMAGEGEN_WORKERS", "200")))
+    ap.add_argument("--retries", type=int, default=int(os.environ.get("IMAGEGEN_RETRIES", "2")))
+    a = ap.parse_args(argv)
+
+    global MODEL, RETRIES
+    if a.model:
+        MODEL = a.model
+    RETRIES = a.retries
+
+    if not KEY:
+        raise SystemExit(f"缺 API key：设 NEWAPI_KEY / 写 {CONFIG_PATH} / 传环境变量")
+
+    if a.plan:
+        raw = json.loads(Path(a.plan).read_text(encoding="utf-8"))
+        items = raw if isinstance(raw, list) else raw.get("items", [])
+    elif a.prompt or a.prompt_file:
+        items = [{"name": a.name, "prompt": a.prompt, "prompt_file": a.prompt_file,
+                  "refs": a.ref, "size": a.size, "quality": a.quality,
+                  "background": a.background, "model": a.model}]
+    else:
+        raise SystemExit("需要 --plan，或 --prompt / --prompt-file")
+
+    if not items:
+        raise SystemExit("plan 为空")
+
+    result = fanout(items, Path(a.out), max(1, a.workers))
+    print(json.dumps(result, ensure_ascii=False, indent=1))
+
+
+RETRIES = 2
+
+if __name__ == "__main__":
+    main()

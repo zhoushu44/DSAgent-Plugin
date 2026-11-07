@@ -256,6 +256,11 @@ export const RISK_SDK_INJECT = () => {
   }, 3000)
 
   // ⑤ ★ 自动保持签名新鲜（每 3 分钟刷新一次，token 有效期 10 分钟）
+  //
+  // ★ 2026-10-27 说明：这里的 `__pddSigCache` 现在**只作为页面内诊断探针**，
+  //   `pdd-client.mjs` 的 genSig() 已不再读它（每次现场生成，见该处注释）。
+  //   保留写入是为了让人在 DevTools 里能看到「注入器是否活着、签名长度是否正常」，
+  //   **不要**把它重新接成请求签名来源——签名复用会暴露机器身份。
   setInterval(async () => {
     try {
       const r = await window.__pddGenRiskSig()

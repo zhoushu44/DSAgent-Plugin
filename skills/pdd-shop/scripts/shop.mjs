@@ -84,27 +84,24 @@ const TRANSPORT = argOf('transport') || (mode === 'goods' ? 'browser' : 'http')
   const SHOP = resolveShop()
   if (!SHOP) { emit({ ok: false, failureKind: 'not_bound', text: '未绑定拼多多商家后台账号，请到「账号连接」添加。' }); process.exit(2) }
 
-  // ★ 风控 L4：冷却期内直接拒绝
-  const cd = checkCooldown(SHOP)
-  if (cd.cooling) {
-    emit({
-      ok: false, failureKind: 'rate_limit',
-      text: `账号 ${SHOP} 命中平台频控，冷却剩余 ${fmtRemain(cd.remainMs)}（${cd.reason}）。期间请勿重复调用。`,
-    })
+  // ★ 2026-11-04 迁移到统一风控闸门（pdd-guard）
+  //   原实现是手写四件套（checkCooldown + tryAcquireAccountLock + heartbeat + release 钩子）。
+  //   ⚠️ 闸门内部已持锁，**不要保留旧的 tryAcquireAccountLock**（会自己锁死自己）。
+  const { openTask } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-guard.mjs')))
+  // ★ 2026-11-05：接口路径统一从基座注册表取（PDD 升级只改 pdd-api.mjs）
+  const { API: PDD_API } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-api.mjs')))
+  const apiPath = (name) => {
+    const s = PDD_API[name]
+    if (!s) throw new Error(`注册表缺少接口: ${name}`)
+    return s.path
+  }
+  const guard = await openTask('pdd-shop', SHOP, { lockWaitMs: 300_000 })
+  if (guard.blocked) {
+    emit({ ok: false, failureKind: 'rate_limit', text: `账号 ${SHOP} 当前不可执行：${guard.reason}。期间请勿重复调用。` })
     process.exit(2)
   }
-
-  // 账号级并发锁：同一时刻只允许一个技能打这个号（等最多 5 分钟）
-  const lock = await tryAcquireAccountLock(SHOP, 'pdd-shop', 300000)
-  if (!lock.ok) {
-    emit({ ok: false, failureKind: 'rate_limit', text: '账号 ' + SHOP + ' 正被其他任务占用' + (lock.holder ? '（' + lock.holder + '）' : '') + '，请稍后再试。' })
-    process.exit(2)
-  }
-  const releaseLock = () => { try { releaseAccountLock(SHOP) } catch (e) {} }
-  process.on('exit', releaseLock)
-  process.on('SIGINT', () => { releaseLock(); process.exit(130) })
-  process.on('SIGTERM', () => { releaseLock(); process.exit(143) })
-  const hb = setInterval(() => heartbeatAccountLock(SHOP, 'pdd-shop'), 180000)
+  guard.startHeartbeat()
+  process.on('exit', () => { try { guard.close() } catch { /* ignore */ } })
 
 
   // ══════════════════════════════════════════════════════════════════════
@@ -138,7 +135,7 @@ const TRANSPORT = argOf('transport') || (mode === 'goods' ? 'browser' : 'http')
         const r = await callT3({
           shopKey: SHOP,
           session: sess,
-          url: `${R}/goodsDataShow/queryGoodsDetailVOListForMMS`,
+          url: 'https://mms.pinduoduo.com' + apiPath('shop.legacyGoodsDetailVO'),
           body: {
             startDate: dateArg, endDate: dateArg, queryType: 6,
             sortCol: 0, sortType: 1, pageNum: 1, pageSize: limit, actVs: 1,
@@ -337,7 +334,7 @@ const TRANSPORT = argOf('transport') || (mode === 'goods' ? 'browser' : 'http')
             // 直接试一次，通了才算
             const test = await callT1({
               shopKey: SHOP, cookies: c.str,
-              url: `${R}/mallScore/queryMallFlowData`, body: {},
+              url: 'https://mms.pinduoduo.com' + apiPath('shop.legacyFlow'), body: {},
               referer: 'https://mms.pinduoduo.com/sycm/evaluation',
             })
             if (test.ok) { browserCookies = c.str; return browserCookies }
@@ -348,11 +345,9 @@ const TRANSPORT = argOf('transport') || (mode === 'goods' ? 'browser' : 'http')
     }
 
     const get = async (url, body, referer) => {
-      // ★ 2026-10-27 接入 throttleRequest（此前 import 了但从未调用，是死代码）。
-      //   管「频率上限」（strict 20 次/分钟）；与 pdd-http 内部 reserveSlot 的
-      //   「最小间隔」是不同维度，实测叠加几乎不增加等待。
-      //   ★ /sydney/api 是经营域（宽松），goods 明细走 t3 时更需克制 → 都按 strict。
-      await throttleRequest(SHOP, 'strict')
+      // ★ 2026-11-04：节流统一走闸门 beforeCall（账号级时间槽，落盘跨进程）。
+      const pre = await guard.beforeCall(url)
+      if (!pre.allow) throw Object.assign(new Error(`账号不可用：${pre.reason}`), { __blocked: true })
       let r = await callT1({ shopKey: SHOP, cookies: COOKIES, url, body, referer })
       // ★ 2026-10-25：只有**真的** session_expired（body 43001 且 http 200）才切 Cookie。
       //   HTTP 430 是网关级频率惩罚，切 Cookie 没用，pdd-http 内部已重试。
@@ -374,7 +369,7 @@ const TRANSPORT = argOf('transport') || (mode === 'goods' ? 'browser' : 'http')
     // ★ 2026-10-25 注：queryMallScoreOverView 报的 43001 实为 **HTTP 430 网关级
     //   频率惩罚**（edge 层限流），不是会话过期。已在 pdd-http.mjs 分开处理：
     //   HTTP 430 → rate_limit + 15s/30s 退避；body 43001 → session_expired。
-    const flowR = await get(`${R}/mallScore/queryMallFlowData`, {}, 'https://mms.pinduoduo.com/sycm/evaluation')
+    const flowR = await get('https://mms.pinduoduo.com' + apiPath('shop.legacyFlow'), {}, 'https://mms.pinduoduo.com/sycm/evaluation')
     if (flowR.ok) out.flow = {
       uv: flowR.data.uv, pv: flowR.data.pv, fans: flowR.data.totalFansCnt,
       srchIndex: flowR.data.srchIndex, orderIndex: flowR.data.orderIndex,
@@ -382,13 +377,13 @@ const TRANSPORT = argOf('transport') || (mode === 'goods' ? 'browser' : 'http')
     }
 
     // ── goodsOverview（今日/昨日）──
-    const ovR = await get(`${R}/goodsDataShow/queryGoodsPageOverviewForMms`, {}, 'https://mms.pinduoduo.com/sycm/goods_effect')
+    const ovR = await get('https://mms.pinduoduo.com' + apiPath('shop.legacyGoodsOverview'), {}, 'https://mms.pinduoduo.com/sycm/goods_effect')
     if (ovR.ok) out.goodsOverview = { today: ovR.data.todayData, yesterday: ovR.data.yesterdayData }
 
     // ── score ──
     let scR = null
     if (mode === 'score' || mode === 'overview') {
-      scR = await get(`${R}/mallScore/queryMallScoreOverView`, {}, 'https://mms.pinduoduo.com/sycm/evaluation')
+      scR = await get('https://mms.pinduoduo.com' + apiPath('shop.legacyScore'), {}, 'https://mms.pinduoduo.com/sycm/evaluation')
       // ★ 2026-10-27 修：http 通道漏了把 scR 解析成 out.score。
       //   请求发了、错误也判了（下方 flowR.err || scR?.err），但成功的 scR
       //   从未赋值给 out.score → 下方 `if (out.score && ...)` 恒为 false
@@ -526,10 +521,10 @@ const TRANSPORT = argOf('transport') || (mode === 'goods' ? 'browser' : 'http')
   // hook 经营数据响应（/sydney/api/* + 等级）
   const byApi = {}
   const APIS = [
-    ['flow', 'sydney/api/mallScore/queryMallFlowData'],
-    ['score', 'sydney/api/mallScore/queryMallScoreOverView'],
-    ['goodsOverview', 'sydney/api/goodsDataShow/queryGoodsPageOverviewForMms'],
-    ['goodsList', 'sydney/api/goodsDataShow/queryGoodsDetailVOListForMMS'],
+    ['flow', apiPath('shop.legacyFlow').replace(/^\//, '')],
+    ['score', apiPath('shop.legacyScore').replace(/^\//, '')],
+    ['goodsOverview', apiPath('shop.legacyGoodsOverview').replace(/^\//, '')],
+    ['goodsList', apiPath('shop.legacyGoodsDetailVO').replace(/^\//, '')],
     ['mallLevel', 'rivendell/api/mallLevel/getEntranceInfo'],
   ]
   cdp.on('Network.responseReceived', async (e) => {
@@ -878,7 +873,8 @@ const TRANSPORT = argOf('transport') || (mode === 'goods' ? 'browser' : 'http')
     process.exit(2)
   }
   emit(out)
-  clearInterval(hb)
+  // ★ 2026-11-04：clearInterval(hb) 随迁移去掉（心跳由 guard.startHeartbeat 管理）
+  await guard.close()
   await browser.close()
 })().catch(async (e) => {
   // ★ 风控异常 → 友好提示

@@ -23,7 +23,7 @@
  */
 import * as fs from 'node:fs'
 import * as path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { homedir } from 'node:os'
 import { createRequire } from 'node:module'
 
@@ -112,21 +112,6 @@ try {
 // ─── 校验 ───
 const problems = []
 if (!product.title || String(product.title).trim().length < 2) problems.push('标题缺失')
-
-// ★ 2026-11-01：标题长度预校验（拼多多限 30 汉字 / 60 字符）
-//   实测踩过：50 字标题 + 后缀 → 31 汉字 → 超限 → 提交才报错 → 批量白跑
-//   注意：拼多多的「60 字符」= 30 个汉字（汉字算 2 字符），所以两个都要查。
-{
-  const t = String(product.title || '').trim()
-  const hanziCount = (t.match(/[\u4e00-\u9fa5]/g) || []).length
-  const asPddLen = hanziCount * 2 + (t.length - hanziCount)   // 汉字算 2
-  if (hanziCount > 30) {
-    problems.push(`标题汉字超限（${hanziCount} 个汉字，上限 30）`)
-  } else if (asPddLen > 60) {
-    problems.push(`标题超长（按拼多多算法 ${asPddLen} 字符，上限 60）`)
-  }
-}
-
 if (!Array.isArray(product.images) || !product.images.length) problems.push('主图缺失')
 if (problems.length) {
   emit({ ok: false, failureKind: 'api_error', text: `商品数据校验未通过：${problems.join('、')}` })
@@ -158,13 +143,7 @@ const puppeteer = require('puppeteer-core')
 const { openPublishEntry, waitForPublishPage, selectCategory } = await import('./stage-nav.mjs')
 const { publishFlow } = await import('./publish-flow.mjs')
 const { submitAndVerify } = await import('./stage-submit.mjs')
-const { findTemplate, saveTemplate, templateAttrs: getTplAttrs } = await import('./category-template-v2.mjs')
-// ★ 启动时把老模板升级到 v2（幂等）
-try {
-  const { upgradeTemplates } = await import('./category-template-v2.mjs')
-  const n = upgradeTemplates()
-  if (n > 0) log(`[template] 已升级 ${n} 个模板到 v2`)
-} catch { /* ignore */ }
+const { findTemplate, saveTemplate } = await import('./category-template.mjs')
 
 const shopKey = account
 if (!shopKey) {
@@ -179,7 +158,7 @@ try {
   tpl = findTemplate(catKey)
   if (tpl) {
     log(`[template] 命中类目模板「${catKey}」：已成功 ${tpl.successCount || 0} 次，`
-      + `属性 ${getTplAttrs(tpl).length} 条，规格 ${(tpl.dims || []).length} 维`)
+      + `属性 ${(tpl.requiredAttrs || []).length} 条，规格 ${(tpl.dims || []).length} 维`)
   } else {
     log(`[template] 无「${catKey}」模板，本次从头探测（成功后自动沉淀）`)
   }
@@ -189,11 +168,11 @@ try {
 
 // 用模板属性补全商品属性：商品里没给的、模板里有的 → 用模板值
 // （商品自带属性优先，模板只补空缺 —— 避免覆盖本次真实数据）
-if (getTplAttrs(tpl).length) {
+if (tpl?.requiredAttrs?.length) {
   const norm = s => String(s || '').replace(/\s+/g, '')
   const have = new Set((product.attributes || []).map(a => norm(a.name)))
   const added = []
-  for (const a of getTplAttrs(tpl)) {
+  for (const a of tpl.requiredAttrs) {
     const n = norm(a?.name)
     if (!n || have.has(n)) continue
     // 跳过「商品货号」这类一物一码的字段（模板值对本次无意义）
@@ -215,6 +194,34 @@ if (!product.price && tpl?.price) {
 const PROFILE = path.join(homedir(), '.dsh', 'browser-profiles', 'accounts', shopKey)
 const t0 = Date.now()
 let browser = null
+let guard = null
+
+// ══════ 风控闸门（2026-11-04 接入）══════
+// 本技能打的是 /glide/ /vodka/（商品发布域，全平台最严），
+// 但此前是 7 个 pdd 技能里**唯一没有任何风控前置**的：
+// 无账号锁、无冷却检查、无节流、不记冷却。
+// 上架是 L2 写操作，一旦撞 54001 会连坐整个账号当天的发布能力，
+// 所以这里必须在**开浏览器之前**先过闸门。
+const { openTask } = await import(
+  pathToFileURL(path.join(PLUGIN_ROOT, 'skills/_shared/pdd-guard.mjs')).href
+)
+guard = await openTask('pdd-publish-http', shopKey)
+if (guard.blocked) {
+  emit({
+    ok: false,
+    failureKind: 'rate_limit',
+    shopKey,
+    text: [
+      '已跳过：风控闸门拒绝执行。',
+      `原因：${guard.reason}`,
+      '',
+      '这是保护性拦截——此时强行发布大概率触发 54001，且会延长账号封禁。',
+      '等冷却结束或换账号后重试。',
+    ].join('\n'),
+  })
+  process.exit(0)
+}
+guard.startHeartbeat()
 
 try {
   // ★ 2026-10-30：优先连接**已打开的浏览器**（用户正在看的窗口），不新开
@@ -260,46 +267,15 @@ try {
     page = (await browser.pages())[0] || await browser.newPage()
   }
 
-  // ★ 2026-11-02 提速：模板有 catId 时**跳过段1**（打开商品列表 6 秒纯属浪费）
-  //   直接 goto 直达 URL，省掉「打开列表 → 等加载 → 点发布新商品 → 等跳转」全流程
-  const catIdDirect = String(tpl?.catId || '').trim()
-  let work = null
-  if (!connected && catIdDirect) {
-    log(`段1+2：catId=${catIdDirect} 直达（跳过商品列表）`)
-    const directUrl = `https://mms.pinduoduo.com/goods/goods_add/index?type=add&from=category&id=${catIdDirect}`
-    await page.goto(directUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(e => log(`  goto 警告：${e.message.slice(0, 60)}`))
-    // 等表单页就绪
-    let ready = false
-    for (let w = 0; w < 40; w++) {
-      await sleep(300)
-      ready = await page.evaluate(() => {
-        // 判据：出现类目属性区或标题输入框
-        const hasProp = document.querySelectorAll('[id^="basic.propertys."]').length > 0
-        const hasTitle = !!document.querySelector('input[placeholder*="标题"]')
-        const hasCategory = !!document.querySelector('#goods-category')
-        return hasProp || (hasTitle && hasCategory)
-      }).catch(() => false)
-      if (ready) break
-    }
-    if (ready) {
-      log(`  直达页已就绪（${catIdDirect}）`)
-      work = page
-    } else {
-      log('  ⚠ 直达页未就绪，回退到常规流程')
-    }
+  // 段1
+  if (!connected) {
+    await openPublishEntry(page, { log })
+  } else {
+    log('连接模式：跳过段1 导航，直接使用当前页面')
   }
-
-  if (!work) {
-    // 段1
-    if (!connected) {
-      await openPublishEntry(page, { log })
-    } else {
-      log('连接模式：跳过段1 导航，直接使用当前页面')
-    }
-    // 段2（★ 老类目用 catId 直达，省 5s；连接模式下由 stage-nav 自动跳过直达）
-    work = await waitForPublishPage(browser, { log })
-    work = await selectCategory(work, product.category || categoryKw, { log, catId: tpl?.catId || '', connected })
-  }
+  // 段2（★ 老类目用 catId 直达，省 5s；连接模式下由 stage-nav 自动跳过直达）
+  let work = await waitForPublishPage(browser, { log })
+  work = await selectCategory(work, product.category || categoryKw, { log, catId: tpl?.catId || '', connected })
 
   // 段3 + 段4
   // ★ 2026-11-01：上传前图片预处理（拼多多主图/详情图单张 ≤ 3MB）
@@ -335,7 +311,7 @@ try {
     }
   }
 
-  const flowResult = await publishFlow(work, product, { log, templateAttrs: getTplAttrs(tpl), templateDims: tpl?.dims || [] })
+  const flowResult = await publishFlow(work, product, { log, templateAttrs: tpl?.requiredAttrs || [] })
 
   // ★ 2026-10-30：--no-submit 模式 → 不点提交，保留页面供人工核对
   if (noSubmit) {
@@ -377,31 +353,11 @@ try {
         return true
       })
 
-      // ★ 2026-11-02 v2：把扫描到的完整字段（含 options）+ 本次填的值合并保存
-      //   这样第二次发布时可以直接从模板取「字段名 → 值 + 候选」，零扫描
-      const scanned = flowResult.attrFields || []
-      const filledMap = new Map(uniqAttrs.map(a => [a.name.replace(/\s+/g, ''), a.value]))
-      const attrsForTpl = scanned.map(f => ({
-        name: f.name,
-        required: !!f.required,
-        kind: f.kind || 'select',
-        options: Array.isArray(f.options) ? f.options : [],
-        value: filledMap.get(f.name.replace(/\s+/g, '')) || '',
-      }))
-      // 补上扫描里没有但确实填了的（兜底）
-      for (const a of uniqAttrs) {
-        const n = a.name.replace(/\s+/g, '')
-        if (!attrsForTpl.some(x => x.name.replace(/\s+/g, '') === n)) {
-          attrsForTpl.push({ name: a.name, required: false, kind: 'select', options: [], value: a.value })
-        }
-      }
-
       saveTemplate(catKey, {
         catId,
         catePath: catePath && catePath !== '商品分类' ? catePath : '',
         dims,
-        attrs: attrsForTpl,
-        pageFields: scanned,   // ★ 2026-11-02 防污染：只保留本类目字段
+        requiredAttrs: uniqAttrs,
         price: product.price || '',
         stock: product.stock || '',
       })
@@ -441,7 +397,26 @@ try {
   }
 
   // 段5
-  const submitResult = await submitAndVerify(work, { log, timeoutMs: 60000, productTitle: product.title || '' })
+  // ★ 2026-11-04：提交前过一道闸门 beforeCall。
+  //   本技能是 DOM 驱动（请求由页面自己发），所以只能在这里打时间槽——
+  //   这是整条链路里**唯一真正写平台**的动作，也是唯一值得占槽的位置。
+  //   段1~段4 都是页面内表单操作，不产生业务写请求。
+  {
+    // ★ 2026-11-05：节流 key 也从注册表取
+    const { API: _API } = await import('file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-api.mjs')
+    const pre = await guard.beforeCall('https://mms.pinduoduo.com' + _API['goods.commitSubmit'].path)
+    if (!pre.allow) {
+      emit({
+        ok: false, failureKind: 'rate_limit', shopKey,
+        text: `提交前被风控闸门拦下：${pre.reason}\n\n商品已填完但**未提交**，可稍后重试或用 --confirm 重跑。`,
+      })
+      await guard.close()
+      await browser.close().catch(() => {})
+      process.exit(0)
+    }
+    log(`[风控] 提交前节流通过（等待 ${(pre.waitMs / 1000).toFixed(1)}s）`)
+  }
+  const submitResult = await submitAndVerify(work, { log, timeoutMs: 30000, productTitle: product.title || '' })
 
   const cost = Math.round((Date.now() - t0) / 1000)
 
@@ -481,29 +456,11 @@ try {
         // 去掉「第N行xxx」这种带行号的
         .filter(a => !/^第\d+行/.test(a.name))
 
-      // ★ 2026-11-02 v2：同 --no-submit 分支，保存完整字段（含 options）
-      const scanned2 = flowResult.attrFields || []
-      const filledMap2 = new Map(attrFromFilled.map(a => [a.name.replace(/\s+/g, ''), a.value]))
-      const attrsForTpl2 = scanned2.map(f => ({
-        name: f.name,
-        required: !!f.required,
-        kind: f.kind || 'select',
-        options: Array.isArray(f.options) ? f.options : [],
-        value: filledMap2.get(f.name.replace(/\s+/g, '')) || '',
-      }))
-      for (const a of attrFromFilled) {
-        const n = a.name.replace(/\s+/g, '')
-        if (!attrsForTpl2.some(x => x.name.replace(/\s+/g, '') === n)) {
-          attrsForTpl2.push({ name: a.name, required: false, kind: 'select', options: [], value: a.value })
-        }
-      }
-
       saveTemplate(catKey, {
         catId,
         catePath: catePath && catePath !== '商品分类' ? catePath : (tpl?.catePath || ''),
         dims,
-        attrs: attrsForTpl2,
-        pageFields: scanned2,
+        requiredAttrs: attrFromFilled,
         price: product.price || '',
         stock: product.stock || '',
         goodsId: submitResult.goodsId,
@@ -581,4 +538,7 @@ try {
   if (browser) {
     log('浏览器保留，供人工核对（不自动关闭）')
   }
+  // ★ 风控闸门收尾：放账号锁 + 打印本次调用汇总
+  //   （必须在浏览器处理之后，确保即使前面抛异常也能放锁）
+  try { await guard?.close() } catch { /* ignore */ }
 }

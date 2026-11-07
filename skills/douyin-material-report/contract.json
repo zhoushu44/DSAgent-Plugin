@@ -1,0 +1,46 @@
+{
+  "schema": "dsagent/skill-contract@1",
+  "id": "douyin-material-report",
+  "entry": {
+    "form": "script",
+    "script": "scripts/material-report.mjs"
+  },
+  "input": {
+    "args": [
+      {
+        "name": "start",
+        "description": "开始日期 YYYY-MM-DD，默认今天"
+      },
+      {
+        "name": "end",
+        "description": "结束日期 YYYY-MM-DD，默认与 start 相同"
+      },
+      {
+        "name": "material_type",
+        "description": "素材类型：3=视频素材(默认) / 1=直播间画面 / 2=图片素材 / 4=图文素材 / 5=标题素材"
+      },
+      {
+        "name": "mar_goal",
+        "description": "推广目标：1=推商品(默认) / 2=推直播间"
+      },
+      {
+        "name": "offset",
+        "description": "分页偏移，默认 0"
+      },
+      {
+        "name": "limit",
+        "description": "返回条数上限，默认 20，上限 100"
+      },
+      {
+        "name": "account",
+        "description": "账号 shopKey（可选）；该平台多账号且未绑定时需先向用户确认",
+        "flag": "--account"
+      }
+    ]
+  },
+  "output": {
+    "protocol": "dsagent-result",
+    "resultPrefix": "__DSAGENT_RESULT__",
+    "filesMarker": "---[OUTPUT_FILES]"
+  }
+}

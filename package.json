@@ -33,10 +33,12 @@
   "scripts": {
     "typecheck": "node --max-old-space-size=6144 ./node_modules/typescript/bin/tsc -p tsconfig.typecheck.json",
     "check:esm": "node dev/check-esm-purity.mjs",
+    "check:pdd-guard": "node skills/_shared/check-pdd-guard.mjs",
+    "smoke:pdd": "node skills/_shared/smoke-pdd.mjs",
     "build:host": "node --max-old-space-size=6144 ./node_modules/typescript/bin/tsc -p tsconfig.json",
     "smoke": "node dev/smoke-client.mjs",
     "sync": "node dev/portable/sync-to-host.mjs",
-    "build": "npm run check:esm && npm run typecheck && npm run build:host && node dev/build-client.mjs && node dev/smoke-client.mjs && node dev/portable/sync-to-host.mjs",
+    "build": "npm run check:esm && npm run check:pdd-guard && npm run typecheck && npm run build:host && node dev/build-client.mjs && node dev/smoke-client.mjs && node dev/portable/sync-to-host.mjs",
     "build:client": "node dev/build-client.mjs && node dev/smoke-client.mjs && node dev/portable/sync-to-host.mjs",
     "portable": "pwsh -NoProfile -File dev/portable/build-portable.ps1 -Force",
     "portable:update": "pwsh -NoProfile -File dev/portable/build-update.ps1",
@@ -61,6 +63,7 @@
   },
   "dependencies": {
     "cos-nodejs-sdk-v5": "^3.0.0",
+    "jsdom": "^29.1.1",
     "puppeteer-core": "^23.0.0",
     "yaml": "^2.9.1"
   },
@@ -81,4 +84,3 @@
     "typescript": "^5.6.0"
   }
 }
-

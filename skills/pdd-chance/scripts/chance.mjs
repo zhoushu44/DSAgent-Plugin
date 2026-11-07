@@ -34,13 +34,25 @@ const PKG_BASE = [
  *   POST /opportunity-goods/chance-goods/oversea         跨境
  *
  * 用法：
+ *   node scripts/chance.mjs --mode labels                                      ★ 查本店铺可用标签（含实时商机数）
+ *   node scripts/chance.mjs --mode pick --labels home_page_new,thousand_rec    ★ 按标签选商机
  *   node scripts/chance.mjs --mode list [--page 1] [--size 35] [--cat-id 16548]
+ *   node scripts/chance.mjs --mode detail --chance-id <id>      ★ 单商机详情（只读）
+ *   node scripts/chance.mjs --mode publish --chance-id <id> --product-file <json>            ★ 发布预览
+ *   node scripts/chance.mjs --mode publish --chance-id <id> --product-file <json> --confirm true  ★ 真建草稿
  *   node scripts/chance.mjs --mode mine       我的机会商品（已跟款）
  *   node scripts/chance.mjs --mode collection 收藏列表
  *   node scripts/chance.mjs --mode mission    任务信息
  *   node scripts/chance.mjs --mode follow-check   ★ 一键验证跟款是否成功
  *   node scripts/chance.mjs --mode filters    筛选项（含 51 个站内热搜/缺货词）
  *   node scripts/chance.mjs --mode cates      机会类目树（259 个，看哪些类目开了机会池）
+ *
+ * ★ --labels（2026-11-05 新增）：实测 550 条样本验证
+ *   - 必须是数组（传字符串报 4000000）
+ *   - 多标签 = OR 并集
+ *   - 不能与 cat_id_1:-1 共存（返回 0）
+ *   - 各标签 total：当季新品 2000 / 首页流量 2000 / 热门收藏 1719 / 潜力商品 1525 / 热门跟款 1507 / 全网热销 1500
+ *   - low_price（低价跟款）不可用作 labels 值
  *
  * ★ --cat-id：按一级类目查机会商品（默认 = 店铺主营类目）。
  *   实测：只有 `cat_id_1` 参数生效（cate_id_1/category_id/opt_id 都无效，会返回默认池）。
@@ -59,6 +71,43 @@ const size = Math.min(100, Math.max(1, parseInt(argOf('size') || '35', 10) || 35
 const catId = argOf('cat-id') ? Number(argOf('cat-id')) : null
 
 /**
+ * ★ 2026-11-05 新增：--labels 标签筛选
+ *
+ * 实测（爱绿森旗舰店，550 条样本验证）：
+ *   labels 必须是**数组**，传字符串会报 4000000「请求method,argument,body错误」
+ *   多标签之间是 **OR**（并集），不是 AND
+ *   绝不能同时传 cat_id_1: -1（会返回 0 条）——不传 cat_id 时平台自动用主营类目
+ *
+ * 可用值（来自 get_filters 的 labels 组，6 个）：
+ *   newinfashion_new  当季新品      total≈2000
+ *   hot_follow        热门跟款      total≈1507
+ *   wide_popular      全网热销      total≈1500
+ *   home_page_new     首页流量      total≈2000
+ *   thousand_rec      潜力商品      total≈1525
+ *   hot_favorites_goods 热门收藏    total≈1719
+ *
+ * ⚠️ low_price（低价跟款）**不能**作为 labels 值（返回 0 条）——
+ *    它只存在于 hide_labels 组，是排除项。
+ */
+const LABEL_ALIAS = {
+  '当季新品': 'newinfashion_new', '热门跟款': 'hot_follow', '全网热销': 'wide_popular',
+  '首页流量': 'home_page_new', '潜力商品': 'thousand_rec', '热门收藏': 'hot_favorites_goods',
+  // 兼容 hide_labels 组里的旧值写法
+  'newinfashion': 'newinfashion_new', 'home_page': 'home_page_new',
+}
+const VALID_LABELS = new Set(['newinfashion_new', 'hot_follow', 'wide_popular', 'home_page_new', 'thousand_rec', 'hot_favorites_goods'])
+const rawLabels = argOf('labels')
+const labels = rawLabels
+  ? String(rawLabels).split(/[,，\s]+/).map(s => s.trim()).filter(Boolean).map(s => LABEL_ALIAS[s] || s).filter(s => {
+      if (!VALID_LABELS.has(s)) { console.error(`[chance] ⚠ 未知标签「${s}」，已忽略。可用：${[...VALID_LABELS].join(', ')}`); return false }
+      return true
+    })
+  : null
+const chanceId = argOf('chance-id')
+const confirm = process.argv.includes('--confirm') && argOf('confirm') !== 'false'
+
+
+/**
  * 平台价格档位（2026-10-23 从 35 个样本实测算出，价格带几乎不重叠）：
  *   0 = 品质档，中位 83.50 元（范围 10.70 ~ 257.45）
  *   1 = 主流档，中位 14.47 元（范围 5.90 ~ 79.63）
@@ -73,36 +122,47 @@ const PRICE_LABEL_NAMES = { 0: '品质档', 1: '主流档', 2: '引流档' }
   const { checkCooldown, detectSlider, autoSolveSlider, fmtRemain, getCaptchaToken, saveCaptchaToken, extractCaptchaToken, tryAcquireAccountLock, releaseAccountLock, heartbeatAccountLock } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-risk.mjs')))
   const getTok = getCaptchaToken, saveTok = saveCaptchaToken, extractTok = extractCaptchaToken
   const store = new CredentialStore(path.join(homedir(), '.dsh', 'dsagent-accounts.json'))
-  const SHOP = argOf('account') || store.findByPlatform('pdd_mms')?.shop_key
-  if (!SHOP) { emit({ ok: false, failureKind: 'not_bound', text: '未绑定拼多多商家后台账号，请到「账号连接」添加。' }); process.exit(2) }
+  // ★ 2026-11-05：多账号时必须让用户选，不能静默取第一个（写错店的代价不可逆）
+  const { pickAccount, toEmit } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/account-picker.mjs')))
+  const _pick = pickAccount(store, {
+    platform: 'pdd_mms',
+    want: argOf('account'),
+    wantName: argOf('shop-name') || argOf('shopName'),
+    skill: 'pdd-chance',
+  })
+  if (!_pick.ok) { emit(toEmit(_pick)); process.exit(2) }
+  const SHOP = _pick.shopKey
 
-  const cd = checkCooldown(SHOP)
-  if (cd.cooling) {
-    emit({ ok: false, failureKind: 'rate_limit', text: `账号 ${SHOP} 命中平台频控，冷却剩余 ${fmtRemain(cd.remainMs)}（${cd.reason}）。` })
+  // ★ 2026-11-04 迁移到统一风控闸门（pdd-guard）
+  //   原实现是手写四件套（checkCooldown + tryAcquireAccountLock + heartbeat + release）。
+  //   ⚠️ 闸门内部已持锁，**不要保留旧的 tryAcquireAccountLock**（会自己锁死自己）。
+  const { openTask, getVerifyAuthToken } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-guard.mjs')))
+  const { api: pddApi } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-api.mjs')))
+  const guard = await openTask('pdd-chance', SHOP, { lockWaitMs: 300_000 })
+  if (guard.blocked) {
+    emit({ ok: false, failureKind: 'rate_limit', text: `账号 ${SHOP} 当前不可执行：${guard.reason}。期间请勿重复调用。` })
     process.exit(2)
   }
-
-  // ★ 2026-10-27 补：账号级并发锁（pdd-chance 此前缺，属共性缺口）。
-  //   opportunity-goods 域虽不在官方风控 SDK 白名单（较宽松），
-  //   但采集时仍会打开浏览器打多个接口，与其他任务并发会推高账号出口频率。
-  {
-    const lock = await tryAcquireAccountLock(SHOP, 'pdd-chance', 300_000)
-    if (!lock.ok) {
-      emit({
-        ok: false, failureKind: 'rate_limit',
-        text: `账号 ${SHOP} 正被其他拼多多任务占用${lock.holder ? `（${lock.holder}）` : ''}，请稍后再试。`,
-      })
-      process.exit(2)
-    }
-    const release = () => { try { releaseAccountLock(SHOP) } catch { /* ignore */ } }
-    process.on('exit', release)
-    process.on('SIGINT', () => { release(); process.exit(130) })
-    process.on('SIGTERM', () => { release(); process.exit(143) })
-    setInterval(() => { try { heartbeatAccountLock(SHOP, 'pdd-chance') } catch { /* ignore */ } }, 180_000)
-  }
+  guard.startHeartbeat()
+  process.on('exit', () => { try { guard.close() } catch { /* ignore */ } })
 
   let profile = path.join(homedir(), '.dsh', 'browser-profiles', 'accounts', SHOP)
-  if (!fs.existsSync(profile)) profile = path.join(homedir(), '.dsh', 'browser-profiles', 'accounts', 'pdd_mms_de55c3e159072dfb5297b234eaa487c3')
+  // ★ 2026-11-04 修（安全）：原来这里有个硬编码兜底
+  //     if (!fs.existsSync(profile)) profile = path.join(base, 'pdd_mms_de55c3e159072dfb5297b234eaa487c3')
+  //   会把「本账号 profile 缺失」静默变成「借用另一个账号的登录态」——
+  //   采到的可能是别家店的数据。改为用 pdd-launch 的统一候选链（找不到就抛错）。
+  if (!fs.existsSync(profile)) {
+    try {
+      const { profileCandidates } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-launch.mjs')))
+      const cands = profileCandidates(SHOP)
+      const hit = cands.find(d => fs.existsSync(path.join(homedir(), '.dsh', 'browser-profiles', 'accounts', d)))
+      if (!hit) throw new Error(`找不到账号 ${SHOP} 的浏览器 Profile，请先到「账号连接」重新登录`)
+      profile = path.join(homedir(), '.dsh', 'browser-profiles', 'accounts', hit)
+    } catch (e) {
+      emit({ ok: false, failureKind: 'not_bound', text: e.message })
+      process.exit(2)
+    }
+  }
 
   // ★ 2026-10-24：凭证库 Cookie 有效 ≠ Profile Cookie 有效（实测踩坑）。
   //   凭证库里 3b39d748 的 PASS_ID 是好的，但它自己的 profile 目录里是旧票，
@@ -250,26 +310,32 @@ const PRICE_LABEL_NAMES = { 0: '品质档', 1: '主流档', 2: '引流档' }
   const sig = await page.evaluate(() => window.__sig).catch(() => null)
   console.error(`[chance] 签名: ${sig ? '有' : '无（该域不需要，无影响）'}`)
 
-  // ★ 2026-10-24 补：接口级节流（该域虽不需要签名，但高频一样会被 429/40002）
-  const lastHit = new Map()
-  const MIN_GAP = 2000
+  // ★ 2026-11-04：节流已统一由 pdd-guard 的 beforeCall 负责（内部就是 reserveSlot）。
+  //   原来的进程内 `lastHit` Map + MIN_GAP 兜底已删除 —— 它曾经是"假节流"的证据，
+  //   留着只会让后来者以为还有第二套节流。
   await new Promise(r => setTimeout(r, 0))
 
   const call = async (apiPath, body) => {
-    // 节流：同一接口最小 2s 间隔
-    const now = Date.now()
-    const gap = now - (lastHit.get(apiPath) || 0)
-    if (gap < MIN_GAP) await new Promise(r => setTimeout(r, MIN_GAP - gap))
-    lastHit.set(apiPath, Date.now())
+    // ★ 2026-11-04：节流统一走闸门 beforeCall（内部即 reserveSlot，账号级落盘跨进程）。
+    //   闸门不可用时 fail-open（allow=true），不阻断业务。
+    // ★ 2026-11-05：优先走基座注册表；未登记的路径回退到原来的直发逻辑
+    const regName = CHANCE_API_MAP[apiPath]
+    if (regName) {
+      const rr = await pddApi(page, regName, body, { shopKey: SHOP, guard, raw: true })
+      return rr.raw ?? null
+    }
+    const pre = await guard.beforeCall('https://mms.pinduoduo.com' + apiPath)
+    if (!pre.allow) throw Object.assign(new Error(`账号不可用：${pre.reason}`), { __cooling: true })
 
     // 该域不需要 crawlerInfo/Anti-Content；有签名就带上（兜底未来加风控）
     const payload = sig ? { ...body, crawlerInfo: sig.crawlerInfo } : body
     // ★ 带上 captcha 通行证（有则带，10 分钟内不再弹滑块）
-    const vtk = getTok(SHOP)
+    // ★ 2026-11-05：统一入口（页面 cookie 优先，pdd-risk 存储兜底）
+    const vtk = await getVerifyAuthToken(page, SHOP)
     // ★ puppeteer 的 frame.evaluate 只接受「一个」arg —— 多参数会被丢，
     //   导致 fetch 拿到 undefined → 平台报 4000000「请求method,argument,body错误」。
     //   必须打包成单对象传入。
-    const argObj = { p: apiPath, bd: payload, av: sig?.anti || null, vt: vtk?.token || null }
+    const argObj = { p: apiPath, bd: payload, av: sig?.anti || null, vt: vtk || null }
     let r = await safeEval(async (o) => {
       const resp = await fetch('https://mms.pinduoduo.com' + o.p, {
         method: 'POST', credentials: 'include',
@@ -337,14 +403,35 @@ const PRICE_LABEL_NAMES = { 0: '品质档', 1: '主流档', 2: '引流档' }
     return r
   }
 
+  // ★ 2026-11-05：路径由基座注册表管理（PDD 升级只改 _shared/pdd-api.mjs）
+  //   保留 BASE 仅用于拼接子路径展示，实际请求走注册表
+  // 路径 → 注册表逻辑名
+  const CHANCE_API_MAP = {
+    '/opportunity-goods/chance-goods/home_list': 'chance.home',
+    '/opportunity-goods/chance-goods/my_list': 'chance.my',
+    '/opportunity-goods/chance-goods/collection/list': 'chance.collection',
+    '/opportunity-goods/chance-goods/cate_info': 'chance.cateInfo',
+    '/opportunity-goods/chance-goods/mission_info': 'chance.missionInfo',
+    '/opportunity-goods/chance-goods/get_filters': 'chance.filters',
+    '/opportunity-goods/chance-goods/default_category': 'chance.defaultCategory',
+    '/opportunity-goods/chance-goods/get_keywords_recommend': 'chance.keywordsRecommend',
+    '/opportunity-goods/chance-goods/get_hot_search_goods': 'chance.getHotSearchGoods',
+    '/opportunity-goods/chance-goods/quick_release': 'chance.quickRelease',
+  }
   const BASE = '/opportunity-goods/chance-goods'
 
-  if (mode === 'list' || mode === 'mine' || mode === 'collection') {
-    const api = mode === 'list' ? `${BASE}/home_list` : mode === 'mine' ? `${BASE}/my_list` : `${BASE}/collection/list`
+  if (mode === 'list' || mode === 'pick' || mode === 'mine' || mode === 'collection') {
+    const api = (mode === 'list' || mode === 'pick') ? `${BASE}/home_list` : mode === 'mine' ? `${BASE}/my_list` : `${BASE}/collection/list`
     // ★ cat_id_1 才会筛选类目；cate_id_1/category_id/opt_id 都无效（实测）
-    const body = mode === 'list'
-      ? { size, page: pageNo, banner_type: 0, ...(catId ? { cat_id_1: catId } : {}) }
-      : { size, page: pageNo, ...(catId ? { cat_id_1: catId } : {}) }
+    // ★ 2026-11-05：labels 只在 home_list 生效，且**不能**与 cat_id_1:-1 共存（实测返回 0）
+    let body
+    if (mode === 'list' || mode === 'pick') {
+      body = { size, page: pageNo, banner_type: 0 }
+      if (catId) body.cat_id_1 = catId
+      if (labels?.length) body.labels = labels
+    } else {
+      body = { size, page: pageNo, ...(catId ? { cat_id_1: catId } : {}) }
+    }
     const r = await call(api, body)
     const res = r?.result || {}
     const list = res.list || []
@@ -373,10 +460,10 @@ const PRICE_LABEL_NAMES = { 0: '品质档', 1: '主流档', 2: '引流档' }
     }))
     emit({
       ok: true, mode, shopKey: SHOP,
-      catId, total: res.total ?? items.length, page: pageNo, count: items.length,
+      catId, labels, total: res.total ?? items.length, page: pageNo, count: items.length,
       items,
       text: items.length
-        ? `机会商品（${catId ? `类目 ${catId} · ` : ''}第 ${pageNo} 页，共 ${res.total ?? '?'} 条，本页 ${items.length}）：\n` + items.slice(0, 15).map((g, i) =>
+        ? `机会商品（${catId ? `类目 ${catId} · ` : ''}${labels?.length ? `标签 ${labels.join('+')} · ` : ''}第 ${pageNo} 页，共 ${res.total ?? '?'} 条，本页 ${items.length}）：\n` + items.slice(0, 15).map((g, i) =>
             `  ${i + 1}. [${g.chanceId.slice(0, 12)}] ${g.keywords}\n`
             + `     建议价 ¥${g.referPriceYuan ?? '—'}${g.priceLabelName ? `（${g.priceLabelName}）` : ''} | 热度 ${g.hotIndex} | 潜力 ${g.potentialIndex} | ${g.pics} 图\n`
             + `     标签：${g.labels.join(' / ') || '—'} | 类目 ${g.cats.join('>')}${g.collected ? ' | 已收藏' : ''}`
@@ -384,10 +471,178 @@ const PRICE_LABEL_NAMES = { 0: '品质档', 1: '主流档', 2: '引流档' }
           + `\n\n💡 定价 ≤ 建议价可拿「低价跟款」标签 → 搜索流量倾斜`
         : catId
           ? `类目 ${catId} 暂无机会商品（total=${res.total ?? 0}）。\n可能：①该类目未开放机会池（当前仅 19 个一级类目开放，用 --mode cates 查看）\n②平台正在补录。建议隔天再试。`
-          : '机会商品：本页无数据',
+          : labels?.length
+            ? `标签 ${labels.join('+')} 下暂无机会商品（total=${res.total ?? 0}）。\n★ 已实测：labels 不能与 cat_id_1:-1 共存，且 low_price 不可用。试试不传 --cat-id，或换 --labels hot_follow / wide_popular / thousand_rec。`
+            : '机会商品：本页无数据',
     })
+  } else if (mode === 'detail') {
+    // ★ 2026-11-05 新增：单个商机详情（只读）
+    //   组合 3 个只读接口：热词推荐 + 热搜关联商品 + 类目信息
+    if (!chanceId) {
+      emit({ ok: false, failureKind: 'api_error', text: '--mode detail 需要 --chance-id' })
+      await browser.close(); process.exit(2)
+    }
+    // ★ 2026-11-05 修：`get_keywords_recommend` 本身就是**商机详情接口**，
+    //   实测返回 { chance_id, image_url, goods_name, group_price, hot_index,
+    //             goods_name_length_limit, hot_keywords[], related_goods_info[] }
+    //   —— 不需要再靠 home_list 回捞（那个池子有分页/排序漂移，第6页才找得到）。
+    const safeCall = async (p, b) => { try { return await call(p, b) } catch (e) { console.error(`[chance] ${p} 失败：${String(e.message).slice(0, 80)}`); return null } }
+    const kw = await safeCall(`${BASE}/get_keywords_recommend`, { chance_id: chanceId })
+    const d = kw?.result || {}
+    if (!d.chance_id) {
+      emit({ ok: false, failureKind: 'api_error', text: `商机 ${chanceId} 查不到详情（可能已过期/已下架）。请用 --mode pick 重新选。原始：${JSON.stringify(kw).slice(0, 200)}` })
+      await browser.close(); process.exit(2)
+    }
+    const hotKeywords = (d.hot_keywords || []).map(k => k.keyword).filter(Boolean)
+    const hotList = (d.hot_keywords || []).filter(k => k.hot)
+    // labels 需要从 home_list 补（详情接口不返回）；找不到就留空，不阻断
+    let card = null
+    const findIn = async (body, maxPage) => {
+      for (let p = 1; p <= maxPage && !card; p++) {
+        const hl = await safeCall(`${BASE}/home_list`, { ...body, size: 50, page: p, banner_type: 0 })
+        const list = hl?.result?.list || []
+        const hit = list.find(x => x.chance_id === chanceId)
+        if (hit) { card = hit; return }
+        if (list.length === 0) return
+      }
+    }
+    await findIn({}, 12)
+    if (!card && labels?.length) await findIn({ labels }, 4)
+    const priceYuan = typeof d.group_price === 'number' ? +(d.group_price / 100).toFixed(2) : null
+    fs.mkdirSync(path.join(process.cwd(), 'artifacts', 'pdd-chance'), { recursive: true })
+    fs.writeFileSync(path.join(process.cwd(), 'artifacts', 'pdd-chance', `detail-${chanceId.slice(0, 12)}.json`), JSON.stringify({ detail: d, card }, null, 2), 'utf8')
+    emit({
+      ok: true, mode, shopKey: SHOP, chanceId,
+      detail: {
+        goodsName: d.goods_name,
+        groupPrice: d.group_price,
+        groupPriceYuan: priceYuan,
+        hotIndex: d.hot_index,
+        nameLengthLimit: d.goods_name_length_limit,
+        image: d.image_url,
+        relatedGoodsNum: d.related_goods_num,
+      },
+      hotKeywords,
+      hotMarked: hotList.map(k => k.keyword),
+      card: card ? {
+        keywords: card.keywords,
+        referPriceYuan: +(card.refer_price / 100).toFixed(2),
+        priceLabelName: PRICE_LABEL_NAMES[card.price_label] ?? '',
+        labels: (card.labels || []).map(l => ({ title: l.title, name: l.name, priority: l.priority, essay: l.short_essay, tip: l.hover_title })),
+        cats: [card.cat_id_1, card.cat_id_2, card.cat_id_3].filter(Boolean),
+        gallery: card.gallery_img_url_list || [],
+      } : null,
+      text: `商机详情 [${chanceId.slice(0, 12)}]\n`
+        + `  参考商品名：${d.goods_name || '—'}（限 ${d.goods_name_length_limit ?? 60} 字）\n`
+        + `  建议价：¥${priceYuan ?? '—'}${card && PRICE_LABEL_NAMES[card.price_label] ? `（${PRICE_LABEL_NAMES[card.price_label]}）` : ''}\n`
+        + `  热度：${d.hot_index ?? '—'}${card ? ` | 潜力：${card.potential_index ?? '—'}` : ''}\n`
+        + (card ? `  标签：${(card.labels || []).map(l => `${l.title}${l.short_essay ? `(${l.short_essay})` : ''}`).join(' / ') || '—'}\n` : '  标签：—（该商机已不在首页池，仅详情可用）\n')
+        + (card ? `  类目：${[card.cat_id_1, card.cat_id_2, card.cat_id_3].filter(Boolean).join('>')} | 图片：${(card.gallery_img_url_list || []).length} 张\n` : '')
+        + (hotKeywords.length ? `  热词推荐（${hotKeywords.length}）：${hotKeywords.slice(0, 15).join('、')}\n` : '')
+        + (hotList.length ? `  其中热门词：${hotList.map(k => k.keyword).join('、')}\n` : '')
+        + `\n💡 下一步：--mode publish --chance-id ${chanceId} --product-file <你的商品JSON>`,
+    })
+  } else if (mode === 'publish') {
+    /**
+     * ★ 2026-11-05 新增：发布同款（L2 写操作，两步门禁）
+     *
+     * 链路（从 chance.bcbbcdc7.chunk 逆向）：
+     *   ① POST /opportunity-goods/chance-goods/quick_release { chance_id }
+     *      → 返回 draft_id / goods_commit_id / is_home_page
+     *      ★ 这一步就已经在平台侧创建草稿了（写操作）
+     *   ② 跳 /goods/goods_add/index?type=add&from=chance&homePage=&id=<draft_id>
+     *   ③ 填表提交（交给 pdd-publish-http）
+     *
+     * 门禁设计：
+     *   不带 --confirm → 只做「选品校验 + 物料预览」，**不调 quick_release**
+     *   带 --confirm   → 调 quick_release 建草稿 → 输出 draft_id 与后续命令
+     */
+    if (!chanceId) {
+      emit({ ok: false, failureKind: 'api_error', text: '--mode publish 需要 --chance-id' })
+      await browser.close(); process.exit(2)
+    }
+    const productFile = argOf('product-file')
+    let product = null
+    if (productFile) {
+      try { product = JSON.parse(fs.readFileSync(productFile, 'utf8')) }
+      catch (e) { emit({ ok: false, failureKind: 'api_error', text: `读取 product-file 失败：${e.message}` }); await browser.close(); process.exit(2) }
+    }
+    // 校验商机有效性：**用详情接口**（get_keywords_recommend），不用 home_list 回捞
+    //   ★ 2026-11-05 修：home_list 有分页/排序漂移，目标商机可能在第 6 页之后 → 误判"不在池中"
+    const pubCatch = async (p, b) => { try { return await call(p, b) } catch (e) { console.error(`[chance] ${p} 失败：${String(e.message).slice(0, 80)}`); return null } }
+    const pubKw = await pubCatch(`${BASE}/get_keywords_recommend`, { chance_id: chanceId })
+    console.error(`[chance] publish 商机校验返回：${JSON.stringify(pubKw).slice(0, 300)}`)
+    const pubDetail = pubKw?.result || pubKw || {}
+    if (!pubDetail.chance_id) {
+      emit({ ok: false, failureKind: 'api_error', text: `商机 ${chanceId} 无效或已下架（详情接口查不到）。请用 --mode pick 重新选。原始：${JSON.stringify(pubKw).slice(0, 200)}` })
+      await browser.close(); process.exit(2)
+    }
+    // labels 尽量从 home_list 补（找不到不影响发布，只是预览少一行）
+    let pubCard = null
+    for (let p = 1; p <= 12 && !pubCard; p++) {
+      const hl = await pubCatch(`${BASE}/home_list`, { size: 50, page: p, banner_type: 0 })
+      const list = hl?.result?.list || []
+      const hit = list.find(x => x.chance_id === chanceId)
+      if (hit) pubCard = hit
+      if (list.length === 0) break
+    }
+    const srcPrice = pubCard?.refer_price ?? pubDetail.group_price
+    const srcTitle = pubDetail.goods_name || pubCard?.keywords || ''
+    const srcLabels = (pubCard?.labels || []).map(l => l.title)
+    const srcPics = (pubCard?.gallery_img_url_list || []).length || 1
+    const priceWarn = product?.price != null && (Number(product.price) * 100) > srcPrice
+    const preview = {
+      chanceId,
+      sourceTitle: srcTitle,
+      sourceReferPriceYuan: +(srcPrice / 100).toFixed(2),
+      sourceLabels: srcLabels,
+      sourcePics: srcPics,
+      product: product ? {
+        title: product.title, price: product.price, stock: product.stock,
+        images: (product.images || []).length, skus: (product.skus || []).length,
+      } : null,
+      priceWarning: priceWarn ? `你定价 ¥${product.price} 高于商机建议价 ¥${(srcPrice / 100).toFixed(2)}，可能拿不到「首页流量」入选资格` : null,
+    }
+    if (!confirm) {
+      emit({
+        ok: true, mode, shopKey: SHOP, dryRun: true, preview,
+        text: `【发布预览 · 未执行任何写操作】\n`
+          + `商机：[${chanceId.slice(0, 12)}] ${preview.sourceTitle}\n`
+          + `  建议价 ¥${preview.sourceReferPriceYuan} | 标签 ${preview.sourceLabels.join('/') || '—'} | ${preview.sourcePics} 张参考图\n`
+          + (product
+              ? `你的商品：${product.title}\n  定价 ¥${product.price} | 库存 ${product.stock} | 主图 ${preview.product.images} 张 | SKU ${preview.product.skus} 行\n`
+              : `⚠️ 未提供 --product-file，仅能预览商机侧信息\n`)
+          + (preview.priceWarning ? `\n⚠️ ${preview.priceWarning}\n` : '\n')
+          + `\n确认无误后带 --confirm true 重新调用。\n`
+          + `★ 带 confirm 会真正调 quick_release 创建草稿（L2 写操作）。`,
+      })
+    } else {
+      const qr = await call(`${BASE}/quick_release`, { chance_id: chanceId })
+      if (!qr?.success && qr?.error_code !== 1000000) {
+        emit({ ok: false, failureKind: 'api_error', text: `quick_release 失败：${qr?.error_msg || JSON.stringify(qr).slice(0, 200)}` })
+        await browser.close(); process.exit(1)
+      }
+      const resQr = qr?.result && typeof qr.result === 'object' ? qr.result : qr
+      const draftId = resQr?.draft_id || resQr?.goods_commit_id || resQr?.draftId || resQr?.goodsCommitId
+      const isHomePage = resQr?.is_home_page || resQr?.isHomePage || false
+      const entryUrl = draftId ? `https://mms.pinduoduo.com/goods/goods_add/index?type=add&from=chance&homePage=${isHomePage}&id=${draftId}` : null
+      fs.mkdirSync(path.join(process.cwd(), 'artifacts', 'pdd-chance'), { recursive: true })
+      fs.writeFileSync(path.join(process.cwd(), 'artifacts', 'pdd-chance', `publish-${chanceId.slice(0, 12)}.json`), JSON.stringify({ chanceId, preview, raw: qr }, null, 2), 'utf8')
+      emit({
+        ok: !!draftId, mode, shopKey: SHOP, dryRun: false,
+        chanceId, draftId, isHomePage, preview, entryUrl,
+        text: draftId
+          ? `✅ 草稿已创建\n`
+            + `  chance_id：${chanceId}\n`
+            + `  draft_id：${draftId}\n`
+            + `  是否首页候选：${isHomePage}\n`
+            + `  填表入口：${entryUrl}\n\n`
+            + `★ 下一步：用 pdd-publish-http 填入商品信息并提交\n`
+            + `★ 若放弃该草稿，须到「草稿箱」手动删除，否则会留下脏数据。`
+          : `quick_release 返回成功但未拿到 draft_id，原始返回：${JSON.stringify(qr).slice(0, 300)}`,
+      })
+    }
   } else if (mode === 'follow-check') {
-    // ★ 一键验证跟款是否成功：同时查 my_list（已跟款清单）+ mission_info.follow_goods_cnt
     //   判定标准（平台侧）：
     //     ① my_list 里出现该 chance_id = 跟款成功（最直接）
     //     ② mission_info.follow_goods_cnt / follow_goods_cnt_1m 递增 = 跟款计数
@@ -491,8 +746,85 @@ const PRICE_LABEL_NAMES = { 0: '品质档', 1: '主流档', 2: '引流档' }
         + (lvl1.length ? lvl1.slice(0, 30).map(c => `  [${c.cateId}] ${c.name}`).join('\n')
            : norm.slice(0, 30).map(c => `  [${c.cateId}] ${c.name}（lvl ${c.lvl}，上级 ${c.parentId}）`).join('\n')),
     })
+  } else if (mode === 'labels') {
+    /**
+     * ★ 2026-11-05 新增：列出「本店铺当前可用的标签」+ 每个标签的实时商机数
+     *
+     * 为什么要单独一个 mode：
+     *   标签值是平台服务端下发的，不同店铺/类目/时期可能变。
+     *   写死在文档里会过期，用户也不该背 6 个英文常量。
+     *
+     * 数据来源：`get_filters` 的 labels 组（不是 hide_labels 组）
+     *   - labels 组 = 可筛选的标签
+     *   - hide_labels 组 = 排除项（含 low_price 低价跟款，不可用于筛选）
+     *
+     * 然后对每个标签各调一次 home_list（size=1）拿真实 total。
+     */
+    const fr = await call(`${BASE}/get_filters`, {})
+    const groups = fr?.result || []
+    const labelGroup = groups.find(g => g.params_key === 'labels')
+    const hideGroup = groups.find(g => g.params_key === 'hide_labels')
+    if (!labelGroup) {
+      emit({ ok: false, failureKind: 'api_error', text: 'get_filters 未返回 labels 组，平台结构可能已变更。' })
+      await browser.close(); process.exit(2)
+    }
+    // 中文名映射（服务端只给 title，英文 name 要靠实测枚举）
+    const NAME_HINTS = {
+      '当季新品': 'newinfashion_new', '热门跟款': 'hot_follow', '全网热销': 'wide_popular',
+      '首页流量': 'home_page_new', '潜力商品': 'thousand_rec', '热门收藏': 'hot_favorites_goods',
+    }
+    const opts = (labelGroup.option_info_list || [])
+    const rows = []
+    for (const o of opts) {
+      const title = o.title || o.option_key
+      const value = o.option_key || NAME_HINTS[title] || ''
+      // 实时统计该标签下的商机数（size=1 只为拿 total）
+      let total = null, err = null
+      if (value) {
+        const rr = await call(`${BASE}/home_list`, { size: 1, page: 1, banner_type: 0, labels: [value] })
+        if (rr && (rr.success || rr.error_code === 1000000)) total = rr.result?.total ?? 0
+        else err = rr?.error_msg || `ec=${rr?.error_code}`
+        await new Promise(r => setTimeout(r, 1600))   // 标签间节流，避免 54001
+      }
+      rows.push({
+        value,
+        title,
+        essay: o.short_essay || '',
+        total,
+        error: err,
+        usable: value ? VALID_LABELS.has(value) : false,
+      })
+    }
+    // hide_labels 组：只展示，明确标注"不可用于筛选"
+    const hidden = (hideGroup?.option_info_list || []).map(o => ({ value: o.option_key, title: o.title }))
+    // ★ 平台全量 6 个标签 vs 本店铺实际可用的差集
+    //   实测：爱绿森（餐饮具）labels 组 6 个全有；空空商行（家居饰品）只有 5 个，缺「首页流量」
+    const ALL_LABELS = [
+      { value: 'newinfashion_new', title: '当季新品' }, { value: 'hot_follow', title: '热门跟款' },
+      { value: 'wide_popular', title: '全网热销' }, { value: 'home_page_new', title: '首页流量' },
+      { value: 'thousand_rec', title: '潜力商品' }, { value: 'hot_favorites_goods', title: '热门收藏' },
+    ]
+    const haveSet = new Set(rows.map(r => r.value))
+    const missing = ALL_LABELS.filter(x => !haveSet.has(x.value))
+    fs.mkdirSync(path.join(process.cwd(), 'artifacts', 'pdd-chance'), { recursive: true })
+    fs.writeFileSync(path.join(process.cwd(), 'artifacts', 'pdd-chance', 'labels.json'), JSON.stringify({ rows, hidden, missing, raw: fr }, null, 2), 'utf8')
+    const usable = rows.filter(x => x.usable)
+    emit({
+      ok: true, mode, shopKey: SHOP,
+      labels: usable, excluded: hidden, unavailable: missing,
+      text: `本店铺可用标签（${usable.length} 个，含实时商机数）：\n`
+        + usable.map((x, i) =>
+            `  ${i + 1}. ${x.title}（${x.value}）${x.total != null ? ` — ${x.total} 条商机` : ' — 数量查询失败'}${x.essay ? `\n     ${x.essay}` : ''}`
+          ).join('\n')
+        + `\n\n用法：--mode pick --labels ${usable.slice(0, 2).map(x => x.value).join(',')}`
+        + `\n（多标签用逗号分隔 = OR 并集；中文名也可）`
+        + (missing.length ? `\n\n⚠️ 本店铺没有这 ${missing.length} 个标签：${missing.map(x => `${x.title}(${x.value})`).join('、')}`
+            + `\n   原因：平台按店铺主营类目下发标签池，不同类目可见标签不同。` : '')
+        + (hidden.length ? `\n\nℹ️ hide_labels 组（排除项，不可用于筛选）：${[...new Set(hidden.map(h => h.title))].join('、')}` : '')
+        + `\n\n💡 数字为当前类目下实时商机总数，会随时间变化。`,
+    })
   } else {
-    emit({ ok: false, failureKind: 'api_error', text: `未知 mode：${mode}。可用：list / mine / collection / follow-check / mission / filters / cates` })
+    emit({ ok: false, failureKind: 'api_error', text: `未知 mode：${mode}。可用：pick / labels / list / detail / publish / mine / collection / follow-check / mission / filters / cates` })
     await browser.close(); process.exit(2)
   }
   await browser.close()
@@ -500,3 +832,5 @@ const PRICE_LABEL_NAMES = { 0: '品质档', 1: '主流档', 2: '引流档' }
   emit({ ok: false, failureKind: 'api_error', text: `执行异常：${e?.message || String(e)}` })
   process.exit(1)
 })
+
+

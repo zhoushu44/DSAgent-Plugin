@@ -1,3 +1,18 @@
+import { createRequire } from 'node:module'
+import * as fs from 'node:fs'
+import * as path from 'node:path'
+import { homedir } from 'node:os'
+import { tmpdir } from 'node:os'
+import { fileURLToPath } from 'node:url'
+import { pathToFileURL } from 'node:url'
+
+// ★ 路径推导（替代原硬编码绝对路径）：本文件在 skills/<name>/scripts/ 下，上推三层到插件根
+const HERE = path.dirname(fileURLToPath(import.meta.url))
+const PLUGIN_ROOT = path.resolve(HERE, '..', '..', '..')
+const PKG_BASE = [
+  path.join(PLUGIN_ROOT, 'package.json'),
+  path.join(HERE, 'package.json'),
+].find(p => fs.existsSync(p)) || path.join(tmpdir(), 'pdd-script-base.json')
 /**
  * PDD 店铺名补全工具
  *
@@ -16,12 +31,8 @@
  *   node scripts/fill-mall-names.mjs --account <key>   # 指定账号
  *   node scripts/fill-mall-names.mjs --force           # 已有名字的也重抓
  */
-import { createRequire } from 'node:module'
-import * as fs from 'node:fs'
-import * as path from 'node:path'
-import { homedir } from 'node:os'
 
-const require = createRequire('E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/package.json')
+const require = createRequire(PKG_BASE)
 
 const argOf = (n) => {
   const i = process.argv.indexOf(`--${n}`)
@@ -66,9 +77,9 @@ const GRAB_FROM_API = () => new Promise((resolve) => {
 
 ;(async () => {
   const puppeteer = require('puppeteer-core')
-  const { CredentialStore } = await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/lib/services/credential-store.js`)
+  const { CredentialStore } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/lib/services/credential-store.js')))
   const { launchOptions, profileCandidates, CHROME_PATH, STEALTH_ARGS, STEALTH_SCRIPT } =
-    await import(`file:///E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/skills/_shared/pdd-launch.mjs`)
+    await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-launch.mjs')))
 
   const store = new CredentialStore(path.join(homedir(), '.dsh', 'dsagent-accounts.json'))
   let accs = store.listAccounts().filter(a => a.platform === 'pdd_mms')
@@ -107,7 +118,7 @@ const GRAB_FROM_API = () => new Promise((resolve) => {
       const page = (await browser.pages())[0] || await browser.newPage()
       await page.evaluateOnNewDocument(STEALTH_SCRIPT)
       try {
-        await page.goto('https://mms.pinduuduo.com/goods/goods_list'.replace('pinduuduo', 'pinduoduo'),
+        await page.goto('https://mms.pinduoduo.com/goods/goods_list',
           { waitUntil: 'domcontentloaded', timeout: 45000 })
         await sleep(10000)
         if (/\/login/i.test(page.url())) continue    // 这个 profile 过期了，试下一个

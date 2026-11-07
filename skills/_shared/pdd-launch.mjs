@@ -151,6 +151,18 @@ export function launchOptions(shopKey, extra = {}) {
     }
   }
 
+  // ★ 2026-11-05：统一在 launchOptions 里清锁。
+  //   背景：clearProfileLocks 一直存在，但只有 pdd-promo 调用过，
+  //   其余 pdd 技能（works / shop / chance / activity / video）从来没调，
+  //   于是连续跑多个技能时，上一个浏览器残留的 DevToolsActivePort 会让
+  //   下一个 puppeteer.launch 报 Failed to launch the browser process!
+  //   ——而这条报错指不到真正原因（既不说 profile 被占，也不说哪个进程）。
+  //   放在这里的好处：所有走 launchOptions 的技能自动获得保护，无需逐个改。
+  try {
+    clearProfileLocks(profile)
+  } catch (e) {
+    console.warn('[pdd-launch] 清 Profile 锁失败（继续启动）：' + String(e.message).slice(0, 60))
+  }
 
   return {
     executablePath: CHROME_PATH,
@@ -210,12 +222,68 @@ export function profileCandidates(shopKey) {
  *   导致下次 puppeteer.launch 直接 `Failed to launch the browser process!`，
  *   且报错指不到真正原因。启动前清一遍 + 失败后清一遍重试。
  *
+ * ★ 2026-11-03 扩充：新增 `DevToolsActivePort`。
+ *   实测案例：上次浏览器被强杀后 Singleton* 都不在，但 DevToolsActivePort
+ *   还留着旧端口号（如 53914）。Chrome 启动时读到这个文件认为"已有实例
+ *   在跑该 Profile"，直接拒绝启动，报的还是那句不含原因的
+ *   `Failed to launch the browser process!`。
+ *   判据：先探一下端口是否真的活着（有 CDP 在监听），死了才删 ——
+ *   否则会把别人正在用的实例的端口文件删掉。
+ *
  * @param {string} dir userDataDir 绝对路径
  */
 export function clearProfileLocks(dir) {
   for (const name of ['SingletonLock', 'SingletonCookie', 'SingletonSocket', 'lockfile']) {
     try { fs.rmSync(path.join(dir, name), { force: true }) } catch { /* 不存在或正被占用 */ }
   }
+  // DevToolsActivePort：端口已死才删
+  try {
+    const f = path.join(dir, 'DevToolsActivePort')
+    if (fs.existsSync(f)) {
+      const txt = fs.readFileSync(f, 'utf8')
+      const port = parseInt(String(txt).split('\n')[0].trim(), 10)
+      if (Number.isFinite(port) && port > 0) {
+        // 同步探不活（用 Node 内置 net，避免依赖）
+        const alive = isPortAliveSync(port)
+        if (!alive) {
+          fs.rmSync(f, { force: true })
+          console.warn(`[pdd-launch] 已清理残留 DevToolsActivePort（端口 ${port} 已无监听）`)
+        } else {
+          console.warn(`[pdd-launch] DevToolsActivePort 端口 ${port} 仍在监听，跳过清理（可能有实例在用）`)
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('[pdd-launch] DevToolsActivePort 清理跳过：' + String(e.message).slice(0, 60))
+  }
+}
+
+/**
+ * 同步探测 TCP 端口是否有监听（Node 内置 net，无额外依赖）。
+ *
+ * ⚠️ 实现说明：net.Socket.connect 是**异步**的，没有真正同步的探测方式。
+ *    这里用一次极短的忙等（Atomics.wait 阻塞 250ms）给 connect 事件一个
+ *    执行机会，足够覆盖本机回环（127.0.0.1）的连接建立——本机 RTT 亚毫秒级，
+ *    250ms 是充裕的。仅用于「清理残留锁」这种非关键路径，宁可不删也不误删。
+ *
+ * @param {number} port
+ * @returns {boolean}
+ */
+function isPortAliveSync(port) {
+  try {
+    const net = require('node:net')
+    const s = new net.Socket()
+    s.setTimeout(400)
+    let alive = false
+    s.once('connect', () => { alive = true; try { s.destroy() } catch {} })
+    s.once('error', () => { /* 端口无监听 → alive 保持 false */ })
+    s.once('timeout', () => { try { s.destroy() } catch {} })
+    s.connect(port, '127.0.0.1')
+    // 阻塞主线程 250ms 等 connect/error 事件
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 250)
+    try { s.destroy() } catch {}
+    return alive
+  } catch { return false }
 }
 
 /**

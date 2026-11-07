@@ -47,6 +47,95 @@ const emit = (obj) => { process.stdout.write('__DSAGENT_RESULT__' + JSON.stringi
 
 const mode = argOf('mode') || 'overview'
 
+// ══════════════════════════════════════════════════════════════════════
+// ★ margin 模式：利润率 → 涨价安全垫（纯本地计算，不开浏览器、零平台副作用）
+//
+//   触发场景：商品后期 + 提高利润 / 优化（规则见 _shared/margin-price-advice.md）。
+//   复用共享计算器，保证拼多多/淘宝/抖音三平台口径一致。
+//
+//   用法：
+//     node scripts/promo.mjs --mode margin --price 10 --cost 9
+//     node scripts/promo.mjs --mode margin --price 10 --cost 9 --net-roi 2.1
+//     node scripts/promo.mjs --mode margin --price 10 --cost 9 --steps 0.01,0.02,0.03,0.05
+//     node scripts/promo.mjs --mode margin --goods-id 123 --price 10 --cost 9
+// ══════════════════════════════════════════════════════════════════════
+if (mode === 'margin') {
+  ;(async () => {
+    const { computeMarginAdvice, evaluateTrigger, renderText } =
+      await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/margin_price.mjs')).href)
+    try {
+      const price = argOf('price')
+      const cost = argOf('cost')
+      if (price == null || cost == null) {
+        emit({
+          ok: false, failureKind: 'bad_input',
+          text: 'margin 模式需要 --price <单价,元> 和 --cost <单位成本,元>。\n\n' +
+            '取数路径：单价用 pdd-works --mode sku 的 SKU 价；单位成本由商家提供（平台取不到）。\n' +
+            '示例：node scripts/promo.mjs --mode margin --price 10 --cost 9',
+        })
+        process.exit(1)
+      }
+      const stepsArg = argOf('steps')
+      const steps = stepsArg
+        ? stepsArg.split(',').map(s => parseFloat(s.trim())).filter(n => Number.isFinite(n) && n > 0)
+        : undefined
+      const res = computeMarginAdvice({
+        price: parseFloat(price),
+        cost: parseFloat(cost),
+        steps: steps && steps.length ? steps : undefined,
+        netRoi: argOf('net-roi') != null ? parseFloat(argOf('net-roi')) : null,
+      })
+
+      // 触发条件自检（days / orders / error-label 由调用方从商品与诊断数据带入）
+      const trigger = evaluateTrigger({
+        daysActive: argOf('days') != null ? parseInt(argOf('days'), 10) : null,
+        orderNum: argOf('orders') != null ? parseInt(argOf('orders'), 10) : null,
+        marginRate: res.margin.rate,
+        netRoi: argOf('net-roi') != null ? parseFloat(argOf('net-roi')) : null,
+        hasErrorLabel: String(argOf('error-label') || '') === 'true',
+        wantProfit: String(argOf('want-profit') || 'true') !== 'false',
+      })
+
+      const gid = argOf('goods-id')
+      const prioText = trigger.priority === 'high'
+        ? '🔴 高（毛利率 ≤20% 或 净ROI 低于保本线 → 优先动价格）'
+        : trigger.priority === 'normal'
+          ? '🟡 常规（利润率尚可，仍建议小步试涨；安全垫小 = 掉量容忍度低，幅度更小、观察更密）'
+          : '—'
+      const advice = trigger.shouldAdvise ? [
+        '建议动作：先涨 +1%~+2% 小步试涨，观察 3~5 个自然日',
+        '观察指标：转化率、净ROI、订单数',
+        '回滚条件：掉量 > 该幅度对应的安全垫 → 调回原价',
+        '假设：单位成本不变、成本随销量等比例变动；掉量还受客户流失与竞品比价影响',
+      ] : []
+      emit({
+        ok: true, mode: 'margin',
+        goodsId: gid || null,
+        margin: res.margin,
+        steps: res.steps,
+        roiCheck: res.roiCheck || null,
+        trigger,
+        text: [
+          '【利润与涨价建议】' + (gid ? `商品 ${gid}` : ''),
+          '',
+          '触发条件自检：',
+          `  商品后期：${trigger.lateStage ? '是' : '否（需连续≥7天投产且累计≥30单）'}`,
+          `  优化诉求：${String(argOf('want-profit') || 'true') !== 'false' ? '是（提利润 / 优化）' : '否'}`,
+          `  商品侧异常阻断：${trigger.blockedByErrorLabel ? '是（平台有 error 级标签，先整改商品，不给涨价建议）' : '否'}`,
+          `  优先级：${prioText}`,
+          `  → ${trigger.shouldAdvise ? '✅ 商品后期 + 优化诉求成立，给涨价安全垫建议' : '⛔ 不满足触发条件，走原有诊断结论'}`,
+          ...(advice.length ? ['', advice.join('\n')] : []),
+          '',
+          renderText(res),
+        ].join('\n'),
+      })
+    } catch (e) {
+      emit({ ok: false, mode: 'margin', failureKind: 'bad_input', text: e.message })
+      process.exit(1)
+    }
+  })()
+} else {
+
 ;(async () => {
   const puppeteer = require('puppeteer-core')
   const { CredentialStore } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/lib/services/credential-store.js')))
@@ -65,41 +154,108 @@ const mode = argOf('mode') || 'overview'
   //   （如 window.__pddThrottleAt），或把这些请求改造成 Node 侧发起。
   const { checkCooldown, detectSlider, autoSolveSlider, fmtRemain, tryAcquireAccountLock, releaseAccountLock, heartbeatAccountLock } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-risk.mjs')))
   const store = new CredentialStore(path.join(homedir(), '.dsh', 'dsagent-accounts.json'))
-  const SHOP = argOf('account') || store.findByPlatform('pdd_mms')?.shop_key
+  // ★ 2026-11-03：账号解析三级兜底（与 pdd-shop 的 resolveShop 对齐）。
+  //
+  //   原来只有两档：`argOf('account') || findByPlatform()`。问题在于调用方传的
+  //   往往是**店铺名**（如「空空商行」）而不是 shopKey（pdd_mms_<32位hex>），
+  //   原实现把它当 shopKey 直接用，于是 Profile 目录解析必然落空 —— 以前被
+  //   硬编码兜底目录掩盖着不报错，删掉兜底后立刻暴露成 PDD_PROFILE_MISSING。
+  //
+  //   现在三档：
+  //     ① --account 显式传 shopKey（最准）
+  //     ② --account 传的是店铺名 → 按 display_label / shop_key 模糊匹配
+  //     ③ findByPlatform 兜底（单账号场景）
+  //   多账号且匹配不到时明确报错并列出可用账号，不静默选错号。
+  const resolveShop = () => {
+    const explicit = (argOf('account') || '').trim()
+    const all = store.listAccounts().filter(a => a.platform === 'pdd_mms')
+    if (explicit) {
+      const hit = all.find(a => a.shop_key === explicit)
+      if (hit) return hit.shop_key                      // ① 就是 shopKey
+      const byName = all.find(a =>
+        (a.display_label || '').includes(explicit) || explicit.includes(a.display_label || '')
+        || (a.shop_key || '').includes(explicit))
+      if (byName) {                                     // ② 传的是店铺名
+        console.warn(`[pdd-promo] --account 传入的是店铺名「${explicit}」，已解析为 shopKey: ${byName.shop_key}`)
+        return byName.shop_key
+      }
+      emit({
+        ok: false, failureKind: 'need_account_choice',
+        text: `未找到账号「${explicit}」。可用的拼多多商家后台账号：\n`
+          + all.map(a => `  · ${a.display_label}（${a.shop_key}）`).join('\n')
+          + '\n请用 shopKey 指定 --account。',
+        accounts: all.map(a => ({ shop_key: a.shop_key, label: a.display_label })),
+      })
+      process.exit(2)
+    }
+    return store.findByPlatform('pdd_mms')?.shop_key    // ③ 兜底
+  }
+  const SHOP = resolveShop()
   if (!SHOP) { emit({ ok: false, failureKind: 'not_bound', text: '未绑定拼多多商家后台账号，请到「账号连接」添加。' }); process.exit(2) }
 
-  // ★ 风控 L4：冷却期内直接拒绝
-  const cd = checkCooldown(SHOP)
-  if (cd.cooling) {
+  // ★ 2026-11-04 迁移到统一风控闸门（pdd-guard）
+  //   原实现是手写的「冷却检查 + tryAcquireAccountLock + 心跳 + release 钩子」四件套。
+  //   收敛后：冷却/健康分/锁由 openTask 一次搞定，收尾 guard.close() 放锁 + 打汇总。
+  //   ⚠️ 闸门内部已持锁，不要再自己 tryAcquireAccountLock（会自己锁死自己）。
+  const { openTask, getVerifyAuthToken } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-guard.mjs')).href)
+  // ★ 2026-11-05：接口路径与签名由基座管理
+  const { api: pddApi, API: PDD_API } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-api.mjs')).href)
+  // 注入页面用的纯数据快照（只保留 path/method，避免把整个对象序列化进页面）
+  const PDD_API_FOR_PAGE = Object.fromEntries(Object.entries(PDD_API).map(([k, v]) => [k, { path: v.path, method: v.method }]))
+  const guard = await openTask('pdd-promo', SHOP, { lockWaitMs: 300_000 })
+  if (guard.blocked) {
     emit({
       ok: false, failureKind: 'rate_limit',
-      text: `账号 ${SHOP} 命中平台频控，冷却剩余 ${fmtRemain(cd.remainMs)}（${cd.reason}）。期间请勿重复调用。`,
+      text: `账号 ${SHOP} 当前不可执行：${guard.reason}。期间请勿重复调用（会延长封禁）。`,
     })
     process.exit(2)
   }
+  guard.startHeartbeat()
+  process.on('exit', () => { try { guard.close() } catch { /* ignore */ } })
 
-  // 账号级并发锁：同一时刻只允许一个技能打这个号（等最多 5 分钟）
-  const lock = await tryAcquireAccountLock(SHOP, 'pdd-promo', 300000)
-  if (!lock.ok) {
-    emit({ ok: false, failureKind: 'rate_limit', text: '账号 ' + SHOP + ' 正被其他任务占用' + (lock.holder ? '（' + lock.holder + '）' : '') + '，请稍后再试。' })
-    process.exit(2)
+
+  // ★ 2026-11-03：改用 _shared/pdd-launch 的统一 Profile 解析。
+  //
+  //   原实现（本行以下）自己拼路径，且带一个**硬编码兜底目录**：
+  //     let profile = path.join(base, SHOP)
+  //     if (!fs.existsSync(profile)) {
+  //       profile = path.join(base, 'pdd_mms_de55c3e159072dfb5297b234eaa487c3')
+  //     }
+  //
+  //   两个问题：
+  //     ① 兜底目录与当前账号无关 —— shopKey 目录缺失时会静默借用**别的账号**的
+  //        登录态，查到的可能是别家店的数据，写操作甚至可能落到错误账号上。
+  //        （_shared/pdd-launch.mjs 2026-10-27 已删掉同样的兜底并改为抛错）
+  //     ② 不走候选链 —— 账号连接器「收编 Profile」时按 display_label 命名目录，
+  //        shopKey 用 account_id 命名，两者不一致时 shopKey 目录里可能是过期票据，
+  //        而 profileCandidates() 才能找到真正有登录态的那个。
+  //
+  //   launchOptions() 内建「显式候选链」+ 目录缺失时抛 PDD_PROFILE_MISSING，
+  //   比这里的静默借用更安全，也与 pdd-works 保持一致。
+  let launchOpts
+  try {
+    const { launchOptions } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-launch.mjs')).href)
+    launchOpts = launchOptions(SHOP)
+  } catch (e) {
+    if (e?.code === 'PDD_PROFILE_MISSING') {
+      emit({
+        ok: false, failureKind: 'not_bound',
+        text: `账号 ${SHOP} 没有对应的浏览器 Profile 目录。\n\n`
+          + `这不等于未绑定账号，而是「登录过但 Profile 目录不在预期位置」。\n`
+          + `请到「账号连接」页面对该账号重新扫码登录一次（会自动收编 Profile），然后重试。`,
+      })
+      process.exit(2)
+    }
+    throw e
   }
-  const releaseLock = () => { try { releaseAccountLock(SHOP) } catch (e) {} }
-  process.on('exit', releaseLock)
-  process.on('SIGINT', () => { releaseLock(); process.exit(130) })
-  process.on('SIGTERM', () => { releaseLock(); process.exit(143) })
-  const hb = setInterval(() => heartbeatAccountLock(SHOP, 'pdd-promo'), 180000)
-
-
-  let profile = path.join(homedir(), '.dsh', 'browser-profiles', 'accounts', SHOP)
-  if (!fs.existsSync(profile)) {
-    profile = path.join(homedir(), '.dsh', 'browser-profiles', 'accounts', 'pdd_mms_de55c3e159072dfb5297b234eaa487c3')
-  }
-  // ★ 自动清理 Cookie 域污染（2026-10-28 修）
-  //   同名 Cookie 同时存在于 .pinduoduo.com / mms / yingxiao 时，
-  //   浏览器优先发子域旧值 → 推广域反复掉登录。
-  //   这里删掉子域同名项，让浏览器回落到父域的新值。
-  //   跳过：--no-cookie-clean
+  const profile = launchOpts.userDataDir
+  console.warn(`[pdd-promo] 使用 Profile: ${launchOpts.resolvedProfile}`)
+  // ★ 2026-11-03：Cookie 域清理默认关闭（原 2026-10-28 的默认开启已撤回）。
+  //
+  //   撤回原因（_shared/pdd-launch.mjs L142-144 同结论）：
+  //   子域 SUB_PASS_ID 是**持久 Cookie（过期 11-06）**，父域的是**会话 Cookie
+  //   （关闭浏览器即失效）**。清理会删掉子域那份 —— 也就是删掉唯一能长期保持
+  //   登录的票，反而把用户登出。所以只在显式传 --cookie-clean 时才动。
   if (process.argv.includes('--cookie-clean')) {
     try {
       const { cleanCookiePollution } = await import(pathToFileURL(path.join(HERE, 'cookie-clean.mjs')).href)
@@ -114,19 +270,100 @@ const mode = argOf('mode') || 'overview'
     }
   }
 
+  // ★ 2026-11-03：启动前清残留 Profile 锁。
+  //   上次被强杀/崩溃时 SingletonLock 会留下，导致 puppeteer.launch 直接
+  //   `Failed to launch the browser process!`，而报错指不到真正原因。
+  //   launchOptions() 已解析出 userDataDir，这里只负责把锁清掉。
+  const { clearProfileLocks } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-launch.mjs')).href)
+  clearProfileLocks(profile)
+
   const browser = await puppeteer.launch({
-    executablePath: CHROME_PATH,
-    userDataDir: profile,
+    ...launchOpts,          // executablePath / userDataDir / args / defaultViewport 全部来自统一入口
     headless: false,
-    defaultViewport: null,        // ★ 用真实窗口尺寸（SDK 会采集 innerWidth/screen.*）
     ignoreDefaultArgs: ['--enable-automation'],
-    args: STEALTH_ARGS,
   })
   const page = (await browser.pages())[0] || await browser.newPage()
   // ★ 注入反检测（webdriver / plugins / languages / chrome.runtime）
   await page.evaluateOnNewDocument(STEALTH_SCRIPT);
+  // ★ 2026-11-05：把接口注册表注入页面，供 evaluate 内的 RP() 读取
+  //   （evaluate 的函数体在浏览器执行，无法 import Node 模块）
+  await page.evaluateOnNewDocument((apiTable) => {
+    window.__PDD_API__ = apiTable
+  }, PDD_API_FOR_PAGE);
   const cdp = await page.target().createCDPSession()
   await cdp.send('Network.enable')
+
+  // ══════════════════════════════════════════════════════════════════════
+  // ★ 2026-11-03：推广域登录态「用时现取」——运行期内联 SSO 桥接
+  //
+  //   背景：yingxiao.pinduoduo.com 是独立登录域，票据来源有三：
+  //     ① 扫码时 browser-login.ts 打通并入库（已加固，见该文件 2026-11-03 注释）
+  //     ② 浏览器 Profile 里 Chrome 自己换的持久票（SUB_PASS_ID，11-06 过期）
+  //     ③ 本函数：mms 会话还在时，现场访问推广域让 SSO 自动换票
+  //
+  //   为什么需要 ③：①②都可能为空（换票失败 / 会话票已失效 / Profile 被清），
+  //   此时打开推广页会被重定向到 /login/sso。与其直接报 token_expired 让人去重扫码，
+  //   不如先用仍有效的 mms 会话现场换一次票——换成功就能继续跑，且票落回 Profile，
+  //   下次直接用（这就是「用的时候重新拿到，拿到了就留着」）。
+  //
+  //   判据必须是真的拿到 yingxiao 域 Cookie，不能只看 URL 离没离开登录页
+  //   （SSO 中转页也可能短暂不在 /login 上）。
+  // ══════════════════════════════════════════════════════════════════════
+  const yingxiaoCookieCount = async () => {
+    try {
+      const r = await cdp.send('Network.getCookies', { urls: ['https://yingxiao.pinduoduo.com/'] })
+      return (r.cookies || []).length
+    } catch { return 0 }
+  }
+
+  const bridgeYingxiaoLogin = async () => {
+    // ① 先看 Profile 里现成的票够不够
+    if (await yingxiaoCookieCount() > 0) {
+      console.warn('[pdd-promo] 推广域票据已就绪（来自 Profile / 上次换票）')
+      return true
+    }
+    console.warn('[pdd-promo] 推广域无票据，尝试用 mms 会话现场换票（SSO 桥接）…')
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        await page.goto('https://yingxiao.pinduoduo.com/mains/promotionOverview', { waitUntil: 'domcontentloaded', timeout: 30000 })
+        await new Promise(r => setTimeout(r, 8000))
+        let u = page.url() || ''
+        if (/\/login|\/sso/i.test(u)) {
+          await new Promise(r => setTimeout(r, 6000))
+          u = page.url() || ''
+          if (/\/login|\/sso/i.test(u) && attempt < 3) {
+            await page.goto('https://yingxiao.pinduoduo.com/mains/promotionOverview', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {})
+            await new Promise(r => setTimeout(r, 6000))
+            u = page.url() || ''
+          }
+        }
+        const n = await yingxiaoCookieCount()
+        console.warn(`[pdd-promo] 桥接第 ${attempt}/3 次：yingxiao Cookie ${n} 个｜URL: ${u.slice(0, 70)}`)
+        if (n > 0 && !/\/login|\/sso/i.test(u)) {
+          console.warn('[pdd-promo] ✅ 推广域 SSO 桥接成功，票据已写入 Profile（后续可直接复用）')
+          return true
+        }
+      } catch (e) {
+        console.warn(`[pdd-promo] 桥接第 ${attempt} 次异常：${String(e.message).slice(0, 80)}`)
+      }
+    }
+    return false
+  }
+
+  const yxReady = await bridgeYingxiaoLogin()
+  if (!yxReady) {
+    await browser.close()
+    emit({
+      ok: false, failureKind: 'token_expired',
+      text: `【推广域登录态不可用】已尝试 3 次 SSO 桥接，仍未拿到 yingxiao.pinduoduo.com 票据。\n\n`
+        + `判据：mms 会话存在但推广域换不到票。\n\n`
+        + `处置（按优先级）：\n`
+        + `① 到「账号连接」→ 拼多多商家后台 → 重新扫码登录（会自动打通推广域）\n`
+        + `② 若刚登录过仍失败，可能是账号风控冷却，等 90 秒再试\n`
+        + `③ 若反复失败，需单独登录推广后台（yingxiao 是独立登录域）`,
+    })
+    process.exit(2)
+  }
 
   // ★ 风控 L3：滑块遮罩自动过
   const ensureNoSlider = async (label) => {
@@ -564,19 +801,47 @@ const mode = argOf('mode') || 'overview'
       || (Array.isArray(byApi.rangeReport) ? (byApi.rangeReport.find(r => r?.sumReport) || {}).sumReport : byApi.rangeReport?.sumReport)
       || null
     const num = (v) => (v && typeof v === 'object' ? v.value : (v ?? null))
+    // ★ 2026-11-03：商品报表的 ID 字段实测是**推广单元 ID（adId）**，不是商品 ID。
+    //
+    //   现象（用户报「这个展示数据就展示宝贝id，10350626984 搜索不到」）：
+    //     poseidon/api/report/queryEntityReport 返回的 entityReportList[].goodsId
+    //     实测等于 adInfos[].adId（如 10350626984），而商品 ID 是 1021971425475。
+    //     前端把 entityId 当商品 ID 渲染，用户拿它去商品管理搜索自然搜不到。
+    //
+    //   修法：建 adId → goodsId 映射，用 unitList（goods/promotion/v3/list，
+    //   它的 goodsId 是真正的商品 ID）回填。映射不到时保留原值并标注，
+    //   不静默显示一个错 ID。
+    const adToGoods = new Map()
+    for (const u of (byApi.unitList?.adInfos || [])) {
+      const ad = u.adId ?? u.id
+      const gid = u.goodsId
+      if (ad != null && gid != null) adToGoods.set(String(ad), String(gid))
+    }
+    const resolveGoodsId = (raw) => {
+      const s = raw == null ? '' : String(raw)
+      const mapped = adToGoods.get(s)
+      if (mapped) return { goodsId: mapped, idKind: 'goodsId' }
+      // 映射不到：原值可能就是商品 ID（接口语义变动），也可能真是 adId。
+      // 保守标注成 adId，让使用者知道该去推广列表而非商品管理搜。
+      return { goodsId: s, idKind: s ? 'adId(未映射)' : null }
+    }
     out.goodsReport = {
       total: byApi.entityReport?.total ?? list.length,
-      items: list.map(x => ({
-        goodsId: x.goodsId ?? x.entityId,
-        goodsName: x.goodsName ?? x.entityName ?? '',
-        spend: num(x.orderSpend ?? x.spend),
-        gmv: num(x.gmv),
-        orderNum: x.orderNum,
-        roi: num(x.orderSpendRoiUnified ?? x.roi),
-        click: x.click ?? x.clickNum,
-        impression: x.impression ?? x.imprNum,
-        ctr: num(x.ctr),
-      })),
+      items: list.map(x => {
+        const r = resolveGoodsId(x.goodsId ?? x.entityId)
+        return {
+          goodsId: r.goodsId,
+          idKind: r.idKind,
+          goodsName: x.goodsName ?? x.entityName ?? '',
+          spend: num(x.orderSpend ?? x.spend),
+          gmv: num(x.gmv),
+          orderNum: x.orderNum,
+          roi: num(x.orderSpendRoiUnified ?? x.roi),
+          click: x.click ?? x.clickNum,
+          impression: x.impression ?? x.imprNum,
+          ctr: num(x.ctr),
+        }
+      }),
       sum: sum ? {
         spend: num(sum.orderSpend), gmv: num(sum.gmv), netGmv: num(sum.netGmv),
         orderNum: sum.orderNum, roi: num(sum.orderSpendRoiUnified),
@@ -586,11 +851,20 @@ const mode = argOf('mode') || 'overview'
     }
     if (mode === 'goods') {
       const g = out.goodsReport
+      const unmapped = g.items.filter(x => x.idKind && x.idKind.startsWith('adId'))
       out.text = g.items.length
         ? `商品推广报表（${g.items.length}/${g.total} 个商品）：\n` + g.items.slice(0, 30).map((x, i) =>
             `  ${i + 1}. [${x.goodsId}] ${String(x.goodsName).slice(0, 24)} | 花费=${x.spend ?? '—'} GMV=${x.gmv ?? '—'} 订单=${x.orderNum ?? '—'} ROI=${x.roi ?? '—'} 点击=${x.click ?? '—'}`).join('\n')
         : `商品推广报表：暂无商品推广数据（entityReportList 为空，total=0）。\n说明：店铺当前没有正在投放的商品。` +
           (g.sum ? `\n周期汇总：花费=${g.sum.spend} GMV=${g.sum.gmv} 订单=${g.sum.orderNum} ROI=${g.sum.roi} 点击=${g.sum.click} 收藏=${g.sum.fav}` : '')
+
+      // 有未能映射成商品 ID 的行时明确提示，避免用户再拿错 ID 去商品管理搜
+      if (unmapped.length) {
+        out.text += `\n\n⚠️ ${unmapped.length} 行 ID 未能从推广单元映射到商品 ID（该单元可能已暂停/删除，v3/list 未返回）：\n`
+          + unmapped.map(x => `  · ${x.goodsId}｜${String(x.goodsName).slice(0, 24)}`).join('\n')
+          + `\n  这些是推广单元 ID，请在推广列表（而非商品管理）中搜索。`
+      }
+      out.text += `\n（ID 已统一为商品 ID，可直接在商品管理搜索）`
 
       // ★ 追加：全店速率表（付费分析的一部分）
       try {
@@ -618,6 +892,208 @@ const mode = argOf('mode') || 'overview'
         }))
       } catch (e) { /* 速率表失败不影响主报表 */ }
     }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // ★ 2026-11-03：daily 模式 —— 近 N 天日级报表（含 impression/click/ctr）
+  //
+  //   为什么需要：CTR 单日波动极大（实测同一单元 11-02 CTR 16.41% →
+  //   11-03 CTR 5.39%，差 3 倍），单日或混合多日口径算出的均值/标准差/
+  //   显著性都不可信。要判断必须看逐日序列。
+  //
+  //   ★ 关键实测（2026-11-03 逆向）：
+  //     queryRangeReport 的请求体形如
+  //       {"entityId":800050996,"startDate":"2026-10-27","endDate":"2026-11-02",...}
+  //     页面加载时就**同时发两份**：近 N 日 + 上一周期（供「对比」用）。
+  //     所以正常导航后 hook 缓冲里就有多份 dailyReportList，取最长的那份即可。
+  //     日期控件是平台自绘（DateAreaV2_quickWrapper），含
+  //     「今日/昨日/近7日/近30日/近90日」快捷选项 —— 点它比改 URL 参数可靠。
+  //
+  //   ★ entityId 是**店铺级**（800050996），不是商品 ID。
+  //     所以 queryRangeReport 给的是全店日级数据；单品日级要走
+  //     queryEntityReport（entityDimensionType=0，按商品维度分页）。
+  //
+  //   ⚠️ 口径：impression/click/ctr 都是**按天**的。跨天 CTR 必须
+  //      总点击÷总曝光（加权），不能把每日 CTR 算术平均。
+  // ══════════════════════════════════════════════════════════════════════
+  if (mode === 'daily') {
+    const days = Math.min(90, Math.max(1, parseInt(argOf('days') || '7', 10) || 7))
+    const REPORT_URL = 'https://yingxiao.pinduoduo.com/goods/report/promotion/overView'
+    const quickLabel = { 1: '今日', 2: '昨日', 7: '近 7 日', 30: '近 30 日', 90: '近 90 日' }[days] || null
+
+    /** 从 hook 缓冲取 dailyReportList 最长的一份 */
+    const harvest = async () => {
+      const caps = await page.evaluate(() => window.__caps || []).catch(() => [])
+      let best = []
+      for (const c of caps) {
+        if (!/queryRangeReport/.test(c.url)) continue
+        try {
+          const j = JSON.parse(c.body)
+          const l = (j.result ?? j.data)?.dailyReportList || []
+          if (l.length > best.length) best = l
+        } catch { /* ignore */ }
+      }
+      return best
+    }
+
+    // ① 直接导航（不清缓冲——页面这次发的请求就是要用的数据）
+    await page.goto(REPORT_URL, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {})
+    await new Promise(r => setTimeout(r, 14000))
+    let raw = await harvest()
+
+    // ② 天数不够 → 点日期控件的快捷选项（实测 class: DateAreaV2_quickWrapper）
+    if (raw.length < days && quickLabel) {
+      console.warn(`[pdd-promo] daily：拿到 ${raw.length} 天，点击「${quickLabel}」…`)
+      const clicked = await page.evaluate((label) => {
+        const cands = [...document.querySelectorAll('div,span,li,a,button')]
+          .filter(e => {
+            const t = (e.textContent || '').replace(/\s+/g, '').trim()
+            return t === label.replace(/\s+/g, '') && e.children.length === 0
+          })
+        if (!cands.length) return ''
+        cands[0].click()
+        return label
+      }, quickLabel).catch(() => '')
+      if (clicked) {
+        await new Promise(r => setTimeout(r, 14000))
+        const got = await harvest()
+        if (got.length > raw.length) raw = got
+        console.warn(`[pdd-promo] daily：点击后拿到 ${raw.length} 天`)
+      } else {
+        console.warn(`[pdd-promo] daily：未找到「${quickLabel}」快捷选项（class DateAreaV2_quickWrapper 可能已改版）`)
+      }
+    }
+
+    // ③ 仍不够 → 试 URL query 参数（兜底，可能无效）
+    if (raw.length < days) {
+      const end = new Date()
+      const start = new Date(Date.now() - (days - 1) * 86400000)
+      const fmt = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+      for (const u of [
+        `${REPORT_URL}?beginDate=${fmt(start)}&endDate=${fmt(end)}`,
+        `${REPORT_URL}?startDate=${fmt(start)}&endDate=${fmt(end)}`,
+      ]) {
+        await page.goto(u, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {})
+        await new Promise(r => setTimeout(r, 12000))
+        const got = await harvest()
+        if (got.length > raw.length) raw = got
+        if (raw.length >= days) break
+      }
+    }
+
+    const v = (o) => (o && typeof o === 'object' ? o.value : (o ?? null))
+    const dayList = raw.map(d => ({
+      date: String(d.date ?? '').slice(0, 10),
+      spend: parseFloat(v(d.orderSpend) ?? v(d.spend) ?? '0') || 0,
+      orderNum: v(d.orderNum) ?? null,
+      gmv: parseFloat(v(d.gmv) ?? '0') || 0,
+      netGmv: parseFloat(v(d.netGmv) ?? '0') || 0,
+      settlementGmv: parseFloat(v(d.settlementGmv) ?? '0') || 0,
+      roi: v(d.orderSpendRoiUnified) ?? null,
+      netRoi: v(d.orderSpendNetRoi) ?? null,
+      click: d.click ?? null,
+      impression: d.impression ?? null,
+      ctr: v(d.ctr) ?? null,
+      cvr: v(d.cvr) ?? null,
+    })).filter(d => d.date).sort((a, b) => a.date.localeCompare(b.date))
+
+    // ★ 汇总必须分子分母各自累加（不是比率的平均）
+    const sumClick = dayList.reduce((s, d) => s + (d.click ?? 0), 0)
+    const sumImpr = dayList.reduce((s, d) => s + (d.impression ?? 0), 0)
+    const sumSpend = dayList.reduce((s, d) => s + d.spend, 0)
+    const sumGmv = dayList.reduce((s, d) => s + d.gmv, 0)
+    const sumNetGmv = dayList.reduce((s, d) => s + d.netGmv, 0)
+    const sumSettle = dayList.reduce((s, d) => s + d.settlementGmv, 0)
+    const sumOrder = dayList.reduce((s, d) => s + (d.orderNum ?? 0), 0)
+
+    // 日级 CTR 序列 → 均值 + 日间标准差
+    //   ★ 这个标准差衡量的是「CTR 逐日波动」，不是单日内的二项抽样误差。
+    //     两者是不同的东西：前者大说明投放不稳定/素材或流量结构在变，
+    //     后者大只说明样本不够。
+    const ctrSeries = dayList
+      .filter(d => d.ctr != null && Number.isFinite(parseFloat(d.ctr)))
+      .map(d => parseFloat(d.ctr))
+    const mean = ctrSeries.length ? ctrSeries.reduce((a, b) => a + b, 0) / ctrSeries.length : null
+    const sd = (ctrSeries.length > 1 && mean != null)
+      ? Math.sqrt(ctrSeries.reduce((s, x) => s + (x - mean) ** 2, 0) / (ctrSeries.length - 1))
+      : null
+    const se = (sd != null && ctrSeries.length) ? sd / Math.sqrt(ctrSeries.length) : null
+
+    out.daily = {
+      days: dayList.length, requested: days,
+      scope: 'shop',   // queryRangeReport 的 entityId 是店铺级
+      dayList,
+      sum: {
+        impression: sumImpr, click: sumClick,
+        ctr: sumImpr > 0 ? +(sumClick / sumImpr * 100).toFixed(2) : null,
+        spend: +sumSpend.toFixed(2), gmv: +sumGmv.toFixed(2),
+        netGmv: +sumNetGmv.toFixed(2), settlementGmv: +sumSettle.toFixed(2),
+        orderNum: sumOrder,
+        roi: sumSpend > 0 ? +(sumGmv / sumSpend).toFixed(2) : null,
+        netRoi: sumSpend > 0 ? +(sumNetGmv / sumSpend).toFixed(2) : null,
+      },
+      ctrStats: {
+        n: ctrSeries.length, mean: mean != null ? +mean.toFixed(2) : null,
+        sd: sd != null ? +sd.toFixed(2) : null,
+        se: se != null ? +se.toFixed(2) : null,
+        min: ctrSeries.length ? +Math.min(...ctrSeries).toFixed(2) : null,
+        max: ctrSeries.length ? +Math.max(...ctrSeries).toFixed(2) : null,
+        cv: (sd != null && mean) ? +(sd / mean * 100).toFixed(0) : null,
+      },
+    }
+
+    const L = []
+    L.push(`日级推广报表（${dayList.length}/${days} 天｜全店口径）`)
+    L.push('')
+    if (!dayList.length) {
+      L.push('未取到日级数据。')
+      L.push('排查：报表页是否发出 queryRangeReport；日期控件快捷选项是否改版。')
+    } else {
+      L.push('日期         曝光   点击   CTR      CVR     订单  花费       GMV        净GMV      结算GMV')
+      L.push('─'.repeat(100))
+      for (const d of dayList) {
+        L.push(
+          String(d.date).padEnd(13)
+          + String(d.impression ?? '—').padStart(6)
+          + String(d.click ?? '—').padStart(7)
+          + (d.ctr != null ? parseFloat(d.ctr).toFixed(2) + '%' : '—').padStart(9)
+          + (d.cvr != null ? parseFloat(d.cvr).toFixed(2) + '%' : '—').padStart(9)
+          + String(d.orderNum ?? '—').padStart(6)
+          + ('¥' + d.spend.toFixed(2)).padStart(10)
+          + ('¥' + d.gmv.toFixed(2)).padStart(12)
+          + ('¥' + d.netGmv.toFixed(2)).padStart(12)
+          + ('¥' + d.settlementGmv.toFixed(2)).padStart(12)
+        )
+      }
+      L.push('─'.repeat(100))
+      L.push(
+        '合计'.padEnd(13)
+        + String(sumImpr).padStart(6)
+        + String(sumClick).padStart(7)
+        + (sumImpr > 0 ? (sumClick / sumImpr * 100).toFixed(2) + '%' : '—').padStart(9)
+        + ''.padStart(9)
+        + String(sumOrder).padStart(6)
+        + ('¥' + sumSpend.toFixed(2)).padStart(10)
+        + ('¥' + sumGmv.toFixed(2)).padStart(12)
+        + ('¥' + sumNetGmv.toFixed(2)).padStart(12)
+        + ('¥' + sumSettle.toFixed(2)).padStart(12)
+      )
+      if (mean != null) {
+        L.push('')
+        L.push('CTR 逐日统计（日间波动 ≠ 单日二项抽样误差）：')
+        L.push(`  天数 ${ctrSeries.length}｜均值 ${mean.toFixed(2)}%｜日间标准差 ±${sd != null ? sd.toFixed(2) + 'pp' : '—'}｜标准误 ±${se != null ? se.toFixed(2) + 'pp' : '—'}`)
+        L.push(`  区间 ${Math.min(...ctrSeries).toFixed(2)}% ~ ${Math.max(...ctrSeries).toFixed(2)}%`
+          + (out.daily.ctrStats.cv != null ? `｜变异系数 ${out.daily.ctrStats.cv}%` : ''))
+        L.push(`  加权 CTR（总点击÷总曝光）${sumImpr > 0 ? (sumClick / sumImpr * 100).toFixed(2) + '%' : '—'}`)
+        L.push('')
+        L.push('⚠️ 口径：')
+        L.push('  · 跨天 CTR 用 总点击÷总曝光，不是每日 CTR 的算术平均')
+        L.push('  · 日间标准差大 = 投放不稳定（素材/流量结构在变）；单日 SE 大 = 样本不够')
+        L.push('  · 净GMV/结算GMV 为 0 而 GMV>0 → 订单未结算或免退款，ROI 偏乐观')
+        L.push('  · 本表为**全店**口径（entityId 为店铺级）；单品日级需另走 queryEntityReport')
+      }
+    }
+    out.text = L.join('\n')
   }
 
   // ══════════════════════════════════════════════════════════════════════
@@ -958,50 +1434,45 @@ const mode = argOf('mode') || 'overview'
       const results = []
       for (const p of actionable) {
         try {
+          // ★ 2026-11-04：每个调参动作前过闸门 beforeCall（账号级时间槽，落盘跨进程）。
+          //   原来只有下面那句固定 7 秒 sleep —— 进程内等待，跨进程/跨技能完全不知情。
+          {
+            const pre = await guard.beforeCall('https://yingxiao.pinduoduo.com/mms-gateway/venus/api/goods/promotion/update/max/cost')
+            if (!pre.allow) {
+              results.push({ adId: p.adId, step: 'guard', ok: false, ec: 'blocked', reason: pre.reason })
+              break
+            }
+          }
           // ① 提限额（页面上下文发请求，带 Anti-Content）
           if (p.newMaxCost != null && p.newMaxCost !== p.maxCost) {
-            const r1 = await page.evaluate(async (adId, newCost) => {
-              const sig = window.__sigPair || {}
-              const body = { adId: Number(adId), maxCost: { value: String(newCost), unitCode: 1 } }
-              const resp = await fetch('/mms-gateway/venus/api/goods/promotion/update/max/cost', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Anti-Content': sig.anti || '' },
-                body: JSON.stringify({ ...body, crawlerInfo: sig.crawlerInfo }),
-              })
-              const j = await resp.json().catch(() => null)
-              return { ok: resp.ok && (j?.success === true || j?.errorCode === 1000000), ec: j?.errorCode ?? j?.error_code ?? null }
-            }, p.adId, p.newMaxCost).catch(e => ({ ok: false, ec: 'js:' + String(e.message).slice(0, 40) }))
+            // ★ 2026-11-05：改走基座（路径/签名/节流/归因全由 pdd-api 负责）
+            const r1 = await pddApi(page, 'promo.updateMaxCost',
+              { adId: Number(p.adId), maxCost: { value: String(p.newMaxCost), unitCode: 1 } },
+              { shopKey: SHOP, guard })
             results.push({ adId: p.adId, step: 'maxcost', ok: r1.ok, ec: r1.ec })
           }
           await new Promise(r => setTimeout(r, 7000))   // 7 秒间隔（实测平台日志节奏）
           // ② 提投产（★ body 用 updateBidList 数组，实测 2026-10-28 通过）
           if (p.newRoi != null) {
-            const r2 = await page.evaluate(async (adId, newRoi) => {
-              const sig = window.__sigPair || {}
-              const body = {
-                updateBidList: [{
-                  adId: Number(adId),
-                  targetRoi: { value: String(newRoi), unitCode: 1 },
-                  isAdvertiserEnableAdvanced: true,
-                  optionalOptimizationMessageInfoList: [
-                    { optimizationGoal: 3, dataOperateStatus: 2 },
-                    { optimizationGoal: 4, dataOperateStatus: 2 },
-                    { optimizationGoal: 5, dataOperateStatus: 2 },
-                  ],
-                }],
-              }
-              const resp = await fetch('/mms-gateway/venus/api/promotion/batchUpdateBid', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Anti-Content': sig.anti || '' },
-                body: JSON.stringify({ ...body, crawlerInfo: sig.crawlerInfo }),
-              })
-              const j = await resp.json().catch(() => null)
-              // 主操作成功即算成功；failList 里的「不支持高级版」不影响主值
-              const okMain = resp.ok && (j?.success === true || j?.errorCode === 1000000)
-              const failList = j?.result?.failList ?? j?.result?.failAdList ?? []
-              const softFail = !okMain && j?.result?.successList?.length
-              return { ok: okMain || softFail, ec: j?.errorCode ?? j?.error_code ?? null, fail: failList.length ? failList[0]?.errorMessage : null }
-            }, p.adId, p.newRoi).catch(e => ({ ok: false, ec: 'js:' + String(e.message).slice(0, 40) }))
+            // ★ 2026-11-05：改走基座（body 结构作为业务参数传入，路径由注册表管理）
+            const r2raw = await pddApi(page, 'promo.updateBid', {
+              updateBidList: [{
+                adId: Number(p.adId),
+                targetRoi: { value: String(p.newRoi), unitCode: 1 },
+                isAdvertiserEnableAdvanced: true,
+                optionalOptimizationMessageInfoList: [
+                  { optimizationGoal: 3, dataOperateStatus: 2 },
+                  { optimizationGoal: 4, dataOperateStatus: 2 },
+                  { optimizationGoal: 5, dataOperateStatus: 2 },
+                ],
+              }],
+            }, { shopKey: SHOP, guard, raw: true })
+            // 主操作成功即算成功；failList 里的「不支持高级版」不影响主值
+            const j2 = r2raw.raw
+            const okMain = r2raw.ok
+            const failList = j2?.result?.failList ?? j2?.result?.failAdList ?? []
+            const softFail = !okMain && j2?.result?.successList?.length
+            const r2 = { ok: okMain || softFail, ec: r2raw.ec, fail: failList.length ? failList[0]?.errorMessage : null }
             results.push({ adId: p.adId, step: 'roi', ok: r2.ok, ec: r2.ec, note: r2.fail })
           }
           // 写日志
@@ -1369,6 +1840,26 @@ const mode = argOf('mode') || 'overview'
       } else if (diag) {
         L.push('')
         L.push('平台异常标签：无')
+      }
+
+      // ★ 利润与涨价建议（触发式）
+      //   规则见 _shared/margin-price-advice.md；只在「商品后期 + 优化诉求 + 无 error 级标签」
+      //   成立时提示，避免对承接有问题的商品喊涨价。利润低只决定优先级（高/常规），不是门槛。
+      //   单位成本平台取不到，必须由用户提供；缺成本时只提示去取数，不编毛利率。
+      const hasError = errLabels.length > 0
+      const daysCover = dayList.length
+      const orders30 = dayList.reduce((s, d) => s + (d.orderNum == null ? 0 : Number(d.orderNum) || 0), 0)
+      if (!hasError && daysCover >= 3 && (orders30 > 0 || (g && g.spend > 0))) {
+        L.push('')
+        L.push('💰 利润与涨价建议：')
+        L.push(`   本品近 ${daysCover} 天有消耗、累计订单 ${orders30}，属可评估价格的商品后期阶段。`)
+        L.push('   若单位成本已知，可直接算涨价安全垫：')
+        L.push(`   --mode margin --price <单价> --cost <单位成本> --net-roi ${g?.roi != null ? Number(g.roi).toFixed(2) : '<净ROI>'}${gid ? ` --goods-id ${gid}` : ''}`)
+        L.push('   口径：涨价 +2% 在 10% 毛利率下 ≈ 利润 +20%、可扛约 16.7% 掉量；保本投产比 = 1/毛利率。')
+        L.push('   ⚠️ 单位成本平台取不到，必须商家提供；缺成本时不得默认毛利率下结论。')
+      } else if (hasError) {
+        L.push('')
+        L.push('💰 利润与涨价建议：跳过（平台有 error 级标签，根因在商品侧，涨价会放大问题）')
       }
 
       // 调参命令
@@ -2010,7 +2501,7 @@ const mode = argOf('mode') || 'overview'
   if (!sigPair) {
     await page.evaluate(() => new Promise((resolve) => {
       const x = new XMLHttpRequest()
-      x.open('POST', '/mms-gateway/venus/api/goods/promotion/listAdGroupInfo')
+      x.open('POST', RP('promo.adGroups') || '/mms-gateway/venus/api/goods/promotion/listAdGroupInfo')
       x.setRequestHeader('Content-Type', 'application/json')
       x.onload = () => resolve(); x.onerror = () => resolve()
       x.send(JSON.stringify({ withAdCount: true }))
@@ -2058,13 +2549,18 @@ const mode = argOf('mode') || 'overview'
     const vtkToken = _getTok(SHOP)?.token || null
     const r = await page.evaluate(async (m, uid, gid, mcYuan, roiVal, sig, pid, ids, vtk) => {
       const yuanToApi = (y) => Math.round(Number(y) * 100)   // 元 → 分
+      // ★ 2026-11-05：路径统一从基座注册表取（PDD 升级只改 pdd-api.mjs）
+      const RP = (n) => {
+        const s = window.__PDD_API__ && window.__PDD_API__[n]
+        return s ? s.path : ''
+      }
       const APIs = {
-        pause: '/mms-gateway/venus/api/global/unit/batchUpdateStatus',
-        resume: '/mms-gateway/venus/api/global/unit/batchUpdateStatus',
-        delete: '/mms-gateway/venus/api/goods/promotion/virtual/delete',
-        create: '/mms-gateway/venus/api/promotion/batchCreate',
-        maxcost: '/mms-gateway/venus/api/goods/promotion/update/max/cost',
-        roi: '/mms-gateway/venus/api/promotion/batchUpdateBid',
+        pause: RP('promo.updateStatus') || '/mms-gateway/venus/api/global/unit/batchUpdateStatus',
+        resume: RP('promo.updateStatus') || '/mms-gateway/venus/api/global/unit/batchUpdateStatus',
+        delete: RP('promo.delete') || '/mms-gateway/venus/api/goods/promotion/virtual/delete',
+        create: RP('promo.batchCreate') || '/mms-gateway/venus/api/promotion/batchCreate',
+        maxcost: RP('promo.updateMaxCost') || '/mms-gateway/venus/api/goods/promotion/update/max/cost',
+        roi: RP('promo.updateBid') || '/mms-gateway/venus/api/promotion/batchUpdateBid',
       }
       const adId = uid ? Number(uid) : 0
       const adIds = (ids || []).map(x => Number(x)).filter(x => x > 0)
@@ -2139,7 +2635,8 @@ const mode = argOf('mode') || 'overview'
   }
 
   emit(out)
-  clearInterval(hb)
+  // ★ 2026-11-04：clearInterval(hb) 随迁移去掉（心跳由 guard.startHeartbeat 管理）
+  await guard.close()
   await browser.close()
 })().catch(async (e) => {
   // ★ 风控异常 → 友好提示 + 记账号健康分
@@ -2174,4 +2671,5 @@ const mode = argOf('mode') || 'overview'
   emit({ ok: false, failureKind: 'api_error', text: `执行异常：${e?.message || String(e)}` })
   process.exit(1)
 })
+}
 

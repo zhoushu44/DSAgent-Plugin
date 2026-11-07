@@ -43,30 +43,36 @@ const mode = argOf('mode') || 'overview'
   const { CredentialStore } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/lib/services/credential-store.js')))
   const store = new CredentialStore(path.join(homedir(), '.dsh', 'dsagent-accounts.json'))
   const { checkCooldown, detectSlider, autoSolveSlider, fmtRemain, tryAcquireAccountLock, releaseAccountLock, heartbeatAccountLock, throttleRequest } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-risk.mjs')))
-  const SHOP = argOf('account') || store.findByPlatform('pdd_mms')?.shop_key
-  if (!SHOP) { emit({ ok: false, failureKind: 'not_bound', text: '未绑定拼多多商家后台账号，请到「账号连接」添加。' }); process.exit(2) }
+  // ★ 2026-11-05：多账号时必须让用户选，不能静默取第一个（写错店的代价不可逆）
+  const { pickAccount, toEmit } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/account-picker.mjs')))
+  const _pick = pickAccount(store, {
+    platform: 'pdd_mms',
+    want: argOf('account'),
+    wantName: argOf('shop-name') || argOf('shopName'),
+    skill: 'pdd-activity',
+  })
+  if (!_pick.ok) { emit(toEmit(_pick)); process.exit(2) }
+  const SHOP = _pick.shopKey
 
-  // ★ 风控 L4：冷却期内直接拒绝
-  const cd = checkCooldown(SHOP)
-  if (cd.cooling) {
+  // ★ 2026-11-04 迁移到统一风控闸门（pdd-guard）
+  //   原实现是手写的「冷却检查 + tryAcquireAccountLock + 心跳 + release 钩子」四件套，
+  //   能力等价但与其他技能口径不一（比如健康分、错误归因没走统一实现）。
+  //   收敛后：冷却/健康分/锁由 openTask 一次搞定，收尾 guard.close() 放锁 + 打汇总。
+  //   ⚠️ 闸门内部已持锁，不要再自己 tryAcquireAccountLock（会自己锁死自己）。
+  const { openTask, getVerifyAuthToken } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-guard.mjs')).href)
+  // ★ 2026-11-05：路径由基座注册表管理
+  const { API: PDD_API } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-api.mjs')).href)
+  const P = (name) => { const s = PDD_API[name]; if (!s) throw new Error('注册表缺 ' + name); return s.path }
+  const guard = await openTask('pdd-activity', SHOP, { lockWaitMs: 300_000 })
+  if (guard.blocked) {
     emit({
       ok: false, failureKind: 'rate_limit',
-      text: `账号 ${SHOP} 命中平台频控，冷却剩余 ${fmtRemain(cd.remainMs)}（${cd.reason}）。期间请勿重复调用。`,
+      text: `账号 ${SHOP} 当前不可执行：${guard.reason}。期间请勿重复调用（会延长封禁）。`,
     })
     process.exit(2)
   }
-
-  // 账号级并发锁：同一时刻只允许一个技能打这个号（等最多 5 分钟）
-  const lock = await tryAcquireAccountLock(SHOP, 'pdd-activity', 300000)
-  if (!lock.ok) {
-    emit({ ok: false, failureKind: 'rate_limit', text: '账号 ' + SHOP + ' 正被其他任务占用' + (lock.holder ? '（' + lock.holder + '）' : '') + '，请稍后再试。' })
-    process.exit(2)
-  }
-  const releaseLock = () => { try { releaseAccountLock(SHOP) } catch (e) {} }
-  process.on('exit', releaseLock)
-  process.on('SIGINT', () => { releaseLock(); process.exit(130) })
-  process.on('SIGTERM', () => { releaseLock(); process.exit(143) })
-  const hb = setInterval(() => heartbeatAccountLock(SHOP, 'pdd-activity'), 180000)
+  guard.startHeartbeat()
+  process.on('exit', () => { try { guard.close() } catch { /* ignore */ } })
 
 
   let profile = path.join(homedir(), '.dsh', 'browser-profiles', 'accounts', SHOP)
@@ -147,8 +153,8 @@ const mode = argOf('mode') || 'overview'
     ['quickCard', 'quick_enroll/quickmultigoodscard'],
     ['storeEnroll', 'full_store_enroll/need_show_sidenav_tab'],
     ['agreement', 'full_store_enroll/agreement_detail'],
-    ['records', 'lakemms/activityGoods/list'],
-    ['effect', 'data_board/query/activity_effect_data'],
+    ['records', P('act.list').replace(/^\//, '')],
+    ['effect', P('act.effectData').replace(/^\//, '')],
     ['eligible', 'eligible/goods/list'],
     ['invite', 'invite/activity_batch_tab_v2'],
     ['recommendList', 'activity/query/recommend/list'],
@@ -170,12 +176,15 @@ const mode = argOf('mode') || 'overview'
   // 页面内 fetch 兜底：直接抓 effect 接口原始数据（避免 CDP 大响应体截断）
   if (mode === 'effect') {
     try {
-      const fetched = await page.evaluate(async () => {
+      // ★ 2026-11-05 补 VerifyAuthToken：page.evaluate 的 fetch 绕过 msfe 插件链，
+      //   cookie 里有票也不会自动进请求头，必须手动带。
+      const _vtk = await getVerifyAuthToken(page, SHOP)
+      const fetched = await page.evaluate(async (vt) => {
         for (const qt of [0, 1]) {
           try {
-            const resp = await fetch('https://mms.pinduoduo.com/lakemms/data_board/query/activity_effect_data', {
+            const resp = await fetch('https://mms.pinduoduo.com' + P('act.effectData'), {
               method: 'POST', credentials: 'include',
-              headers: { 'Content-Type': 'application/json' },
+              headers: { 'Content-Type': 'application/json', ...(vt ? { VerifyAuthToken: vt } : {}) },
               body: JSON.stringify({ query_type: qt }),
             })
             const j = await resp.json()
@@ -183,7 +192,7 @@ const mode = argOf('mode') || 'overview'
           } catch { /* 下一个 */ }
         }
         return null
-      }).catch(() => null)
+      }, _vtk).catch(() => null)
       if (fetched) byApi.effect = fetched
     } catch { /* 兜底失败就用 hook 数据 */ }
   }
@@ -479,7 +488,7 @@ const mode = argOf('mode') || 'overview'
       const r = await page.evaluate(async (bd, s, mall, vt) => {
         const payload = s ? { ...bd, crawlerInfo: s.crawlerInfo } : bd
         try {
-          const resp = await fetch('https://mms.pinduoduo.com/lakemms/activityGoods/cancelEnroll', {
+          const resp = await fetch('https://mms.pinduoduo.com' + P('act.cancelEnroll'), {
             method: 'POST', credentials: 'include',
             headers: { 'Content-Type': 'application/json', ...(s ? { 'Anti-Content': s.anti } : {}), ...(vt ? { VerifyAuthToken: vt } : {}) },
             body: JSON.stringify(payload),
@@ -522,18 +531,31 @@ const mode = argOf('mode') || 'overview'
     // ① enrollPopups ② lowPriceCheckV3 ③ enrollV2
     // 签名：该子应用用 Anti-Content 头（值 == body.crawlerInfo）
     const sig = await page.evaluate(() => window.__sigPair || null).catch(() => null)
-    const r = await page.evaluate(async (activityId, goodsId, sig) => {
+    // ★ 2026-11-04 修：原来 page.evaluate 内部那行 `await throttleRequest(SHOP,'strict')`
+    //   是**无效代码** —— evaluate 的函数体被序列化后在浏览器里执行，
+    //   根本访问不到 Node 侧的 throttleRequest / SHOP，执行时会抛 ReferenceError，
+    //   而外层没有 try/catch，所以这行要么报错要么被静默吞掉，从来没真正节流过。
+    //   正确做法：在 Node 侧（evaluate 之外）调闸门 beforeCall 占时间槽。
+    {
+      const pre = await guard.beforeCall('https://mms.pinduoduo.com/leekmms/activity/query/enrollPopups')
+      if (!pre.allow) {
+        emit({ ok: false, failureKind: 'rate_limit', text: `报名前被风控闸门拦下：${pre.reason}` })
+        await browser.close(); process.exit(0)
+      }
+    }
+    // ★ 2026-11-05：报名链路必须带 VerifyAuthToken（写操作，且 evaluate 绕过插件链）
+    const _enrollVtk = await getVerifyAuthToken(page, SHOP)
+    const r = await page.evaluate(async (activityId, goodsId, sig, vt) => {
       const mallId = String(window.__mallId || '')
       const boost = 'uyrhleur-' + mallId + '-' + Date.now()
       const boostB64 = btoa(boost)
       const headers = { 'Content-Type': 'application/json' }
       if (sig) headers['Anti-Content'] = sig.anti
+      if (vt) headers['VerifyAuthToken'] = vt
 
       const call = async (path, body) => {
-        // ★ 2026-10-27 接入 throttleRequest（此前 import 了但从未调用，是死代码）。
-        //   管「频率上限」（strict 20 次/分钟）；与 reserveSlot 的「最小间隔」
-        //   是不同维度，实测叠加几乎不增加等待（详见 pdd-works 同处注释）。
-        await throttleRequest(SHOP, 'strict')
+        // ★ 2026-11-04：原来这里的 throttleRequest 调用是无效的（浏览器上下文访问不到 Node 变量），
+        //   已移到 evaluate 之外由闸门 beforeCall 统一处理。
         const payload = sig ? { ...body, crawlerInfo: sig.crawlerInfo } : body
         const resp = await fetch('https://mms.pinduoduo.com' + path, {
           method: 'POST', credentials: 'include', headers, body: JSON.stringify(payload),
@@ -542,7 +564,7 @@ const mode = argOf('mode') || 'overview'
       }
 
       // ① 报名弹窗查询（拿活动要求/协议）
-      const pop = await call('/leekmms/activity/query/enrollPopups', {
+      const pop = await call(P('act.enrollPopups'), {
         activity_id: Number(activityId), goods_id_list: [Number(goodsId)], query_dimension: 2,
       })
 
@@ -561,7 +583,7 @@ const mode = argOf('mode') || 'overview'
           }],
         }],
       }
-      const low = await call('/lakemms/activityGoods/lowPriceCheckV3', lowBody)
+      const low = await call(P('act.lowPriceCheck'), lowBody)
 
       // ③ 报名提交
       const enrollBody = {
@@ -589,9 +611,9 @@ const mode = argOf('mode') || 'overview'
         },
         behavior_collection_v1_cas_boost_factor: boostB64,
       }
-      const enroll = await call('/lakemms/enrollV2', enrollBody)
+      const enroll = await call(P('act.enroll'), enrollBody)
       return { pop, low, enroll, boostB64 }
-    }, activityId, goodsId, sig)
+    }, activityId, goodsId, sig, _enrollVtk)
     const ok = r.enroll?.json?.success === true
     out.text = ok
       ? `报名成功！活动 ${activityId} + 商品 ${goodsId}\n返回：${JSON.stringify(r.enroll.json).slice(0, 300)}`
@@ -601,7 +623,8 @@ const mode = argOf('mode') || 'overview'
     await browser.close(); process.exit(2)
   }
   emit(out)
-  clearInterval(hb)
+  // ★ 2026-11-04：原来的 clearInterval(hb) 随迁移一并去掉（心跳由 guard.startHeartbeat 管理）
+  await guard.close()
   await browser.close()
 })().catch(async (e) => {
   // ★ 风控异常 → 友好提示

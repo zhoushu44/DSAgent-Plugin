@@ -1,0 +1,29 @@
+name: 闲鱼每日蓝海词监控上架
+mode: batch
+count_input: count
+description: |
+  每天跑一次的闲鱼API蓝海词监控+上架物料工作流。
+  平台支持的模型：DeepSeek V4.1 / GLM-5.3 / Kimi K3 / Qwen3.8 / MiniMax / 豆包Seedance视频
+
+  输入1个数（今天上几个品），自动完成：
+  ① 搜索10个关键词，计算蓝海系数，输出今日蓝海词TOP排行
+  ② 按TOP排序选前N个词，调用xianyu-listing-prep生成合规物料
+
+  ★ 蓝海词清单（2026-10-26实测）：
+  DeepSeek日卡(285) - 绝对爆款，想要数8540
+  DeepSeek API额度(248) - 第二爆款
+  MiniMax API(81)
+  Kimi API密钥(69)
+  豆包API(50)
+  Qwen API额度(49)
+  GLM-5.3 API(40)
+
+  ★ 合规闸门硬拦截：中转/代理/ChatGPT/OpenAI/GPT4/VPN/翻墙/官方N折/不掺量/最低/第一/100%
+inputs:
+  - key: count
+    label: 今天上几个品
+    type: number
+    default: 3
+steps:
+  - name: 蓝海词采集
+    skill: xianyu-crawl

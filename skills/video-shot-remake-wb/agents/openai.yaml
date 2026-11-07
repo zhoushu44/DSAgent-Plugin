@@ -1,0 +1,4 @@
+interface:
+  display_name: "视频拉片复刻"
+  short_description: "按参考片节奏与镜头语言替换角色、产品并完成逐镜复刻"
+  default_prompt: "使用 $video-shot-remake-wb 分析这段参考视频，并按阶段确认完成模板化复刻。"

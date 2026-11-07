@@ -26,6 +26,12 @@ metadata:
 - 登录态有效期较短（约 1-3 天），过期后需重新登录
 - Cookie 中的 `web_session` 是判定登录成功的关键凭证
 
+## 用户主页笔记（只读）
+
+按作者 ID 读取公开作品列表，最多翻页 3 次，每页之间至少等待 3 秒：
+
+> `python {this_skill_dir}/scripts/user_profile.py --user-id <作者ID> --xsec-token <分享链接中的token> --pages 3`
+
 ## 使用方法
 
 直接说你想搜什么就行：

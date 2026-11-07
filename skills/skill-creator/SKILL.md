@@ -141,6 +141,19 @@ python scripts/quick_validate.py /path/to/skill-folder
 
 修复问题后重新运行。
 
+**★ 若新建的是 `pdd-*` 技能（拼多多），必须额外跑风控闸门检查：**
+
+```bash
+node {PLUGIN_ROOT}/skills/_shared/check-pdd-guard.mjs pdd-新技能名
+```
+
+不通过会列出具体缺项（pdd-guard 引用 / openTask / beforeCall / 残留旧锁 / 残留旧节流 /
+`page.evaluate` 跨上下文调用 Node 函数）。全部改完才算完成——**这一项是硬门禁，
+不是建议**：风控漏接会导致账号被封、误发到别人店铺等不可逆后果。
+
+接入形态与四条硬约束见项目规则 `.trae/rules/project_rules.md`
+「拼多多技能风控闸门规则」，机制说明见知识库《拼多多技能统一风控闸门（pdd-guard）》。
+
 ### 步骤 6：启用与迭代
 
 - 手动创建的 skill 在 `skill.json` 中默认**禁用** — 需在控制台或 CLI 启用

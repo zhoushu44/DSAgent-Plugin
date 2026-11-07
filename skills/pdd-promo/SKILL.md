@@ -17,8 +17,9 @@ metadata:
 
 > 完整机制与历史踩坑记录在**知识库**，遇到风控问题**先查库**：
 > ```
-> dsagent_wiki_search(keyword="风控")            # 两页都列出来
-> dsagent_wiki_search(path="平台/entities/拼多多风控机制与应对.md")
+> dsagent_wiki_search(keyword="风控")                                     # 全部风控页
+> dsagent_wiki_search(path="平台/entities/拼多多风控机制与应对.md")        # 机制总览
+> dsagent_wiki_search(path="平台/entities/拼多多签名注入范围（Anti-Content vs crawlerInfo）.md") # 该不该带签名
 > ```
 
 ### 错误码 → 处置
@@ -30,6 +31,7 @@ metadata:
 | `100001` | `rate_limit` | 活动写操作频控（请 2 小时后重试） | **不可本地修复**。等待 2 小时或换时间段 |
 | `43001` | `token_expired` | 会话过期（**不是风控**） | 重新扫码登录。注意凭证库快照可能是旧票，优先用浏览器当前 Cookie |
 | `40001` | `token_expired` | 未登录 | 重新扫码登录 |
+| `310120000` | `reload_required` | **页面上下文失效**（403 专用码） | 官方处置是 `window.location.reload()`：重开/刷新页面后重试。**不是登录失效，不要跳登录页** |
 | `40010` | `no_permission` | 无权限 | 可能是账号类型不对（需诚信通/实力商家），或换主店号 |
 | `2000000` | `no_permission` | 账号不适合发布 | 权限问题，换号或到后台查违规记录 |
 | `48143` | `api_error` | 非法请求 | 该接口依赖页面 SDK 的请求上下文，需让页面自己发请求（DOM 触发） |
@@ -37,17 +39,19 @@ metadata:
 | HTTP `430` | `rate_limit` | 网关级频率惩罚（Cookie 有效） | 等 15~30s 重试。**不要**误判成 session_expired |
 | `detached Frame` / `Target closed` | `risk_control` | 平台主动关掉页面 | 等 3~5 分钟再试，别连续重试 |
 
-### 三条铁律
+### 四条铁律
 
 1. **不要把 54001 当 token_expired** —— 前者需要过一次滑块，后者才需要重新登录。误判会让用户反复登录，每次登录还刷新一次风控基线。
 2. **不要重试 40002** —— 它是接口级持久限流，实测冷却 240s 零请求后仍空。
 3. **不要在冷却期内连续调用** —— 拼多多按「累计行为分数」延长封禁，越打越久。
+4. **分清两个签名条件，别合并** —— 平台有两套独立判断：**域名正则**（mms/ims/... 命中就带 `header Anti-Content`）+ **162 条路径白名单**（命中才在 body 里塞 `crawlerInfo`）。只要域名是 `mms.pinduoduo.com`，**头就必须带**；把「不在 162 名单」当成「不用签名」会稳定打出 54001（我已真机踩过）。判据统一用 `_shared/pdd-sign-scope.mjs` 的 `signPlan(url)`。
 
 ### 其他已知坑
 
 - **两个登录态不通用**：`pdd`（H5 买家态，`.yangkeduo.com`）与 `pdd_mms`（商家后台态，`mms.pinduoduo.com`）是两套独立账号，各跑一套风控评分。
 - **`Failed to launch the browser process!`** 大概率是 Profile 被孤儿 Chrome 占用（SingletonLock 残留），不是 Chrome 坏了。清理：`~/.dsh/pdd-account-locks` 无关，要杀占用该 Profile 的 chrome 进程 + 删 `SingletonLock`。
 - **账号级并发**：两个任务同时打同一个号会显著提高被封概率，`_shared/pdd-risk.mjs` 的账号锁会拦住，看到「正被其他任务占用」就等等。
+- **签名兜底字面量**：平台自己的兜底值是 `"getRisckInfoError"`（注意 `Risck` 是平台拼写）。带它发请求 = 自报「我拿不到环境指纹」，比不带更可疑。
 
 <!-- RISK-CHEATSHEET:END -->
 
@@ -66,6 +70,7 @@ metadata:
 - 要判断「哪个商品投得值」→ `goods` 模式 + 按 ROI 排序
 - 用户问「**平台建议**」「平台怎么说」「诊断异常」「转化过低」「曝光过低」→ `diagnose` / `balance` 模式（含 labelType 官方枚举）
 - 要判断「**该加价还是降价还是停**」→ `balance` 模式（有 error 级标签会直接建议停投整改）
+- **商品后期投产了，想提利润 / 优化价格** → `margin` 模式（规则见 [_shared/margin-price-advice.md](../_shared/margin-price-advice.md)）
 
 ## 能力
 
@@ -81,6 +86,7 @@ metadata:
 | **`item`** | **只读** | **★ 单品推广诊断**（2026-10-28 新增）：一屏结论 + 商品数据 + 单元配置 + **烧钱速率（当天速率/速率比/预计烧完时间/近 7 天柱状图）** + 平台 labelType 标签 + 提醒 + 调参命令。入参 `--goods-id` 或 `--ad-id` |
 | **`diagnose`** | **只读** | **★ 推广诊断**（`smartTool/diagnosis/queryStableCostAdDiagnosis`）：5 类诊断模块 — 出价竞争力/投放状态/竞争力下滑/创意素材/排名过低；含竞争等级、排名、建议出价、效果预估；**+ 平台 labelType 异常标签（10 种官方枚举，1/4/7 为 error 级）+ 平台官方原文** |
 | **`balance`** | **只读** | **★ 推广平衡分析**：一屏结论（健康度 + 最该做什么）+ 诊断打分（0~100）+ 「该加价/该降价/**该停投整改**」+ 预算重分配 + 平台建议汇总 |
+| **`margin`** | **只读** | **★ 利润率 → 涨价安全垫**（纯本地计算，不开浏览器、零平台副作用）：按单价 + 单位成本算毛利率、保本投产比、各涨价幅度的利润变化 / 等效营业额增幅 / 最多可掉销量，并做触发条件自检。规则见 [_shared/margin-price-advice.md](../_shared/margin-price-advice.md) |
 | `pause` | **L2 写** | 暂停推广单元（`venus/api/global/unit/batchUpdateStatus`，`adStatus:2`） |
 | `resume` | **L2 写** | 开启推广单元（同接口，`adStatus:1`） |
 | `delete` | **L2 写** | 删除商品推广（`venus/api/goods/promotion/virtual/delete`） |
@@ -525,6 +531,14 @@ adId        倍数   净ROI  保本线  阶段  限额        投产         原
 | `--max-cost` | string | 条件 | maxcost 模式必填：日限额（元），或 `unlimited`/`0` = 不限 |
 | `--roi` | number | 条件 | roi 模式必填：投产比（如 3 = 投 1 元赚 3 元） |
 | `--days` | number | 否 | 统计窗口天数，默认 7，上限 90 |
+| `--price` | number | 条件 | **margin 模式必填**：商品单价（元） |
+| `--cost` | number | 条件 | **margin 模式必填**：单位成本（元，商家提供，平台取不到） |
+| `--net-roi` | number | 否 | margin 模式可选：当前推广净ROI，用于和保本线 `1/毛利率` 对比 |
+| `--steps` | string | 否 | margin 模式可选：自定义涨价幅度，逗号分隔，如 `0.01,0.02,0.05` |
+| `--days` / `--orders` | number | 否 | margin 模式可选：商品已投产天数 / 累计订单，用于触发条件自检 |
+| `--error-label` | string | 否 | margin 模式可选：`true` 表示平台有 error 级标签（命中则不触发涨价建议） |
+| `--want-profit` | string | 否 | margin 模式可选：`false` 关闭（默认 true，即后期 + 优化诉求即触发） |
+| `--goods-id` | number | 否 | margin 模式可选：标注是哪个商品 |
 | `--confirm` | flag | 条件 | **写操作必须带 true**；省略只返回预览（L2 门禁） |
 | `--account` | string | 否 | 账号 shopKey；多账号未绑定时先向用户确认 |
 
@@ -537,6 +551,10 @@ adId        倍数   净ROI  保本线  阶段  限额        投产         原
 | `groups` | 广告组数组（id/name/展现/点击/消耗/ROI） |
 | `account` | overview 模式：`{balance, dailyCost}` |
 | `dailyCost` | 日消耗明细 |
+| `margin` | margin 模式：`{rate, ratePct, unitProfit, costRatio, breakevenRoi}` |
+| `steps` | margin 模式：各涨价幅度的 `{k, newPrice, newUnitProfit, profitChangePct, equivRevenuePct, maxVolumeDropPct}` |
+| `roiCheck` | margin 模式：`{netRoi, breakevenRoi, aboveBreakeven, gapPct}` |
+| `trigger` | margin 模式：触发判定 `{lateStage, lowMargin, roiBelowBreakeven, blockedByErrorLabel, priority(high\|normal\|none), shouldAdvise}` |
 | `text` | 面向用户的中文文案，原样转述 |
 
 ## 用法
@@ -571,8 +589,72 @@ node {baseDir}/scripts/promo.mjs --mode roi --unit-id 123456 --roi 3 --confirm t
 # 创建推广 / 删除推广
 node {baseDir}/scripts/promo.mjs --mode create --goods-id 1018993401073 --confirm true
 node {baseDir}/scripts/promo.mjs --mode delete --goods-id 1018993401073 --confirm true
+
+# ── 利润与涨价建议（只读，纯本地计算，零平台副作用）──
+# 规则：skills/_shared/margin-price-advice.md
+node {baseDir}/scripts/promo.mjs --mode margin --price 10 --cost 9
+node {baseDir}/scripts/promo.mjs --mode margin --price 10 --cost 9 --net-roi 2.1
+node {baseDir}/scripts/promo.mjs --mode margin --price 10 --cost 9 --steps 0.01,0.02,0.03,0.05
+node {baseDir}/scripts/promo.mjs --mode margin --goods-id 816543902441 --price 12.9 --cost 11.5 --net-roi 2.1 --days 14 --orders 56
 ```
 
+### `margin` 模式：什么时候用、怎么算
+
+**触发时机（商品后期 + 在做提高利润 / 优化）**：
+
+| # | 条件 | 判定 |
+|---|---|---|
+| ① | 商品后期 | 连续 ≥7 天有消耗且累计订单 ≥30（或日均 ≥3 单） |
+| ② | 优化诉求 | 用户在提利润 / 优化价格 / 优化投产（`--want-profit false` 可关） |
+| ③ | 非商品承接问题 | 平台无 error 级标签（labelType 1/4/7）；CTR 不低于健康线 |
+
+> ⚠️ **利润低不是门槛，只决定优先级**（这是最容易搞反的一点）：
+> 后期优化利润时**任何毛利率的商品都该看这张表**——
+> 🔴 高优先级 = 毛利率 ≤20% 或 净ROI < 保本线；
+> 🟡 常规 = 利润率尚可，但**安全垫更小（掉量容忍度低）**，所以要更小步、观察更密。
+
+**计算口径**（`m` = 毛利率，`k` = 涨价幅度）：
+
+```
+利润变化倍数     = 1 + k/m
+等效营业额增幅   = k/m
+最多可掉销量     = k/(m+k)
+保本投产比       = 1/m          ← 注意：不是 1/(1-m)（那是成本加成率）
+```
+
+**实跑样例**（单价 ¥10、成本 ¥9 → 毛利率 10%）：
+
+```
+【利润与涨价建议】
+
+触发条件自检：
+  商品后期：是
+  利润低：是（毛利率 10% ≤ 20%）｜净ROI 低于保本线
+  商品侧异常阻断：否
+  → ✅ 满足触发条件，可给涨价建议
+
+建议动作：先涨 +1%~+2% 小步试涨，观察 3~5 个自然日
+观察指标：转化率、净ROI、订单数
+回滚条件：掉量 > 该幅度对应的安全垫 → 调回原价
+假设：单位成本不变、成本随销量等比例变动；掉量还受客户流失与竞品比价影响
+
+单价 ¥10｜单位成本 ¥9
+毛利率 10%｜单件利润 ¥1｜保本投产比 10
+
+涨价幅度   新单价   单件利润   利润变化   等效营业额/销量   最多可掉销量
++1%       ¥10.1     ¥1.1      +10%      +10%            9.1%
++2%       ¥10.2     ¥1.2      +20%      +20%            16.7%
++3%       ¥10.3     ¥1.3      +30%      +30%            23.1%
++5%       ¥10.5     ¥1.5      +50%      +50%            33.3%
+
+投产比判定：当前净ROI 2.1 vs 保本线 10 → 低于保本线（差 -79%）
+```
+
+**三条边界**：
+
+1. **单位成本平台取不到**（`pdd-works` 只有售价），必须商家提供；缺成本时只提示去取数，**不得**默认毛利率下结论。
+2. **有 error 级标签时跳过**（item 模式会显式写"跳过"），涨价只会放大商品侧问题。
+3. 淘宝 / 抖音同场景用同一套规则（`_shared/margin_price.mjs`），三平台口径一致，不要各算一套。
 ## 推广操作（L2）—— 实测状态
 
 | 模式 | 接口 | Body | 实测 |
@@ -622,6 +704,21 @@ node {baseDir}/scripts/promo.mjs --mode delete --goods-id 1018993401073 --confir
 ④ 三个维度交叉：钱花在哪个组 → 组推哪个商品 → 商品产出多少 GMV
 ```
 
+### W4：商品投产了，想提利润 → 该不该涨价
+
+```
+① 调 promo.mjs --mode goods               → 找候选商品（低 ROI / 高花费 / 高 GMV）
+② 调 promo.mjs --mode item --ad-id <ID>   → 确认商品处于后期且平台无 error 级标签
+③ 向商家要单位成本（售价用 pdd-works --mode sku 拿，成本平台取不到）
+④ 调 promo.mjs --mode margin --price <单价> --cost <成本> --net-roi <净ROI>
+⑤ 按输出的安全垫表选幅度 → 小步试涨（+1%~+2%）→ 观察 3~5 天转化/ROI/订单
+⑥ 掉量超过该幅度安全垫 → 回滚原价；没超 → 保留并进入下一轮
+```
+
+> **利润低不是触发门槛**：商品后期 + 想提利润就会触发。
+> 低毛利 → 🔴 高优先级（安全垫大、更该涨）；高毛利 → 🟡 常规（安全垫小，幅度更小、观察更密）。
+> 完整规则见 [_shared/margin-price-advice.md](../_shared/margin-price-advice.md)。
+
 ## 输出字段（goods 模式）
 
 | 字段 | 含义 |
@@ -655,6 +752,17 @@ node ../pdd-shop/scripts/shop.mjs --mode goods --shop-name <店铺名>
 #    平台 labelType=1(出价过低) + 无转化问题              → 才考虑提价
 #    平台 healthy + 商品转化率 > 类目均值                 → 可加预算放量
 ```
+
+## 利润与涨价建议（跨技能，三平台同一口径）
+
+规则与计算器在 **[_shared/margin-price-advice.md](../_shared/margin-price-advice.md)** +
+**[_shared/margin_price.mjs](../_shared/margin_price.mjs)**，拼多多 / 淘宝 / 抖音共用。
+
+- **只在**「商品后期 + 优化诉求」成立、且平台无 error 级标签时给涨价建议。
+- **利润低不是门槛，只决定优先级**：🔴 高 = 毛利率 ≤20% 或 净ROI < 保本线；🟡 常规 = 利润尚可但安全垫更小，要更小步试涨。
+- **单位成本必须商家提供**；缺成本时只提示取数，不得默认毛利率。
+- 保本投产比 = `1/毛利率`（**不是** `1/(1−毛利率)`，后者是成本加成率）。
+- 价格 A/B 测试设计走 `ab-test-setup`（主指标转化率，护栏毛利 / 退款率）。
 
 ## 错误处理
 

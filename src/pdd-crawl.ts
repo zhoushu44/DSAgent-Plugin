@@ -23,9 +23,43 @@
  * ★ 前提：匿名浏览器访问拼多多商品页/搜索页一律强制跳登录页，
  *   因此本技能要求凭证库中已存在 pdd 账号（否则返回 not_bound 引导扫码登录）。
  */
-import { CredentialStore, resolveAccountForRequest, type StoredAccount } from './services/credential-store.js'
-import { applyStealth } from './stealth-inject'
+import { CredentialStore, resolveAccountForRequest, credentialPlatform, type StoredAccount } from './services/credential-store.js'
+import { applyStealth } from './stealth-inject.js'
 import { clearProfileLocks, findChromePath, profileDir, profileOwner, releaseProfile, tryAcquireProfile } from './browser-login.js'
+import { join, dirname } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+
+/**
+ * 把插件内的绝对路径转成 file:// URL 供动态 import 使用。
+ *
+ * ★ 2026-10-27 修（真实缺陷，非测试限制）：
+ *   `await import(join(PLUGIN_ROOT, 'skills/_shared/pdd-risk.mjs'))` 直接把
+ *   Windows 路径（`C:\...`）传给 import()，Node 报
+ *   `ERR_UNSUPPORTED_ESM_URL_SCHEME: Received protocol 'c:'`。
+ *   而被 `.catch(() => null)` 吞掉 → riskMod=null →
+ *   **账号锁、冷却检查、孤儿进程清理全部静默失效**。
+ *   实测探针确认：riskMod = NULL。
+ */
+const toFileUrl = (p: string): string => pathToFileURL(p).href
+
+/**
+ * 风控模块（skills/_shared/pdd-risk.mjs）所在**插件根**。
+ *
+ * ★ 2026-10-27 修（P2-13 排查时发现）：原来照抄 pdd-publish.ts 的 `'..', '..'`
+ *   （上推两层）是**错的**。安装位置的插件自带 skills 目录：
+ *
+ *     node_modules/@dsagent/dsagent-plugin/
+ *       ├─ lib/pdd-crawl.js        ← 本文件编译后在这
+ *       └─ skills/_shared/pdd-risk.mjs
+ *
+ *   从 lib/ 出发只需上推**一层**就是插件根。上推两层会指到
+ *   `node_modules/@dsagent`，那里没有 skills → import 恒失败，
+ *   而调用处都有 `.catch(() => null)` 兜底 → **静默失效**。
+ *
+ *   pdd-publish.ts 里既有的两处 import 正是踩了这个坑：滑块自动过
+ *   在发布链路里从未真正接入过，只是没报错而已。
+ */
+const PLUGIN_ROOT_FOR_RISK = join(dirname(fileURLToPath(import.meta.url)), '..')
 
 const H5_BASE = 'https://mobile.yangkeduo.com'
 const CRAWL_WAIT_MS = 30_000
@@ -36,6 +70,19 @@ const MAX_BODY_CHARS = 400_000
 /** 移动端 UA：目标站点是 H5 站，桌面 UA 更容易被风控 */
 const MOBILE_UA =
   'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1'
+/**
+ * ★ 2026-10-27 新增：滚动分页节流。
+ *
+ * 背景：scrollTo 会触发页面自身的分页请求（feed 的 /proxy/api/api/alexa/cells/hub/v3
+ * 分页、search 的 SSR 补齐）。此前循环里每 2 秒滚一次，等于 2 秒一个分页请求，
+ * 连续打 30 秒 → 15 次分页 → 极易触发 40002「系统繁忙」。
+ *
+ * 实测依据：拼多多按「接口前缀 + 账号」分级风控，H5 的 /proxy/api/ 域虽然比
+ * 商家后台宽松，但连续分页仍会被限。4~6 秒一次滚动（带抖动）与商家后台的
+ * 账号级节流参数（4.0s + 0~2.0s jitter）对齐。
+ */
+const SCROLL_INTERVAL_MS = 4000
+const SCROLL_JITTER_MS = 2000
 
 export interface PddCrawlOptions {
   /** 搜索关键词（mode=search 时必填） */
@@ -88,7 +135,17 @@ function selectAccount(
   store: CredentialStore,
   opts: { account?: string; agentId?: string },
 ): { account: StoredAccount | null; choices: unknown[]; error?: PddCrawlResult } {
-  const candidates = store.listAccounts().filter(a => a.platform === 'pdd' && a.status !== 'invalid')
+  // ★ 2026-11-04 修：账号过滤必须走 credentialPlatform() 归一化。
+  //
+  //   原来写死 `a.platform === 'pdd'`，但「账号连接」页存进来的 platform 是
+  //   **前端别名** `pinduoduo`（见 lib/services/credential-store.js L198-201 的
+  //   别名表：pinduoduo→pdd）。写死比较导致 candidates 恒为空 → 明明已绑定
+  //   账号却返回 not_bound，让用户反复去扫码。
+  //
+  //   findByPlatform（credential-store L1165）用的是 `credentialPlatform(item.platform) === target`，
+  //   这里对齐成同一套写法。
+  const candidates = store.listAccounts()
+    .filter(a => credentialPlatform(a.platform) === 'pdd' && a.status !== 'invalid')
   if (!candidates.length) {
     return {
       account: null,
@@ -313,6 +370,77 @@ export async function pddCrawl(
     }
   }
 
+  // ★ 2026-10-27 修（P2-13）：再拿一道「账号级」文件锁。
+  //
+  //   背景：拼多多的风控评分是**账号级**的，两个浏览器同时操作同一个号
+  //   （哪怕一个打 H5 买家态、一个打商家后台）会让出口频率翻倍，极易触发风控。
+  //
+  //   而此前有两套互不相通的锁：
+  //     · 插件侧 `tryAcquireProfile(dir)` —— 进程内存 Map，只有插件主进程内的
+  //       模块（pdd-crawl / pdd-publish / 登录 / 风控验证）能互相看到；
+  //     · skills 侧 `tryAcquireAccountLock(shopKey)` —— 文件锁，只有各技能的
+  //       Node 子进程（pdd-works / pdd-shop / pdd-promo...）能互相看到。
+  //   两者维度不同（目录 vs shopKey）、存储不同（内存 vs 文件），
+  //   于是「采集正在跑」时 `pdd-shop` 照样能起来 —— 双浏览器打同一个号。
+  //
+  //   修法：采集也去拿 skills 侧那个账号文件锁，让**账号维度**只有一个权威锁。
+  //   Profile 目录锁保留（它防的是同进程内 Chrome userDataDir 独占冲突）。
+  let releaseAccountLock: (() => void) | null = null
+  let accountLockHeartbeat: NodeJS.Timeout | null = null
+  // ★ 2026-11-05：迁移到统一风控闸门 pdd-guard（与其他 pdd 技能同一套准入）
+  //   原实现是手写四件套（checkCooldown + tryAcquireAccountLock + 心跳 + release），
+  //   能力等价但缺账号级节流 —— 滚动间隔是进程内 setTimeout，跨进程/并发失效。
+  //   ⚠️ 闸门内部已持锁，不要再自己 tryAcquireAccountLock（会自己锁死自己）。
+  let crawlGuard: any = null
+  try {
+    const guardMod: any = await import(toFileUrl(join(PLUGIN_ROOT_FOR_RISK, 'skills/_shared/pdd-guard.mjs'))).catch(() => null)
+    if (guardMod?.openTask) {
+      crawlGuard = await guardMod.openTask('pdd-crawl', shopKey, { lockWaitMs: 300_000 })
+      if (crawlGuard.blocked) {
+        releaseProfile(dir)
+        return {
+          ok: false,
+          failureKind: 'rate_limit',
+          shopKey,
+          mode,
+          text: `账号 ${shopKey} 当前不可执行：${crawlGuard.reason}。\n期间请勿重复调用（会延长封禁）。`,
+        }
+      }
+      crawlGuard.startHeartbeat()
+    } else {
+      // 闸门不可用时降级到原来的手写逻辑
+      const riskMod: any = await import(toFileUrl(join(PLUGIN_ROOT_FOR_RISK, 'skills/_shared/pdd-risk.mjs'))).catch(() => null)
+      if (riskMod?.checkCooldown) {
+        const cd = riskMod.checkCooldown(shopKey)
+        if (cd?.cooling) {
+          releaseProfile(dir)
+          return {
+            ok: false,
+            failureKind: 'rate_limit',
+            shopKey,
+            mode,
+            text: `账号 ${shopKey} 命中平台频控，冷却剩余 ${riskMod.fmtRemain ? riskMod.fmtRemain(cd.remainMs) : Math.ceil(cd.remainMs / 60000) + ' 分钟'}（${cd.reason || ''}）。`,
+          }
+        }
+      }
+      if (riskMod?.tryAcquireAccountLock) {
+        const lock = await riskMod.tryAcquireAccountLock(shopKey, 'pdd-crawl', 300_000)
+        if (!lock.ok) {
+          releaseProfile(dir)
+          return {
+            ok: false,
+            failureKind: 'rate_limit',
+            text: `账号 ${shopKey} 正被其他拼多多任务占用${lock.holder ? `（${lock.holder}）` : ''}。`,
+          }
+        }
+        releaseAccountLock = () => { try { riskMod.releaseAccountLock(shopKey) } catch { /* ignore */ } }
+        accountLockHeartbeat = setInterval(() => {
+          try { riskMod.heartbeatAccountLock(shopKey, 'pdd-crawl') } catch { /* ignore */ }
+        }, 180_000)
+      }
+    }
+  } catch { /* 风控模块缺失不影响主流程，退化为只有 Profile 锁 */ }
+
   // feed 模式指向首页（推荐流接口 /proxy/api/api/alexa/cells/hub/v3 由首页自身发出）
   const targetUrl = mode === 'goods'
     ? `${H5_BASE}/goods.html?goods_id=${encodeURIComponent(goodsId)}`
@@ -335,7 +463,17 @@ export async function pddCrawl(
       userDataDir: dir,
       args: ['--no-sandbox', '--disable-blink-features=AutomationControlled', '--window-size=1280,900'],
     }
-    clearProfileLocks(dir)
+    // ★ 2026-10-27（P2-13 后续）：启动前清「孤儿 chrome + Profile 锁」。
+    //
+    //   原来只有 clearProfileLocks(dir)（删锁文件），但锁能删、占用它的进程
+    //   还在的话立刻被重建。必须先杀孤儿进程。
+    //   pdd-proc-clean 的安全边界：只杀命令行含 --user-data-dir 且指向本
+    //   Profile 的 chrome 进程，绝不碰用户日常浏览器。
+    try {
+      const procClean = await import(toFileUrl(join(PLUGIN_ROOT_FOR_RISK, 'skills/_shared/pdd-proc-clean.mjs'))).catch(() => null)
+      if (procClean?.cleanProfileForLaunch) procClean.cleanProfileForLaunch(dir, { quiet: true })
+      else clearProfileLocks(dir)
+    } catch { clearProfileLocks(dir) }
     try {
       browser = await puppeteer.launch(launchOpts)
     } catch (e) {
@@ -348,13 +486,28 @@ export async function pddCrawl(
     await page.setViewport({ width: 390, height: 844, isMobile: true, hasTouch: true, deviceScaleFactor: 3 })
     await page.setUserAgent(MOBILE_UA)
     await applyStealth(page)
-
-    // 注入拼多多域 Cookie（H5 站登录态在 .yangkeduo.com）
-    const cookieList = Object.entries(accountCookies)
-      .filter(([, v]) => v !== '' && v != null)
-      .map(([name, value]) => ({ name, value: String(value), domain: '.yangkeduo.com', path: '/' }))
-    if (cookieList.length > 0) await page.setCookie(...cookieList)
-    console.log(`[dsagent-pdd-crawl] 已注入 ${cookieList.length} 个 yangkeduo.com Cookie（账号 ${shopKey}）`)
+    // ★ 2026-10-27 修：PASS_ID 优先级铁律 —— 浏览器本地会话 > 凭证库快照。
+    //
+    //   原实现无条件 page.setCookie(...storeCookies) 会把 Profile 里的新票据
+    //   覆盖成几天前的旧票（PASS_ID 会在服务端过期/轮转），一打开页面就跳登录页，
+    //   然后把「本来只是需要刷新票据」误报成 token_expired，让用户反复重新登录。
+    //
+    //   正确逻辑：Profile 里已有有效 PASS_ID → 跳过注入，以浏览器为准；
+    //             没有才注入凭证库快照。
+    const existingCookies = await page.cookies('https://mobile.yangkeduo.com').catch(() => [])
+    const profileHasPass = existingCookies.some((c: any) => c.name === 'PASS_ID' && c.value)
+    let injected = 0
+    if (profileHasPass) {
+      console.log(`[dsagent-pdd-crawl] Profile 已有 PASS_ID，跳过凭证库注入（以浏览器会话为准，账号 ${shopKey}）`)
+    } else {
+      // 注入拼多多域 Cookie（H5 站登录态在 .yangkeduo.com）
+      const cookieList = Object.entries(accountCookies)
+        .filter(([, v]) => v !== '' && v != null)
+        .map(([name, value]) => ({ name, value: String(value), domain: '.yangkeduo.com', path: '/' }))
+      if (cookieList.length > 0) await page.setCookie(...cookieList)
+      injected = cookieList.length
+      console.log(`[dsagent-pdd-crawl] Profile 无 PASS_ID，已注入 ${injected} 个 yangkeduo.com Cookie（账号 ${shopKey}）`)
+    }
 
     // ── 拦截页面自身的业务接口响应 ──────────────────────────
     // 页面请求自带 anti_content 签名，host 侧只负责把响应体收下来。
@@ -383,18 +536,67 @@ export async function pddCrawl(
       } catch { /* 响应体读取失败（跳转/被中断），忽略 */ }
     })
 
+    // ★ 2026-11-05：打开页面前过闸门 beforeCall（账号级时间槽，落盘跨进程）
+    //   原来滚动间隔是进程内 setTimeout（4~6s），跨进程/并发时失效。
+    //   这里在唯一入口占一个槽，配合下面的滚动间隔形成双层保护。
+    if (crawlGuard?.beforeCall) {
+      const pre = await crawlGuard.beforeCall(targetUrl)
+      if (!pre.allow) {
+        releaseProfile(dir)
+        return {
+          ok: false,
+          failureKind: 'rate_limit',
+          shopKey,
+          mode,
+          text: `账号 ${shopKey} 当前不可执行：${pre.reason}。`,
+        }
+      }
+    }
+
     console.log(`[dsagent-pdd-crawl] 打开页面：${targetUrl}`)
     await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 45_000 })
 
     // 登录态失效会跳登录页；给模型一个明确的失败类型而不是空等
     const landedUrl = page.url()
     if (/login\.html|login\?/i.test(landedUrl)) {
+      // ★ 2026-10-27 修：区分「真的登录态失效」与「被风控打到登录页」。
+      //
+      //   原实现只要 URL 命中 login 就 store.setStatus('expired') + 报 token_expired，
+      //   让用户反复重新登录。但拼多多的风控（54001 滑块连续失败 / 40002 高频）
+      //   也会把页面踢到登录页，此时账号并未过期，重新登录只会刷新风控基线。
+      //
+      //   判别依据：
+      //     · 本轮已见到业务错误码（54001/40002 等）→ 是风控，不是过期
+      //     · 页面 DOM 里有滑块/安全验证遮罩 → 是风控
+      //     · 两者都没有且 URL 在登录页 → 才判定真的过期
+      const riskControlled = bizCodes.size > 0
+      const sliderVisible = await page.evaluate(() => {
+        const ms = Array.from(document.querySelectorAll('[class*="Modal"], [class*="modal"], [class*="MDL"], [class*="Dialog"], [class*="captcha"], [class*="Captcha"], [class*="verify"], [class*="Verify"]'))
+          .filter(m => { const r = m.getBoundingClientRect(); return r.width > 200 && r.height > 150 })
+        return ms.some(m => /滑块|拼图|安全验证|向右/.test(((m as HTMLElement).innerText || '').slice(0, 60)))
+      }).catch(() => false)
+      if (riskControlled || sliderVisible) {
+        const codeHint = bizCodes.size ? `业务错误码：${[...bizCodes].join(', ')}。` : ''
+        return {
+          ok: false,
+          failureKind: 'risk_control',
+          shopKey,
+          mode,
+          sourceUrls,
+          text: `拼多多把页面重定向到了 ${landedUrl}，但这不是登录态失效——`
+            + `${codeHint}${sliderVisible ? '页面存在滑块/安全验证遮罩。' : ''}`
+            + `该账号被平台风控，Cookie 可能仍然有效。\n`
+            + `★ 不要引导用户重新登录（那只会刷新风控基线，问题依旧）。\n`
+            + `建议：打开浏览器窗口人工完成滑块/安全验证，完成后重试；`
+            + `若搜索接口持续返回 40002，改用 mode=feed（首页推荐流，实测稳定可用）。`,
+        }
+      }
       await store.setStatus(shopKey, 'expired')
       return {
         ok: false,
         failureKind: 'token_expired',
         shopKey,
-        text: `拼多多登录态已失效（页面被重定向到 ${landedUrl}）。请到「账号连接」页面重新登录拼多多后重试。`,
+        text: `拼多多登录态已失效（页面被重定向到 ${landedUrl}，且无滑块遮罩、无业务错误码）。请到「账号连接」页面重新登录拼多多后重试。`,
       }
     }
 
@@ -407,7 +609,11 @@ export async function pddCrawl(
     let stagnant = 0
     let lastCount = 0
     while (Date.now() < deadline && goods.length < limit && stagnant < 2) {
-      await new Promise(r => setTimeout(r, 2000))
+      // ★ 2026-10-27 修：滚动分页节流。
+      //   原实现固定 2 秒滚一次 → 30 秒内 15 次分页请求 → 极易触发 40002。
+      //   改为 4~6 秒一次（与商家后台账号级节流参数对齐），带随机抖动。
+      const scrollGap = SCROLL_INTERVAL_MS + Math.floor(Math.random() * SCROLL_JITTER_MS)
+      const nextScrollAt = Date.now() + scrollGap
       if (mode === 'search' || mode === 'feed') {
         try {
           await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight))
@@ -419,6 +625,8 @@ export async function pddCrawl(
       }
       if (goods.length === lastCount) stagnant += 1
       else { stagnant = 0; lastCount = goods.length }
+      const sleepMs = nextScrollAt - Date.now()
+      if (sleepMs > 0) await new Promise(r => setTimeout(r, sleepMs))
     }
 
     const items = dedupe(goods).slice(0, limit)
@@ -439,10 +647,34 @@ export async function pddCrawl(
           ? `${riskHint}。`
           : '页面可能仍停留在登录页、被风控拦截，或页面结构已变更。'
       // search / goods 接口实测有账号级持久频控（页面自身请求也被限），feed 稳定可用 → 明确给出回退建议
+      //
+      // ★ 2026-10-27 补：feed 失败时按账号候选数分流提示。
+      //   实测（dev 脚本，空 Cookie mock）：feed 在 Cookie 为空时返回 0 条，
+      //   此时页面停在首页（不跳登录页）、也无业务错误码 → 归为 parse_error。
+      //   原文案只说「若已登录仍无数据」，没覆盖「没登录/没绑定」的情形。
+      //
+      //   ⚠ 注意：pddCandidateCount === 0 这个分支**正常不可达** ——
+      //   selectAccount 在 candidates 为空时已提前返回 not_bound，走不到这里。
+      //   保留它是为了防御「运行间隙账号被删/状态变 invalid」的竞态，
+      //   以及让文案与真实条件保持对应。不要因为"测不到"就删掉。
+      // ★ 2026-11-04 修：同 selectAccount，必须走 credentialPlatform() 归一化，
+      //   否则统计恒为 0，兜底文案会说「没有可用账号」（与事实相反）。
+      const pddCandidateCount = store.listAccounts()
+        .filter(a => credentialPlatform(a.platform) === 'pdd' && a.status !== 'invalid').length
       const fallback = mode === 'feed'
-        ? '若已登录仍无数据，可能是平台接口调整，请把上面的接口清单反馈给用户。'
+        ? (pddCandidateCount === 0
+            ? '当前凭证库没有可用的拼多多（pdd）账号，而 feed 模式也需要登录态才能返回商品流。'
+              + '请到「账号连接」页面扫码登录一个拼多多买家号后重试。'
+              + '（注意：pdd_mms 商家后台账号与 pdd 买家态是两套独立登录态，不能互相替代。）'
+            : '该账号已绑定但 feed 仍未取到数据，可能是平台接口调整，请把上面的接口清单反馈给用户。')
         : '该账号的 search / goods 接口正处于平台频控中（页面自身请求也返回「系统繁忙」）。'
           + '请改用 mode=feed（首页推荐流，实测稳定可用）取商品数据，或等待平台解除限流后重试。'
+      // ★ 2026-10-27 修：40002 是「不可本地修复」的平台侧限流，且**重试无效**
+      //   （实测冷却 240s 零请求后仍空）。必须在文案里明确写出「不要重试」，
+      //   否则模型收到含义不明的失败会反复重试，反而加重风控。
+      const noRetry = throttled
+        ? '\n★ 不要重试当前 mode：40002 是接口级持久限流，重试无法解除，只会延长封禁。'
+        : ''
       return {
         ok: false,
         failureKind: throttled ? 'risk_control' : 'parse_error',
@@ -455,7 +687,7 @@ export async function pddCrawl(
             + `、isNoResultList=${ssrState.isNoResultList}、hasError=${ssrState.hasError}\n` : '')
           + (sourceUrls.length ? `已拦截接口：\n${sourceUrls.map(u => `  - ${u}`).join('\n')}` : '未拦截到任何 /proxy/api/ 接口。')
           + (throttled
-            ? '\n建议：' + fallback
+            ? '\n建议：' + fallback + noRetry
             : '\n建议：打开浏览器窗口确认是否出现滑块/安全验证，人工完成后重试；' + fallback),
       }
     }
@@ -491,9 +723,20 @@ export async function pddCrawl(
       text: `拼多多采集失败：${err instanceof Error ? err.message : String(err)}`,
     }
   } finally {
+    // ★ P2-13：账号锁与 Profile 锁都要释放（顺序无关，各自独立）
+    // ★ 2026-11-05：优先用闸门收尾（放锁 + 打印汇总）；降级路径才走手写释放
+    if (crawlGuard?.close) { try { await crawlGuard.close() } catch { /* ignore */ } }
+    if (accountLockHeartbeat) { try { clearInterval(accountLockHeartbeat) } catch { /* ignore */ } }
+    if (releaseAccountLock) { try { releaseAccountLock() } catch { /* ignore */ } }
     releaseProfile(dir)
     if (browser) {
       try { await browser.close() } catch { /* 忽略 */ }
+      // ★ 2026-10-27：close 后兜底杀孤儿 chrome + 删锁，避免残留占用 Profile
+      //   导致下次 launch 报指不到原因的 Failed to launch。
+      try {
+        const procClean = await import(toFileUrl(join(PLUGIN_ROOT_FOR_RISK, 'skills/_shared/pdd-proc-clean.mjs'))).catch(() => null)
+        procClean?.cleanProfileForLaunch?.(dir, { quiet: true })
+      } catch { /* ignore */ }
     }
   }
 }

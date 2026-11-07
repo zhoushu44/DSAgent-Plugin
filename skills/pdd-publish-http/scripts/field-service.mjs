@@ -105,58 +105,26 @@ export async function fillServiceCommitments(page, opts = {}) {
 
     // ② 勾选（点击 checkbox 或其 label）
     const clicked = await page.evaluate((mark) => {
-      // ★ 2026-11-02 完整修复：真实鼠标点击 + 用 data-checked 校验
-      //   原 bug 1：返回 {x,y} 但调用方当布尔用 → 永远走 cb.click()（JS click 无效）
-      //   原 bug 2：校验读 cb.checked —— beast-core 的 input 是隐藏的，永远是 false
-      //             → 已勾选也报「勾选失败」
       const cb = document.querySelector(`[data-svc-mark="${mark}"]`)
-      if (!cb) return { ok: false, err: 'no-input' }
+      if (!cb) return false
+      // 优先点 label（平台可能监听 label click）
+      const label = cb.closest('label')
+      if (label) { label.click(); return true }
+      cb.click()
+      return true
+    }, item.mark).catch(() => false)
 
-      // 找 wrapper（beast-core-checkbox 或 label），真实状态在 data-checked
-      const wrapper = cb.closest('[data-testid="beast-core-checkbox"]') || cb.closest('label')
-      const dataChecked = wrapper?.getAttribute('data-checked')
-
-      // 已勾选（含平台强制 disabled）→ 直接成功
-      if (dataChecked === '1') return { ok: true, already: true }
-
-      // 点 label（或 wrapper），用坐标返回给外层做真实鼠标点击
-      const target = wrapper || cb
-      target.scrollIntoView({ block: 'center' })
-      const r = target.getBoundingClientRect()
-      const x = Math.round(r.x + r.width / 2)
-      const y = Math.round(r.y + r.height / 2)
-      const top = document.elementFromPoint(x, y)
-      const reachable = !!top && (top === target || target.contains(top) || top.closest('label') === target)
-      return { ok: true, x, y, reachable, tag: target.tagName }
-    }, item.mark).catch(() => ({ ok: false, err: 'eval-fail' }))
-
-    if (!clicked?.ok) {
-      missed.push(`服务承诺「${item.text}」（${clicked?.err || '点击失败'}）`)
+    if (!clicked) {
+      missed.push(`服务承诺「${item.text}」（点击失败）`)
       detail.push({ ...item, ok: false })
       continue
     }
-    if (clicked.already) {
-      filled.push(`服务承诺=${item.text || '已勾选'}`)
-      log(`[service] 「${item.text}」已勾选`)
-      detail.push({ ...item, ok: true, skipped: true })
-      continue
-    }
+    await sleep(500)
 
-    // ★ 真实鼠标点击（JS click 对 beast-core 无效）
-    if (clicked.reachable === false) {
-      log(`[service] 「${item.text}」被遮挡，仍尝试点击`)
-    }
-    await page.mouse.click(clicked.x, clicked.y).catch(() => {})
-    await sleep(600)
-
-    // ③ 校验：用 data-checked（不是 cb.checked）
+    // ③ 校验
     const nowChecked = await page.evaluate((mark) => {
       const cb = document.querySelector(`[data-svc-mark="${mark}"]`)
-      if (!cb) return false
-      const wrapper = cb.closest('[data-testid="beast-core-checkbox"]') || cb.closest('label')
-      const dc = wrapper?.getAttribute('data-checked')
-      // 隐藏 input 的 checked 不可信，优先 data-checked
-      return dc === '1' || dc === 'true' || cb.checked === true
+      return cb ? cb.checked : false
     }, item.mark).catch(() => false)
 
     if (nowChecked) {

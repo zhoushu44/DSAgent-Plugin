@@ -11,8 +11,121 @@ metadata:
 
 # 拼多多 · 多多视频
 
+<!-- RISK-CHEATSHEET:START（由 dev/inject-risk-cheatsheet.mjs 注入，请勿手改） -->
+
+## ⚠ 风控速查（先读这里再排查）
+
+> 完整机制与历史踩坑记录在**知识库**，遇到风控问题**先查库**：
+> ```
+> dsagent_wiki_search(keyword="风控")                                     # 全部风控页
+> dsagent_wiki_search(path="平台/entities/拼多多风控机制与应对.md")        # 机制总览
+> dsagent_wiki_search(path="平台/entities/拼多多签名注入范围（Anti-Content vs crawlerInfo）.md") # 该不该带签名
+> ```
+
+### 错误码 → 处置
+
+| 错误码 | failureKind | 含义 | 正确处置 |
+|---|---|---|---|
+| `54001` | `risk_control` | 操作太过频繁（风控） | **可自愈**：清旧 token → 提新票 → 重放。失败则人工过一次滑块，通过后有 10 分钟通行证。**不要**重新登录 |
+| `40002` | `rate_limit` | 高频限流（**接口级**） | **不可本地修复**，重试无效、只会延长封禁。等待冷却，或降级（如 search → feed） |
+| `100001` | `rate_limit` | 活动写操作频控（请 2 小时后重试） | **不可本地修复**。等待 2 小时或换时间段 |
+| `43001` | `token_expired` | 会话过期（**不是风控**） | 重新扫码登录。注意凭证库快照可能是旧票，优先用浏览器当前 Cookie |
+| `40001` | `token_expired` | 未登录 | 重新扫码登录 |
+| `310120000` | `reload_required` | **页面上下文失效**（403 专用码） | 官方处置是 `window.location.reload()`：重开/刷新页面后重试。**不是登录失效，不要跳登录页** |
+| `40010` | `no_permission` | 无权限 | 可能是账号类型不对（需诚信通/实力商家），或换主店号 |
+| `2000000` | `no_permission` | 账号不适合发布 | 权限问题，换号或到后台查违规记录 |
+| `48143` | `api_error` | 非法请求 | 该接口依赖页面 SDK 的请求上下文，需让页面自己发请求（DOM 触发） |
+| `3000000` | `api_error` | 参数错误或灰度未开放 | 检查入参（日期/页码/queryType 等） |
+| HTTP `430` | `rate_limit` | 网关级频率惩罚（Cookie 有效） | 等 15~30s 重试。**不要**误判成 session_expired |
+| `detached Frame` / `Target closed` | `risk_control` | 平台主动关掉页面 | 等 3~5 分钟再试，别连续重试 |
+
+### 四条铁律
+
+1. **不要把 54001 当 token_expired** —— 前者需要过一次滑块，后者才需要重新登录。误判会让用户反复登录，每次登录还刷新一次风控基线。
+2. **不要重试 40002** —— 它是接口级持久限流，实测冷却 240s 零请求后仍空。
+3. **不要在冷却期内连续调用** —— 拼多多按「累计行为分数」延长封禁，越打越久。
+4. **分清两个签名条件，别合并** —— 平台有两套独立判断：**域名正则**（mms/ims/... 命中就带 `header Anti-Content`）+ **162 条路径白名单**（命中才在 body 里塞 `crawlerInfo`）。只要域名是 `mms.pinduoduo.com`，**头就必须带**；把「不在 162 名单」当成「不用签名」会稳定打出 54001（我已真机踩过）。判据统一用 `_shared/pdd-sign-scope.mjs` 的 `signPlan(url)`。
+
+### 其他已知坑
+
+- **两个登录态不通用**：`pdd`（H5 买家态，`.yangkeduo.com`）与 `pdd_mms`（商家后台态，`mms.pinduoduo.com`）是两套独立账号，各跑一套风控评分。
+- **`Failed to launch the browser process!`** 大概率是 Profile 被孤儿 Chrome 占用（SingletonLock 残留），不是 Chrome 坏了。清理：`~/.dsh/pdd-account-locks` 无关，要杀占用该 Profile 的 chrome 进程 + 删 `SingletonLock`。
+- **账号级并发**：两个任务同时打同一个号会显著提高被封概率，`_shared/pdd-risk.mjs` 的账号锁会拦住，看到「正被其他任务占用」就等等。
+- **签名兜底字面量**：平台自己的兜底值是 `"getRisckInfoError"`（注意 `Risck` 是平台拼写）。带它发请求 = 自报「我拿不到环境指纹」，比不带更可疑。
+
+<!-- RISK-CHEATSHEET:END -->
+
+<!-- PITFALLS:START（由 dev/inject-skill-sections.mjs 注入） -->
+
+## 错误处理
+
+| 场景 | failureKind | 引导动作 |
+|------|-------------|---------|
+| 未绑定拼多多商家后台账号 | `not_bound` | 引导到「账号连接」添加账号 |
+| 登录态失效（跳登录页**且**无滑块遮罩、无业务错误码） | `token_expired` | 引导重新扫码登录 |
+| 被风控打到登录页（跳登录页**但**有滑块遮罩或业务错误码） | `risk_control` | ★ **不要引导重新登录**（只会刷新风控基线）。引导人工过滑块，完成后重试 |
+| `54001` 操作太过频繁 | `risk_control` | 可自愈（清 token→提新票→重放）；失败则人工过一次滑块，之后 10 分钟有通行证 |
+| `40002` 高频限流 | `rate_limit` | ★ **重试无效**（接口级持久限流），只会延长封禁。等待冷却或降级 |
+| HTTP `430` 网关级频率惩罚 | `rate_limit` | 等 15~30s 重试，**不要**误判成 session_expired |
+| 页面被关闭 / `detached Frame` | `risk_control` | 平台主动关页面 = 临时风控。等 3~5 分钟再试，别连续重试 |
+| 账号正被其他任务占用 | `rate_limit` | 账号锁生效中，等待当前任务结束 |
+| `Failed to launch the browser process!` | `api_error` | 大概率是 Profile 被孤儿 Chrome 占用（SingletonLock 残留），不是 Chrome 坏了。杀占用该 Profile 的 chrome 进程后重试 |
+| L2 写操作未带 `--confirm` | `needConfirm` | 这是预览门禁，把 text 给用户看并征得同意后带 `--confirm` 重试 |
+
+> 完整机制与历史踩坑记录在知识库：`dsagent_wiki_search(keyword="风控")`
+
+<!-- PITFALLS:END -->
+
+<!-- PRECONDITIONS:START（由 dev/inject-skill-sections.mjs 注入） -->
+
+## 前置条件
+
+- **账号已绑定**：「账号连接」页已绑定**拼多多商家后台**（`live.pinduoduo.com` 走 mms SSO）。
+- **登录态有效**：失效时返回 `token_expired`。
+- **上传/删除是 L2 写操作**：必须两步走——先不带 `--confirm` 拿预览给用户看，**明确同意后**才带 `--confirm` 执行。
+- **视频文件要求**：本地绝对路径，`.mp4/.wmv/.mov/.avi/.m4v`，单文件 ≤500MB。
+- **Chrome 可用**（签名与上传需要页面环境）。
+
+<!-- PRECONDITIONS:END -->
+
+
+
+
 > 入口 `live.pinduoduo.com/n-creator/video/home?from=mms`（**独立域**，mms 扫码后 SSO 自动打通）。
 > 写模式（upload/delete）是**不可撤销的真实操作（L2）**：先给预览，用户明确同意后才执行。
+
+## 工作流
+
+### W1：查询类（只读，无副作用）
+
+```
+① 确认模式：list（我的视频）/ detail（单个视频数据）/ data（带货数据）
+   / anchor（主播信息）/ qualify（发布资格）/ topics（话题列表）
+② 调 node scripts/video.mjs --mode <模式> [--limit N]
+③ 把 text 原样转述用户；明细类可让用户指定某条再看 detail
+```
+
+### W2：上传视频（L2 写，两步走）
+
+```
+① 第一步：不带 --confirm 拿「发布预览」给用户看
+   node scripts/video.mjs --mode upload --file <本地视频绝对路径>
+        [--title 标题] [--desc 描述] [--cover 封面] [--goods-id 带货商品ID]
+② 用户明确同意后，第二步才带 --confirm 真正上传
+   node scripts/video.mjs --mode upload --file ... --confirm true
+③ 报告结果：ok=true → 已上传；平台可能要求审核（正常）
+```
+
+### W3：删除视频（L2 写，两步走）
+
+```
+① 先 list 拿到 video_id，确认要删哪条
+② 不带 --confirm 拿预览 → 给用户确认 → 带 --confirm 执行
+③ ★ 删除不可撤销，务必让用户明确知道删的是哪条
+```
+
+**★ 风控要点**：`live.pinduoduo.com` 是独立域（与 mms 后台 SSO 打通但 Cookie 域不同）。
+上传前若页面被关掉（detached Frame），等 3~5 分钟再试，别连续重试。
 
 ## 何时使用
 
