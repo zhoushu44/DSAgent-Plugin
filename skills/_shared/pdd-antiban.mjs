@@ -51,14 +51,104 @@ export const ERR = {
   HIGH_FREQUENCY: 40002,
 }
 
-/** 默认节流参数（实测值） */
+/**
+ * 默认节流参数
+ *
+ * ══════════════════════════════════════════════════════════════════
+ * ★ 2026-11-07 实测校准（重要）
+ * ══════════════════════════════════════════════════════════════════
+ *
+ * 实测（pdd_pure_test/ratelimit-probe.mjs）：
+ *   A. 轻接口 common/query/status，间隔 1s × 20 次   → 20/20 全过
+ *   B. 重接口 glide/goodsList，  间隔 2s × 12 次   → 12/12 全过
+ *   C. 重接口 glide/goodsList，  **零间隔** × 30 次 → 30/30 全过 ✅
+ *   D. 读接口 1s × 3 次                            → 3/3 全过
+ *
+ * 结论：**只读接口没有速率限制**，零间隔连打 30 次也不限。
+ *
+ * 那 54001「操作太过频繁」从哪来？
+ *   → 只在「短时间内打大量**不同**接口」时出现（扫描式探测特征）
+ *   → 正常业务反复读同一批接口，不会触发
+ *
+ * ══════════════════════════════════════════════════════════════════
+ * 旧配置 baseGapMs=4000 是**过度保守**的
+ * ══════════════════════════════════════════════════════════════════
+ *   旧：每次间隔 4~6 秒 → 读 100 个商品 400~600 秒
+ *   新：读接口 150ms     → 读 100 个商品约 15 秒（快 30 倍）
+ *
+ * 但**写操作**仍需保守（平台对写有独立频控，写错代价高）。
+ *
+ * ══════════════════════════════════════════════════════════════════
+ * 关键新增：扫描检测
+ * ══════════════════════════════════════════════════════════════════
+ * 真正触发限流的是「单位时间内访问**不同接口**的数量」。
+ *   60 秒内访问 > 12 个不同接口 → 判定扫描，主动冷却 90 秒。
+ *
+ * 正常业务：一个 skill 反复读 2~5 个接口 → 永不触发
+ * 接口探测：一分钟打 20 个 → 触发，正是平台想拦的
+ */
 export const THROTTLE = {
-  baseGapMs: 4000,        // 基础间隔 4s
-  jitterMs: 2000,         // 随机抖动 0~2s
-  perEndpointGapMs: 1800, // 同接口最小间隔（官方 SDK 最常用值）
-  cooldownAfterRiskMs: 60 * 1000,      // 命中风控后 60s 冷却
-  cooldownAfterFreqMs: 240 * 1000,     // 40002 后 240s（官方实测）
-  cooldownLongMs: 2 * 60 * 60 * 1000,  // 今日 ≥3 次风控 → 2 小时
+  // ── 只读接口 ──
+  readGapMs: 150,
+  readJitterMs: 100,
+
+  // ── 写接口 ──
+  writeGapMs: 3000,
+  writeJitterMs: 2000,
+
+  // ── 域级额外间隔（2026-11-08 实测：推广域比商品域严格得多）──
+  //   商品域：零间隔 30 次全过
+  //   推广域：连续几次就 54001，且恢复慢
+  domainGapMs: {
+    yingxiao: 15000,     // 推广域 15 秒/次
+    live: 5000,          // 视频域 5 秒/次
+    mms: 0,              // 商品域不加额外间隔
+  },
+
+  // ── 扫描检测（真正的限流诱因）──
+  scanWindowMs: 60 * 1000,
+  scanDistinctLimit: 12,
+  scanCooldownMs: 90 * 1000,
+
+  // ── 兼容旧字段（其他模块仍在引用）──
+  baseGapMs: 4000,         // @deprecated → readGapMs / writeGapMs
+  jitterMs: 2000,          // @deprecated
+  perEndpointGapMs: 1800,  // @deprecated
+  cooldownAfterRiskMs: 60 * 1000,
+  cooldownAfterFreqMs: 240 * 1000,
+  cooldownLongMs: 2 * 60 * 60 * 1000,
+}
+
+/**
+ * 判断接口是读还是写
+ * @param {string} pathOrUrl
+ * @returns {'read'|'write'}
+ */
+export function classifyEndpoint(pathOrUrl) {
+  const u = String(pathOrUrl || '').toLowerCase()
+
+  // ★ 例外优先：这些路径含 "add/edit" 等词但其实是**只读查询**
+  //   glide/addProperties/goodsList  = 商品属性列表（读）
+  //   glide/addProperties/goods/count = 商品属性计数（读）
+  if (/addproperties\/goods(\/count|list)?$/.test(u)) return 'read'
+  if (/\/gray\/status/.test(u)) return 'read'
+  if (/\/common\/query\//.test(u)) return 'read'
+
+  // 明确的写操作
+  if (/\/(onsale|offsale|batchonsale|batchoffsale|batchincrease|batchdecrease|edit|commit|create|delete|update|submit|save|modify|publish|enroll|cancel|apply|setquantity|updatestock)/.test(u)) return 'write'
+
+  // 查询类
+  if (/\/(query|list|get|detail|count|status|search|is_exist|info|statistics|report|statics|effect|home)/.test(u)) return 'read'
+
+  return 'write'   // 默认保守
+}
+
+/** 按 URL 判断所属域 */
+export function detectDomainOf(pathOrUrl) {
+  const u = String(pathOrUrl || '')
+  if (/yingxiao\.pinduoduo\.com|^\/mms-gateway\//.test(u)) return 'yingxiao'
+  if (/live\.pinduoduo\.com|^\/api\/backbone\//.test(u) || /^\/mms\/amco\//.test(u) || /^\/kiwi\//.test(u)) return 'live'
+  return 'mms'
 }
 
 /** 账号健康分规则 */
@@ -88,11 +178,19 @@ function today() { return new Date().toISOString().slice(0, 10) }
 /**
  * ★ 时间槽预留（同步占位，防并发穿透）
  *
+ * ★ 2026-11-07 重写：区分读/写 + 扫描检测
+ *
+ * 规则：
+ *   读接口 → 150ms 间隔（实测可零间隔，只留余量）
+ *   写接口 → 3000ms 间隔（保守）
+ *   扫描检测 → 60s 内不同接口 > 12 个 → 冷却 90s
+ *
  * @param {string} shopKey
- * @param {string} endpoint 接口路径（用于 per-endpoint 节流）
- * @returns {Promise<{ waitMs: number, allowedAt: number }>}
+ * @param {string} endpoint 接口路径
+ * @param {object} [opts] { kind?: 'read'|'write' } 不传则自动判断
+ * @returns {Promise<{ waitMs:number, allowedAt:number, cooling:boolean, reason?:string, kind:string }>}
  */
-export async function reserveSlot(shopKey, endpoint = '') {
+export async function reserveSlot(shopKey, endpoint = '', opts = {}) {
   const state = readState()
   const now = Date.now()
 
@@ -101,18 +199,50 @@ export async function reserveSlot(shopKey, endpoint = '') {
 
   // ① 检查冷却
   if (acct.cooldownUntil && now < acct.cooldownUntil) {
-    return { waitMs: acct.cooldownUntil - now, allowedAt: acct.cooldownUntil, cooling: true, reason: acct.cooldownReason || '风控冷却' }
+    return {
+      waitMs: acct.cooldownUntil - now, allowedAt: acct.cooldownUntil,
+      cooling: true, reason: acct.cooldownReason || '风控冷却',
+      kind: opts.kind || 'read',
+    }
   }
 
-  // ② 账号级时间槽
-  const gap = THROTTLE.baseGapMs + Math.floor(Math.random() * THROTTLE.jitterMs)
-  const acctNext = Math.max(now, acct.nextAllowedAt || 0)
-  const acctAllowedAt = acctNext
+  // ② 判定读/写
+  const kind = opts.kind || classifyEndpoint(endpoint)
 
-  // ③ 接口级时间槽
+  // ③ 扫描检测：窗口内不同接口数
+  acct.scan = acct.scan || { windowStart: now, seen: [] }
+  if (now - (acct.scan.windowStart || 0) > THROTTLE.scanWindowMs) {
+    acct.scan = { windowStart: now, seen: [] }
+  }
+  if (endpoint && !acct.scan.seen.includes(endpoint)) {
+    acct.scan.seen.push(endpoint)
+    if (acct.scan.seen.length > THROTTLE.scanDistinctLimit) {
+      // 判定为扫描式探测 → 主动冷却
+      acct.cooldownUntil = now + THROTTLE.scanCooldownMs
+      acct.cooldownReason = `扫描检测：${THROTTLE.scanWindowMs / 1000}s 内访问了 ${acct.scan.seen.length} 个不同接口`
+      acct.scan = { windowStart: now, seen: [] }
+      state[shopKey] = acct
+      writeState(state)
+      return {
+        waitMs: THROTTLE.scanCooldownMs, allowedAt: acct.cooldownUntil,
+        cooling: true, reason: acct.cooldownReason, kind,
+      }
+    }
+  }
+
+  // ④ 账号级时间槽（读/写间隔 + 域级额外间隔）
+  const dom = detectDomainOf(endpoint)
+  const domainExtra = THROTTLE.domainGapMs?.[dom] || 0
+  const baseGap = (kind === 'write' ? THROTTLE.writeGapMs : THROTTLE.readGapMs) + domainExtra
+  const jitter = kind === 'write' ? THROTTLE.writeJitterMs : THROTTLE.readJitterMs
+  const gap = baseGap + Math.floor(Math.random() * jitter)
+  const acctAllowedAt = Math.max(now, acct.nextAllowedAt || 0)
+
+  // ⑤ 接口级时间槽（同接口连续调用，读接口几乎不需等待）
   acct.endpoints = acct.endpoints || {}
   const ep = acct.endpoints[endpoint] || 0
-  const epAllowedAt = Math.max(now, ep + THROTTLE.perEndpointGapMs)
+  const epGap = kind === 'write' ? THROTTLE.writeGapMs : THROTTLE.readGapMs
+  const epAllowedAt = Math.max(now, ep + epGap)
 
   const allowedAt = Math.max(acctAllowedAt, epAllowedAt)
   const waitMs = Math.max(0, allowedAt - now)
@@ -124,7 +254,7 @@ export async function reserveSlot(shopKey, endpoint = '') {
   state[shopKey] = acct
   writeState(state)
 
-  return { waitMs, allowedAt, cooling: false }
+  return { waitMs, allowedAt, cooling: false, kind }
 }
 
 /**
@@ -154,23 +284,33 @@ export function recordResult(shopKey, kind, detail = {}) {
     acct.stats.captcha++
     acct.captchaCount = (acct.captchaCount || 0) + 1
     acct.health = Math.max(0, acct.health + HEALTH.captchaHit)
-    acct.cooldownUntil = now + THROTTLE.cooldownAfterRiskMs
-    acct.cooldownReason = `54001 风控（今日第 ${acct.captchaCount} 次）`
-    // ★ 2026-10-27 修（第三十轮量化测量发现）：原为「今日 ≥3 次 → 硬跳 2 小时」，
-    //   与 pdd-risk.mjs 的「24h 内指数退避 ×1/×2/×4/×8」**策略不一致**。
-    //   两套规则并存时谁后写谁生效 → 冷却时长不可预测，
-    //   这是第 1 轮「四套错误码矛盾」的残留。
+
+    // ★ 2026-11-07：区分「限流型 54001」和「真风控型 54001」
     //
-    //   统一为**指数退避**（与 pdd-risk.mjs 一致，pdd-risk 是实际生效的那套）：
-    //     第 1 次 ×1 = 60s，第 2 次 ×2 = 120s，第 3 次 ×4 = 240s，第 4 次起 ×8 = 480s
-    //   比硬跳 2 小时更平滑（一次误判不会冻结账号半天），且仍随累计次数加严。
-    //   保留 dailyCaptchaThreshold 常量供健康分/告警判断用，不再用于硬跳时长。
-    const mult = Math.min(8, Math.pow(2, acct.captchaCount - 1))
-    acct.cooldownUntil = now + THROTTLE.cooldownAfterRiskMs * mult
-    acct.cooldownReason = `54001 风控（今日第 ${acct.captchaCount} 次，退避 ×${mult}）`
-    if (acct.captchaCount >= HEALTH.dailyCaptchaThreshold) {
-      // 仅作告警标记，不再改冷却时长（时长已由退避倍数决定）
-      acct.heavyRiskToday = true
+    // 实测发现 54001 有两种完全不同的语义：
+    //   ① error_msg 含「频繁 / 稍后」→ 只是限流，等 60~90 秒即可恢复，不是风控
+    //   ② 其它（含 verifyAuthToken、滑块）→ 真风控，需要更长的退避
+    //
+    // 旧逻辑一刀切按风控处理 → 一次正常限流就冷却 60s，
+    // 当天第 3 次 → 480s（8 分钟），账号被自己锁死。
+    const msg = String(detail?.errorMsg || detail?.msg || '')
+    const isThrottleOnly = /频繁|稍后|太快|slow down/i.test(msg)
+      && !detail?.verifyAuthToken
+
+    if (isThrottleOnly) {
+      // 限流：轻量冷却，不累计风控计数
+      acct.captchaCount = Math.max(0, (acct.captchaCount || 1) - 1)
+      acct.stats.rateLimit = (acct.stats.rateLimit || 0) + 1
+      acct.cooldownUntil = now + THROTTLE.scanCooldownMs
+      acct.cooldownReason = `54001 限流（操作频繁），冷却 ${THROTTLE.scanCooldownMs / 1000}s`
+    } else {
+      // 真风控：指数退避（与原逻辑一致）
+      const mult = Math.min(8, Math.pow(2, acct.captchaCount - 1))
+      acct.cooldownUntil = now + THROTTLE.cooldownAfterRiskMs * mult
+      acct.cooldownReason = `54001 风控（今日第 ${acct.captchaCount} 次，退避 ×${mult}）`
+      if (acct.captchaCount >= HEALTH.dailyCaptchaThreshold) {
+        acct.heavyRiskToday = true
+      }
     }
   } else if (kind === 'session') {
     acct.stats.session++

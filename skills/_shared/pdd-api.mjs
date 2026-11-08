@@ -57,6 +57,11 @@ const load = (f) => import(pathToFileURL(path.join(HERE, f)).href)
  */
 export const API = {
   /* ── 商品（vodka / glide）────────────────────────────────── */
+  // ★ 2026-11-07 纯 Node 实测可用（10 个）：
+  //   goods.listGlide / goods.skuInfo / goods.batchOnSale / goods.count
+  //   goods.copyedExist / goods.newStyleGray / common.status
+  //   shop.info(earth) / shop.flow(sydney) / chance.home(opportunity-goods)
+  // ⚠️ goods.list(mall/goodsList) 对当前账号被单接口限制，用 listGlide 替代
   'goods.list': { path: '/vodka/v2/mms/query/display/mall/goodsList', method: 'POST', note: '商品列表', lastSeen: '20261101' },
   // ★ 2026-11-07：glide 商品列表（实测纯 Node 0as 可通，返回 total=14）
   //   与 goods.list 是两套接口：goods.list 走 vodka 分页查询，这个走 glide 商品属性域
@@ -246,44 +251,60 @@ export async function api(page, name, body = {}, opts = {}) {
   let anti = ''
   let vtk = ''
 
-  // ★ 2026-11-07：纯 Node 通道（不传 page，只传 account）
-  //   /vodka/ /glide/ 可以用 jsdom 跑 react_anti SDK 生成 0as，无需浏览器。
-  //   实测：签名 9ms，请求 120~330ms（浏览器通道 28000ms）。
-  const pureNode = !page && opts.account
-  if (pureNode && plan.headerAnti) {
-    const vs = await load('pdd-vodka-signer.mjs')
-    anti = await vs.sign({
-      cookies: opts.account.cookies || {},
-      localStorage: opts.account.localStorage || {},
-    })
-    if (!anti || !anti.startsWith('0as')) {
-      return { ok: false, ec: 'sign_failed', failureKind: 'auth', data: null, raw: null, status: 0,
-        hint: `纯 Node 签名生成失败（得到 ${anti ? anti.slice(0, 6) : '空'}）` }
+  // ══════════════════════════════════════════════════════════════════
+  // ★ 2026-11-07：Node 优先，浏览器兜底
+  // ══════════════════════════════════════════════════════════════════
+  //   有 account（含 cookies + seed）→ 先走纯 Node
+  //   纯 Node 失败（54001/签名无效）→ 自动降级到浏览器（如果 page 可用）
+  //
+  //   性能：纯 Node 120~330ms，浏览器 28000ms
+  //   适用：/vodka/ /glide/ 已实测稳定；推广域不稳定，会自动降级
+  const canPureNode = !!opts.account?.cookies && plan.headerAnti
+  const hasBrowser = !!page
+  let pureNode = canPureNode
+  let nodeFailReason = ''
+
+  if (pureNode) {
+    try {
+      const vs = await load('pdd-vodka-signer.mjs')
+      const seed = opts.account.localStorage || (await load('pdd-seed-store.mjs')).readSeed(opts.shopKey || '')?.localStorage || {}
+      anti = await vs.sign({
+        cookies: opts.account.cookies || {},
+        localStorage: seed,
+      })
+      if (!anti || !anti.startsWith('0as')) {
+        nodeFailReason = `签名生成异常（${anti ? anti.slice(0, 6) : '空'}）`
+        pureNode = false
+      }
+    } catch (e) {
+      nodeFailReason = `签名器异常：${String(e.message).slice(0, 60)}`
+      pureNode = false
     }
-  } else if (!pureNode && plan.headerAnti) {
+  } else if (plan.headerAnti) {
     anti = await getAntiContent(page, origin)
   }
 
   // VerifyAuthToken 只在浏览器通道可用（需要页面 cookie 操作）
   if (!pureNode && opts.shopKey) {
-    vtk = await getVerifyAuthToken(page, opts.shopKey)
+    try { vtk = await getVerifyAuthToken(page, opts.shopKey) } catch { /* ignore */ }
   }
 
   // ③ 组装 body（crawlerInfo 由 plan.bodyCrawlerInfo 决定，不是无脑加）
   const finalBody = (plan.bodyCrawlerInfo && anti) ? { ...body, crawlerInfo: anti } : body
 
-  // ④ 发请求
-  //   纯 Node 通道 → 直接 fetch（自己带 Cookie）
-  //   浏览器通道   → page.evaluate（自动带 Cookie + 同源）
-  const res = pureNode
-    ? await (async () => {
+  // ④ 发请求（Node 优先，失败自动降级浏览器）
+  let res
+  let usedChannel = 'browser'
+
+  if (pureNode) {
+    usedChannel = 'node'
+    res = await (async () => {
       const cookieStr = Object.entries(opts.account.cookies || {})
         .map(([k, v]) => `${k}=${v}`).join('; ')
       const hd = buildHeaders(anti, vtk, plan, opts.extraHeaders)
-      // Node fetch 需要小写化 + 补 Origin/Referer/UA
       const headers = {}
       for (const [k, v] of Object.entries(hd)) headers[k.toLowerCase()] = v
-      headers['origin'] = 'https://mms.pinduoduo.com'
+      headers['origin'] = origin
       headers['referer'] = opts.account.referer || 'https://mms.pinduoduo.com/goods/goods_list'
       headers['user-agent'] = opts.account.userAgent ||
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36'
@@ -303,7 +324,34 @@ export async function api(page, name, body = {}, opts = {}) {
         return { status: 0, json: null, err: String(e).slice(0, 120) }
       }
     })()
-    : await page.evaluate(async (u, m, hd, bd) => {
+
+    // ★ 降级判断：Node 通道返回 54001（签名不被接受）且浏览器可用 → 切浏览器重试
+    const nodeEc = Number(res.json?.error_code ?? res.json?.errorCode ?? 0)
+    const nodeOk = res.json?.success === true || nodeEc === 1000000
+    const nodeRisk = nodeEc === 54001 || nodeEc === 54003
+    if (!nodeOk && nodeRisk && hasBrowser) {
+      nodeFailReason = `Node 签名被拒（ec=${nodeEc}），降级浏览器`
+      usedChannel = 'browser'
+      anti = await getAntiContent(page, origin)
+      if (opts.shopKey) { try { vtk = await getVerifyAuthToken(page, opts.shopKey) } catch { } }
+      const fbBody = (plan.bodyCrawlerInfo && anti) ? { ...body, crawlerInfo: anti } : body
+      res = await page.evaluate(async (u, m, hd, bd) => {
+        try {
+          const resp = await fetch(u, {
+            method: m, credentials: 'include', headers: hd,
+            ...(m === 'GET' ? {} : { body: JSON.stringify(bd || {}) }),
+          })
+          const text = await resp.text()
+          let json = null
+          try { json = JSON.parse(text) } catch { /* 非 JSON */ }
+          return { status: resp.status, json, text: text.slice(0, 500) }
+        } catch (e) {
+          return { status: 0, json: null, err: String(e).slice(0, 120) }
+        }
+      }, url, spec.method, buildHeaders(anti, vtk, plan, opts.extraHeaders), fbBody)
+    }
+  } else {
+    res = await page.evaluate(async (u, m, hd, bd) => {
       try {
         const resp = await fetch(u, {
           method: m,
@@ -319,6 +367,7 @@ export async function api(page, name, body = {}, opts = {}) {
         return { status: 0, json: null, err: String(e).slice(0, 120) }
       }
     }, url, spec.method, buildHeaders(anti, vtk, plan, opts.extraHeaders), finalBody)
+  }
 
   // ⑤ 错误归因（统一口径）
   const { normalize } = await loadErr()
@@ -337,6 +386,8 @@ export async function api(page, name, body = {}, opts = {}) {
     ok: success,
     ec: success ? null : ec,
     suggestedTier,
+    channel: usedChannel,          // 'node' | 'browser' —— 排查用
+    nodeFallback: nodeFailReason,  // Node 失败原因（成功则为空）
     status: res.status,
     failureKind: success ? '' : n.failureKind,
     data: success ? unwrap(res.json, opts.raw) : null,

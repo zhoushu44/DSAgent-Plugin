@@ -100,6 +100,18 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
     console.error(`[pdd-video] 多个账号可用，默认取 ${SHOP}；可用 --account 指定：\n` + mmsAccs.map(a => `  ${a.shop_key}  ${a.display_label || ''}`).join('\n'))
   }
 
+  // ★ 2026-11-07：构造统一账号对象（供 pdd-request 走 Node 通道）
+  //   有种子时 Node 优先，失败自动降级浏览器；无种子则纯浏览器。
+  let ACC = null
+  try {
+    const accRec = store.listAccounts().find(a => String(a.shop_key) === String(SHOP))
+    if (accRec?.cookies) {
+      const seedStore = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-seed-store.mjs')).href)
+      const seed = seedStore.readSeed(SHOP)
+      ACC = { cookies: accRec.cookies, localStorage: seed?.localStorage || {} }
+    }
+  } catch { /* 无种子也能跑（走浏览器） */ }
+
   // ★ 2026-11-04 迁移到统一风控闸门（pdd-guard）
   //   原实现只有账号锁，**入口没有冷却检查**（只在出错后的提示里读一次冷却剩余时间），
   //   所以账号已经在 54001/40002 冷却中时，仍会照常启动浏览器、打开页面、
@@ -232,38 +244,42 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
     const spec = PDD_API[hit]
     return spec ? spec.path : p
   }
+  /**
+   * ★ 2026-11-07：改走基座统一入口 pdd-request.mjs
+   *
+   * 好处：
+   *   · 自动识别域（live / yingxiao / mms）
+   *   · 有 account 时先试纯 Node，失败自动降级浏览器
+   *   · 签名位置（header/body）由基座决定，skill 不再关心
+   *
+   * 视频域目前没有 Node 方案（需 VerifyAuthToken），会自动走浏览器。
+   * 代码已统一，将来打通 Node 时无需改这里。
+   */
   const api = async (p, bd, opts = {}) => {
     p = resolvePath(p)
-    const pre = await guard.beforeCall('https://live.pinduoduo.com' + p)
-    if (!pre.allow) throw Object.assign(new Error(`账号不可用：${pre.reason}`), { __blocked: true })
-    // ★ 2026-11-06：部分接口（如 backbone/video/publish）页面发请求时**不带 VerifyAuthToken**，
-    //   带上反而被判定为异常请求 → 2000000。用 opts.noVtk 关闭。
-    const vtk = opts.noVtk ? null : await getVerifyAuthToken(page, SHOP)
-    return page.evaluate(async (p2, b2, vt) => {
-      try {
-        const resp = await fetch('https://live.pinduoduo.com' + p2, {
-          method: 'POST', credentials: 'include',
-          headers: { 'Content-Type': 'application/json', ...(vt ? { VerifyAuthToken: vt } : {}) },
-          body: JSON.stringify(b2 || {}),
-        })
-        return { status: resp.status, json: await resp.json().catch(() => null) }
-      } catch (e) { return { status: 0, json: null, err: String(e).slice(0, 100) } }
-    }, p, bd || {}, vtk)
+    const { request } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-request.mjs')).href)
+    const r = await request(p, bd || {}, {
+      page,
+      account: ACC,        // 有种子时会先试 Node
+      shopKey: SHOP,
+      guard,
+      domain: 'live',
+    })
+    return { status: r.status, json: r.raw }
   }
   /** 统一 GET */
   const apiGet = async (p) => {
     p = resolvePath(p)
-    const pre = await guard.beforeCall('https://live.pinduoduo.com' + p)
-    if (!pre.allow) throw Object.assign(new Error(`账号不可用：${pre.reason}`), { __blocked: true })
-    const vtk = await getVerifyAuthToken(page, SHOP)
-    return page.evaluate(async (p2, vt) => {
-      try {
-        const resp = await fetch('https://live.pinduoduo.com' + p2, {
-          credentials: 'include', ...(vt ? { headers: { VerifyAuthToken: vt } } : {}),
-        })
-        return { status: resp.status, json: await resp.json().catch(() => null) }
-      } catch (e) { return { status: 0, json: null, err: String(e).slice(0, 100) } }
-    }, p, vtk)
+    const { request } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-request.mjs')).href)
+    const r = await request(p, {}, {
+      page,
+      account: ACC,
+      shopKey: SHOP,
+      guard,
+      domain: 'live',
+      method: 'GET',
+    })
+    return { status: r.status, json: r.raw }
   }
   /** 取待发布队列 */
   const getQueue = async () => {

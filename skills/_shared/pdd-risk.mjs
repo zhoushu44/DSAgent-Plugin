@@ -82,6 +82,34 @@ const HERE = path.dirname(fileURLToPath(import.meta.url))
  *     （见 markCooldown 的 hits 逻辑）——与 pdd-error.mjs 的语义一致：
  *     54001 是「可自愈、失败要人工」，不是「直接长封」。
  */
+/**
+ * ★ 限流型 54001 —— 与真风控 54001 分开处理（2026-11-07 实测新增）
+ *
+ * 实测（pdd_pure_test/ratelimit-probe.mjs）：
+ *   · 只读接口零间隔连打 30 次 → 30/30 全过，**无速率限制**
+ *   · 54001 的两种语义：
+ *       ① error_msg 含「频繁/稍后」→ 只是限流，等 60~90 秒即恢复
+ *       ② 带 verifyAuthToken / 要滑块 → 真风控，需要长退避
+ *
+ * 旧逻辑把 ① 也当 ② 处理：
+ *   一次正常限流 → 60s；当天第 3 次 → 240s；第 4 次起 → 480s
+ *   → 账号被自己的冷却逻辑锁死。
+ *
+ * 现在：限流型只冷却 THROTTLE.scanCooldownMs（90s），且**不计入 24h 命中次数**，
+ *       不触发指数退避。
+ */
+export function isThrottleOnly(json) {
+  if (!json || typeof json !== 'object') return false
+  const code = json.error_code ?? json.errorCode
+  if (Number(code) !== 54001) return false
+  const msg = String(json.error_msg ?? json.errorMsg ?? '')
+  const hasVtk = !!(json.result?.verifyAuthToken || json.verifyAuthToken)
+  return /频繁|稍后|太快|slow down/i.test(msg) && !hasVtk
+}
+
+/** 限流型冷却时长（毫秒），与 pdd-antiban.THROTTLE.scanCooldownMs 对齐 */
+const THROTTLE_ONLY_COOLDOWN_MS = 90 * 1000
+
 const RISK_CODES = {
   54001: 60 * 1000,
   // ★ 2026-11-05 新增：54003 = 安全验证未通过、暂时无法登录。
@@ -89,7 +117,7 @@ const RISK_CODES = {
   //   故基础时长直接给 24h，且不进指数退避（退避是给可恢复的频控用的）。
   //   ⚠️ 如果不加进这张表，markCooldown 会在 `if (!base) return` 处静默返回，
   //     冷却写不进去 —— 这与历史上「40002 不在 RISK_CODES 被吞掉」是同一个坑。
-  54003: 24 * 60 * 60 * 1000,           // 操作太过频繁 → 60s（对齐 pdd-antiban；当日累计≥3次仍升级）
+  54003: 24 * 60 * 60 * 1000,
   40002: 240 * 1000,          // 高频限流 → 240s（官方实测此码无法本地修复，只能降级或等待）
   100001: 2 * 60 * 60 * 1000, // 当前请求频繁，请2小时后重试 → 2 小时
   2000000: 30 * 60 * 1000,    // 网络繁忙，请不要频繁操作 → 30 分钟
@@ -155,22 +183,41 @@ export function markCooldown(shopKey, code, extraReason) {
   const cd = readCooldown()
   const now = Date.now()
   const prev = cd[shopKey]
+
+  // ★ 2026-11-07：限流型 54001 走「轻冷却」，不计入 24h 命中次数
+  //   判据：reason 里带「限流」或「频繁」且没有「风控」字样
+  const reasonStr = String(extraReason || '')
+  const throttleOnly = Number(code) === 54001
+    && /频繁|稍后|限流/.test(reasonStr)
+    && !/风控|滑块|verifyAuthToken/i.test(reasonStr)
+
   // 统计 24h 内累计命中次数（hitCount + 历史 hits）
   const hits = (prev?.hits || []).filter(t => now - t < 24 * 3600 * 1000)
-  hits.push(now)
-  const mult = backoffMultiplier(hits.length)
-  const ms = Math.min(base * mult, 24 * 3600 * 1000)   // 封顶 24 小时
+  if (!throttleOnly) hits.push(now)
+
+  const mult = throttleOnly ? 1 : backoffMultiplier(hits.length)
+  const ms = throttleOnly
+    ? THROTTLE_ONLY_COOLDOWN_MS
+    : Math.min(base * mult, 24 * 3600 * 1000)   // 封顶 24 小时
+
   cd[shopKey] = {
     until: now + ms,
     code,
-    reason: extraReason || `命中频控 code=${code}`,
+    reason: extraReason || (throttleOnly ? `限流 code=${code}` : `命中频控 code=${code}`),
     hits,
-    baseMs: base,
+    baseMs: throttleOnly ? THROTTLE_ONLY_COOLDOWN_MS : base,
     multiplier: mult,
+    throttleOnly,
   }
   writeCooldown(cd)
-  console.warn(`[pdd-risk] ${shopKey} 进入冷却 ${Math.round(ms / 60000)} 分钟`
-    + `（code=${code}，基础 ${Math.round(base / 60000)} 分钟 × ${mult} 倍，24h 内第 ${hits.length} 次命中）`)
+
+  const mins = Math.round(ms / 1000)
+  if (throttleOnly) {
+    console.warn(`[pdd-risk] ${shopKey} 限流冷却 ${mins}s（code=${code}，不计入风控次数）`)
+  } else {
+    console.warn(`[pdd-risk] ${shopKey} 进入冷却 ${Math.round(ms / 60000)} 分钟`
+      + `（code=${code}，基础 ${Math.round(base / 60000)} 分钟 × ${mult} 倍，24h 内第 ${hits.length} 次命中）`)
+  }
 }
 
 /** 清除冷却（用户手动过滑块后调用） */
@@ -638,6 +685,23 @@ export async function guard(page, shopKey, fn, opts = {}) {
 
     // ★★★ 54001 处理（对齐觅千手 SDK）★★★
     if (code === 54001) {
+      // ★ 2026-11-07：先判断是不是「纯限流」——这类不需要过滑块，等 90 秒即可
+      //
+      // 实测：error_msg 含「操作太过频繁，请稍后再试」且无 verifyAuthToken
+      //   → 平台只是限流，不是风控。重试无意义，过滑块更无意义。
+      //   旧逻辑会在这种场景下清 token、提 token、重试、再判风控，最终冷却 60~480s，
+      //   把一次正常的频率限制放大成「账号被锁」。
+      if (isThrottleOnly(r)) {
+        markCooldown(shopKey, 54001, `限流：${r?.error_msg || r?.errorMsg || '操作太过频繁'}`)
+        const err = new Error('RISK_54001_THROTTLE')
+        err.riskCode = 54001
+        err.throttleOnly = true            // ★ 上层据此判断「只需等待，不用过滑块」
+        err.riskMsg = r?.error_msg || r?.errorMsg || ''
+        err.riskData = r
+        err.needManualCaptcha = false      // ★ 不需要人工干预
+        throw err
+      }
+
       // 先清掉旧 token（SDK：防止用过期 token 空转）
       clearCaptchaToken(shopKey)
       // 从响应里提取新 token

@@ -228,11 +228,40 @@ const mmsH = (ctx, extra = {}) => ({
 })
 
 let _tokenExpired = false
+
+// ★ 2026-11-07：接入统一风控闸门
+//   本 skill 的 API 是纯 Node fetch（aid.pinduoduo.com），不开浏览器请求，
+//   但同样需要节流 + 冷却检查，否则会绕过基座风控。
+let _guard = null
+async function ensureGuard(shopKey) {
+  if (_guard) return _guard
+  try {
+    const { openTask } = await import('file://' + path.join(PLUGIN_ROOT, 'skills/_shared/pdd-guard.mjs').replace(/\\/g, '/'))
+    const g = await openTask('pdd-ai-video', shopKey || 'pdd-ai-video', { lockWaitMs: 300_000 })
+    if (g.blocked) throw Object.assign(new Error(`账号不可用：${g.reason}`), { __blocked: true })
+    g.startHeartbeat()
+    process.on('exit', () => { try { g.close() } catch { /* ignore */ } })
+    _guard = g
+  } catch (e) {
+    if (e.__blocked) throw e
+    // 闸门不可用时降级（不阻断业务）
+    _guard = { beforeCall: async () => ({ allow: true }), afterCall: async () => { }, close: () => { } }
+  }
+  return _guard
+}
+
 async function api(ctx, ep, body) {
-  const r = await fetch('https://aid.pinduoduo.com' + ep, { method: 'POST', headers: aidH(ctx), body: JSON.stringify(body) })
+  const g = await ensureGuard(ctx?.shopKey || ctx?.mallId || 'pdd-ai-video')
+  const url = 'https://aid.pinduoduo.com' + ep
+  if (g?.beforeCall) {
+    const pre = await g.beforeCall(url)
+    if (!pre.allow) throw Object.assign(new Error(`账号不可用：${pre.reason}`), { __blocked: true })
+  }
+  const r = await fetch(url, { method: 'POST', headers: aidH(ctx), body: JSON.stringify(body) })
   const txt = await r.text()
   let j = null
   try { j = JSON.parse(txt) } catch { throw new Error(`HTTP ${r.status} 非 JSON: ${txt.slice(0, 120)}`) }
+  if (g?.afterCall) { try { await g.afterCall(url, j) } catch { /* ignore */ } }
   if (j.errorCode === 40022 || j.errorCode === 43001) _tokenExpired = true
   return j
 }

@@ -314,6 +314,43 @@ export async function openTask(skill, shopKey, opts = {}) {
     locked = true
   }
 
+  // ══ ④ 种子自动维护（2026-11-07）══════════════════════════════
+  //   纯 Node 签名依赖 localStorage 种子（_nano_fp / MMS-LOGIN-FP / ISLOGIN）。
+  //   种子会随登录态变化失效 → 签名被拒 → 降级浏览器 → 变慢。
+  //
+  //   这里做自动检查：
+  //     · 种子不存在 → 阻塞导出（否则纯 Node 完全不可用）
+  //     · 种子过期   → 后台异步刷新（不阻塞当前任务）
+  //     · 连续失败   → 由 noteSignFailure 触发
+  //
+  //   ⚠️ 失败绝不影响业务（catch 后只记日志）。
+  try {
+    const sa = await import(new URL('./pdd-seed-auto.mjs', import.meta.url).href)
+    let acc = m.risk?.getAccountCookies?.(shopKey) || null
+    if (!acc) {
+      // 兜底：直接读凭证库
+      try {
+        const { CredentialStore } = await import(pathToFileURL(path.join(process.cwd(), 'lib/services/credential-store.js')).href)
+        const store = new CredentialStore(path.join(os.homedir(), '.dsh', 'dsagent-accounts.json'))
+        acc = store.listAccounts().find(a => String(a.shop_key) === String(shopKey))?.cookies || null
+      } catch { /* ignore */ }
+    }
+    const health = sa.checkSeedHealth(shopKey, acc || {})
+    if (health.need) {
+      log(`种子${health.reason}，开始维护…`)
+      const r = await sa.ensureSeed({
+        shopKey,
+        cookies: acc || {},
+        profileDir: m.risk?.getProfileDir?.(shopKey) || undefined,
+        pluginRoot: process.cwd(),
+      })
+      if (r.refreshed) log(`种子已刷新（${r.seed ? Object.keys(r.seed.localStorage || {}).length : 0} 项）`)
+      else if (r.reason) log(`种子维护：${r.reason}`)
+    }
+  } catch (e) {
+    log(`种子维护跳过：${String(e.message).slice(0, 60)}`)
+  }
+
   return makeGuard({ skill, shopKey, locked, t0 })
 }
 

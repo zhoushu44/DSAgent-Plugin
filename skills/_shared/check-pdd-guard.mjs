@@ -204,7 +204,13 @@ for (const skill of skills) {
 
     if (!code.includes('pdd-guard')) issues.push(`[1] ${where}: 未引用 pdd-guard`)
     if (!hasRealCall(code, 'openTask')) issues.push(`[2] ${where}: 未调用 openTask（准入缺失）`)
-    if (!hasRealCall(code, 'beforeCall')) issues.push(`[3] ${where}: 未调用 beforeCall（节流失效）`)
+    // [3] 节流：两条合法路径
+    //   a) 直接 guard.beforeCall(...)
+    //   b) 通过基座统一入口 pdd-request.mjs 转发（它内部调 opts.guard.beforeCall/afterCall）
+    const usesRequestGateway = /pdd-request\.mjs/.test(code)
+    if (!hasRealCall(code, 'beforeCall') && !usesRequestGateway) {
+      issues.push(`[3] ${where}: 未调用 beforeCall（节流失效）`)
+    }
     if (hasRealCall(code, 'tryAcquireAccountLock')) issues.push(`[4] ${where}: 残留 tryAcquireAccountLock 实际调用（会与闸门重复加锁）`)
     if (hasRealCall(code, 'reserveSlot')) issues.push(`[5] ${where}: 残留 reserveSlot 实际调用（应走闸门）`)
     if (hasRealCall(code, 'throttleRequest')) issues.push(`[5] ${where}: 残留 throttleRequest 实际调用（应走闸门）`)
@@ -212,9 +218,29 @@ for (const skill of skills) {
     // [7] 有 page.evaluate(fetch) 的，必须带 VerifyAuthToken
     //     credentials:'include' 只带 Cookie，VerifyAuthToken 是**请求头**，不会自动带上。
     //     evaluate 的 fetch 绕过 msfe 插件链 → cookie 有票也白拿。
-    const fetchCount = (code.match(/fetch\s*\(/g) || []).length
-    const inEval = /page\.evaluate\s*\(/.test(code)
-    if (fetchCount > 0 && inEval && !code.includes('VerifyAuthToken')) {
+    //
+    // ★ 2026-11-07 修：原实现只要文件里同时有 fetch( 和 page.evaluate( 就报警，
+    //   但多数文件是「Node 侧 fetch + 另一个无关的 page.evaluate」，
+    //   属于 false positive。改为**只在 page.evaluate 的实参块内找到 fetch** 才判定。
+    const evalFetch = (() => {
+      const re = /page\.evaluate\s*(?:<[^>]*>)?\s*\(/g
+      let m
+      while ((m = re.exec(code))) {
+        // 从 evaluate( 开始，向后扫到配对的右括号
+        let i = m.index + m[0].length - 1
+        let depth = 0
+        const start = i
+        for (; i < code.length; i++) {
+          const ch = code[i]
+          if (ch === '(') depth++
+          else if (ch === ')') { depth--; if (depth === 0) break }
+        }
+        const block = code.slice(start, i + 1)
+        if (/fetch\s*\(/.test(block)) return true
+      }
+      return false
+    })()
+    if (evalFetch && !code.includes('VerifyAuthToken')) {
       issues.push(`[7] ${where}: page.evaluate 内有 fetch 但未带 VerifyAuthToken（cookie 有票不会自动进头）`)
     }
 

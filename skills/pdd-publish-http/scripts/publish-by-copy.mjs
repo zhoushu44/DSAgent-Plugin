@@ -87,6 +87,11 @@ const { default: puppeteer } = await import(pathToFileURL(`${PLUGIN}/node_module
 const hook = await import(pathToFileURL(`${PLUGIN}/skills/_shared/pdd-shadow-hook.mjs`).href).catch(() => null)
 const antiban = await import(pathToFileURL(`${PLUGIN}/skills/_shared/pdd-antiban.mjs`).href).catch(() => null)
 
+// ★ 基座风控（pdd-risk）：账号级节流 + 冷却 + 滑块守卫 + 通行证
+const risk = await import(pathToFileURL(`${PLUGIN}/skills/_shared/pdd-risk.mjs`).href).catch(() => null)
+if (risk) log('基座风控已加载（throttle strict=20次/分 + 冷却 + 滑块守卫）')
+else log('⚠ 基座风控未加载，降级为 pdd-antiban')
+
 const browser = await puppeteer.launch({
   executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe',
   headless: false, userDataDir: PROFILE, defaultViewport: null,
@@ -150,6 +155,19 @@ async function post(url, body, label = '') {
   const ep = url.replace(/^https?:\/\/[^/]+/, '').split('?')[0]
   const MAXR = 2
   for (let attempt = 0; attempt <= MAXR; attempt++) {
+    // ★ 基座风控①：账号级冷却检查（54001/40002 后会被 markCooldown 标记）
+    if (risk) {
+      const cd = risk.checkCooldown(shopKey)
+      if (cd?.cooling) {
+        log(`   ⏳ 账号冷却中 ${risk.fmtRemain ? risk.fmtRemain(cd.remainMs) : Math.ceil(cd.remainMs / 1000) + 's'}（${cd.reason || ''}）`)
+        await sleep(Math.min(cd.remainMs, 300000))
+      }
+    }
+    // ★ 基座风控②：账号级滑动窗口节流（商品域 20 次/分钟）
+    if (risk) {
+      try { await risk.throttleRequest(shopKey, 'strict') } catch { }
+    }
+    // ★ 兜底：pdd-antiban 时间槽（接口级 1.8s）
     if (antiban) {
       const slot = await antiban.reserveSlot(shopKey, ep)
       if (slot.waitMs > 0) {
@@ -170,16 +188,41 @@ async function post(url, body, label = '') {
     if (ok) { antiban?.recordResult(shopKey, 'ok'); if (label) log(`   ${label} → ✅`); return r }
     if (ec === 40002) {
       antiban?.recordResult(shopKey, 'rate_limit')
-      log(`   ${label} → ⚠ 40002 高频（${attempt + 1}/${MAXR + 1}）`)
+      // ★ 基座风控：记录冷却（240s），后续请求会自动等待
+      if (risk) { try { risk.markCooldown(shopKey, 40002, `40002 高频 ${ep}`) } catch { } }
+      log(`   ${label} → ⚠ 40002 高频（${attempt + 1}/${MAXR + 1}），已记冷却 240s`)
       if (attempt < MAXR) { await sleep(240000); continue }
     } else if (ec === 54001) {
       antiban?.recordResult(shopKey, 'captcha')
+      if (risk) { try { risk.markCooldown(shopKey, 54001, `54001 风控 ${ep}`) } catch { } }
       log(`   ${label} → ⚠ 54001 风控（${attempt + 1}/${MAXR + 1}）`)
+      // ★ 基座风控：尝试自动过滑块（连续失败会自动停，转人工）
+      if (risk && page && attempt < MAXR) {
+        try {
+          const stop = risk.shouldStopAutoSlider ? risk.shouldStopAutoSlider(shopKey) : { stop: false }
+          if (stop.stop) {
+            log(`   ⚠ ${stop.reason}`)
+          } else {
+            log('   尝试自动过滑块…')
+            const solved = await risk.autoSolveSlider(shopKey, page)
+            log(`   滑块: ${solved?.ok ? '✅ 通过' : '❌ ' + (solved?.text || '').slice(0, 60)}`)
+            if (solved?.ok) continue
+          }
+        } catch (e) { log('   滑块尝试异常:', e.message.slice(0, 60)) }
+      }
       if (attempt < MAXR) { await sleep(60000); continue }
     } else if (ec === 43001 || ec === 40001) {
       antiban?.recordResult(shopKey, 'session')
+      if (risk) { try { risk.markCooldown(shopKey, 43001, '会话失效') } catch { } }
       log(`   ${label} → ❌ 会话失效，请到「账号连接」重新登录`)
       return r
+    }
+    // ★ 基座风控：识别其它未列出的风控码
+    if (risk && !ok && attempt === 0) {
+      try {
+        const det = risk.detectRiskCode(r?.data)
+        if (det?.isRisk) log(`   识别到风控码 ${det.code}: ${det.reason || ''}`)
+      } catch { }
     }
     if (label) log(`   ${label} → ❌ ${r?.data?.error_msg || r?.err || ''}`)
     if (ec !== 40002 && ec !== 54001) return r
@@ -189,9 +232,21 @@ async function post(url, body, label = '') {
 const BASE = 'https://mms.pinduoduo.com'
 
 // 启动：确认登录
+// ★ 基座风控：账号级并发锁（防多个技能同时操作同一账号 → 必触发 54001）
+if (risk) {
+  const lk = await risk.tryAcquireAccountLock(shopKey, 'pdd-publish-by-copy', 30000)
+  if (!lk.ok) {
+    log(`❌ 账号正被占用（${lk.holder || '未知任务'}），30s 内未释放。请等其它任务结束。`)
+    await browser.close().catch(() => { })
+    process.exit(1)
+  }
+  log('   账号锁已获取')
+  process.on('exit', () => { try { risk.releaseAccountLock(shopKey) } catch { } })
+}
+
 await page.goto(`${BASE}/goods/goods_list`, { waitUntil: 'domcontentloaded', timeout: 90000 }).catch(() => { })
 await sleep(12000)
-if (/login/.test(page.url())) { log('❌ 未登录，请先在「账号连接」绑定/重新登录拼多多商家后台'); await browser.close(); process.exit(1) }
+if (/login/.test(page.url())) { log('❌ 未登录，请先在「账号连接」绑定/重新登录拼多多商家后台'); if (risk) { try { risk.releaseAccountLock(shopKey) } catch { } } await browser.close(); process.exit(1) }
 log('✅ 已进入商家后台')
 await refreshCookies()   // ★ 预热 Cookie，后续全部走 Node 直连
 log(`   Cookie 已缓存（${COOKIE_CACHE.length} 字符）`)
@@ -312,13 +367,25 @@ if (fs.existsSync(nativeBodyFile)) {
   log('   body: 用原生 action/edit 模板（157 字段）')
   // 清掉这次不该带的（crawlerInfo 会被页面层重新注入）
   delete body.crawlerInfo
-  // ★ detail_gallery 必须带（实测那次成功时是 10 张）
-  if (!Array.isArray(body.detail_gallery) || body.detail_gallery.length === 0) {
-    const srcDetail = draft.detail_gallery || []
-    body.detail_gallery = srcDetail.length ? srcDetail
-      : (body.gallery || []).slice(0, 10).map(g => ({ url: g.url, width: 1024, height: 1024, file_id: null, file_type: 'pic' }))
+  // ★ detail_gallery 完整结构（type=2 详情图，file_id 必填，宽高必填）
+  //   从 commit/detail 的 detail_gallery 或 galleries(type=2) 取全量，不要截断
+  {
+    const srcAll = draft.detail_gallery || draft.galleries || []
+    body.detail_gallery = srcAll.map(g => ({
+      url: g.url || g.img_url,
+      width: g.width || 750,
+      height: g.height || 1500,
+      type: 2,
+      source: null,
+      status: null,
+      video_url: null,
+      file_id: null,
+      is_deleted: null,
+      check_comment: null,
+      origin_url: null,
+    })).filter(x => x.url)
   }
-  log(`   detail_gallery: ${(body.detail_gallery || []).length} 张`)
+  log(`   detail_gallery: ${(body.detail_gallery || []).length} 张（type=2）`)
   log(`   decorationDetail: ${(body.decorationDetail || []).length} 个楼层`)
 } else {
   // 退化：直接用 commit/detail（去掉纯展示字段），并补齐提交必需字段
@@ -401,9 +468,58 @@ log(`   属性: ${(body.goods_properties || []).length} 条 | propertys_tid=${bo
 
 // ★ 主图：可直接用「图片空间已有 URL」（product.imageUrls），避免 file/create 限流
 if (Array.isArray(product.imageUrls) && product.imageUrls.length) {
-  body.gallery = product.imageUrls.map(u => ({ url: u, type: 1, file_id: null }))
-  log(`   主图: 用图片空间已有图 ${product.imageUrls.length} 张（跳过上传）`)
-  // SKU 预览图沿用源商品（必须是本店图片空间文件）
+  // ★ 查图片空间，拿到每张图的 file_id / 宽高（carousel_gallery 需要完整结构）
+  let spaceFiles = []
+  try {
+    const r = await post(`${BASE}/garner/mms/file/dir_list`, {
+      if_query_dir: true, order_by: 'create_time desc ', dir_id: 0,
+      page: 1, page_size: 100, file_param: { file_type_desc: '' }, dir_param: {},
+    }, 'file/dir_list')
+    spaceFiles = r?.data?.result?.file_list || r?.data?.result?.list || []
+    log(`   图片空间读到 ${spaceFiles.length} 个文件`)
+  } catch (e) { log('   ⚠ 图片空间读取失败:', e.message.slice(0, 60)) }
+
+  // ★ 关键：保留源商品完整 gallery，只把头部替换成新图
+  //   （gallery 只剩 2 张会触发「详情图数量」校验失败）
+  const srcGallery = (draft.galleries || draft.gallery || []).map(g => ({
+    url: g.url || g.img_url, width: g.width || 750, height: g.height || 1200,
+    type: 1, source: null, status: null, video_url: null,
+    file_id: null, is_deleted: null, check_comment: null, origin_url: null,
+  })).filter(x => x.url)
+  const newImgsTop = product.imageUrls.map(u => {
+    const f = spaceFiles.find(x => x.url === u) || spaceFiles.find(x => u.includes(String(x.name || ''))) || {}
+    return {
+      url: u,
+      width: f.width || 1024,
+      height: f.height || 1024,
+      type: 1,
+      source: null, status: null, video_url: null,
+      file_id: null,   // ★ 页面实测：新图 file_id 一律 null（靠 url 认图）
+      is_deleted: null, check_comment: null, origin_url: null,
+    }
+  })
+  // 新图在前，源图补齐（保持总数量不低于源商品）
+  body.gallery = [...newImgsTop, ...srcGallery.slice(newImgsTop.length)]
+  log(`   gallery: 新图 ${newImgsTop.length} + 源图 ${body.gallery.length - newImgsTop.length} = ${body.gallery.length} 张`)
+  log(`   主图: 图片空间图 ${product.imageUrls.length} 张（file_id ${body.gallery.filter(g => g.file_id).length}/${body.gallery.length} 命中）`)
+
+  // ★ 换主图：detail_gallery 保留源商品完整列表（图不够会导致数量校验失败），
+  //   只把前 N 张替换为新主图（新图已在图片空间登记，file_id 有效）
+  {
+    const srcDetail = draft.detail_gallery || draft.galleries || []
+    const newImgs = body.gallery.map(g => ({
+      url: g.url, width: g.width || 1024, height: g.height || 1024,
+      type: 2, source: null, status: null, video_url: null,
+      file_id: null, is_deleted: null, check_comment: null, origin_url: null,
+    }))
+    const keep = srcDetail.slice(newImgs.length).map(g => ({
+      url: g.url || g.img_url, width: g.width || 750, height: g.height || 1500,
+      type: 2, source: null, status: null, video_url: null,
+      file_id: null, is_deleted: null, check_comment: null, origin_url: null,
+    })).filter(x => x.url)
+    body.detail_gallery = [...newImgs, ...keep]
+    log(`   detail_gallery: 新图 ${newImgs.length} + 源图 ${keep.length} = ${body.detail_gallery.length} 张`)
+  }
 }
 
 // 主图：本地图上传（可选）
@@ -468,55 +584,118 @@ if (!r6.data?.success) {
   await browser.close(); process.exit(1)
 }
 
-// ── ⑥.5 详情图：重读草稿 → 用服务端最新 decorationDetail 再写一次 ──────
+// ── ⑥.5 装修楼层对齐：save → query → 用 query 结果回写 ──────────────
+//    页面真实时序：saveDecorationDetail → queryDecorationDetail → 用 floor_list 初始化
 log('')
-log('⑥.5 详情图对齐（重读草稿）')
-await sleep(2500)
-const fresh = await post(`${BASE}/glide/v2/mms/query/commit/detail`, {
-  goods_commit_id: Number(commitId), goods_id: Number(goodsId),
-}, 'commit/detail(重读)')
-if (fresh?.data?.success && fresh.data.result) {
-  const fr = fresh.data.result
-  const newFloors = fr.decorationDetail || fr.decoration_detail || []
-  const curFloors = body.decorationDetail || []
-  log(`   服务端楼层 ${newFloors.length} / 当前 ${curFloors.length}`)
-  if (newFloors.length && newFloors.length !== curFloors.length) {
-    body.decorationDetail = newFloors
-    const rfix = await post(`${BASE}/glide/mms/goodsCommit/action/edit`, body, 'action/edit(对齐详情图)')
-    if (rfix.data?.success) log('   已用服务端楼层回写')
-  } else {
-    log('   楼层数与当前一致，跳过')
+log('⑥.5 装修楼层对齐')
+{
+  // ★ 楼层可能为空（退化模式/源商品无装修）：先查一次服务端
+  if (!Array.isArray(body.decorationDetail) || !body.decorationDetail.length) {
+    const rq0 = await post(`${BASE}/gorse/mms/goods/decoration/commit/query/V2`, {
+      goods_commit_id: Number(commitId), goods_id: Number(goodsId),
+    }, 'decoration/query(预查)')
+    const initFloors = rq0?.data?.result?.floor_list || []
+    if (initFloors.length) {
+      body.decorationDetail = initFloors
+      log(`   预查到服务端楼层 ${initFloors.length}`)
+    }
   }
-}
+  // ★ 仍为空 → 用 detail_gallery 或 gallery 生成标准装修楼层
+  if (!Array.isArray(body.decorationDetail) || !body.decorationDetail.length) {
+    const imgs = (body.detail_gallery?.length ? body.detail_gallery : body.gallery) || []
+    if (imgs.length) {
+      body.decorationDetail = imgs.slice(0, 20).map((g, i) => ({
+        floor_id: Date.now() + i,
+        key: 'DecImage',
+        type: i === 0 ? 'text' : 'image',
+        priority: i,
+        content_list: [{
+          img_url: g.url, file_id: g.file_id || null,
+          height: g.height || 1500, width: g.width || 750,
+          file_status: null, goods_id: null, goods_name: null, show_price: null,
+          status: null, min_on_sale_group_price: null,
+          text: i === 0 ? (product.title || '') : null,
+          hot_zone_list: null,
+          text_module_details: i === 0 ? { font_size: 15, font_color: '#333', font_family: 9, align: 'left', background_color: '#fff' } : null,
+          activity_sn: null, combine_buy_element_dtoList: null,
+        }],
+        check_status: null, check_id: null, check_name: null, comment: null,
+        if_have_template: null, floor_status: null, template_id: null, template_type: null, template_json: null,
+      }))
+      log(`   用图片生成标准楼层 ${body.decorationDetail.length} 个`)
+    }
+  }
+  // ★ 换主图时：用图片空间新图【重建】装修楼层（源商品旧图不在图片空间 → 会报「非图片空间图片」）
+  if (Array.isArray(product.imageUrls) && product.imageUrls.length && Array.isArray(body.decorationDetail) && body.decorationDetail.length) {
+    const newUrls = body.gallery.map(g => g.url)
+    const makeFloor = (url, i, withText) => ({
+      floor_id: Date.now() + i,
+      key: 'DecImage',
+      type: withText ? 'text' : 'image',
+      priority: i,
+      content_list: [{
+        img_url: url, file_id: null, height: 1500, width: 750,
+        file_status: null, goods_id: null, goods_name: null, show_price: null,
+        status: null, min_on_sale_group_price: null,
+        text: withText ? (product.title || '') : null,
+        hot_zone_list: null,
+        text_module_details: withText ? { font_size: 15, font_color: '#333', font_family: 9, align: 'left', background_color: '#fff' } : null,
+        activity_sn: null, combine_buy_element_dtoList: null,
+      }],
+      check_status: null, check_id: null, check_name: null, comment: null,
+      if_have_template: null, floor_status: null, template_id: null, template_type: null, template_json: null,
+    })
+    const n = body.decorationDetail.length
+    body.decorationDetail = Array.from({ length: n }, (_, i) => makeFloor(newUrls[i % newUrls.length], i, i === 0))
+    log(`   装修楼层已用图片空间新图重建（${n} 层）`)
+  }
+  // 旧逻辑保留（不换图时）
+  if (false) {
+    const newUrls = body.gallery.map(g => g.url)
+    const newFids = body.gallery.map(g => g.file_id)
+    body.decorationDetail = body.decorationDetail.map((fl, i) => {
+      const cl = Array.isArray(fl.content_list) ? fl.content_list : []
+      return {
+        ...fl,
+        content_list: cl.map((c, j) => ({
+          ...c,
+          img_url: newUrls[(i + j) % newUrls.length] || c.img_url,
+          file_id: newFids[(i + j) % newFids.length] || c.file_id || null,
+        })),
+      }
+    })
+    log(`   装修楼层已统一为新主图（${body.decorationDetail.length} 层）`)
+  }
+  const floors = body.decorationDetail || []
+  log(`   当前楼层: ${floors.length}`)
+  if (floors.length) {
+    // ① 保存装修
+    await post(`${BASE}/gorse/mms/goods/decoration/commit/save`, {
+      goods_commit_id: Number(commitId), goods_id: Number(goodsId), floor_list: floors,
+    }, 'decoration/save')
 
-// ── ⑥.6 兜底：页面点保存草稿（仅在楼层仍为空时）───────────────────────
-if (!Array.isArray(body.decorationDetail) || !body.decorationDetail.length) {
-log('⑥.6 详情图为空 → 打开草稿页点保存草稿')
-await page.goto(`${BASE}/goods/goods_add/index?id=${commitId}&goods_id=${goodsId}`, { waitUntil: 'domcontentloaded', timeout: 90000 }).catch(() => { })
-await sleep(12000)
-let saveBtn = null
-for (let i = 0; i < 20; i++) {
-  saveBtn = await page.evaluate(() => {
-    const c = [...document.querySelectorAll('button')].filter(e => /保存草稿/.test((e.innerText || '').replace(/\s+/g, '')))
-    if (!c.length) return null
-    c[0].scrollIntoView({ block: 'center' })
-    const r = c[0].getBoundingClientRect()
-    return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }
-  }).catch(() => null)
-  if (saveBtn) { log(`   按钮出现（${12 + i * 5}s）`); break }
-  await sleep(5000)
-}
-if (saveBtn) {
-  await page.mouse.click(saveBtn.x, saveBtn.y)
-  log('   已点保存草稿，等 12s')
-  await sleep(12000)
-} else {
-  log('   ⚠ 90s 内没找到保存草稿按钮')
-}
-// 回稳定页（Node 直连，不用等页面完全加载）
-await page.goto(`${BASE}/goods/goods_list`, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => { })
-await sleep(4000)
-log('   已回到列表页')
+    // ② 立刻查回
+    await sleep(1200)
+    const rq = await post(`${BASE}/gorse/mms/goods/decoration/commit/query/V2`, {
+      goods_commit_id: Number(commitId), goods_id: Number(goodsId),
+    }, 'decoration/query')
+
+    const back = rq?.data?.result?.floor_list || []
+    log(`   服务端回读楼层: ${back.length}`)
+
+    // ③ 用回读结果回写 action/edit（页面就是这么做的）
+    if (back.length && JSON.stringify(back) !== JSON.stringify(floors)) {
+      body.decorationDetail = back
+      const rw = await post(`${BASE}/glide/mms/goodsCommit/action/edit`, body, 'action/edit(回写装修)')
+      if (rw.data?.success) log('   ✅ 已用服务端楼层回写')
+    } else if (back.length) {
+      log('   楼层一致，跳过回写')
+    } else {
+      log('   ⚠ 服务端回读为空')
+    }
+  } else {
+    log('   ⚠ body 无 decorationDetail')
+  }
 }
 
 // ── ⑦ commit/submit ─────────────────────────────────────────────────
@@ -536,6 +715,20 @@ if (r7.data?.success) {
 log('日志 →', LOGPATH)
 await sleep(2000)
 await browser.close().catch(() => { })
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

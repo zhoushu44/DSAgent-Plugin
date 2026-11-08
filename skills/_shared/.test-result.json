@@ -1,0 +1,140 @@
+{
+ "at": "2026-11-08T01:14:02.304Z",
+ "total": 22,
+ "pass": 22,
+ "fail": 0,
+ "results": [
+  {
+   "name": "pdd-api.mjs",
+   "ok": true,
+   "detail": "4 个导出",
+   "ms": 2
+  },
+  {
+   "name": "pdd-request.mjs",
+   "ok": true,
+   "detail": "2 个导出",
+   "ms": 1
+  },
+  {
+   "name": "pdd-seed-store.mjs",
+   "ok": true,
+   "detail": "3 个导出",
+   "ms": 1
+  },
+  {
+   "name": "pdd-seed-auto.mjs",
+   "ok": true,
+   "detail": "4 个导出",
+   "ms": 1
+  },
+  {
+   "name": "pdd-guard.mjs",
+   "ok": true,
+   "detail": "3 个导出",
+   "ms": 1
+  },
+  {
+   "name": "pdd-vodka-signer.mjs",
+   "ok": true,
+   "detail": "3 个导出",
+   "ms": 1
+  },
+  {
+   "name": "pdd-promo-signer.mjs",
+   "ok": true,
+   "detail": "3 个导出",
+   "ms": 1
+  },
+  {
+   "name": "pdd-transport.mjs",
+   "ok": true,
+   "detail": "2 个导出",
+   "ms": 1
+  },
+  {
+   "name": "域识别 10 例",
+   "ok": true,
+   "detail": "10/10",
+   "ms": 0
+  },
+  {
+   "name": "健康检查",
+   "ok": true,
+   "detail": "健康",
+   "ms": 1
+  },
+  {
+   "name": "种子读取",
+   "ok": true,
+   "detail": "27 项",
+   "ms": 1
+  },
+  {
+   "name": "状态查询",
+   "ok": true,
+   "detail": "needRefresh=false",
+   "ms": 3
+  },
+  {
+   "name": "缺失检测",
+   "ok": true,
+   "detail": "种子不存在",
+   "ms": 0
+  },
+  {
+   "name": "接口分类 5 例",
+   "ok": true,
+   "detail": "5/5",
+   "ms": 0
+  },
+  {
+   "name": "读接口 10 次",
+   "ok": true,
+   "detail": "1693ms (旧策略约 40000ms)",
+   "ms": 1693
+  },
+  {
+   "name": "扫描检测触发",
+   "ok": true,
+   "detail": "第 13 个左右触发",
+   "ms": 508
+  },
+  {
+   "name": "商品列表",
+   "ok": true,
+   "detail": "channel=node total=180",
+   "ms": 2069
+  },
+  {
+   "name": "SKU 详情",
+   "ok": true,
+   "detail": "channel=node",
+   "ms": 97
+  },
+  {
+   "name": "商品数",
+   "ok": true,
+   "detail": "channel=node",
+   "ms": 157
+  },
+  {
+   "name": "通用状态",
+   "ok": true,
+   "detail": "channel=node",
+   "ms": 60
+  },
+  {
+   "name": "店铺信息",
+   "ok": true,
+   "detail": "channel=node",
+   "ms": 71
+  },
+  {
+   "name": "无通道时报错",
+   "ok": true,
+   "detail": "ec=no_channel",
+   "ms": 0
+  }
+ ]
+}

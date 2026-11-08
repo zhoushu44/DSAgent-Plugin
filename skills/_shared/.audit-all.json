@@ -1,0 +1,802 @@
+[
+ {
+  "key": "goods.list",
+  "path": "/vodka/v2/mms/query/display/mall/goodsList",
+  "method": "POST",
+  "domain": "mms",
+  "ok": false,
+  "ec": 54001,
+  "channel": "node",
+  "hint": "操作太过频繁，请稍后再试！"
+ },
+ {
+  "key": "goods.listGlide",
+  "path": "/glide/v2/mms/addProperties/goodsList",
+  "method": "POST",
+  "domain": "mms",
+  "ok": true,
+  "ec": null,
+  "channel": "node",
+  "hint": ""
+ },
+ {
+  "key": "goods.count",
+  "path": "/vodka/v2/mms/query/display/mall_goods/count",
+  "method": "POST",
+  "domain": "mms",
+  "ok": true,
+  "ec": null,
+  "channel": "node",
+  "hint": ""
+ },
+ {
+  "key": "goods.copyedExist",
+  "path": "/vodka/v2/mms/query/display/goods_copyed/is_exist",
+  "method": "POST",
+  "domain": "mms",
+  "ok": true,
+  "ec": null,
+  "channel": "node",
+  "hint": ""
+ },
+ {
+  "key": "goods.newStyleGray",
+  "path": "/vodka/v2/mms/newStyleGoods/gray/queryNewStyleGoodsGray",
+  "method": "POST",
+  "domain": "mms",
+  "ok": true,
+  "ec": null,
+  "channel": "node",
+  "hint": ""
+ },
+ {
+  "key": "common.status",
+  "path": "/vodka/v2/mms/common/query/status",
+  "method": "POST",
+  "domain": "mms",
+  "ok": true,
+  "ec": null,
+  "channel": "node",
+  "hint": ""
+ },
+ {
+  "key": "goods.skuInfo",
+  "path": "/vodka/v2/mms/query/sku/info",
+  "method": "POST",
+  "domain": "mms",
+  "ok": true,
+  "ec": null,
+  "channel": "node",
+  "hint": ""
+ },
+ {
+  "key": "goods.onSale",
+  "path": "/vodka/v2/mms/pc/onSale",
+  "method": "POST",
+  "domain": "mms",
+  "ok": false,
+  "ec": 54001,
+  "channel": "node",
+  "hint": "操作太过频繁，请稍后再试！"
+ },
+ {
+  "key": "goods.offSale",
+  "path": "/vodka/v2/mms/pc/offSale",
+  "method": "POST",
+  "domain": "mms",
+  "ok": false,
+  "ec": 54001,
+  "channel": "node",
+  "hint": "操作太过频繁，请稍后再试！"
+ },
+ {
+  "key": "goods.batchOnSale",
+  "path": "/vodka/v2/mms/batchOnSale",
+  "method": "POST",
+  "domain": "mms",
+  "ok": false,
+  "ec": 3000000,
+  "channel": "node",
+  "hint": "参数校验失败: 批量上下商品Id不能为空"
+ },
+ {
+  "key": "goods.batchOffSale",
+  "path": "/vodka/v2/mms/batchOffSale",
+  "method": "POST",
+  "domain": "mms",
+  "ok": false,
+  "ec": 54001,
+  "channel": "node",
+  "hint": "操作太过频繁，请稍后再试！"
+ },
+ {
+  "key": "goods.batchStock",
+  "path": "/vodka/v2/mms/edit/quantity/batchIncrease",
+  "method": "POST",
+  "domain": "mms",
+  "ok": false,
+  "ec": 3000000,
+  "channel": "node",
+  "hint": "参数校验失败: sourceId不能为空"
+ },
+ {
+  "key": "goods.resourceValidate",
+  "path": "/vodka/v2/mms/pc/resourceValidate",
+  "method": "POST",
+  "domain": "mms",
+  "ok": false,
+  "ec": 54001,
+  "channel": "node",
+  "hint": "操作太过频繁，请稍后再试！"
+ },
+ {
+  "key": "goods.commitOnShop",
+  "path": "/glide/v2/mms/query/commit/on_shop/detail",
+  "method": "POST",
+  "domain": "mms",
+  "ok": false,
+  "ec": 600009,
+  "channel": "node",
+  "hint": "商品不存在"
+ },
+ {
+  "key": "goods.commitCreateBySn",
+  "path": "/glide/v2/mms/edit/commit/create_by_sn",
+  "method": "POST",
+  "domain": "mms",
+  "ok": false,
+  "ec": 2000000,
+  "channel": "node",
+  "hint": "参数校验失败:goodsId 不能为null"
+ },
+ {
+  "key": "goods.commitDelete",
+  "path": "/glide/v2/mms/edit/commit/delete",
+  "method": "POST",
+  "domain": "mms",
+  "ok": false,
+  "ec": 600001,
+  "channel": "node",
+  "hint": "该编辑不存在，或未传goods_id参数"
+ },
+ {
+  "key": "goods.commitEdit",
+  "path": "/glide/mms/goodsCommit/action/edit",
+  "method": "POST",
+  "domain": "mms",
+  "ok": false,
+  "ec": 3000000,
+  "channel": "node",
+  "hint": "参数校验失败: goods_commit_id不能为空"
+ },
+ {
+  "key": "goods.commitSubmit",
+  "path": "/glide/v2/mms/edit/commit/submit",
+  "method": "POST",
+  "domain": "mms",
+  "ok": false,
+  "ec": 2000000,
+  "channel": "node",
+  "hint": "商品编辑版本号为空"
+ },
+ {
+  "key": "goods.commitUpdate",
+  "path": "/glide/v2/mms/edit/commit/update",
+  "method": "POST",
+  "domain": "mms",
+  "ok": false,
+  "ec": 3000000,
+  "channel": "node",
+  "hint": "参数校验失败: goods_commit_id不能为空"
+ },
+ {
+  "key": "shop.info",
+  "path": "/earth/api/mallInfo/commonMallInfo",
+  "method": "GET",
+  "domain": "mms",
+  "ok": true,
+  "ec": null,
+  "channel": "node",
+  "hint": ""
+ },
+ {
+  "key": "shop.flow",
+  "path": "/sydney/api/mallScore/queryMallFlowData",
+  "method": "POST",
+  "domain": "mms",
+  "ok": true,
+  "ec": null,
+  "channel": "node",
+  "hint": ""
+ },
+ {
+  "key": "shop.flowOverview",
+  "path": "/sydney/api/mallFlow/queryMallFlowOverView",
+  "method": "POST",
+  "domain": "mms",
+  "ok": false,
+  "ec": 2000000,
+  "channel": "node",
+  "hint": "开始结束时间不为空"
+ },
+ {
+  "key": "shop.dsr",
+  "path": "/sydney/api/mallDsr/dsrResult",
+  "method": "POST",
+  "domain": "mms",
+  "ok": true,
+  "ec": null,
+  "channel": "node",
+  "hint": ""
+ },
+ {
+  "key": "shop.score",
+  "path": "/sydney/api/mallScore/queryMallScoreOverView",
+  "method": "POST",
+  "domain": "mms",
+  "ok": true,
+  "ec": null,
+  "channel": "node",
+  "hint": ""
+ },
+ {
+  "key": "shop.goodsOverview",
+  "path": "/sydney/api/goodsDataShow/queryGoodsPageOverviewForMms",
+  "method": "POST",
+  "domain": "mms",
+  "ok": true,
+  "ec": null,
+  "channel": "node",
+  "hint": ""
+ },
+ {
+  "key": "shop.goodsDetailVO",
+  "path": "/sydney/api/goodsDataShow/queryGoodsDetailVOList",
+  "method": "POST",
+  "domain": "mms",
+  "ok": false,
+  "ec": 3000000,
+  "channel": "node",
+  "hint": "开始结束时间不能为空"
+ },
+ {
+  "key": "shop.goodsSpanDate",
+  "path": "/sydney/api/goodsDataShow/queryGoodsSpanDateList",
+  "method": "POST",
+  "domain": "mms",
+  "ok": true,
+  "ec": null,
+  "channel": "node",
+  "hint": ""
+ },
+ {
+  "key": "promo.list",
+  "path": "/mms-gateway/venus/api/goods/promotion/v3/list",
+  "method": "POST",
+  "domain": "yingxiao",
+  "ok": false,
+  "ec": 54001,
+  "channel": "node",
+  "hint": ""
+ },
+ {
+  "key": "promo.detail",
+  "path": "/mms-gateway/venus/api/goods/promotion/detail/query",
+  "method": "POST",
+  "domain": "yingxiao",
+  "ok": false,
+  "ec": 54001,
+  "channel": "node",
+  "hint": ""
+ },
+ {
+  "key": "promo.updateMaxCost",
+  "path": "/mms-gateway/venus/api/goods/promotion/update/max/cost",
+  "method": "POST",
+  "domain": "yingxiao",
+  "ok": false,
+  "ec": 54001,
+  "channel": "node",
+  "hint": ""
+ },
+ {
+  "key": "promo.updateBid",
+  "path": "/mms-gateway/venus/api/promotion/batchUpdateBid",
+  "method": "POST",
+  "domain": "yingxiao",
+  "ok": false,
+  "ec": 54001,
+  "channel": "node",
+  "hint": ""
+ },
+ {
+  "key": "promo.batchCreate",
+  "path": "/mms-gateway/venus/api/promotion/batchCreate",
+  "method": "POST",
+  "domain": "yingxiao",
+  "ok": false,
+  "ec": 54001,
+  "channel": "node",
+  "hint": ""
+ },
+ {
+  "key": "promo.updateStatus",
+  "path": "/mms-gateway/venus/api/global/unit/batchUpdateStatus",
+  "method": "POST",
+  "domain": "yingxiao",
+  "ok": false,
+  "ec": 54001,
+  "channel": "node",
+  "hint": ""
+ },
+ {
+  "key": "promo.delete",
+  "path": "/mms-gateway/venus/api/goods/promotion/virtual/delete",
+  "method": "POST",
+  "domain": "yingxiao",
+  "ok": false,
+  "ec": 54001,
+  "channel": "node",
+  "hint": ""
+ },
+ {
+  "key": "promo.accountAll",
+  "path": "/mms-gateway/reinhardt/homepage/v3/accountAll",
+  "method": "POST",
+  "domain": "yingxiao",
+  "ok": false,
+  "ec": 54001,
+  "channel": "node",
+  "hint": ""
+ },
+ {
+  "key": "promo.entityReport",
+  "path": "/mms-gateway/poseidon/api/report/queryEntityReport",
+  "method": "POST",
+  "domain": "yingxiao",
+  "ok": false,
+  "ec": 54001,
+  "channel": "node",
+  "hint": ""
+ },
+ {
+  "key": "promo.dailyCost",
+  "path": "/mms-gateway/reinhardt/invoice/getAdvertiserDailyCosts",
+  "method": "POST",
+  "domain": "yingxiao",
+  "ok": false,
+  "ec": 54001,
+  "channel": "node",
+  "hint": ""
+ },
+ {
+  "key": "act.list",
+  "path": "/lakemms/activityGoods/list",
+  "method": "POST",
+  "domain": "mms",
+  "ok": false,
+  "ec": 100001,
+  "channel": "node",
+  "hint": "当前请求频繁，请2小时后重试"
+ },
+ {
+  "key": "act.statics",
+  "path": "/lakemms/activityGoods/statics",
+  "method": "POST",
+  "domain": "mms",
+  "ok": true,
+  "ec": null,
+  "channel": "node",
+  "hint": ""
+ },
+ {
+  "key": "act.effectData",
+  "path": "/lakemms/data_board/query/activity_effect_data",
+  "method": "POST",
+  "domain": "mms",
+  "ok": true,
+  "ec": null,
+  "channel": "node",
+  "hint": ""
+ },
+ {
+  "key": "act.cancelEnroll",
+  "path": "/lakemms/activityGoods/cancelEnroll",
+  "method": "POST",
+  "domain": "mms",
+  "ok": false,
+  "ec": 100001,
+  "channel": "node",
+  "hint": "当前请求频繁，请2小时后重试"
+ },
+ {
+  "key": "act.enrollPopups",
+  "path": "/leekmms/activity/query/enrollPopups",
+  "method": "POST",
+  "domain": "mms",
+  "ok": false,
+  "ec": 3000000,
+  "channel": "node",
+  "hint": "参数校验失败: 活动id不能为空"
+ },
+ {
+  "key": "act.lowPriceCheck",
+  "path": "/lakemms/activityGoods/lowPriceCheckV3",
+  "method": "POST",
+  "domain": "mms",
+  "ok": false,
+  "ec": 3000000,
+  "channel": "node",
+  "hint": "参数校验失败: 商品列表不能为空"
+ },
+ {
+  "key": "act.enroll",
+  "path": "/lakemms/enrollV2",
+  "method": "POST",
+  "domain": "mms",
+  "ok": false,
+  "ec": 100001,
+  "channel": "node",
+  "hint": "当前请求频繁，请2小时后重试"
+ },
+ {
+  "key": "chance.home",
+  "path": "/opportunity-goods/chance-goods/home_list",
+  "method": "POST",
+  "domain": "mms",
+  "ok": true,
+  "ec": null,
+  "channel": "node",
+  "hint": ""
+ },
+ {
+  "key": "chance.my",
+  "path": "/opportunity-goods/chance-goods/my_list",
+  "method": "POST",
+  "domain": "mms",
+  "ok": true,
+  "ec": null,
+  "channel": "node",
+  "hint": ""
+ },
+ {
+  "key": "chance.cateInfo",
+  "path": "/opportunity-goods/chance-goods/cate_info",
+  "method": "POST",
+  "domain": "mms",
+  "ok": true,
+  "ec": null,
+  "channel": "node",
+  "hint": ""
+ },
+ {
+  "key": "video.list",
+  "path": "/mms/amco/prePublish/query",
+  "method": "POST",
+  "domain": "live",
+  "ok": false,
+  "ec": "no_channel",
+  "channel": "none",
+  "hint": "既没有可用账号（account）也没有浏览器（page）"
+ },
+ {
+  "key": "video.query",
+  "path": "/api/backbone/video/query",
+  "method": "POST",
+  "domain": "live",
+  "ok": false,
+  "ec": "no_channel",
+  "channel": "none",
+  "hint": "既没有可用账号（account）也没有浏览器（page）"
+ },
+ {
+  "key": "video.publish",
+  "path": "/api/backbone/video/publish",
+  "method": "POST",
+  "domain": "live",
+  "ok": false,
+  "ec": "no_channel",
+  "channel": "none",
+  "hint": "既没有可用账号（account）也没有浏览器（page）"
+ },
+ {
+  "key": "promo.adGroups",
+  "path": "/mms-gateway/venus/api/goods/promotion/listAdGroupInfo",
+  "method": "POST",
+  "domain": "yingxiao",
+  "ok": false,
+  "ec": 54001,
+  "channel": "node",
+  "hint": ""
+ },
+ {
+  "key": "chance.quickRelease",
+  "path": "/opportunity-goods/chance-goods/quick_release",
+  "method": "POST",
+  "domain": "mms",
+  "ok": false,
+  "ec": 54001,
+  "channel": "node",
+  "hint": "操作太过频繁，请稍后再试！"
+ },
+ {
+  "key": "chance.keywordsRecommend",
+  "path": "/opportunity-goods/chance-goods/get_keywords_recommend",
+  "method": "POST",
+  "domain": "mms",
+  "ok": true,
+  "ec": null,
+  "channel": "node",
+  "hint": ""
+ },
+ {
+  "key": "chance.getHotSearchGoods",
+  "path": "/opportunity-goods/chance-goods/get_hot_search_goods",
+  "method": "POST",
+  "domain": "mms",
+  "ok": false,
+  "ec": 50000,
+  "channel": "node",
+  "hint": "http error:500"
+ },
+ {
+  "key": "chance.totalInfo",
+  "path": "/opportunity-goods/chance-goods/total_info",
+  "method": "POST",
+  "domain": "mms",
+  "ok": false,
+  "ec": 50000,
+  "channel": "node",
+  "hint": "http error:500"
+ },
+ {
+  "key": "chance.base",
+  "path": "/opportunity-goods/chance-goods",
+  "method": "POST",
+  "domain": "mms",
+  "ok": false,
+  "ec": 40010,
+  "channel": "node",
+  "hint": "未知URL"
+ },
+ {
+  "key": "chance.collection",
+  "path": "/opportunity-goods/chance-goods/collection/list",
+  "method": "POST",
+  "domain": "mms",
+  "ok": true,
+  "ec": null,
+  "channel": "node",
+  "hint": ""
+ },
+ {
+  "key": "chance.missionInfo",
+  "path": "/opportunity-goods/chance-goods/mission_info",
+  "method": "POST",
+  "domain": "mms",
+  "ok": true,
+  "ec": null,
+  "channel": "node",
+  "hint": ""
+ },
+ {
+  "key": "chance.filters",
+  "path": "/opportunity-goods/chance-goods/get_filters",
+  "method": "POST",
+  "domain": "mms",
+  "ok": true,
+  "ec": null,
+  "channel": "node",
+  "hint": ""
+ },
+ {
+  "key": "chance.defaultCategory",
+  "path": "/opportunity-goods/chance-goods/default_category",
+  "method": "POST",
+  "domain": "mms",
+  "ok": true,
+  "ec": null,
+  "channel": "node",
+  "hint": ""
+ },
+ {
+  "key": "video.mallDiagnosis",
+  "path": "/api/backbone/goods/mall/diagnosis_and_suggest",
+  "method": "POST",
+  "domain": "live",
+  "ok": false,
+  "ec": "no_channel",
+  "channel": "none",
+  "hint": "既没有可用账号（account）也没有浏览器（page）"
+ },
+ {
+  "key": "video.weeklyReport",
+  "path": "/api/backbone/goods/mall/weekly_report",
+  "method": "POST",
+  "domain": "live",
+  "ok": false,
+  "ec": "no_channel",
+  "channel": "none",
+  "hint": "既没有可用账号（account）也没有浏览器（page）"
+ },
+ {
+  "key": "video.statsOverview",
+  "path": "/api/backbone/goods/stats/overview",
+  "method": "POST",
+  "domain": "live",
+  "ok": false,
+  "ec": "no_channel",
+  "channel": "none",
+  "hint": "既没有可用账号（account）也没有浏览器（page）"
+ },
+ {
+  "key": "video.statsTrend",
+  "path": "/api/backbone/goods/stats/trend",
+  "method": "POST",
+  "domain": "live",
+  "ok": false,
+  "ec": "no_channel",
+  "channel": "none",
+  "hint": "既没有可用账号（account）也没有浏览器（page）"
+ },
+ {
+  "key": "video.publishPage",
+  "path": "/api/backbone/video/publish/page/query",
+  "method": "POST",
+  "domain": "live",
+  "ok": false,
+  "ec": "no_channel",
+  "channel": "none",
+  "hint": "既没有可用账号（account）也没有浏览器（page）"
+ },
+ {
+  "key": "video.publishQualification",
+  "path": "/api/backbone/video/publish_qualification",
+  "method": "POST",
+  "domain": "live",
+  "ok": false,
+  "ec": "no_channel",
+  "channel": "none",
+  "hint": "既没有可用账号（account）也没有浏览器（page）"
+ },
+ {
+  "key": "video.signedContract",
+  "path": "/api/backbone/video/signed_contract/query",
+  "method": "POST",
+  "domain": "live",
+  "ok": false,
+  "ec": "no_channel",
+  "channel": "none",
+  "hint": "既没有可用账号（account）也没有浏览器（page）"
+ },
+ {
+  "key": "video.topicList",
+  "path": "/api/orpheus-obs/topic/list",
+  "method": "POST",
+  "domain": "live",
+  "ok": false,
+  "ec": "no_channel",
+  "channel": "none",
+  "hint": "既没有可用账号（account）也没有浏览器（page）"
+ },
+ {
+  "key": "video.prePublishDelete",
+  "path": "/mms/amco/prePublish/delete",
+  "method": "POST",
+  "domain": "live",
+  "ok": false,
+  "ec": "no_channel",
+  "channel": "none",
+  "hint": "既没有可用账号（account）也没有浏览器（page）"
+ },
+ {
+  "key": "video.videoFlowCard",
+  "path": "/element/obs/video_flow_card/entrance",
+  "method": "POST",
+  "domain": "live",
+  "ok": false,
+  "ec": "no_channel",
+  "channel": "none",
+  "hint": "既没有可用账号（account）也没有浏览器（page）"
+ },
+ {
+  "key": "video.replayPromotionCfg",
+  "path": "/carllive/replay/mall_promotion_config",
+  "method": "POST",
+  "domain": "live",
+  "ok": false,
+  "ec": "no_channel",
+  "channel": "none",
+  "hint": "既没有可用账号（account）也没有浏览器（page）"
+ },
+ {
+  "key": "video.anchorInfo",
+  "path": "/kiwi/obs/anchor/info",
+  "method": "GET",
+  "domain": "live",
+  "ok": false,
+  "ec": "no_channel",
+  "channel": "none",
+  "hint": "既没有可用账号（account）也没有浏览器（page）"
+ },
+ {
+  "key": "aivideo.genVideo",
+  "path": "/api/banner-intelligent/smartTool/video/genVideo",
+  "method": "POST",
+  "domain": "mms",
+  "ok": false,
+  "ec": 0,
+  "channel": "node",
+  "hint": ""
+ },
+ {
+  "key": "aivideo.getResult",
+  "path": "/api/banner-intelligent/smartTool/video/getResult",
+  "method": "POST",
+  "domain": "mms",
+  "ok": false,
+  "ec": 0,
+  "channel": "node",
+  "hint": ""
+ },
+ {
+  "key": "aivideo.available",
+  "path": "/api/banner-intelligent/smartTool/video/available",
+  "method": "POST",
+  "domain": "mms",
+  "ok": false,
+  "ec": 0,
+  "channel": "node",
+  "hint": ""
+ },
+ {
+  "key": "aivideo.getStatus",
+  "path": "/api/banner-intelligent/smartTool/video/get/status",
+  "method": "POST",
+  "domain": "mms",
+  "ok": false,
+  "ec": 0,
+  "channel": "node",
+  "hint": ""
+ },
+ {
+  "key": "shop.legacyGoodsDetailVO",
+  "path": "/sydney/api/goodsDataShow/queryGoodsDetailVOListForMMS",
+  "method": "POST",
+  "domain": "mms",
+  "ok": false,
+  "ec": 3000000,
+  "channel": "node",
+  "hint": "开始结束时间不能为空"
+ },
+ {
+  "key": "shop.legacyGoodsOverview",
+  "path": "/sydney/api/goodsDataShow/queryGoodsPageOverviewForMms",
+  "method": "POST",
+  "domain": "mms",
+  "ok": true,
+  "ec": null,
+  "channel": "node",
+  "hint": ""
+ },
+ {
+  "key": "shop.legacyFlow",
+  "path": "/sydney/api/mallScore/queryMallFlowData",
+  "method": "POST",
+  "domain": "mms",
+  "ok": true,
+  "ec": null,
+  "channel": "node",
+  "hint": ""
+ },
+ {
+  "key": "shop.legacyScore",
+  "path": "/sydney/api/mallScore/queryMallScoreOverView",
+  "method": "POST",
+  "domain": "mms",
+  "ok": true,
+  "ec": null,
+  "channel": "node",
+  "hint": ""
+ }
+]
