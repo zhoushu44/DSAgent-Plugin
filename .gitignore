@@ -81,3 +81,6 @@ profs.txt
 # PDD 登录令牌（真实凭据，绝不入库）
 skills/pdd-ai-video/.cache/
 **/ptj-token.json
+# 测试/审计产物（本地数据，不入库）
+skills/_shared/.audit-all.json
+skills/_shared/.test-result.json
