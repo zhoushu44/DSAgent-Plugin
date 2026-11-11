@@ -17,6 +17,9 @@ description: |
     默认的 gpt-image-2.5 会报 model_not_found。
     需设置环境变量 NEWAPI_IMAGE_MODEL=gpt-image-2.5-2k（或 1k/4k）。
 
+  ⚠ 拼多多账号 shopKey 必须填「账号连接」页里真实存在的 pdd_mms_* 主键；
+    填了已解绑/已失效的旧主键，每轮都会在「上架拼多多」这步直接失败。
+
   一轮约 4 分钟。
 inputs:
   - key: keywords
@@ -39,7 +42,7 @@ inputs:
   - key: shop
     label: 拼多多 shopKey
     type: text
-    default: pdd_mms_7953c88bd519a91aac2fee2e3656f7e3
+    default: pdd_mms_975543fcd3e3ed8b495a85ca7e912aec
     required: true
   - key: category
     label: 拼多多类目搜索词

@@ -774,13 +774,17 @@ export function createSkillService(skillRoot: string, opts?: { statsPath?: strin
             const p = payload as Record<string, unknown>
             if ('ok' in p) payloadOk = p.ok !== false
             else if (typeof p.status === 'string') payloadOk = p.status !== 'error'
+            // ★ needConfirm=true = 「预览已就绪，等用户确认」，不是错误
+            if (p.needConfirm === true) payloadOk = true
           }
           const ok = code === 0 && payloadOk && !noResult
           // 失败原因可能写在 message / error / error_message / detail / reason 任一个字段，全部兜住
           let message = ''
           if (typeof payload === 'object' && payload !== null) {
             const p = payload as Record<string, unknown>
-            message = String(p.message ?? p.error ?? p.error_message ?? p.detail ?? p.reason ?? '')
+            message = String(p.message ?? p.error ?? p.error_message ?? p.detail ?? p.reason
+              // ★ text 是技能脚本最常用的「结论/错误」字段；不兜底会把真实原因吞成「未知错误」
+              ?? (typeof p.text === 'string' ? p.text.slice(0, 2000) : ''))
           }
           // 兜底：argparse 报错 / 未捕获异常只写 stderr，取最后一行含错误关键字的，退路取最后一行非空
           if (!message) {

@@ -10,7 +10,7 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 const ROOT = 'E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin'
-const SHOP = 'pdd_mms_2b1bca962e5fba5172e3edc19a09e406'
+let SHOP = process.env.PDD_SHOP || ''
 const GID = 1025317086069
 const CID = 205398721152
 
@@ -20,7 +20,19 @@ const seedStore = await import(pathToFileURL(path.join(ROOT, 'skills/_shared/pdd
 const { CredentialStore } = await import(pathToFileURL(path.join(ROOT, 'lib/services/credential-store.js')).href)
 
 const store = new CredentialStore(path.join(os.homedir(), '.dsh', 'dsagent-accounts.json'))
-const acc = store.listAccounts().find(a => String(a.shop_key) === SHOP)
+// 自动选一个健康账号
+let acc = null
+for (const a of store.listAccounts().filter(x => x.platform === 'pdd_mms')) {
+  try {
+    const ck = Object.entries(a.cookies || {}).map(([k, v]) => `${k}=${v}`).join('; ')
+    const rr = await fetch('https://mms.pinduoduo.com/earth/api/mallInfo/commonMallInfo', { method: 'GET', headers: { 'user-agent': 'Mozilla/5.0 Chrome/157', cookie: ck, referer: 'https://mms.pinduoduo.com/' } })
+    const j = await rr.json().catch(() => null)
+    if ((j?.error_code ?? j?.errorCode) === 1000000) { acc = a; break }
+  } catch { }
+}
+if (!acc) { console.error('NO_VALID_ACCOUNT'); process.exit(1) }
+SHOP = acc.shop_key
+console.error('USING_SHOP=' + SHOP)
 const account = { cookies: acc.cookies, localStorage: seedStore.readSeed(SHOP)?.localStorage || {} }
 
 /** 已知参数（只读场景） */
@@ -31,7 +43,9 @@ const KNOWN_BODY = {
   '/vodka/v2/mms/query/display/mall/goodsList': { pre_sale_type: 4, page: 1, out_goods_sn_gray_flag: true, shipment_time_type: 3, is_onsale: 1, sold_out: 0, size: 3 },
 }
 
-const entries = Object.entries(api.API)
+// ★ 跳过「路径前缀型」条目（如 chance.base = /opportunity-goods/chance-goods）
+//   它们不是真接口，直接 POST 必然 40010，混进缺口清单是噪声。
+const entries = Object.entries(api.API).filter(([, spec]) => !spec.prefixOnly)
 
 console.log('AUDIT START')
 console.log(`total=${entries.length}`)

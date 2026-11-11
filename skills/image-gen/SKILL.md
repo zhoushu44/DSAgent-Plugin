@@ -28,6 +28,22 @@ metadata:
 - 网关可达：`http://45.205.27.41:3001/v1`
 - key 在 `~/.dsh/image-gen.local.json`：`{"base":"...","key":"...","model":"gpt-image-2.5-2k"}`
 
+## 执行入口（宿主按「脚本型」调用本技能）
+
+宿主靠 SKILL.md 里带 `{baseDir}` 占位符的命令行判断技能能不能被执行。
+**下面第一行就是本技能的可执行入口**（from-pack 模式：1688 素材包 → 15 张图 + product.json）：
+
+```bash
+# from-pack：素材包目录 → 主图 5 + 详情 10，并顺手产出 product.json（供 pdd-publish-http --product-file 用）
+python {baseDir}/scripts/gen.py --mode from-pack --pack "<素材包目录>" --out "<输出目录>" --workers 8 --category 儿童睡衣
+
+# 单张 / plan 批量
+python {baseDir}/scripts/gen.py --prompt "<提示词>" --ref "<参考图路径>" --size 1024x1024 --name hero --out "./out"
+```
+
+⚠ 入口脚本改动必须同步这两行，否则技能会退化成「纯指令型」：
+调用方只拿到这份文档、看起来调用成功，实际一张图都不出（工作流里则直接判该步骤不可用）。
+
 ## Workflow
 
 1. **写 plan** —— 把每张图的 `name / prompt / size`（有参考图就加 `ref`）写成 `plan.json`。**size 一律 `1024x1024`（1K），不要写 2K/4K**。
