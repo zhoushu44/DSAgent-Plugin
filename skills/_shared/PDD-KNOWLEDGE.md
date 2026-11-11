@@ -1,6 +1,6 @@
 # 拼多多基座 · 知识库
 
-> 最后更新：2026-11-08
+> 最后更新：2026-11-10
 > 合并自 9 份分析文档，本文是**唯一权威版本**
 
 ---
@@ -15,6 +15,8 @@
 6. [种子维护](#六种子维护)
 7. [能力边界](#七能力边界)
 8. [踩坑记录](#八踩坑记录)
+9. [**类目 / 模板（纯 Node）**](#九类目--模板纯-node)
+10. [**账号 key 漂移**](#十账号-key-漂移pdd_mms-专属)
 
 ---
 
@@ -106,12 +108,30 @@ const SDK = m.exports.default
 | **`t2n`** | **pdd-vodka-signer.mjs** | **❌** | **0as** | **`/vodka/` `/glide/`（首选）** |
 | `t2` | pdd-client.mjs | ✅ | 0as | 无种子兜底 |
 | `t3` | pdd-client.mjs | ✅ | 0as+webSpiderRule | 商品明细（必须浏览器） |
+| **混合** | **pdd-promo-signer-hybrid.mjs** | **签名阶段需要** | 推广域/live 域 | **`/mms-gateway/`（推广）`live.`（视频）** |
+
+### ★ 混合通道（2026-11-09）
+
+**为什么需要**：推广域签名器是普通 JS 混淆，纯 jsdom 复刻**实测不可能**（jsdom 运行时语义与浏览器不同，不是环境变量问题）。
+
+**怎么做**：**真实 Chrome 负责签名，Node 负责发请求**。
+
+| 域 | Chrome 的职责 | Node 的职责 |
+|---|---|---|
+| yingxiao | 跑 SDK 生成 `crawlerInfo`（+ 同串 `anti-content` 头） | 带签名发 HTTP |
+| live | 提供 Profile 里的 Cookie（含 `msfe-pc-cookie-captcha-token`） | 带 `VerifyAuthToken` 头发 HTTP |
+
+**实现要点**：
+- Chrome 用**账号自己的 Profile**（`~/.dsh/browser-profiles/accounts/<shopKey>`），所以登录态和浏览器一致
+- Cookie 从 CDP `Storage.getCookies` 取（**不能用** `Network.getCookies`，Cookie DB 被 Chrome 锁住）
+- 签名器常驻会占住事件循环 → skill 结束必须 `closeChannels()`
 
 ### 性能
 
 | 通道 | 耗时 |
 |---|---|
 | 纯 Node | **58~330ms** |
+| 混合（Chrome 签名 + Node 发） | 请求本身同纯 Node；**浏览器常驻成本 ~8s/次会话** |
 | 浏览器 | 28000ms |
 
 ---
@@ -134,6 +154,46 @@ const SDK = m.exports.default
 | `vodka/.../batchOnSale` | `{goodsIds:[id]}` | |
 | `vodka/.../common/query/status` | `{}` | |
 | `yingxiao/.../getAdvertiserDailyCosts` | `{}` | 成功码是 **1000** 不是 1000000 |
+| `sydney/.../queryGoodsDetailVOList` | `{startDate,endDate,queryType:6,sortCol:0,sortType:1,pageNum,pageSize,actVs:1}` | 用 `beginDate` 报「开始结束时间不能为空」 |
+| `chance-goods/get_hot_search_goods` | `{page,page_size,statistic_type}` | 缺 `statistic_type` → **http 500** |
+
+### ★ 基座级默认 body（2026-11-09 新增）
+
+拼多多的 body 字段名是**它自己定的**（`scenesMode` / `clientType` / `blockType` / `queryConfigList`…），
+不抄真实请求就调不通 —— 之前 11 个推广接口全部 `ec=40001`，根因就是 body 缺字段（**不是签名问题**）。
+
+**现在默认 body 表放在基座**（`pdd-api.mjs` 的 `API_BODY_DEFAULTS`），
+`request()` 自动合并，**每个 skill 都不用改**。
+
+| 能力 | 说明 |
+|---|---|
+| 表 | `API_BODY_DEFAULTS`（键 = 去掉 `/mms-gateway/` 前缀和前导 `/` 的路径） |
+| 合并 | 显式传入的字段优先；`opts.noBodyDefaults` 可关掉 |
+| 占位符 | `{{today}}` `{{yesterday}}` `{{mallId}}` 递归替换 |
+| **mallId** | **基座自动解析**（`venus/api/user/userInfo`，按 shopKey 缓存）—— 它是**店铺级**的，不能写死 |
+
+### ★ 报表接口的 body 形状（挖 JS bundle 的方法）
+
+`poseidon/api/report/queryEntityReport` 猜了 5 版全 500，最后从页面 chunk 的调用点挖出真相
+（`4271-*.js` 的 `getEntityTable`）：
+
+```js
+{
+  entityId: mallId,          // 店铺级
+  entityDimensionType: 0,    // MALL
+  queryDimensionType: 2,     // UNIT
+  reportPromotionType: 9,    // Goods
+  blockTypes: [6],           // ReportTable
+  startDate, endDate,
+  queryRange: { pageNumber, pageSize },   // ★ 嵌套对象，不是顶层
+  orderBy: 9999, orderType: 1,             // ★ orderType 必须为 1，填 0 服务端 500
+  clientType: 1,                           // PC
+  returnTotalSumReport: true,
+}
+```
+
+**枚举值从 chunk 里挖**：`MALL=0 PLAN=1 UNIT=2 CREATIVE=4 AD_CREATIVE=11 SHOW=13`、
+`ReportTable=6`、`Goods=9`、`PC=1`。
 
 ### 返回结构
 
@@ -221,7 +281,42 @@ mms.pmm.did.2
 
 ---
 
-## 七、能力边界
+## 七、Cookie 自愈（2026-11-09 新增）
+
+### 问题
+
+凭证库里存的是**登录时那一份 Cookie 快照**，会过期（`43001 会话已过期`）；
+但**同一个浏览器 Profile 里的会话还是活的** —— 实测同一时刻：
+凭证库 Cookie 43001，Profile 打开推广页正常。
+
+### 机制
+
+```
+request() 收到 43001
+   ↓
+从 Profile 浏览器 CDP Storage.getCookies 取实时 Cookie（过滤 *.pinduoduo.com）
+   ↓
+写回凭证库 store.setCookies(shopKey, jar)   ← 落盘，下次直接快
+   ↓
+用新 Cookie 重放一次原请求
+```
+
+### 效果
+
+| 域 | 自愈前 | 自愈后 |
+|---|---|---|
+| mms `commonMallInfo` | 43001 | ✅ ok |
+| shop / works / chance / promo | 全部 43001 | ✅ 全通 |
+
+**这是基座能力** —— 所有拼多多 skill 自动受益，不用逐个改。
+
+### 只在「会话失效」时触发
+
+`43001` 才自愈；限流（`54001`/`100001`/`429`）**绝不**自愈 —— 那两种越试越糟。
+
+---
+
+## 八、能力边界
 
 ### ✅ 纯 Node 稳定（15 个）
 
@@ -239,18 +334,42 @@ mms.pmm.did.2
 | `chance.home` | opportunity-goods | `{}` |
 | `promo.dailyCost` | yingxiao | `{}`（不稳定，会降级） |
 
-### ❌ 不可用
+### ✅ 纯 Node 可用（2026-11-09 全量审计：89 个接口，42 个通）
 
-| 项 | 原因 |
+| 域 | 通过/总数 | 状态 |
+|---|---|---|
+| `shop` | **11/12** | ✅ 几乎全通（店铺流量/评分/商品明细/DSR） |
+| `chance` | **9/11** | ✅ 机会商品几乎全通 |
+| `promo` | **14/21** | ✅ 读接口全通；剩下 7 个是**写操作**（缺业务参数） |
+| `goods` | 5/18 | ⚠️ 见下方限制 |
+| `act` | 2/7 | ⚠️ 活动域 2 小时频控 |
+| `common` | 1/1 | ✅ |
+| `video` | 0/15 | ❌ 见下方限制 |
+| `aivideo` | 0/4 | ❌ 独立鉴权域 |
+
+**读接口基本全通**；不通的那批里 **17 个是写操作**（报「参数校验失败」= 传输层是好的，只是缺 adId/goodsId 这类业务参数）。
+
+### ❌ 真正的硬缺口
+
+| 项 | 数量 | 原因 | 谁能解 |
+|---|---|---|---|
+| **视频域** `live.pinduoduo.com` | 15 | **账号没登录 live.pinduoduo.com**（浏览器直接跳 `/login`，拿不到 `msfe-pc-cookie-captcha-token`） | **用户**：在该 Profile 登录一次多多视频创作者后台，基座自动接管 |
+| **AI 素材域** `/api/banner-intelligent/` | 4 | 连接层就失败（ec=0），独立鉴权 | 需要单独打通 |
+| `chance.total_info` | 1 | **拼多多服务端 500**（页面自己也是 500） | 拼多多 |
+| `mall/goodsList` 族 | 5 | **服务端对该账号的接口族限制**（浏览器也 54001）；已用 `goods.listGlide` 替代，skill 不受影响 | 换账号 |
+| `lakemms` 活动域 | 3 | `100001` 2 小时频控（连打触发） | 等冷却 |
+
+### 写操作现状
+
+| 操作 | 现状 |
 |---|---|
-| **视频域** `live.pinduoduo.com` | **账号无创作者权限**（浏览器也 302 到登录页） |
-| `mall/goodsList` | 账号级接口限制（浏览器也 54001） |
-| `lakemms` 活动 | `100001` 2 小时频控 |
-| 写操作（改价/改库存） | 参数未抓全（需真实点击保存） |
+| 推广域 6 个写接口 | **body 已抓到**（在 `promo.mjs`），Node 通道已通（混合签名），只差接业务参数 |
+| 商品上架 | 走 `pdd-publish-http`，图片规整 + 改包重放链路已通 |
+| 商品上下架 / 改价 | 浏览器路径可用，Node 路径受 `mall` 接口族限制 |
 
 ---
 
-## 八、踩坑记录
+## 九、踩坑记录
 
 ### ① `_` 不是分隔符
 
@@ -293,6 +412,468 @@ mms.pmm.did.2
 `check-pdd-guard.mjs` 的 [7] 原来只要文件里同时有 `fetch(` 和 `page.evaluate(` 就报警。
 
 **修正**：只在 `page.evaluate` 的实参块内扫描 `fetch`（括号配对）。
+
+### ⑦ 推广域 40001 的真正根因是 body，不是签名（2026-11-09）
+
+**错误**：11 个推广接口全 40001 → 以为是签名不对，反复换签名器
+
+**真相**：推广域**签名必须同时出现在两处**（body `crawlerInfo` **和** header `anti-content`，同一个字符串），
+且 body 里还缺拼多多自有字段（`scenesMode`/`clientType`/`blockType`…）。签名对了、body 不全，照样 40001。
+
+**教训**：40001 先查 body 字段，再查签名位置。
+
+### ⑧ async `beforeExit` 会让进程永不退出
+
+**错误**：`process.on('beforeExit', async () => { await closeChannels() })`
+
+**真相**：async 的 `beforeExit` 处理器会让 Node **反复重触发**它（回调把事件循环填满 → 触发 beforeExit → 又填满），
+进程永远不退出。
+
+**修正**：改成显式 `shutdown()`，在出结果前和每个 `process.exit()` 前调用。
+
+### ⑨ SIGKILL 杀 Chrome 只杀父进程会留 Profile 锁
+
+**错误**：`browser.close()` 后直接删 `SingletonLock`
+
+**真相**：Chrome 被 SIGKILL 时，**子渲染进程还活着**并占着 Profile 锁 → 下次启动报
+`Failed to launch the browser process!`
+
+**修正**：退出时 `taskkill /PID <pid> /T /F` 杀**整棵进程树**；启动再加重试（4s/8s 退避）。
+
+### ⑩ 默认 body 表的键要剥前导 `/`
+
+**错误**：默认表键写 `sydney/api/...`，查找时用 `path.replace(/^\/mms-gateway\//,'')` → 得到 `/sydney/api/...`（**多一个斜杠**）
+
+**真相**：mms 域路径不带 `/mms-gateway/` 前缀，剥不掉 → **全部 mms 类接口都没命中默认 body** → 报「开始结束时间不能为空」
+
+**修正**：`.replace(/^\/mms-gateway\//,'').replace(/^\//,'')`。
+
+### ⑪ `{{mallId}}` 不能写死
+
+**错误**：默认 body 里 `entityId: 800050996`
+
+**真相**：mall_id 是**店铺级**的，换账号就是另一个值，写死必错（而且报表接口全 500）
+
+**修正**：基座按 shopKey 自动解析并缓存（`venus/api/user/userInfo`）。
+
+### ⑫ 抽到 chunk 的调用点比猜 body 快 10 倍
+
+`getEntityReport` 的 body 猜了 5 版全 500；从页面 chunk 的 `getEntityTable` 一眼看穿：
+`queryRange` 是**嵌套对象**、`orderType` 必须为 **1**（填 0 服务端 500）。
+
+**方法**：进页面 → `document.scripts` 拿 chunk → 逐个 `fetch` 下来 → 搜接口路径 → 看 `post()` 的第二个参数。
+
+---
+
+## 九、类目 / 模板（纯 Node）
+
+**2026-11-10 收进基座注册表 —— 选类目、拉属性模板都不需要浏览器。**
+
+| 注册名 | 路径 | 方法 | 说明 |
+|---|---|---|---|
+| `mms.categorySearch` | `/vodka/v2/mms/search/categories/v2` | GET | 关键词 → 类目树（`?keyword=`） |
+| `mms.mallTemplate` | `/draco-ms/mms/template/mall` | GET | 叶子 catId → 属性 + 规格维度（`?catId=`） |
+
+### GET 查询参数由基座拼
+
+注册表加 `query: ['catId']`，调用方直接给对象，基座负责 URL 编码和拼接：
+
+```js
+await callApi('mms.mallTemplate', { catId: 8463 }, { account, shopKey })
+// → GET /draco-ms/mms/template/mall?catId=8463
+```
+
+也支持路径占位符 `path: '/x/{catId}'`（同样从 body 取值）。
+
+### 返回结构坑
+
+`categories/v2` 的返回**顶层就是 `cat_info_v2_lists`**，不是文档写的 `result.cat_info_v2_lists`。
+代码里两种都兼容。
+
+### 只有叶子类目有模板
+
+传一级/二级类目 → 接口 200 + `modules: []`（**不是报错**）。
+`templateId=0` 且 0 属性 0 规格维 = 空模板 → CLI 报 `EMPTY_TEMPLATE`、退出码 1，
+绝不能让上层拿空模板去填表。
+
+### 实测数据（空空商行）
+
+| 关键词 | 类目路径 | catId | templateId | 属性 | 规格维 |
+|---|---|---|---|---|---|
+| T恤 | 女装/女士精品 > T恤 > T恤 | 8463 | 53657 | 15 | 2（颜色分类 115 预设 / 尺码 91 预设），SKU 上限 900 |
+| 保温杯 | 餐饮具 > 杯子/水杯/水壶 > 保温杯/保冷杯 | 16557 | 40001 | 13 | 0（该类目不开放规格） |
+
+耗时：单次 2~5 秒（含签名），全程 `channel=node`。
+
+### CLI
+
+```bash
+node skills/pdd-publish-http/scripts/pdd-category.mjs search   --keyword "T恤"
+node skills/pdd-publish-http/scripts/pdd-category.mjs template --cat-id 8463 --save
+node skills/pdd-publish-http/scripts/pdd-category.mjs resolve  --keyword "保温杯" --save
+```
+
+---
+
+## 十、账号 key 漂移（pdd_mms 专属）
+
+### 现象
+
+同一个店铺的 shop_key 会**自己变**：
+`pdd_mms_975543fcd3…` → `pdd_mms_3fa2ee60c6…` → `pdd_mms_25f216caa8…`
+
+### 根因
+
+`lib/services/credential-store.js` 里 `ACCOUNT_ID_FROM.pdd_mms = 'PASS_ID'` ——
+商家后台没有独立的数字店铺 ID，只能拿 `PASS_ID` 派生 account_id。
+而 **PASS_ID 会随 SSO 会话轮换** → `migrateDriftedKeys` 在 store 每次加载时
+按 cookie 重新派生 key → 账号被改名。
+
+连带失效（因为很多资产按 shop_key 命名）：
+- Profile 目录 `~/.dsh/browser-profiles/accounts/<shop_key>`
+- 签名种子 `~/.dsh/pdd-risk-seeds/<shop_key>.json`
+- 签名器记忆 `~/.dsh/pdd-signer-choice.json`
+
+### 已落的三道防线
+
+**① 不再把轮换票据写回凭证库**
+推广/自愈路径写 Cookie 时**只补缺失的键，绝不覆盖已有值**。
+`PASS_ID` 不被覆盖 → account_id 稳定 → key 不再漂。
+
+> ⚠ 这条是硬约束。改成 `setCookies(shopKey, 全量jar)` 会立刻复现漂移。
+
+**② Profile 目录：映射表 + 自动发现 + Windows 目录联接**
+`skills/_shared/pdd-profile-map.mjs`
+- `~/.dsh/pdd-profile-map.json` 记 shop_key → 实际目录
+- 默认目录不存在/是空壳（Cookies 为 0）→ 在同前缀目录里找**会话最全**的那个
+- 找到后建 **junction**，让十几个按 `path.join(..., shopKey)` 硬拼路径的技能自动命中
+
+> ⚠ Cookie 库路径要同时认 `Default/Network/Cookies`（Chrome ≥96）和 `Default/Cookies`。
+> 只查旧路径会永远读到 0 字节 → 把有登录态的 Profile 误判成空壳。
+
+**③ 种子读取：同店铺兜底**
+`readSeed()` 精确 key 找不到时，在同前缀种子里挑**同店铺**的（比对 `new_userinfo` 的 mall_id）。
+不同店铺绝不借用 —— 拿错种子 = 用别人的身份签名，比没有更糟。
+
+---
+
+## 十一、视频域（live）纯 Node —— 2026-11-10 打通
+
+### 两个曾经的错误认知（都已纠正）
+
+| 错误认知 | 实际 |
+|---|---|
+| live 域用 `VerifyAuthToken` 请求头 | ❌ **不存在**。抓 5 个真实接口，全部只带 `anti-content` |
+| live 域票在 cookie `msfe-pc-cookie-captcha-token` | ❌ live 域 25 个 cookie 里**根本没有**这个键 |
+| live 域和 mms 共用 `PASS_ID` | ❌ 各有各的：mms 用 `PASS_ID`，live 用 `L_PASS_ID` |
+
+### 正确姿势（三条同时满足才能通）
+
+1. **签名**：`anti-content` 请求头，用 `pdd-vodka-signer.mjs`（与 mms 同一套 JVM2 虚拟机）
+2. **Cookie**：必须是 **live 域专属票据** `L_PASS_ID`（+ `HEARTBEAT_PASS_ID` / `L_PASS_TYPE`）
+   —— 拿 mms 的 `PASS_ID` 去打 live 域 → **HTTP 403 + `{"error_code":40001,"error_msg":""}`**
+   （空文案最坑：看着像「未登录」，其实是「票不对域」）
+3. **body 参数名**：待发布列表是 `pageSize` / `pageNum`（不是 `page` / `pageSize`）
+
+### 域的 cookie 分布（实测同一账号）
+
+```
+live.pinduoduo.com (7)    webp,_nano_fp,L_PASS_ID,L_PASS_TYPE,L_PASS_DEAD,HEARTBEAT_PASS_ID,pdd_user_id
+mms.pinduoduo.com  (7)    webp,_nano_fp,PASS_ID,webp,mms_b84d1838,x-visit-time,JSESSIONID
+.pinduoduo.com     (8)    api_uid,rckk,_bee,ru1k,_f77,ru2k,_a42,windows_app_shop_token_23
+yingxiao.pinduoduo.com (3) _nano_fp,SUB_SYSTEM_ID,SUB_PASS_ID
+```
+
+→ 用 `daemonDomainCookies(shopKey, ['live.pinduoduo.com'])` 按域取，别混。
+
+### 实测（空空商行）
+
+| 接口 | 结果 |
+|---|---|
+| `video.list` | ✅ 首次 2.2s，热态 **102ms** |
+| `video.publishQualification` | ✅ `hasQualification:true` |
+| `video.topicList` | ✅ |
+| `video.query` | ❌ **不通**（详见下） |
+
+#### `video.query` 的坑：参数不是问题，接口本身就不通
+
+实测四种参数组合（含页面内直发，带 `credentials:'include'` + 插件自动签名）：
+
+```
+{status:-1,pageSize:20,page:1,startTime,endTime}   → 40002 系统异常
+{status:-1,pageNum:1,pageSize:20,startTime,endTime} → 40002 系统异常
+{status:-1,page:1,pageSize:20}                      → 40002 系统异常
+{}                                                  → 40002 系统异常
+```
+
+**页面内直发也 40002** → 不是签名、不是 Cookie、不是参数名的问题。
+且失败会**连带账号冷却 30s**（40002 频控），别反复试。
+
+⚠️ **曾经的假成功**：`published` 模式拿到 40002 时 `result` 为空 →
+`feeds=[]` → 走待发布兜底 → 报「已发布视频 0 个」，看起来一切正常。
+现已改成：`success === false` 直接抛错，绝不把接口失败伪装成「没有数据」。
+
+**结论**：查已发布视频请用 `--mode list`（待发布队列，纯 Node 稳定）。
+`video.query` 需要另找入口（可能是别的域名或需要额外凭证），暂标为不可用。
+
+### 前置条件（否则 40001）
+
+- 账号必须**登录过 live.pinduoduo.com**（多多视频创作者后台）。
+  实测：空空商行 ✅ 有票；爱绿森两个账号 ❌ 只有 7 个通用 cookie，从没登录过 live 域。
+- 常驻签名服务里要有该账号的浏览器（`daemonWarm` 预热）。
+
+---
+
+## 十二、**「进程不退出」全局坑**（2026-11-10，影响所有纯 Node 通道）
+
+### 症状（最容易被误判）
+
+skill **结果完全正确**、JSON 已经打印出来了，但**进程一直不退出**：
+```
+{"ok":true,"mode":"list",...,"total":396,...}    ← 结果正确
+（然后进程挂着，永远不退出）
+```
+调用方 `WaitForExit` 超时 → 误判成「卡死 / 技能不通」。
+实测 `pdd-works` / `pdd-shop` / `pdd-activity` / `pdd-promo` 全部中招。
+
+### 根因（两个，都要治）
+
+| # | 来源 | 说明 |
+|---|---|---|
+| ① | **jsdom**（主因） | `pdd-vodka-signer.mjs` 里 `new JSDOM(...)` 的 window 自带 `setInterval` / `MessageChannel` 等**活句柄**。不 `window.close()`，事件循环永远不空。**最小复现 = 只调一次 `sign()`**。 |
+| ② | undici 连接池 | Node 24 内置 fetch 把 keep-alive socket 留在池里。`Connection: close` **无效**（PDD 走 HTTP/2，h2 忽略该头）。 |
+
+### 修法
+
+1. **签名器**：`pdd-vodka-signer.mjs` 的 `resetSandbox()` 真正 `_liveDom.window.close()` 并置空，
+   下次签名自动重建（+75ms，可忽略）。
+2. **基座**：`pdd-request.mjs` 的 `request()` 结尾调 `releaseDispatcherIfIdle()`，
+   同时关 undici dispatcher + jsdom 沙箱 → **所有 skill 自动获得**。
+3. **兜底**：`pdd-works` / `pdd-activity` / `pdd-promo` 入口加 `.then(() => process.exit(0))`。
+
+### 排查方法（记住这个顺序）
+
+```
+1. node --check                     ← 语法
+2. 单独跑最小案例：只 import → 加签名 → 加请求   ← 二分定位
+3. process._getActiveHandles()       ← 看剩什么句柄
+   （fd=2 是 stderr，不是 socket，别被骗）
+4. 别用 RedirectStandardError 判断「是否卡死」    ← 管道本身会让进程看起来不退
+```
+
+### 顺带修掉的
+
+- **`test-suite` 选号缺陷**：`pickPddAccount()` 只按 `status=valid` 选，但库里同时有
+  「有种子」和「没种子」的账号 → 间歇性报「种子不存在」。
+  已改成优先选 **valid + 有种子** 的账号。
+
+---
+
+## 十三、pdd-activity 的两个真 bug（2026-11-10）
+
+### bug ① 作用域错误把真实错误全吞了
+
+`activity.mjs` 的 `.catch()` 在**外层作用域**，里面却引用 `try` 内才定义的 `const SHOP`：
+```js
+})().catch(async (e) => {
+  const cd = checkCooldown(SHOP)   // ← ReferenceError: SHOP is not defined
+```
+后果：**任何错误**进来都会先抛 `ReferenceError`，把真实原因整个吞掉，
+外面只看到一个看不懂的堆栈（表现为「这个技能全挂了」）。
+
+修：外层用 `argOf('account')` 兜底取账号。
+> 这是通用教训 —— **错误处理代码本身抛异常，比原始错误更难查**。
+> 写 catch 块时先确认引用的变量在这个作用域里存在。
+
+### bug ② 无条件开浏览器 + 手搓 launch
+
+只读模式（types/stats/effect/overview）也要开浏览器等 20s+，
+且手搓 `puppeteer.launch({ executablePath: 硬编码路径 })` 拿不到
+`launchOptions` 里的「让常驻签名服务释放 Profile 锁」→ 守护进程占着 Profile 就直接失败。
+
+修：按需开（只有 `enroll` / `quit` / `records` 要页面），改用 `launchOptions()`。
+
+**修复后实测四种只读模式全部 `ok:true`、退出码 0。**
+
+---
+
+## 十四、pdd-crawl 是「宿主工具型」，不是脚本型
+
+`skills/pdd-crawl/` 下**只有 README + SKILL.md，没有任何脚本** —— 这不是缺失。
+
+它的实现是 **TypeScript**：`src/pdd-crawl.ts`（37KB）→ 编译到 `lib/pdd-crawl.js`，
+通过宿主工具 `dsagent_pdd_crawl(mode/keyword/goodsId/limit)` 调用。
+
+> 所以「用 `ls skills/xxx/scripts` 判断技能有没有实现」是**错的**：
+> 会漏掉 `pdd-crawl` 这类宿主工具型技能。
+
+### 它的前提
+
+用 **`pdd` 平台账号**（H5 买家态，Cookie 域 `.yangkeduo.com`），
+与 `pdd_mms`（商家后台态）是**两套完全独立的登录态**，不通用。
+
+### 当前状态（2026-11-10）
+
+凭证库里有 `pinduoduo_8836271194`（status=valid、10 个 Cookie），
+`dsagent_check_account_health` 也报「真实探测有效」，
+但**实际调用仍然跳到 `login.html`** —— 说明凭证库里的 H5 Cookie 是老的、服务端已不认。
+→ 需要在「账号连接」重新扫码登录 **pdd（买家态）** 账号。
+
+---
+
+## 十五、pdd-shop `--mode goods` 商品明细（2026-11-11 修）
+
+### 症状
+
+```
+goodsDetailList: []           ← 空列表，但 CLI 报 ok:true「0 个」
+PUA 解码覆盖 0 码点
+连续重试 → 54001 → 账号冷却
+```
+
+### 根因（三个叠在一起）
+
+| # | 问题 | 说明 |
+|---|---|---|
+| ① | **`queryType: 6` 是「今日实时」，会忽略 startDate/endDate** | 实测：`queryType=6 + startDate=2026-11-09` → 返回 `statDate=2026-11-11`。而 `queryType=1/2/3` 才认日期。原代码用 6 + 日期=TODAY，等于永远查「今天」，而生意参谋**当天不出数** → 恒空 |
+| ② | **goods 默认 `transport=browser`**，走了页面 hook | 页面自己决定查哪天，`--date` 参数**完全不起作用**；且拿到什么算什么，空列表被当「没数据」 |
+| ③ | **空列表返回 `ok:true`** | 把「没取到」伪装成「没有数据」，用户看不出问题 |
+
+### 修法
+
+1. `queryType` 默认 **1**（按日期查），支持 `--query-type` 覆盖
+2. `--date` 默认**昨天**（当天不出数）
+3. `TRANSPORT` 默认改 **`http`**（t3 纯 Node 真签名）——
+   原默认 browser 的理由「静态 PUA_MAP 会解错」**已过时**，
+   t3 分支早就换成 `buildPuaMap()` 动态推导了
+4. 空列表 → 明确报 `empty_result` + 三条可执行建议，绝不返回假成功
+
+### 实测对比
+
+|  | 修复前 | 修复后 |
+|---|---|---|
+| 通道 | browser（页面 hook） | **t3 纯 Node** |
+| 日期 | 2026-11-11（今天，不可控） | **2026-11-10（昨天，可控）** |
+| 数据 | `[]` 空 / 假成功 | **uv:68 pv:89 payAmt:77.10 vcr:8.82%** |
+| PUA | 0 码点 | **10/10** |
+
+### queryType 实测表（同一账号，只改这一个变量）
+
+| queryType | 结果 |
+|---|---|
+| 1 / 2 / 3 | ✅ 认 `startDate`，返回对应日期 |
+| 4 | 2000000（无权限） |
+| 5 / 7 | 空 |
+| 6 | ✅ 但**忽略日期**，恒返回当天 |
+
+### 附带修的：`needRelogin` 陈旧标记
+
+`pdd-antiban` 的 `needRelogin: true` 一旦置上**没人清**，
+用户重新扫码登录后仍报「需要重新登录」（`health` 还是 70，不是健康分问题）。
+
+**处置**：`clearCooldown(shopKey)` 会删 `needRelogin` 并把健康分 +20。
+> 重新登录后如果遇到「需要重新登录」，先跑一次 clearCooldown 再判断。
+
+---
+
+## 十六、系统性缺陷审计（2026-11-11）
+
+由 `pdd-shop --mode goods` 空列表问题引发，全仓扫描后发现**四个同类模式缺陷**。
+
+### 缺陷 A：空结果当成功（最危险）
+
+```js
+const list = r?.result?.list || []
+emit({ ok: true, items: list })          // ← 接口失败也走这里
+```
+接口失败时 `result` 是 undefined → `list = []` → 报 `ok:true`「0 条」。
+**把「没取到」伪装成「本来就没有」**，用户完全看不出问题。
+
+| 受害点 | 状态 |
+|---|---|
+| `pdd-shop --mode goods`（goodsDetailList 恒空） | ✅ 已修（2026-11-11） |
+| `pdd-video` `getQueue()` | ✅ 已修（改抛错） |
+| `pdd-chance` `call()` 返回 `rr.raw ?? null` | ✅ 已修（改抛错） |
+| `pdd-works` 的 `\|\| []` | ✅ 本来就安全（其 `call()` 已抛错） |
+
+**基座已提供 `pickList(r, pick, label)`** —— 新代码请用它，别手写 `|| []`。
+
+### 缺陷 B：`pdd-api` 绕过 `request()`，拿不到自愈
+
+`pdd-api.mjs` 的纯 Node 路径用**自己的 fetch**，绕过了 `pdd-request.mjs`：
+
+| 路径 | 43001 表现 |
+|---|---|
+| `request()` | ✅ 自动 Cookie 自愈 → 重试成功 |
+| `pddApi()` | ❌ 原样返回 43001 |
+
+→ 调用方以为「账号要重登」，其实刷新 Cookie 就能继续。
+**已修**：`pdd-api` 加 43001/40001 自愈（复用 `healCookiesForApi()`）。
+
+### 缺陷 C：`needRelogin` 永久锁死账号
+
+`pdd-antiban` 里 `kind === 'session'` 就置 `needRelogin = true`，**永久有效**。
+但 43001 经常是**瞬时**的（自愈后立刻能用）→ 用户明明重登了还一直报「需要重新登录」。
+
+**已修**：加 15 分钟有效期（`needReloginUntil`）；老数据无该字段视为已过期。
+`clearCooldown(shopKey)` 可立即清除并 +20 健康分。
+
+### 缺陷 D：`queryType` 语义误解
+
+详见第十五章。`queryType=6` 是「今日实时」，**忽略日期参数**；`1/2/3` 才按日期查。
+
+### 排查方法论（这次用的）
+
+```
+1. 静态扫描：找 `|| []` 后无 `!arr.length` 检查就 ok:true 的地方
+2. 精确扫描：找「取 result 但前 12 行内无 ok 检查」
+3. **行为验证（最可靠）**：构造失败场景（错参数 / 临时改坏接口路径）
+   → 看返回的是 ok:false 还是 ok:true
+```
+
+第 3 步最关键 —— 静态扫描会大量误报，行为验证一测一个准。
+
+---
+
+## 十七、基座修复完成情况（2026-11-11 收口）
+
+### ✅ 已完成（4 项基座级修复）
+
+| # | 修复 | 落点 | 覆盖方式 |
+|---|---|---|---|
+| 1 | **Cookie 自愈**补到 `pdd-api` | `pdd-api.mjs` 43001/40001 分支 | 所有走 `pddApi()` 的 skill 自动受益 |
+| 2 | **`needRelogin` 加 15 分钟有效期** | `pdd-antiban.mjs` `canUse()` | 全局，不再永久锁号 |
+| 3 | **`pickList()` 工具** | `pdd-request.mjs` 导出 | 新代码统一用，替代手写 `\|\| []` |
+| 4 | **闸门检查项 [10] 假成功检测** | `check-pdd-guard.mjs` | CI 门禁，新代码再犯直接 fail |
+
+### ⚠️ 诚实说明：`pickList` 目前是**可选工具，不是强制迁移**
+
+当前**只有 3 个具体调用点**是手改修好的：
+- `pdd-shop --mode goods`
+- `pdd-video getQueue()`
+- `pdd-chance call()`
+
+其余 skill 的 `|| []` 经**行为验证**确认安全（它们的取数封装本身会 `throw`），
+不是靠 `pickList` 覆盖的。所以准确说法是：
+
+> 「基座补齐了 4 个能力 + 加了门禁防止退化」，
+> **不等于**「所有 skill 的假成功都被改写成 pickList」。
+
+### 检查项 [10] 的设计要点（踩过 3 次坑）
+
+写这个检查器时连续误判，值得记录：
+
+| 版本 | 问题 |
+|---|---|
+| v1 | `const call = async` 后 1200 字符内有 `throw` 就放行 → **节流的 throw 也算**，漏报 |
+| v2 | 文件级匹配 `!r.ok → throw` → **被别的函数带偏**，漏报 |
+| v3 ✅ | **只在 `call`/`get`/`api` 函数体内**匹配，且认两种写法：<br>`if (!r.ok) throw` / `if (r.ok) return; throw` |
+
+**验证方法（关键）**：故意破坏一个 skill 的保护（把 `if (r.ok)` 改成 `if (true)`、
+把 `throw` 改成 `return null`），跑闸门确认**报错**；再恢复。
+
+> 只验证「不误报」不够 —— 必须验证「真能抓到」。
+> 否则就是个永远 pass 的摆设。
 
 ---
 

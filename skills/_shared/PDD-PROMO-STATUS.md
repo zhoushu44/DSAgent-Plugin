@@ -1,183 +1,193 @@
-# 推广域剩余 10 个接口 · 攻坚结果
+# 推广域（yingxiao）能力现状
 
-> 2026-11-08
-> 结论：**抓到 1 个新接口参数，其余仍卡在推广域限流**
+> 最后更新：2026-11-09
+> 结论：**读接口 14/14 全通（混合通道），写接口 body 已全部拿到，只差接业务参数**
 
 ---
 
-## 一、本轮新增
+## 一、结论先行
 
-### ✅ 抓到 `queryRangeReport` 完整参数
+| 项 | 2026-11-08 | **2026-11-09（现在）** |
+|---|---|---|
+| 纯 Node 签名 | ⚠️ 不稳定（jsdom 复刻失败） | ❌ **实测不可能**，放弃 |
+| **混合通道**（Chrome 签名 + Node 发） | ✅ 可用 | ✅ **基座默认通道** |
+| 读接口 | 2/10 | **14/14 全通** |
+| 写接口 body | 未抓 | **6/6 已抓到** |
+| 报表接口 | 500 | ✅ entityReport / rangeReport 已通 |
+| 限流 | 怀疑是根因 | **不是根因** —— 根因是 body 字段缺失 |
 
-```json
+> **限流从来不是推广域不通的原因。** 11 个接口全 40001，根因是
+> ①签名只注入 body 没注入 header ②body 缺拼多多自有字段（`scenesMode`/`clientType`/`blockType`…）。
+> 补齐后同一个账号一次通过。
+
+---
+
+## 二、混合通道怎么工作
+
+```
+skill → request('/mms-gateway/...', body)
+           ↓
+      自动选域 = yingxiao
+           ↓
+      自动合并默认 body（API_BODY_DEFAULTS）
+           ↓
+      Chrome（账号自己的 Profile）跑 SDK 生成 crawlerInfo
+           ↓
+      Node 带 crawlerInfo(body) + anti-content(header) 发 HTTP
+           ↓
+      成功码 = 1000（不是 1000000！）
+```
+
+### 两个必须同时满足的条件
+
+| 条件 | 说明 |
+|---|---|
+| **签名两处都放** | body `crawlerInfo` + header `anti-content`，**同一个字符串** |
+| **成功码是 1000** | 推广域不是 1000000，判错会全部误判为失败 |
+
+### 为什么不能纯 Node
+
+推广签名器是普通 JS 混淆（不是 JVM2 虚拟机），但它采集的运行时特征（`navigator`/时序/环境对象图）
+**jsdom 复刻不出来** —— 实测 jsdom 签名「第一次成功，之后全失败」。
+真实 Chrome 签名 + Node 发请求，是唯一稳的组合。
+
+---
+
+## 三、接口清单（审计：14/21 通）
+
+### ✅ 读接口 —— 全通
+
+| 接口 | 说明 |
+|---|---|
+| `promo.userInfo` | 用户信息，**基座用它解析 mallId** |
+| `promo.accountAll` | 广告账户列表 |
+| `promo.dailyCost` | 日消耗（`{}` 即可） |
+| `promo.list` | 推广单元列表 |
+| `promo.adGroups` | 广告组 |
+| `promo.scenes` | 场景推广 |
+| `promo.goodsUpgrade` | 商品推广升级版状态 |
+| `promo.entityReport` | 实体报表（挖 bundle 才通） |
+| `promo.rangeReport` | 区间报表 |
+| `promo.reportConfig` | 报表自定义配置 |
+| `promo.maxCostInfo` | 预算附加信息 |
+| `promo.autoCharge` | 自动出价 |
+| `promo.assistInfo` | 推广引导 |
+| `promo.chargeSuggest` | 充值建议 |
+
+### ⚠️ 写接口 —— body 已抓到，审计里报「参数为空」是**正常的**
+
+| 接口 | 审计报错 | 实际 body |
+|---|---|---|
+| `promo.detail` | adId 不能为空 | `{adId}` |
+| `promo.updateMaxCost` | maxCost 不能为空 | `{adId, maxCost:{value,unitCode}}` |
+| `promo.updateBid` | 不能为空 | `{updateBidList:[{adId,targetRoi:{value,unitCode},isAdvertiserEnableAdvanced,optionalOptimizationMessageInfoList:[{optimizationGoal:3\|4\|5,dataOperateStatus:2}]}]}` |
+| `promo.batchCreate` | 单元信息不能为空 | `{adInfoList:[{goodsId,maxCost,bidType:1,targetRoi,isAdvertiserEnableAdvanced:true}]}` |
+| `promo.updateStatus` | operateStatus 错误 | `{adIdList:[], dataOperateStatus:2}`（暂停）/ `1`（开启） |
+| `promo.delete` | 删除参数不可为空 | `{goodsId, adId, planId}` |
+| `promo.adDiagnosis` | adId 不能为空 | `{adId, 平台类型}` |
+
+**常量**：`UNLIMITED = {value:'1000000.00', unitCode:1}`
+
+**注入方式**（混合通道下自动生效）：
+```
+body  = { ...body, crawlerInfo: sig }
+header['Anti-Content'] = sig
+header['VerifyAuthToken'] = vtk
+```
+
+---
+
+## 四、报表接口的 body（挖出来的，别再猜）
+
+### `queryEntityReport`
+
+```js
 {
-  "clientType": 1,
-  "entityId": 800050996,
-  "queryDimensionType": 0,
-  "endDayHour": 9,
-  "endDate": "2026-11-08",
-  "startDate": "2026-11-01",
-  "returnLastUpdateTime": true,
-  "reportPromotionType": 9,
-  "blockTypes": [1]
+  clientType: 1,              // PC
+  entityId: '{{mallId}}',      // ← 基座自动解析
+  entityDimensionType: 0,     // MALL
+  queryDimensionType: 2,      // UNIT
+  reportPromotionType: 9,     // Goods
+  blockTypes: [6],            // ReportTable
+  startDate: '{{today}}', endDate: '{{today}}',
+  queryRange: { pageNumber: 1, pageSize: 50 },   // ★ 嵌套对象
+  orderBy: 9999, orderType: 1,                   // ★ orderType 必须为 1
+  returnTotalSumReport: true,
 }
 ```
 
-**这是推广报表的核心接口**（`/mms-gateway/poseidon/api/report/queryRangeReport`）。
+### `queryRangeReport`
 
-### ✅ 确认 `accountAll` 参数为空
-
-```json
-{}
-```
-只需 `crawlerInfo`。
-
-### ✅ 新增混合模式模块
-
-`pdd-promo-hybrid.mjs` —— 浏览器签名 + Node 请求
-
-```
-初始化浏览器   13615ms（一次性）
-每次签名          37ms
-每次请求        84~201ms
+```js
+{
+  clientType: 1, entityId: '{{mallId}}',
+  entityDimensionType: 0, queryDimensionType: 2,
+  reportPromotionType: 9, blockTypes: [6],
+  startDate: '{{yesterday}}', endDate: '{{today}}', endDayHour: 23,
+}
 ```
 
-**好处：签名质量 = 真实浏览器级别，请求走 Node。**
+### 枚举（从 chunk 挖）
 
----
-
-## 二、未抓到的 8 个
-
-| 接口 | 为什么没抓到 |
+| 枚举 | 值 |
 |---|---|
-| `promotion/v3/list` | 推广列表页需开通推广账户才加载 |
-| `promotion/detail` | 同上（需点击计划行） |
-| `updateMaxCost` | 需点「修改预算」弹窗并提交 |
-| `batchUpdateBid` | 需点「批量改价」 |
-| `batchCreate` | 需走完建计划流程 |
-| `batchUpdateStatus` | 需点「批量启停」 |
-| `virtual/delete` | 需点「删除」 |
-| `listAdGroupInfo` | 需展开计划详情 |
-
-**共同点：都需要真实点击交互，无法只靠打开页面触发。**
+| MALL / PLAN / UNIT / CREATIVE | 0 / 1 / 2 / 4 |
+| AD_CREATIVE / SHOW / SHOW_TOTAL | 11 / 13 / 14 |
+| MALL_PRODUCT_TYPE / MALL_ENTRUST / BRAND_KEYWORD / MALL_AllLine | 15 / 16 / 17 / 18 |
+| Goods（报表维度） | 9 |
+| ReportTable（blockType） | 6 |
+| PC（clientType） | 1 |
 
 ---
 
-## 三、当前卡点：推广域限流
+## 五、采集模式 → 接口计划（省时间的关键）
 
-### 证据
+`promo.mjs` 按模式只调需要的接口，别每次全量拉：
 
-```
-checkToken（免签名）  → ✅ 1000  账号完全正常
-accountAll（带签名）   → ❌ 54001
-dailyCost（带签名）    → ❌ 54001  ← 之前成功过的也失败了
-```
-
-### 判断
-
-**推广域有独立的接口级限流，比商品域严格得多。**
-
-本轮为了抓参数，打开了 3 个推广页面 + 多次重放，触发限流。
-
-### 恢复时间
-
-未知。可能需要几小时。
-
----
-
-## 四、推广域能力现状
-
-### ✅ 已确认可用（历史上成功过）
-
-| 接口 | 参数 | 备注 |
+| 模式 | 调用的接口 | 实测耗时 |
 |---|---|---|
-| `promo.dailyCost` | `{}` | 需浏览器签名 |
-| `promo.checkToken` | `{}` | **免签名**，纯 Node 可通 |
+| `overview` / `goods` | userInfo, accountAll, dailyCost, adGroups, list, scenes, goodsUpgrade, entityReport（8 个） | 47~61s |
+| `rates` | userInfo, accountAll, list, entityReport（4 个） | 62s |
+| `units` | userInfo, list（2 个） | 49s |
+| `daily` | userInfo, dailyCost, rangeReport | — |
+| 默认 | 全部 11 个 | 51597ms，收集 11 失败 0 |
 
-### ⚠️ 参数已抓但未验证
+**现状**：`overview` / `goods` / `rates` / `units` 四个模式已 **纯 Node 化**
+（`NODE_ONLY_MODES`），不再开浏览器页面（只开签名器）。
 
-| 接口 | 参数 |
-|---|---|
-| `queryRangeReport` | 见上（9 个字段） |
-| `accountAll` | `{}` |
-
-### ❌ 参数未抓
-
-8 个写操作/列表接口（见上表）
+**还走浏览器的**：`daily` / `item` / `diagnose` / `balance` / `auto`
++ 6 个写操作（pause/resume/delete/create/maxcost/roi）。
 
 ---
 
-## 五、正确的推广域调用方式
-
-### 推荐：混合模式
+## 六、限流与间隔
 
 ```js
-import { initPromoBrowser, callPromoHybrid, closePromoBrowser }
-  from './skills/_shared/pdd-promo-hybrid.mjs'
-
-await initPromoBrowser()          // 13615ms，一次性
-const r = await callPromoHybrid(
-  '/mms-gateway/reinhardt/invoice/getAdvertiserDailyCosts',
-  {}
-)
-await closePromoBrowser()
+domainGapMs: { yingxiao: 6000, live: 5000, mms: 0 }
 ```
 
-**优势：**
-- 签名质量与真实浏览器一致
-- 请求走 Node（可并发、可拦截）
-- 不用每次跳页面
+推广域**同域请求最小间隔 6 秒**（2026-11-09 从 15s 调到 6s，实测稳定）。
+再快会 54001。
 
-### 不推荐：纯 Node jsdom
-
-```js
-// pdd-promo-signer.mjs
-// 问题：jsdom 环境采集项不足，签名质量不稳定
-```
-
-**实测：同样的代码，第一次成功，之后全部失败。**
+**读接口本身没有速率限制** —— 实测重接口零间隔 × 30 全过。
+真正的限流诱因是 **60 秒内访问 > 13 个不同接口**（平台拦的是扫描式探测）。
 
 ---
 
-## 六、下一步建议
+## 七、相关文件
 
-### 如果想继续攻推广域
-
-**必须解决限流**：
-1. 等足够长时间（几小时）
-2. 用另一个账号
-3. 严格控制调用频率（每次间隔 ≥ 30 秒）
-
-**抓写操作参数**：
-- 需要真实点击 UI（修改预算、批量操作）
-- 风险：可能真的提交
-- 建议：在测试账号上做，或抓住请求后立即取消
-
-### 如果接受现状
-
-**推广域只用 `dailyCost` + `checkToken`**，其他走浏览器。
-
----
-
-## 七、诚实评估
-
-| 项 | 状态 |
+| 文件 | 作用 |
 |---|---|
-| 推广域 SDK 提取 | ✅ 完成（100KB 源码） |
-| 签名机制逆向 | ✅ 完成 |
-| 纯 Node 签名 | ⚠️ 不稳定（时好时坏） |
-| 混合模式 | ✅ 可用（浏览器签名） |
-| 参数抓取 | ⚠️ 2/10 |
-| 写操作验证 | ❌ 未做 |
-
-**投入产出比已明显下降。**
-
-推广域接口数量少（10 个）、调用频率低（一天几次），**用浏览器成本可接受**。
+| `skills/_shared/pdd-promo-signer-hybrid.mjs` | 混合签名器 + Cookie 桥（`healCookiesFromProfile`） |
+| `skills/_shared/pdd-request.mjs` | 基座：选域 / 合并 body / 解 mallId / 自愈 / 降级 |
+| `skills/_shared/pdd-api.mjs` | 接口注册表 + 默认 body 表 + 枚举 |
+| `skills/pdd-promo/scripts/promo.mjs` | 推广域 skill 主程序（Node/浏览器双通道） |
+| `skills/pdd-promo/scripts/promo-node.mjs` | 纯 Node 采集器 |
+| `skills/_shared/pdd-api.mjs` → `PROMO_BODY_DEFAULTS` | 默认 body（已升级为基座级 `API_BODY_DEFAULTS`） |
 
 ---
 
 ## 相关
 
+- [[PDD-KNOWLEDGE]] — 基座知识库（架构 / 签名 / 限流 / 踩坑）
 - [[PDD-API-STATUS]] — 全接口能力清单
-- [[PDD-KNOWLEDGE]] — 基座知识库
-- `skills/_shared/pdd-promo-hybrid.mjs` — 混合模式模块

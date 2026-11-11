@@ -1,193 +1,192 @@
-# 拼多多接口能力清单（准确版）
+# 拼多多接口能力清单
 
-> 2026-11-08
-> 来源：80 个接口全量实测 + 限流排除验证
-
----
-
-## 一、重要前提：审计方法
-
-### 第一次审计（不可信）
-
-连测 80 个接口 → 触发限流 → **17 个报 54001**
-
-**这些 54001 全部是限流，不是接口不可用。**
-
-### 验证方式
-
-冷却 100 秒后重测 3 个报 54001 的接口：
-```
-✅ promo.dailyCost    恢复
-✅ goods.list         恢复
-✅ chance.quickRelease 恢复
-```
-
-### 正确审计方法
-
-**每测 5~8 个接口，冷却 60 秒。**
-
-否则会把「限流」误判成「不可用」。
+> 最后更新：2026-11-09
+> 来源：`audit-all-api.mjs` 全量实测 **89 个接口**（基座默认 body + Cookie 自愈 + 混合通道全开）
+> 产物：`skills/_shared/.audit-all.json`
 
 ---
 
-## 二、可用接口（确认可用）
+## 一、结论先行
 
-### 商品域
-
-| 接口 | 路径 | 参数 | 备注 |
-|---|---|---|---|
-| `goods.listGlide` | `/glide/v2/mms/addProperties/goodsList` | `{page_num, page_size, only_query_no_props_goods:false, only_query_un_auth_brand:false}` | **total=180** |
-| `goods.list` | `/vodka/v2/mms/query/display/mall/goodsList` | `{pre_sale_type:4, page:1, out_goods_sn_gray_flag:true, shipment_time_type:3, is_onsale:1, sold_out:0, size:N}` | ✅ 可用（需完整 body） |
-| `goods.skuInfo` | `/vodka/v2/mms/query/sku/info` | `{goodsId}` | 完整 SKU |
-| `goods.count` | `/vodka/v2/mms/query/display/mall_goods/count` | `{}` | 在售/下架/售罄数 |
-| `goods.copyedExist` | `/vodka/v2/mms/query/display/goods_copyed/is_exist` | `{}` | |
-| `goods.newStyleGray` | `/vodka/v2/mms/newStyleGoods/gray/queryNewStyleGoodsGray` | `{}` | |
-| `common.status` | `/vodka/v2/mms/common/query/status` | `{}` | |
-| `goods.batchOnSale` | `/vodka/v2/mms/batchOnSale` | `{goodsIds:[id]}` | ✅ 已验证 |
-
-### 经营域
-
-| 接口 | 路径 | 参数 |
+| 指标 | 2026-11-08 | **2026-11-09** |
 |---|---|---|
-| `shop.info` | `/earth/api/mallInfo/commonMallInfo` | `{}` **GET** |
-| `shop.flow` | `/sydney/api/mallFlow/getMallFlowData` | `{}` |
+| 接口总数 | 80 | 89 |
+| **实测可用** | 13 | **42** |
+| 可用率 | 16% | **47%** |
+| A 传输层已通·只缺业务参数 | 10 | **18** |
+| B 限流/冷却 | 17（污染误判） | **9**（其中 5 个是账号级接口族限制） |
+| C 无登录态/权限（要人操作） | 26 | **15**（全是 live 域） |
+| D 平台侧错误 | 2 | 1 |
+| E 连接失败 | 4 | 4 |
 
-### 机会商品
-
-| 接口 | 路径 | 参数 |
-|---|---|---|
-| `chance.home` | `/opportunity-goods/chance-goods/home_list` | `{}` |
-| `chance.quickRelease` | `/opportunity-goods/chance-goods/quick_release` | `{}` |
-
-### 推广域
-
-| 接口 | 路径 | 参数 | 备注 |
-|---|---|---|---|
-| `promo.dailyCost` | `/mms-gateway/reinhardt/invoice/getAdvertiserDailyCosts` | `{}` | ✅ 成功码 **1000** |
+**可用率翻近 3 倍，靠的是 4 件事**（都不需要改单个 skill）：
+① 基座默认 body 表 ② Cookie 自愈 ③ 混合签名通道 ④ 默认 body 键匹配修正。
 
 ---
 
-## 三、需要补参数（签名已通过）
+## 二、按域统计
 
-这些接口返回 `3000000 参数校验失败`，说明**签名和鉴权都通过了**，只缺业务参数：
-
-| 接口 | 报错 | 需要什么 |
+| 域 | 通过/总数 | 状态 |
 |---|---|---|
-| `goods.batchStock` | `sourceId 不能为空` | `{sourceId, quantity}` |
-| `goods.commitEdit` | `goods_commit_id 不能为空` | `{goods_commit_id}` |
-| `goods.commitUpdate` | `goods_commit_id 不能为空` | `{goodsId, goods_commit_id}` |
-| `shop.goodsDetailVO` | `开始结束时间不能为空` | `{startTime, endTime}` |
-| `shop.legacyGoodsDetailVO` | 同上 | 同上 |
-| `shop.flowOverview` | `开始结束时间不为空` | `{startTime, endTime}` |
-| `act.enrollPopups` | `活动id不能为空` | `{activityId}` |
-| `act.lowPriceCheck` | `商品列表不能为空` | `{goodsList:[...]}` |
-| `goods.commitCreateBySn` | `goodsId 不能为 null` | `{goodsId}` |
-| `goods.commitSubmit` | `商品编辑版本号为空` | `{goodsId, commitId, version}` |
-
-**这类接口的「不可用」只是缺参数，不是权限问题。**
+| `shop` 经营域 | **11/12** | ✅ 几乎全通 |
+| `chance` 机会商品 | **9/11** | ✅ 几乎全通 |
+| `promo` 推广域 | **14/21** | ✅ 读全通，差的全是要参数 |
+| `goods` 商品域 | 5/18 | ⚠️ 见下 |
+| `act` 活动域 | 2/7 | ⚠️ 2 小时频控 |
+| `common` | 1/1 | ✅ |
+| `video` 视频域 | 0/15 | ❌ 账号无创作者登录态 |
+| `aivideo` AI 素材域 | 0/4 | ❌ 独立鉴权 |
 
 ---
 
-## 四、真正不可用
+## 三、✅ 已通（42 个）
 
-### 视频域（15 个接口）
+### 经营域 shop（11/12）
 
-**原因：账号无创作者权限**
+| 接口 | 路径 | body |
+|---|---|---|
+| `shop.info` | `/earth/api/mallInfo/commonMallInfo` | `{}` GET |
+| `shop.flow` / `shop.legacyFlow` | `/sydney/api/mallScore/queryMallFlowData` | 基座默认 |
+| `shop.flowOverview` | `/sydney/api/mallFlow/queryMallFlowOverView` | 基座默认 |
+| `shop.score` / `shop.legacyScore` | `/sydney/api/mallScore/queryMallScoreOverView` | 基座默认 |
+| `shop.dsr` | `/sydney/api/mallDsr/dsrResult` | `{}` |
+| `shop.goodsOverview` / `shop.legacyGoodsOverview` | `/sydney/api/goodsDataShow/queryGoodsPageOverviewForMms` | 基座默认 |
+| `shop.goodsDetailVO` | `/sydney/api/goodsDataShow/queryGoodsDetailVOList` | `{startDate,endDate,queryType:6,sortCol:0,sortType:1,pageNum,pageSize,actVs:1}` |
+| `shop.goodsSpanDate` | `/sydney/api/goodsDataShow/queryGoodsSpanDateList` | `{}` |
 
-```
-live.pinduoduo.com → 302 重定向到 mms 登录页 → SSO 失败
-浏览器访问也一样
-```
+### 机会商品 chance（9/11）
 
-需要先在商家后台**开通视频创作者权限**。
+`home` / `my` / `cateInfo` / `keywordsRecommend` / **`getHotSearchGoods`** / `collection` /
+`missionInfo` / `filters` / `defaultCategory` —— 全部 ✅
 
-涉及接口：
-```
-video.list / video.query / video.publish / video.publishPage
-video.publishQualification / video.signedContract / video.topicList
-video.prePublishDelete / video.videoFlowCard / video.replayPromotionCfg
-video.anchorInfo / video.statsOverview / video.statsTrend
-video.weeklyReport / video.mallDiagnosis
-```
+**关键修复**：`get_hot_search_goods` 缺 `statistic_type` → http 500（从 chunk 挖出来的）。
 
-### 活动域（3 个）
+### 推广域 promo（14/21 读接口全通）
 
-**原因：`100001` 独立频控，2 小时冷却**
+`userInfo` / `accountAll` / `dailyCost` / `list` / `adGroups` / `scenes` / `goodsUpgrade` /
+**`entityReport`** / **`rangeReport`** / `reportConfig` / `maxCostInfo` / `autoCharge` /
+`assistInfo` / `chargeSuggest`
 
-```
-act.list / act.cancelEnroll / act.enroll
-```
+详情见 [[PDD-PROMO-STATUS]]。
 
-这个频控跟主站限流是分开的，触发后要等 2 小时。
+### 商品域 goods（5/18）
 
-### 推广域其余接口（10 个）
-
-**原因：参数未抓全**
-
-```
-promo.list / promo.detail / promo.updateMaxCost / promo.updateBid
-promo.batchCreate / promo.updateStatus / promo.delete
-promo.accountAll / promo.entityReport / promo.adGroups
-```
-
-签名机制已攻克，但请求体结构需要真实抓包（要点击推广页面）。
-
-### ai-video（4 个）
-
-**原因：`ec=0`，需要 `ptj_token`**
-
-```
-aivideo.genVideo / aivideo.getResult / aivideo.available / aivideo.getStatus
-```
-
-这个 token 需要浏览器获取（24h 有效）。
-
-### 其他
-
-| 接口 | 问题 |
+| 接口 | 备注 |
 |---|---|
-| `chance.getHotSearchGoods` | `http error:500`（平台侧错误） |
-| `chance.totalInfo` | 同上 |
-| `chance.base` | `40010 未知URL`（路径猜测错误） |
-| `goods.commitDelete` | `600001 该编辑不存在` |
-| `goods.commitOnShop` | `600009 商品不存在` |
+| `goods.listGlide` | `/glide/v2/mms/addProperties/goodsList` → total=180（**列表主力**） |
+| `goods.count` | 在售/下架/售罄数 |
+| `goods.skuInfo` | 完整 SKU |
+| `goods.copyedExist` / `goods.newStyleGray` | — |
+
+### 活动域 act（2/7）
+
+`act.statics` / `act.effectData` ✅（另外 3 个在 2 小时冷却里）
 
 ---
 
-## 五、汇总
+## 四、A 类：传输层已通，只缺业务参数（18 个）
 
-| 类别 | 数量 | 占比 |
-|---|---|---|
-| ✅ **确认可用** | **13** | 16% |
-| ⚠️ 需补参数 | 10 | 13% |
-| ❌ 视频域（无权限） | 15 | 19% |
-| ❌ 活动域（2h 频控） | 3 | 4% |
-| ❌ 推广域（参数未抓） | 10 | 13% |
-| ❌ ai-video（需 token） | 4 | 5% |
-| ❌ 其他 | 5 | 6% |
-| ⚠️ 限流污染（需重测） | 17 | 21% |
-| 合计 | 80 | |
+**这类报 `3000000 参数校验失败` / `ec=1`，说明签名和鉴权都过了。**
+
+| 接口 | 需要什么 |
+|---|---|
+| `goods.batchOnSale` | `{goodsIds:[id]}` |
+| `goods.batchStock` | `{sourceId, quantity}` |
+| `goods.commitEdit` / `commitUpdate` | `{goods_commit_id}` |
+| `goods.commitCreateBySn` | `{goodsId}` |
+| `goods.commitSubmit` | `{goodsId, commitId, version}` |
+| `goods.commitDelete` / `commitOnShop` | 真实 goods_id |
+| `promo.detail` | `{adId}` |
+| `promo.updateMaxCost` | `{adId, maxCost:{value,unitCode}}` |
+| `promo.updateBid` | `{updateBidList:[...]}` |
+| `promo.batchCreate` | `{adInfoList:[{goodsId,maxCost,bidType:1,targetRoi,...}]}` |
+| `promo.updateStatus` | `{adIdList:[], dataOperateStatus:1\|2}` |
+| `promo.delete` | `{goodsId, adId, planId}` |
+| `promo.adDiagnosis` | `{adId, 平台类型}` |
+| `act.enrollPopups` | `{activityId}` |
+| `act.lowPriceCheck` | `{goodsList:[...]}` |
+| `shop.legacyGoodsDetailVO` | ForMMS 版要 `startDate/endDate` + `queryType:6`（已知，可能是账号无该权限） |
+
+**推广域这 6 个写接口的 body 已经在 `promo.mjs` 里，Node 通道也通 —— 只差接业务逻辑。**
 
 ---
 
-## 六、结论
+## 五、B 类：限流 / 冷却（9 个）
 
-### 「接口不行」分四种
+| 接口 | 性质 |
+|---|---|
+| `goods.list` / `onSale` / `offSale` / `batchOffSale` / `resourceValidate` | ⚠️ **服务端对该账号的接口族限制** —— 隔离测试（间隔 2.5s、健康分 100、无冷却）**仍全部 54001**，浏览器也一样。已用 `goods.listGlide` 替代列表功能，skill 不受影响。**换账号可解** |
+| `act.list` / `cancelEnroll` / `enroll` | `100001` 2 小时频控（审计连打写接口触发），等冷却 |
+| `chance.quickRelease` | 写接口连打触发，冷却后会恢复 |
 
-| 类型 | 表现 | 能否解决 |
-|---|---|---|
-| **限流** | 54001 + "操作太过频繁" | ✅ 等 60~90 秒 |
-| **缺参数** | 3000000 + 字段名提示 | ✅ 补参数 |
-| **无权限** | 40001 / 302 跳登录 | ❌ 需开通权限 |
-| **平台错误** | 500 / 未知URL | ❌ 等平台修复 |
+---
 
-**真正「做不了」的只有：视频域（15 个）+ 活动域频控（3 个）。**
+## 六、C 类：无登录态 / 权限（15 个）—— 需要用户操作一次
 
-**其余都是「还没做」，不是「做不了」。**
+```
+live.pinduoduo.com/n-creator/video/home → 302 到 /login
+Profile 里没有 msfe-pc-cookie-captcha-token → 拿不到 VerifyAuthToken
+```
+
+**基座已就位**：live 域的 Node 通道已经写好了（Chrome 取票 + Node 发请求），
+只要该 Profile 登录过一次 live.pinduoduo.com，**基座自动接管，不用改任何 skill**。
+
+**现在**：live 域返回 40001 时会明确提示「该 Profile 需先登录 live.pinduoduo.com」。
+
+接口：`video.list / query / publish / publishPage / publishQualification / signedContract /
+topicList / prePublishDelete / videoFlowCard / replayPromotionCfg / anchorInfo /
+statsOverview / statsTrend / weeklyReport / mallDiagnosis`
+
+### AI 素材域（4 个）—— E 类：连接层失败
+
+`aivideo.genVideo / getResult / available / getStatus` —— `ec=0`（连接层就失败），需要独立鉴权（`ptj_token`）。
+
+### 平台侧错误（1 个）—— D 类
+
+`chance.total_info` → http 500（**拼多多服务端问题**，页面自己也是 500）。
+
+---
+
+## 六、「接口不行」分五种
+
+| 类型 | 表现 | 谁能解 | 数量 |
+|---|---|---|---|
+| **A 缺业务参数** | 3000000 / ec=1 + 字段名提示 | ✅ 补参数（多数已抓） | 18 |
+| **B 限流 / 账号族限制** | 54001 / 100001 | 冷却 / 换账号 | 9 |
+| **C 无登录态** | live 域 40001（基座有明确提示） | ❌ **用户登录一次** | 15 |
+| **D 平台错误** | 500 / 未知URL | ❌ 等平台 | 1 |
+| **E 连接失败** | ec=0 | 需单独打通鉴权 | 4 |
+
+**真正需要人介入的只剩 2 类**：live 域登录（15）+ AI 素材域鉴权（4）= **19 个**。
+其余 28 个要么等冷却，要么补参数（body 已经抓到了）。
+
+---
+
+## 七、审计方法（重要）
+
+**审计本身会触发限流**，把「限流」误判成「不可用」。
+
+| 做法 | 说明 |
+|---|---|
+| ✅ 读接口连打 | 安全（重接口零间隔 × 30 全过） |
+| ❌ 写接口连打 | 会触发 `100001` 2 小时冷却 |
+| ⚠️ 审计结论 | 必须**隔离复测**才可信（间隔 ≥ 2.5s，单独跑） |
+
+**限流真正的诱因**：60 秒内访问 > 13 个**不同**接口 —— 平台拦的是扫描式探测。
+
+---
+
+## 八、复现
+
+```bash
+node skills/_shared/audit-all-api.mjs      # 全量审计 → .audit-all.json
+node skills/_shared/test-suite.mjs          # 22/22
+node skills/_shared/test-node-capability.mjs # 纯 Node 能力
+```
 
 ---
 
 ## 相关
 
-- [[PDD-KNOWLEDGE]] — 基座知识库
-- `skills/_shared/audit-all-api.mjs` — 审计脚本
+- [[PDD-KNOWLEDGE]] — 基座知识库（架构 / 签名 / 限流 / 踩坑）
+- [[PDD-PROMO-STATUS]] — 推广域专项
