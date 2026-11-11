@@ -215,6 +215,59 @@ for (const skill of skills) {
     if (hasRealCall(code, 'reserveSlot')) issues.push(`[5] ${where}: 残留 reserveSlot 实际调用（应走闸门）`)
     if (hasRealCall(code, 'throttleRequest')) issues.push(`[5] ${where}: 残留 throttleRequest 实际调用（应走闸门）`)
 
+    // [10] ★ 2026-11-11：**假成功检测**。
+    //
+    //   `const list = r?.result?.list || []` + 后面 emit({ok:true}) ——
+    //   接口失败时 result 是 undefined → list=[] → 报「0 条」，
+    //   把「没取到」伪装成「本来就没有」，用户完全看不出问题。
+    //
+    //   实测踩过：pdd-shop --mode goods（goodsDetailList 恒空）、
+    //            pdd-video getQueue()、pdd-chance call()。
+    //
+    //   合法写法（任一即可）：
+    //     a) 先判 r.ok，失败抛错
+    //     b) 用基座的 pickList(r, pick, label)
+    //     c) 后面对该变量做 !arr.length 检查并报 failureKind
+    //     d) 该文件里的取数封装（call/get/api）本身就 throw
+    {
+      const l10 = code.split('\n')
+      for (let i = 0; i < l10.length; i++) {
+        const m10 = l10[i].match(/(?:const|let)\s+(\w+)\s*=\s*[^;=]*?(?:\?\.)?(?:result|data)[^;]*?\|\|\s*\[\]/)
+        if (!m10) continue
+        const v10 = m10[1]
+        const win = l10.slice(i, Math.min(i + 40, l10.length)).join('\n')
+        if (!/ok:\s*true/.test(win)) continue
+        if (new RegExp(`!\\s*${v10}\\s*\\.\\s*length|${v10}\\s*\\.\\s*length\\s*===?\\s*0`).test(win)) continue
+        if (/pickList\s*\(/.test(win)) continue
+        if (/throw new Error/.test(win)) continue
+        // 取数封装本身会抛错 → 失败走不到这一行。
+        // ★ 注意别只看「附近有 throw」：节流/参数的 throw 也在里面，会误判。
+        //   要求 throw 紧跟在「取到 ok / result」之后（200 字符内）。
+        // 取数封装本身会抛错 → 失败走不到这一行。
+        //   ★ 必须**只看那个封装函数内部**：
+        //     文件级判断会被别处的 throw（节流检查、其他函数）带偏，导致漏报。
+        //   两种合法写法：
+        //     a) if (!r.ok) throw ...
+        //     b) if (r.ok) return r.raw; throw ...
+        const fnStart = code.search(/const\s+(?:call|get|api)\s*=\s*async/)
+        let fnBody = ''
+        if (fnStart >= 0) {
+          // 从函数起点往后取 2000 字符（覆盖整个取数+判错逻辑）
+          fnBody = code.slice(fnStart, fnStart + 2000)
+          // 截到下一个顶层 const/函数定义，避免串到别的函数
+          const cut = fnBody.slice(10).search(/\n\s{0,2}const\s+\w+\s*=\s*(?:async)?\s*\(/)
+          if (cut > 0) fnBody = fnBody.slice(0, cut + 10)
+        }
+        const okGuardThrow = fnBody && (
+          /(?:!\s*(?:r|res|rr|resp)\s*\.\s*ok|(?:r|res|rr|resp)\s*\.\s*ok\s*!==?\s*true|(?:r|res|rr|resp)\s*\.\s*ok\s*===?\s*false)[\s\S]{0,500}?throw\s/.test(fnBody)
+          || /if\s*\(\s*(?:r|res|rr|resp)\s*\.\s*ok\s*\)\s*return[\s\S]{0,300}?throw\s/.test(fnBody)
+        )
+        if (okGuardThrow) continue
+        issues.push(`[10] ${where}:${i + 1}: 疑似假成功 —— \`${v10}\` 取 result||[] 后直接 ok:true，接口失败会被当成「0 条」（改用 pickList 或先判 r.ok）`)
+        break
+      }
+    }
+
     // [7] 有 page.evaluate(fetch) 的，必须带 VerifyAuthToken
     //     credentials:'include' 只带 Cookie，VerifyAuthToken 是**请求头**，不会自动带上。
     //     evaluate 的 fetch 绕过 msfe 插件链 → cookie 有票也白拿。

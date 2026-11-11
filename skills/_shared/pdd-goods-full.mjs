@@ -1,0 +1,151 @@
+/**
+ * pdd-goods-full.mjs —— 完整商品数据（纯 Node）
+ *
+ * ══════════════════════════════════════════════════════════════════
+ * 解决什么问题
+ * ══════════════════════════════════════════════════════════════════
+ *
+ *   mall/goodsList  → 一次拿全（含价格/在售），但**长期 54001 限流**
+ *   glide/goodsList → 稳定可通（289ms），但**缺价格/在售状态**
+ *   skuInfo         → 有价格/库存/在售，但一次只能查一个商品
+ *
+ * 方案：glide 拿列表 + 并发 skuInfo 补全
+ *
+ *   实测：137 个商品，列表 289ms + SKU 并发（5 并发）约 3~5 秒
+ *   对比：浏览器 mall/goodsList 28 秒，且经常限流失败
+ *
+ * ══════════════════════════════════════════════════════════════════
+ * 字段映射
+ * ══════════════════════════════════════════════════════════════════
+ *
+ *   glide/goodsList          skuInfo              输出
+ *   ─────────────────        ───────────────      ──────────────────
+ *   goods_id                 goods_id            id
+ *   goods_name               -                   title
+ *   thumb_url                thumb_url           thumb
+ *   cat_id1/2/3              -                   catIds
+ *   -                        price               price（分→元）
+ *   -                        quantity            stock
+ *   -                        is_onsale           isOnSale
+ *   -                        sold_quantity       soldQty
+ *   -                        sku_id              skuId
+ *
+ * ══════════════════════════════════════════════════════════════════
+ * 用法
+ * ══════════════════════════════════════════════════════════════════
+ *
+ *   import { listGoodsFull } from './pdd-goods-full.mjs'
+ *
+ *   const goods = await listGoodsFull(req, account, shopKey, {
+ *     max: 50,          // 最多取多少个（默认全部）
+ *     concurrency: 5,   // SKU 查询并发数
+ *   })
+ *   // → [{ id, title, thumb, catIds, price, stock, isOnSale, soldQty, skuCount }]
+ */
+import path from 'node:path'
+import { pathToFileURL } from 'node:url'
+
+const listCache = new Map()
+const CACHE_TTL = 60 * 1000
+
+/**
+ * @param {Function} request  pdd-request 的 request 函数
+ * @param {object} account    { cookies, localStorage }
+ * @param {string} shopKey
+ * @param {object} [opts]
+ */
+export async function listGoodsFull(request, account, shopKey, opts = {}) {
+  const { max = 0, concurrency = 5, pageSize = 50, useCache = true } = opts
+  const ck = `${shopKey}:${max}:${pageSize}`
+  if (useCache && listCache.has(ck)) {
+    const c = listCache.get(ck)
+    if (Date.now() - c.at < CACHE_TTL) return c.data
+  }
+
+  // ── ① 分页拉 glide 列表 ──
+  const raw = []
+  let page = 1
+  let total = 0
+  while (true) {
+    const r = await request('/glide/v2/mms/addProperties/goodsList', {
+      page_num: page,
+      page_size: pageSize,
+      only_query_no_props_goods: false,
+      only_query_un_auth_brand: false,
+    }, { account, shopKey })
+    if (!r.ok) throw new Error(`商品列表失败 ec=${r.ec} ${r.hint || ''}`)
+    const list = r.data?.list || []
+    total = r.data?.total ?? list.length
+    raw.push(...list)
+    if (list.length < pageSize) break
+    if (max && raw.length >= max) break
+    page++
+    if (page > 50) break
+    await new Promise(s => setTimeout(s, 300))
+  }
+
+  const picked = max ? raw.slice(0, max) : raw
+
+  // ── ② 并发补 SKU ──
+  const out = new Array(picked.length)
+  let idx = 0
+  const worker = async () => {
+    while (true) {
+      const i = idx++
+      if (i >= picked.length) return
+      const g = picked[i]
+      let sku = null
+      try {
+        const sr = await request('/vodka/v2/mms/query/sku/info', { goodsId: g.goods_id }, { account, shopKey })
+        if (process.env.PDD_DEBUG_GOODS) {
+          console.error(`[sku] goodsId=${g.goods_id} ok=${sr.ok} ec=${sr.ec} dataType=${Array.isArray(sr.data) ? 'array[' + sr.data.length + ']' : typeof sr.data}`)
+        }
+        if (sr.ok && Array.isArray(sr.data) && sr.data.length) {
+          // ★ 价格字段是 group_price（拼团价）/ normal_price（原价），单位「分」
+          //   注意：price 字段恒为 0，不可用
+          const gp = sr.data.map(x => Number(x.group_price) || 0).filter(n => n > 0)
+          const np = sr.data.map(x => Number(x.normal_price) || 0).filter(n => n > 0)
+          const stocks = sr.data.map(x => Number(x.quantity) || 0)
+          sku = {
+            price: gp.length ? Math.min(...gp) / 100 : null,
+            priceMax: gp.length ? Math.max(...gp) / 100 : null,
+            normalPrice: np.length ? Math.min(...np) / 100 : null,
+            stock: stocks.reduce((a, b) => a + b, 0),
+            isOnSale: sr.data.some(x => x.is_onsale === true),
+            soldQty: sr.data.reduce((a, b) => a + (Number(b.sold_quantity) || 0), 0),
+            skuCount: sr.data.length,
+            skuId: sr.data[0].sku_id,
+            skuSn: sr.data[0].out_sku_sn || '',
+          }
+        }
+      } catch (e) {
+        if (process.env.PDD_DEBUG_GOODS) console.error('[sku] EXCEPTION:', String(e.message).slice(0, 120), String(e.stack).split('\n')[1] || '')
+      }
+
+      out[i] = {
+        id: g.goods_id,
+        title: g.goods_name,
+        thumb: g.thumb_url,
+        catIds: [g.cat_id1, g.cat_id2, g.cat_id3].filter(x => x),
+        commitId: g.goods_commit_id,
+        ...(sku || { price: null, stock: null, isOnSale: null, skuCount: 0 }),
+      }
+      await new Promise(s => setTimeout(s, 120))
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, picked.length) }, worker))
+
+  const data = { total, goods: out }
+  if (useCache) listCache.set(ck, { at: Date.now(), data })
+  return data
+}
+
+/** 清缓存 */
+export function clearGoodsCache() { listCache.clear() }
+
+export const GOODS_FULL_INFO = {
+  module: 'pdd-goods-full.mjs',
+  strategy: 'glide 列表 + 并发 skuInfo',
+  why: 'mall/goodsList 长期 54001，glide 稳定但缺价格',
+  fields: ['id', 'title', 'thumb', 'catIds', 'price', 'stock', 'isOnSale', 'soldQty', 'skuCount'],
+}

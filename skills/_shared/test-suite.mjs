@@ -20,8 +20,28 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 const ROOT = 'E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin'
-const SHOP = 'pdd_mms_2b1bca962e5fba5172e3edc19a09e406'
 const L = (f) => import(pathToFileURL(path.join(ROOT, 'skills/_shared', f)).href)
+
+// ★ 账号动态取 —— 硬编码的 shopKey 早已失效（2026-11-09：pdd_mms_2b1bca… 不在了）
+// ★ 2026-11-10 修：**必须选「有种子」的账号**。
+//   pickPddAccount() 只按 status=valid 选，但库里可能同时存在：
+//     · 空空商行  → 有种子 ✅
+//     · 爱绿森 ×2 → 无种子（从没跑过 exportSeedFromBrowser）
+//   选中后者会让「健康检查 / 种子读取」间歇性失败，看着像功能坏了。
+//   → 这里显式挑「有种子」的那个；都没有才退回原来逻辑。
+const { pickPddAccount } = await import(pathToFileURL(path.join(ROOT, 'skills/_shared/pdd-account-pick.mjs')).href)
+const { CredentialStore: _CS } = await import(pathToFileURL(path.join(ROOT, 'lib/services/credential-store.js')).href)
+const { readSeed: _readSeed } = await import(pathToFileURL(path.join(ROOT, 'skills/_shared/pdd-seed-store.mjs')).href)
+let _acc = null
+try {
+  const _store = new _CS(path.join(os.homedir(), '.dsh', 'dsagent-accounts.json'))
+  const _withSeed = _store.listAccounts()
+    .filter(a => a.platform === 'pdd_mms' && a.status === 'valid' && _readSeed(a.shop_key)?.localStorage)
+  if (_withSeed.length) _acc = { ..._withSeed[0], pickedReason: 'valid + 有种子' }
+} catch { /* 退回动态选号 */ }
+if (!_acc) _acc = await pickPddAccount()
+const SHOP = _acc?.shop_key || ''
+if (_acc) console.log(`使用账号: ${SHOP.slice(-12)} ${_acc.display_label || ''}  [${_acc.pickedReason || 'auto'}]`)
 
 const argv = process.argv.slice(2)
 const onlyArg = argv.find(a => a.startsWith('--only='))
@@ -175,8 +195,13 @@ if (run(5)) {
   const seedStore = await L('pdd-seed-store.mjs')
   const { CredentialStore } = await import(pathToFileURL(path.join(ROOT, 'lib/services/credential-store.js')).href)
   const store = new CredentialStore(path.join(os.homedir(), '.dsh', 'dsagent-accounts.json'))
-  const acc = store.listAccounts().find(a => String(a.shop_key) === SHOP)
-  const account = { cookies: acc.cookies, localStorage: seedStore.readSeed(SHOP)?.localStorage || {} }
+  // ★ 账号动态取：硬编码的 shopKey 早已失效（2026-11-09 实测）
+  const acc = store.listAccounts().find(a => a.platform === 'pdd_mms' && a.status === 'valid')
+    || store.listAccounts().find(a => a.platform === 'pdd_mms')
+  if (!acc) { console.log('⑤ 跳过：凭证库无 pdd_mms 账号'); }
+  const account = acc
+    ? { cookies: acc.cookies, localStorage: seedStore.readSeed(acc.shop_key)?.localStorage || {} }
+    : { cookies: {}, localStorage: {} }
 
   const CASES = [
     ['/glide/v2/mms/addProperties/goodsList', { page_num: 1, page_size: 3, only_query_no_props_goods: false, only_query_un_auth_brand: false }, '商品列表'],

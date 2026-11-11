@@ -56,6 +56,14 @@ const load = (f) => import(pathToFileURL(path.join(HERE, f)).href)
  *   lastSeen 最近一次从线上 bundle 确认的版本（便于识别过期）
  */
 export const API = {
+  /* ── 类目 / 模板（draco / vodka）──────────────────────────── */
+  // ★ 2026-11-10 纯 Node 化（实测走基座 request() 通）：
+  //   类目模板 → 15 个属性 + 2 个规格维（catId=8463 女装T恤）
+  //   类目搜索 → 不需要 Anti-Content，Cookie 即可
+  // ⚠️ 叶子类目才有模板；传一级类目会返回空 modules（不是错误）。
+  'mms.mallTemplate': { path: '/draco-ms/mms/template/mall', method: 'GET', note: '类目模板（属性 + 规格维度）', query: ['catId'], lastSeen: '20261110' },
+  'mms.categorySearch': { path: '/vodka/v2/mms/search/categories/v2', method: 'GET', note: '类目搜索（关键词 → 类目树）', query: ['keyword'], lastSeen: '20261110' },
+
   /* ── 商品（vodka / glide）────────────────────────────────── */
   // ★ 2026-11-07 纯 Node 实测可用（10 个）：
   //   goods.listGlide / goods.skuInfo / goods.batchOnSale / goods.count
@@ -129,6 +137,20 @@ export const API = {
   'video.publish': { path: '/api/backbone/video/publish', method: 'POST', domain: 'live', note: '发布视频', lastSeen: '20261030' },
   /* ── 补充：各 skill 实际在用（2026-11-05 全量审计补齐）──────── */
   'promo.adGroups': { path: '/mms-gateway/venus/api/goods/promotion/listAdGroupInfo', method: 'POST', domain: 'yingxiao', note: '推广广告组列表', lastSeen: '20261101' },
+  // ★ 2026-11-09：补齐推广域其余读接口（从真实页面请求抓取后登记）
+  'promo.scenes': { path: '/mms-gateway/ryze/planIncreaseBudget/queryAllScenesAdList', method: 'POST', domain: 'yingxiao', note: '全场景广告列表', lastSeen: '20261109' },
+  'promo.goodsUpgrade': { path: '/mms-gateway/venus/api/goods/promotion/queryGoodsMarketingUpgradeInfo', method: 'POST', domain: 'yingxiao', note: '商品推广升级信息', lastSeen: '20261109' },
+  'promo.assistInfo': { path: '/mms-gateway/smartTool/strategy/mall/guide/queryPromotionAssistantInfo', method: 'POST', domain: 'yingxiao', note: '推广助手/诊断建议', lastSeen: '20261109' },
+  'promo.chargeSuggest': { path: '/mms-gateway/smartTool/mall/charge/suggest', method: 'POST', domain: 'yingxiao', note: '充值建议', lastSeen: '20261109' },
+  'promo.rangeReport': { path: '/mms-gateway/poseidon/api/report/queryRangeReport', method: 'POST', domain: 'yingxiao', note: '区间报表', lastSeen: '20261109' },
+  'promo.reportConfig': { path: '/mms-gateway/poseidon/report/queryReportCustomConfig', method: 'POST', domain: 'yingxiao', note: '报表维度配置', lastSeen: '20261109' },
+  // ★ 2026-11-09：页面**实际在用**的诊断接口是 v2 这条（旧 queryStableCostAdDiagnosis 页面已不用）。
+  //   body 实测：{adId, platform:1}（platform=1 是 PC）
+  'promo.diagnosisV2': { path: '/mms-gateway/smartTool/diagnosis/v2/queryPromotionDiagnosis', method: 'POST', domain: 'yingxiao', note: '推广诊断 V2（页面在用）', lastSeen: '20261109' },
+  'promo.adDiagnosis': { path: '/mms-gateway/smartTool/diagnosis/queryStableCostAdDiagnosis', method: 'POST', domain: 'yingxiao', note: '推广单元诊断', lastSeen: '20261109' },
+  'promo.autoCharge': { path: '/mms-gateway/apollo/api/adAutoCharge/queryV2', method: 'POST', domain: 'yingxiao', note: '自动充值状态', lastSeen: '20261109' },
+  'promo.maxCostInfo': { path: '/mms-gateway/venus/api/goods/promotion/mall/additional/max/cost/info', method: 'POST', domain: 'yingxiao', note: '日限额附加信息', lastSeen: '20261109' },
+  'promo.userInfo': { path: '/mms-gateway/venus/api/user/userInfo', method: 'POST', domain: 'yingxiao', note: '店铺信息（含 mall_id / 店铺名）', lastSeen: '20261109' },
 
   /* ★ 2026-11-05 新增：发布同款链路 + 详情（从 chance.bcbbcdc7.chunk 逆向） */
   'chance.quickRelease': { path: '/opportunity-goods/chance-goods/quick_release', method: 'POST', note: '发布同款-创建草稿（★写操作）', lastSeen: '20261105' },
@@ -136,7 +158,7 @@ export const API = {
   'chance.getHotSearchGoods': { path: '/opportunity-goods/chance-goods/get_hot_search_goods', method: 'POST', note: '热搜词关联商品', lastSeen: '20261105' },
   'chance.totalInfo': { path: '/opportunity-goods/chance-goods/total_info', method: 'POST', note: '机会商品总览（商家数）', lastSeen: '20261105' },
 
-  'chance.base': { path: '/opportunity-goods/chance-goods', method: 'POST', note: '机会商品基址（各子接口前缀）', lastSeen: '20261028' },
+  'chance.base': { path: '/opportunity-goods/chance-goods', method: 'POST', note: '机会商品基址（各子接口前缀）—— ⚠️ 这是**路径前缀不是接口**，直接 POST 会 40010 未知URL；审计应跳过', prefixOnly: true, lastSeen: '20261028' },
   'chance.collection': { path: '/opportunity-goods/chance-goods/collection/list', method: 'POST', note: '收藏列表', lastSeen: '20261028' },
   'chance.missionInfo': { path: '/opportunity-goods/chance-goods/mission_info', method: 'POST', note: '任务信息', lastSeen: '20261028' },
   'chance.filters': { path: '/opportunity-goods/chance-goods/get_filters', method: 'POST', note: '筛选项', lastSeen: '20261028' },
@@ -179,6 +201,266 @@ const ORIGINS = {
   live: 'https://live.pinduoduo.com',
 }
 
+
+
+/* ══════════════════════════════════════════════════════════════════
+ * 接口默认请求体（2026-11-09 从真实页面请求抓取）
+ *
+ * 这些字段名（scenesMode / clientType / blockType / queryConfigList …）是拼多多
+ * 自己的命名，不抄真实请求就调不通 —— 此前 11 个推广接口全部 ec=40001，
+ * 就是因为 body 缺字段（不是签名问题）。
+ *
+ * ★ 这张表放在**基座**（pdd-request.mjs 读它），所以每个 skill 调 request() 都会
+ *   自动带上默认 body，**不需要逐个 skill 改**（用户要求：有用到的 skill 自动使用）。
+ *   显式传入的字段优先；需要完全自定义时传 opts.noBodyDefaults。
+ *
+ * 键 = 去掉 /mms-gateway/ 前缀的短路径
+ * ══════════════════════════════════════════════════════════════════ */
+export const API_BODY_DEFAULTS = {
+  // ★ 2026-11-10 实测（抓 live 域真实请求）：待发布视频列表的参数名是
+  //   pageSize / pageNum（不是 page / pageSize）。传错名字 → 40001（看起来像鉴权失败，
+  //   实际是参数校验没过）。
+  "mms/amco/prePublish/query": { "pageSize": 50, "pageNum": 1 },
+  // ★ 2026-11-10 实测：video/query 必须带**全部五个参数**，缺一个就 40002「系统异常」。
+  //   status 取值 0~4（5 报 BAD_PARAMS），-1 = 全部。
+  //   startTime/endTime 是毫秒时间戳；默认给最近 90 天。
+  //   ⚠ 键必须和「注册表 path 去掉前导 /」完全一致，即 `api/backbone/video/query`。
+  //     写成 `backbone/video/query` 会静默不命中 → 默认值失效 → 40002。
+  "api/backbone/video/query": { "status": -1, "pageSize": 20, "page": 1, "startTime": "{{ninetyDaysAgo}}", "endTime": "{{now}}" },
+  "reinhardt/homepage/v3/accountAll": {},
+  "reinhardt/invoice/getAdvertiserDailyCosts": {
+    "beginDate": "{{yesterday}}",
+    "endDate": "{{today}}"
+  },
+  "venus/api/goods/promotion/listAdGroupInfo": {
+    "withAdCount": true,
+    "scenesMode": 1
+  },
+  "ryze/planIncreaseBudget/queryAllScenesAdList": {},
+  "venus/api/goods/promotion/queryGoodsMarketingUpgradeInfo": {},
+  "poseidon/api/report/queryRangeReport": {
+    "clientType": 1,
+    "entityId": "{{mallId}}",
+    "queryDimensionType": 0,
+    "endDayHour": 23,
+    "endDate": "{{today}}",
+    "startDate": "{{yesterday}}",
+    "reportPromotionType": 9,
+    "blockTypes": [
+      2
+    ],
+    "showGoodsPromotionHistoryReport": false
+  },
+  // ★ 2026-11-09：商品维度报表（entityReport）
+  //   ★ body 形状是**从页面 JS bundle 里挖出来的**（_chunks/4271-*.js 的 getEntityTable）：
+  //     - queryRange 是**嵌套对象** {pageNumber,pageSize}，不是顶层的 pageNumber/pageSize
+  //     - entityDimensionType=0(MALL) / queryDimensionType=2(UNIT)
+  //     - reportPromotionType=9(Goods) / blockTypes=[6](ReportTable) / clientType=1(PC)
+  //     - orderType 必须为 1（填 0 服务端 500）
+  //   之前按 rangeReport 的字段猜 → 全部 http 500。
+  "poseidon/api/report/queryEntityReport": {
+    "clientType": 1,
+    "entityId": "{{mallId}}",
+    "entityDimensionType": 0,
+    "queryDimensionType": 2,
+    "reportPromotionType": 9,
+    "blockTypes": [
+      6
+    ],
+    "startDate": "{{today}}",
+    "endDate": "{{today}}",
+    "queryRange": {
+      "pageNumber": 1,
+      "pageSize": 50
+    },
+    "orderBy": 9999,
+    "orderType": 1,
+    "returnTotalSumReport": true
+  },
+  "venus/api/user/userInfo": {
+    "clientType": 1
+  },
+  "poseidon/report/queryReportCustomConfig": {
+    "clientType": 1,
+    "queryConfigList": [
+      {
+        "dimensionType": 0,
+        "blockType": 2
+      },
+      {
+        "dimensionType": 0,
+        "blockType": 10,
+        "scenesMode": 3
+      },
+      {
+        "dimensionType": 2,
+        "blockType": 3,
+        "scenesMode": 1
+      },
+      {
+        "dimensionType": 2,
+        "blockType": 3,
+        "scenesMode": 3
+      },
+      {
+        "dimensionType": 2,
+        "blockType": 4,
+        "scenesMode": 1
+      },
+      {
+        "dimensionType": 2,
+        "blockType": 4,
+        "scenesMode": 3
+      },
+      {
+        "dimensionType": 11,
+        "blockType": 4,
+        "scenesMode": 1
+      },
+      {
+        "dimensionType": 11,
+        "blockType": 4,
+        "scenesMode": 3
+      },
+      {
+        "dimensionType": 0,
+        "blockType": 5
+      },
+      {
+        "dimensionType": 2,
+        "blockType": 6
+      },
+      {
+        "dimensionType": 2,
+        "blockType": 6,
+        "scenesMode": 1
+      },
+      {
+        "dimensionType": 2,
+        "blockType": 6,
+        "scenesMode": 3
+      },
+      {
+        "dimensionType": 2,
+        "blockType": 7,
+        "scenesMode": 1
+      },
+      {
+        "dimensionType": 2,
+        "blockType": 7,
+        "scenesMode": 3
+      },
+      {
+        "dimensionType": 0,
+        "blockType": 13
+      }
+    ],
+    "reportPromotionType": 9
+  },
+  "venus/api/goods/promotion/v3/list": {
+    "clientType": 1,
+    "blockType": 3,
+    "withTagsInfo": true,
+    "beginDate": "2026-11-09",
+    "endDate": "2026-11-09",
+    "pageNumber": 1,
+    "pageSize": 50,
+    "sortBy": 9999,
+    "orderBy": 9999,
+    "filter": {},
+    "scenesMode": 1,
+    "showGoodsPromotionHistoryReport": false
+  },
+  "smartTool/strategy/mall/guide/queryPromotionAssistantInfo": {
+    "beginDate": "2026-11-09",
+    "endDate": "2026-11-09",
+    "waiverDataBeginDate": "2026-10-10",
+    "waiverDataEndDate": "2026-11-08",
+    "clientType": 1
+  },
+  "smartTool/mall/charge/suggest": {},
+  "smartTool/mall/feature/queryMallSceneActive": {
+    "scenesTypeList": [
+      9
+    ],
+    "reportDateRange": 1
+  },
+  "venus/api/goods/promotion/smart/promotion/v3/info": {
+    "withPlanInfo": true,
+    "withExcellentCaseList": true,
+    "withExcludeRefundSuggest": true,
+    "withExcludeRefundGuideBidInfo": true,
+    "withAssistAdvancedInfo": true,
+    "withAdviceInfo": true
+  },
+  "apollo/api/adAutoCharge/queryV2": {},
+  "venus/api/goods/promotion/mall/additional/max/cost/info": {},
+  "venus/api/unit/queryAssistAdvanceForceSwitchStatus": {},
+  "reach/noticeBar/queryList": {
+    "positionId": 112001
+  },
+  /* ── 店铺 / 经营域（mms）── */
+  "sydney/api/mallScore/queryMallFlowData": {
+    "beginDate": "{{yesterday}}",
+    "endDate": "{{today}}"
+  },
+  "sydney/api/mallFlow/queryMallFlowOverView": {
+    "beginDate": "{{yesterday}}",
+    "endDate": "{{today}}"
+  },
+  "sydney/api/mallScore/queryMallScoreOverView": {
+    "beginDate": "{{yesterday}}",
+    "endDate": "{{today}}"
+  },
+  "sydney/api/goodsDataShow/queryGoodsPageOverviewForMms": {
+    "beginDate": "{{yesterday}}",
+    "endDate": "{{today}}"
+  },
+  "sydney/api/goodsDataShow/queryGoodsDetailVOList": {
+    "startDate": "{{today}}",
+    "endDate": "{{today}}",
+    "queryType": 6,
+    "sortCol": 0,
+    "sortType": 1,
+    "pageNum": 1,
+    "pageSize": 100,
+    "actVs": 1
+  },
+  "sydney/api/goodsDataShow/queryGoodsDetailVOListForMMS": {
+    "startDate": "{{today}}",
+    "endDate": "{{today}}",
+    "queryType": 6,
+    "sortCol": 0,
+    "sortType": 1,
+    "pageNum": 1,
+    "pageSize": 100,
+    "actVs": 1
+  },
+  /* ── 机会商品域（opportunity-goods）── */
+  // ★ 2026-11-09：从 chance 页 JS bundle（chance.a017f29c.chunk…js）挖出的真实 body
+  //   get_hot_search_goods 的校验 schema 要求 statistic_type，缺了就 http 500
+  "opportunity-goods/chance-goods/get_hot_search_goods": {
+    "page": 1,
+    "page_size": 10,
+    "statistic_type": 0
+  },
+  "opportunity-goods/chance-goods/home_list": {
+    "size": 35,
+    "page": 1,
+    "banner_type": 0
+  },
+  "opportunity-goods/chance-goods/my_list": {
+    "size": 35,
+    "page": 1
+  },
+  /* ── 推广诊断 ── */
+  // 实测：platform 必填，缺了报「平台类型错误」
+  "smartTool/diagnosis/v2/queryPromotionDiagnosis": { "platform": 1 },
+  "smartTool/diagnosis/queryStableCostAdDiagnosis": { "platform": 1 }
+}
+
+/** 旧名保留（兼容已引用 PROMO_BODY_DEFAULTS 的代码） */
+export const PROMO_BODY_DEFAULTS = API_BODY_DEFAULTS
 
 /* ══════════════════════════════════════════════════════════════════
  * 页面路由表（DOM 驱动型 skill 用）
@@ -260,7 +542,9 @@ export async function api(page, name, body = {}, opts = {}) {
   //   性能：纯 Node 120~330ms，浏览器 28000ms
   //   适用：/vodka/ /glide/ 已实测稳定；推广域不稳定，会自动降级
   const canPureNode = !!opts.account?.cookies && plan.headerAnti
-  const hasBrowser = !!page
+  // ★ fallbackPage：account 走 Node 但失败时用来降级的浏览器页
+  const browserPage = page || opts.fallbackPage || null
+  const hasBrowser = !!browserPage
   let pureNode = canPureNode
   let nodeFailReason = ''
 
@@ -281,12 +565,12 @@ export async function api(page, name, body = {}, opts = {}) {
       pureNode = false
     }
   } else if (plan.headerAnti) {
-    anti = await getAntiContent(page, origin)
+    anti = await getAntiContent(browserPage, origin)
   }
 
   // VerifyAuthToken 只在浏览器通道可用（需要页面 cookie 操作）
   if (!pureNode && opts.shopKey) {
-    try { vtk = await getVerifyAuthToken(page, opts.shopKey) } catch { /* ignore */ }
+    if (browserPage) { try { vtk = await getVerifyAuthToken(browserPage, opts.shopKey) } catch { /* ignore */ } }
   }
 
   // ③ 组装 body（crawlerInfo 由 plan.bodyCrawlerInfo 决定，不是无脑加）
@@ -326,16 +610,61 @@ export async function api(page, name, body = {}, opts = {}) {
     })()
 
     // ★ 降级判断：Node 通道返回 54001（签名不被接受）且浏览器可用 → 切浏览器重试
+    const nodeEc0 = Number(res.json?.error_code ?? res.json?.errorCode ?? 0)
+    const nodeOk0 = res.json?.success === true || nodeEc0 === 1000000
+
+    // ★★ 2026-11-11：**43001/40001 会话过期 → 自动 Cookie 自愈 + 重试一次**。
+    //
+    //   为什么必须加在这里：pdd-api 的纯 Node 路径用的是**自己的 fetch**，
+    //   完全绕过 pdd-request.mjs 的 request() —— 拿不到那里的 Cookie 自愈。
+    //   实测同一接口：
+    //     request()  → ✅ ok（日志「Cookie 已自愈」）
+    //     pddApi()   → ❌ 43001 原样报错
+    //   调用方（pdd-chance 等）拿到 43001 就以为「账号要重登」，
+    //   其实刷新 Cookie 就能继续。
+    if (!nodeOk0 && (nodeEc0 === 43001 || nodeEc0 === 40001) && opts.shopKey && !opts.__healed) {
+      try {
+        const reqMod = await import(pathToFileURL(path.join(HERE, 'pdd-request.mjs')).href)
+        const fresh = await reqMod.healCookiesForApi?.(opts.shopKey)
+        if (fresh?.cookies && Object.keys(fresh.cookies).length >= 5) {
+          const retryJar = { ...(opts.account.cookies || {}), ...fresh.cookies }
+          const cookieStr2 = Object.entries(retryJar).map(([k, v]) => `${k}=${v}`).join('; ')
+          const hd2 = buildHeaders(anti, vtk, plan, opts.extraHeaders)
+          const headers2 = {}
+          for (const [k, v] of Object.entries(hd2)) headers2[k.toLowerCase()] = v
+          headers2['origin'] = origin
+          headers2['referer'] = opts.account.referer || 'https://mms.pinduoduo.com/goods/goods_list'
+          headers2['user-agent'] = opts.account.userAgent ||
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36'
+          headers2['cookie'] = cookieStr2
+          headers2['accept'] = headers2['accept'] || 'application/json, text/plain, */*'
+          const resp2 = await fetch(url, {
+            method: spec.method,
+            headers: headers2,
+            ...(spec.method === 'GET' ? {} : { body: JSON.stringify(finalBody || {}) }),
+          })
+          const text2 = await resp2.text()
+          let json2 = null
+          try { json2 = JSON.parse(text2) } catch { /* 非 JSON */ }
+          const ec2 = Number(json2?.error_code ?? json2?.errorCode ?? 0)
+          if (json2?.success === true || ec2 === 1000000) {
+            res = { status: resp2.status, json: json2, text: text2.slice(0, 500) }
+            console.warn('[pdd-api] ✅ Cookie 自愈后重试成功')
+          }
+        }
+      } catch { /* 自愈失败 → 走原错误路径 */ }
+    }
+
     const nodeEc = Number(res.json?.error_code ?? res.json?.errorCode ?? 0)
     const nodeOk = res.json?.success === true || nodeEc === 1000000
     const nodeRisk = nodeEc === 54001 || nodeEc === 54003
     if (!nodeOk && nodeRisk && hasBrowser) {
       nodeFailReason = `Node 签名被拒（ec=${nodeEc}），降级浏览器`
       usedChannel = 'browser'
-      anti = await getAntiContent(page, origin)
-      if (opts.shopKey) { try { vtk = await getVerifyAuthToken(page, opts.shopKey) } catch { } }
+      anti = await getAntiContent(browserPage, origin)
+      if (opts.shopKey) { try { vtk = await getVerifyAuthToken(browserPage, opts.shopKey) } catch { } }
       const fbBody = (plan.bodyCrawlerInfo && anti) ? { ...body, crawlerInfo: anti } : body
-      res = await page.evaluate(async (u, m, hd, bd) => {
+      res = await browserPage.evaluate(async (u, m, hd, bd) => {
         try {
           const resp = await fetch(u, {
             method: m, credentials: 'include', headers: hd,
@@ -351,7 +680,7 @@ export async function api(page, name, body = {}, opts = {}) {
       }, url, spec.method, buildHeaders(anti, vtk, plan, opts.extraHeaders), fbBody)
     }
   } else {
-    res = await page.evaluate(async (u, m, hd, bd) => {
+    res = await browserPage.evaluate(async (u, m, hd, bd) => {
       try {
         const resp = await fetch(u, {
           method: m,

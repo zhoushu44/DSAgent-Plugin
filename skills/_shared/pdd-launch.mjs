@@ -23,6 +23,7 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { homedir, tmpdir } from 'node:os'
+import { execFileSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { cleanCookiePollutionSync } from './cookie-clean.mjs'
@@ -164,6 +165,22 @@ export function launchOptions(shopKey, extra = {}) {
     console.warn('[pdd-launch] 清 Profile 锁失败（继续启动）：' + String(e.message).slice(0, 60))
   }
 
+  // ★★ 2026-11-10：让常驻签名服务**让出 Profile 锁**。
+  //
+  //   背景：推广域签名服务（pdd-signer-daemon）为了热签名，会长期持有这个账号的
+  //   Chrome（同一 userDataDir）。浏览器类技能（pdd-video / pdd-publish-http /
+  //   pdd-activity …）也要用同一个 Profile 起 Chrome → Profile 锁冲突 →
+  //   "Failed to launch the browser process!"（这个报错还不指向真正原因）。
+  //
+  //   为什么放在这里：launchOptions() 是**所有** pdd 浏览器启动的唯一收口，
+  //   放这里 = 零 per-skill 改动。守护进程下次签名时会自己重开 Chrome（+8s，一次性）。
+  //
+  //   实现：同步 HTTP（execFileSync + node -e fetch），因为 launchOptions 是同步函数，
+  //   而调用方紧接着就 launch()，必须等守护进程真的关掉浏览器。
+  try {
+    releaseDaemonProfile(shopKey)
+  } catch { /* ignore */ }
+
   return {
     executablePath: CHROME_PATH,
     userDataDir: profile,
@@ -175,6 +192,25 @@ export function launchOptions(shopKey, extra = {}) {
     ignoreDefaultArgs: ['--enable-automation'],   // ★ 去掉「Chrome 正受自动化软件控制」提示
     ...extra,
   }
+}
+
+/**
+ * 让常驻签名服务释放这个账号的 Profile 锁（同步）。
+ *
+ * 守护进程没在跑 → 立刻返回（不产生任何额外开销）。
+ * 守护进程在跑但没有这个账号的浏览器 → 也立刻返回。
+ */
+function releaseDaemonProfile(shopKey) {
+  const script = `
+    const t=setTimeout(()=>process.exit(0),3000);
+    fetch('http://127.0.0.1:8791/release',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({shopKey:${JSON.stringify(String(shopKey))}})})
+      .then(r=>r.json()).then(()=>{clearTimeout(t);process.exit(0)})
+      .catch(()=>{clearTimeout(t);process.exit(0)});
+  `
+  try {
+    execFileSync(process.execPath, ['-e', script], { stdio: 'ignore', timeout: 8000, windowsHide: true })
+  } catch { /* 守护进程不在 → 无所谓 */ }
 }
 
 /**

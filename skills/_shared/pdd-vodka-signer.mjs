@@ -55,6 +55,8 @@ const DOM_URL = 'https://mms.pinduoduo.com/goods/goods_list'
 /** 沙箱缓存（避免重复加载 SDK，75ms → 0ms） */
 let _ctx = null
 let _ctxKey = ''
+/** 当前活着的 jsdom 实例（供 resetSandbox 关闭，防进程退不出去） */
+let _liveDom = null
 
 /**
  * 初始化沙箱
@@ -91,6 +93,8 @@ export async function initSandbox(opts = {}) {
     <canvas id="c"></canvas></body></html>`, {
     url: DOM_URL, referrer: DOM_URL, pretendToBeVisual: true, runScripts: 'outside-only',
   })
+  // ★ 记到模块级，供 resetSandbox() 真正关闭（否则进程退不出去）
+  _liveDom = dom
   const { window } = dom
   const { document } = window
 
@@ -185,11 +189,30 @@ export async function signForAccount(account) {
   })
 }
 
-/** 清理沙箱（一般不需要） */
+/**
+ * 清理沙箱。
+ *
+ * ★ 2026-11-10：**必须真正关闭 jsdom window**，否则进程退不出去。
+ *
+ *   症状：走纯 Node 通道的 skill 结果早就打印完了，进程却一直不退出，
+ *     调用方 WaitForExit 超时 → 误判卡死。
+ *     实测 pdd-works / pdd-shop / pdd-activity / pdd-promo 全中招；
+ *     最小复现 = 只调一次 sign()。
+ *
+ *   根因：本模块是**模块级单例** `const dom = new JSDOM(...)`。
+ *     jsdom 的 window 自带 setInterval / MessageChannel 等活句柄，
+ *     只要进程还引用着这个 window，事件循环就永远不空。
+ *
+ *   修法：resetSandbox() 里 `dom.window.close()` 让 jsdom 清掉所有定时器。
+ *     代价：下次签名重建沙箱 ~75ms，对 1~6 秒节流的 PDD 请求可忽略。
+ */
 export function resetSandbox() {
+  try { _liveDom?.window?.close?.() } catch { /* ignore */ }
+  _liveDom = null
   _ctx = null
   _ctxKey = ''
 }
+export const dispose = resetSandbox
 
 /** SDK 是否就绪 */
 export function sdkReady(sdkPath) {

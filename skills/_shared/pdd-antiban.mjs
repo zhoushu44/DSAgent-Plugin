@@ -96,11 +96,14 @@ export const THROTTLE = {
   writeGapMs: 3000,
   writeJitterMs: 2000,
 
-  // ── 域级额外间隔（2026-11-08 实测：推广域比商品域严格得多）──
+  // ── 域级额外间隔 ──
   //   商品域：零间隔 30 次全过
-  //   推广域：连续几次就 54001，且恢复慢
+  //   推广域：比商品域严格，但真限流阈值是「60s 内 13+ 个**不同**接口」
+  //   （2026-11-09 实测：连打 11 个推广接口即进 429，恢复慢）
+  //   靠下面 scanDistinctLimit=12 的扫描闸门兜底即可，逐次 15s 太保守
+  //   （一次 overview 要 8 个接口 → 120s，用户等不起）。
   domainGapMs: {
-    yingxiao: 15000,     // 推广域 15 秒/次
+    yingxiao: 6000,      // 推广域 6 秒/次（配合 12 个/60s 扫描闸门）
     live: 5000,          // 视频域 5 秒/次
     mms: 0,              // 商品域不加额外间隔
   },
@@ -315,7 +318,12 @@ export function recordResult(shopKey, kind, detail = {}) {
   } else if (kind === 'session') {
     acct.stats.session++
     acct.health = Math.max(0, acct.health + HEALTH.sessionLost)
+    // ★ 2026-11-11：`needRelogin` 原来是**永久标记**，一次 43001 就锁死账号，
+    //   但实测 43001 经常是**瞬时**的（Cookie 自愈后立刻就能用）——
+    //   结果用户明明重登了、或会话自己恢复了，技能还一直报「需要重新登录」。
+    //   → 加 15 分钟有效期；过期自动失效。真正的长期失效靠 health 分兜底。
     acct.needRelogin = true
+    acct.needReloginUntil = now + 15 * 60 * 1000
   } else if (kind === 'rate_limit') {
     acct.stats.rateLimit++
     acct.health = Math.max(0, acct.health + HEALTH.rateLimit)
@@ -348,7 +356,16 @@ export function canUse(shopKey) {
     return { ok: false, reason: `健康分过低（${st.health}），建议换号`, health: st.health }
   }
   if (st.needRelogin) {
-    return { ok: false, reason: '需要重新登录', health: st.health }
+    // ★ 2026-11-11：按有效期判断（默认 15 分钟）。
+    //   canUse 是只读函数，这里不写盘；过期标记会在下一次
+    //   recordToAntiban / clearCooldown 时被覆盖或清掉。
+    //   老数据没有 needReloginUntil → 视为已过期（避免历史遗留的永久锁死账号）。
+    const until = st.needReloginUntil || 0
+    if (now < until) {
+      const remain = Math.ceil((until - now) / 60000)
+      return { ok: false, reason: `需要重新登录（${remain} 分钟后自动重试）`, remainMs: until - now, health: st.health }
+    }
+    // 已过期 → 放行
   }
   return { ok: true, health: st.health }
 }
@@ -361,6 +378,7 @@ export function clearCooldown(shopKey) {
   delete acct.cooldownUntil
   delete acct.cooldownReason
   delete acct.needRelogin
+  delete acct.needReloginUntil
   acct.health = Math.min(HEALTH.init, (acct.health ?? 0) + 20)
   state[shopKey] = acct
   writeState(state)

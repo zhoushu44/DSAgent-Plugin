@@ -421,10 +421,11 @@ function makeGuard({ skill, shopKey, locked = false, blocked = false, reason = '
      * @param {object} json  平台返回体
      * @returns {Promise<{ failureKind: string, ec: number|null, retryable: boolean }>}
      */
-    async afterCall(url, json) {
+    async afterCall(url, json, httpStatus) {
       const m = await mods()
       const ec = Number(json?.error_code ?? json?.errorCode ?? 0)
       const success = json?.success === true || ec === 1000000
+      const errText = String(json?.error_msg ?? json?.errorMsg ?? json?.msg ?? '').trim()
 
       if (success) {
         stats.ok++
@@ -438,6 +439,19 @@ function makeGuard({ skill, shopKey, locked = false, blocked = false, reason = '
       } catch { /* ignore */ }
 
       let retryable = false
+      // ★ 2026-11-09：**网关限流优先判定**
+      //   实测：连续打推广域接口会得到 HTTP 429 + body {"error_code":40001,"error_msg":""}。
+      //   那是 edge 层限流，**不是权限问题** —— 但因为 ec=40001，旧逻辑会记成
+      //   session 失效 → needRelogin=true → 账号被误判掉登录，闸门直接拦死。
+      //   判据：HTTP 429/430，或 40001 但**错误文案为空**（真权限错误一定带文案）。
+      const gatewayThrottle = httpStatus === 429 || httpStatus === 430
+        || (ec === 40001 && errText === '')
+      if (gatewayThrottle) {
+        stats.rateLimit++
+        try { m.antiban?.recordResult?.(shopKey, 'rateLimit') } catch { /* ignore */ }
+        return { failureKind: 'rate_limit', ec, retryable: true }
+      }
+
       // ★ 2026-11-05 新增：54003 = 安全验证未通过、暂时无法登录。
       //   与 43001/40001 的本质区别：**重扫码无效**，只能等。
       //   这里必须最先拦，且 retryable=false —— 任何自动重试都会延长封禁。

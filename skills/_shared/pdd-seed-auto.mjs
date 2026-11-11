@@ -101,6 +101,57 @@ export function checkSeedHealth(shopKey, cookies = {}) {
 }
 
 /**
+ * 推广域环境画像（设备指纹）的健康检查。
+ *
+ * ★ 2026-11-09 新增：推广域也纳入自动维护。
+ *   环境画像 = seed.promoEnv，是「抓一次用很久」的资产；
+ *   缺了它，纯 Node 签名的指纹就是空的（必被服务端判无效）。
+ */
+export function checkPromoEnvHealth(shopKey, opts = {}) {
+  const p = seedPath(shopKey)
+  if (!fs.existsSync(p)) return { need: true, reason: '种子不存在', urgent: false }
+  let seed = null
+  try { seed = JSON.parse(fs.readFileSync(p, 'utf8')) } catch { /* 损坏 */ }
+  if (!seed) return { need: true, reason: '种子损坏', urgent: false }
+  if (!seed.promoEnv || !seed.promoEnv.nav || !seed.promoEnv.doc) {
+    return { need: true, reason: '推广域环境画像缺失', urgent: false }
+  }
+  const maxAge = opts.maxAgeMs || 30 * 24 * 3600 * 1000
+  const at = seed.promoEnv.capturedAt || 0
+  if (at && Date.now() - at > maxAge) {
+    return { need: true, reason: `推广域环境画像已过期（${Math.round((Date.now() - at) / 86400000)} 天）`, urgent: false }
+  }
+  return { need: false, reason: '', urgent: false }
+}
+
+/**
+ * 刷新推广域环境画像。
+ * 优先走**常驻签名服务**（它已经持有那个 Profile 的 Chrome），
+ * 避免另开浏览器和守护进程抢 Profile 锁。
+ */
+export async function refreshPromoEnv(shopKey, opts = {}) {
+  try {
+    const dm = await import('./pdd-signer-daemon.mjs')
+    let profile = await dm.daemonEnv(shopKey).catch(() => null)
+    if (!profile) {
+      // 守护进程没起 → 拉起再试
+      const started = await dm.ensureDaemon().catch(() => null)
+      if (started?.ok) profile = await dm.daemonEnv(shopKey).catch(() => null)
+    }
+    if (!profile) return { ok: false, reason: '常驻签名服务不可用（环境画像未刷新）' }
+    const { readSeed, writeSeed } = await import('./pdd-seed-store.mjs')
+    const seed = readSeed(shopKey) || { localStorage: {}, sessionStorage: {} }
+    seed.promoEnv = profile
+    seed.promoEnv.version = profile.version || 3
+    seed.promoEnv.capturedAt = Date.now()
+    writeSeed(shopKey, seed)
+    return { ok: true, reason: '推广域环境画像已刷新' }
+  } catch (e) {
+    return { ok: false, reason: '环境画像刷新失败：' + String(e?.message || e).slice(0, 80) }
+  }
+}
+
+/**
  * 防抖检查：是否允许现在刷新
  */
 function canRefreshNow(shopKey) {
@@ -134,9 +185,17 @@ export async function ensureSeed(opts) {
 
   const health = checkSeedHealth(shopKey, cookies)
 
-  // 已健康 → 直接返回
+  // ★ 已健康 → 直接返回；但**推广域环境画像**可能还缺（两者是独立的）
   if (!health.need) {
-    return { ok: true, refreshed: false, reason: '', seed: readSeedSafe(shopKey) }
+    const envH = checkPromoEnvHealth(shopKey)
+    if (envH.need) {
+      // 环境画像缺失不阻塞主流程（后台补），但要记一笔
+      if (canRefreshNow(shopKey + ':env')) {
+        markRefreshed(shopKey + ':env', 'triggered')
+        refreshPromoEnv(shopKey).catch(() => { })
+      }
+    }
+    return { ok: true, refreshed: false, reason: envH.need ? envH.reason : '', seed: readSeedSafe(shopKey) }
   }
 
   // 防抖：刚刷过就跳过
@@ -156,6 +215,12 @@ export async function ensureSeed(opts) {
       const { exportSeedFromBrowser } = await import('./pdd-seed-store.mjs')
       const r = await exportSeedFromBrowser({ shopKey, profileDir, pluginRoot })
       markRefreshed(shopKey, r.ok ? 'ok' : 'fail')
+      // ★ 推广域环境画像一并维护（登录后自动补齐，纯 Node 签名的前提）
+      const envHealth = checkPromoEnvHealth(shopKey)
+      if (envHealth.need) {
+        const er = await refreshPromoEnv(shopKey).catch(() => ({ ok: false, reason: 'skip' }))
+        if (!er.ok) console.warn('[seed-auto] ' + er.reason)
+      }
       return { ok: true, refreshed: true, reason: health.reason, seed: readSeedSafe(shopKey) }
     } catch (e) {
       markRefreshed(shopKey, 'error:' + String(e.message).slice(0, 60))

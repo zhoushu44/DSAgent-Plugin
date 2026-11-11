@@ -14,6 +14,18 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { createRequire } from 'node:module'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
+const PLUGIN_ROOT = path.resolve(__dirname, '..', '..')
+
+// 凭证库是 CJS —— 同步 require，因为 readSeed() 必须是同步的
+let CredentialStore = null
+try {
+  const require = createRequire(import.meta.url)
+  CredentialStore = require(path.join(PLUGIN_ROOT, 'lib', 'services', 'credential-store.js')).CredentialStore
+} catch { /* 读不到就退化成「不兜底」 */ }
 
 const SEED_DIR = path.join(os.homedir(), '.dsh', 'pdd-risk-seeds')
 
@@ -22,26 +34,100 @@ function seedPath(shopKey) {
 }
 
 /**
- * 读取种子
- * @returns {{ localStorage: object, sessionStorage: object, savedAt: number } | null}
+ * 读取种子。
+ *
+ * ★ 2026-11-10：**账号 key 漂移兜底**。
+ *   pdd_mms 的 shop_key 是从 PASS_ID 派生的，而 PASS_ID 会随登录轮换
+ *   （实测同一店铺漂过：975543… → 3fa2ee60… → 25f216ca…）。
+ *   种子文件按 shop_key 命名 → key 一漂，旧种子就「不存在」了，
+ *   表现为「种子过期 / 纯 Node 签名全废」，但其实数据都还在。
+ *
+ * ⚠️ 兜底**绝不能只按前缀找最新**：同一平台下有多个店铺（空空商行 / 爱绿森 / …），
+ *    拿错种子 = 用别的店铺的身份签名，比没有种子更糟。
+ *    所以只认「同一店铺」——用种子里的 mallId / 店铺名与凭证库里的账号比对。
  */
 export function readSeed(shopKey) {
   try {
     const p = seedPath(shopKey)
-    if (!fs.existsSync(p)) return null
-    const j = JSON.parse(fs.readFileSync(p, 'utf8'))
-    if (!j || !j.localStorage) return null
-    return j
+    if (fs.existsSync(p)) {
+      const j = JSON.parse(fs.readFileSync(p, 'utf8'))
+      if (j && j.localStorage) return j
+    }
+    // 漂移兜底：只接受「确认是同一店铺」的种子
+    const want = ownerOf(shopKey)
+    if (!want) return null
+    let best = null
+    for (const name of fs.readdirSync(SEED_DIR)) {
+      if (!name.endsWith('.json')) continue
+      if (!name.startsWith(String(shopKey).replace(/_[0-9a-f]{16,}$/i, '_'))) continue
+      const f = path.join(SEED_DIR, name)
+      try {
+        const j = JSON.parse(fs.readFileSync(f, 'utf8'))
+        if (!j?.localStorage) continue
+        const got = ownerOfSeed(j)
+        if (!got || got !== want) continue        // ← 店铺不同 → 绝不借用
+        const st = fs.statSync(f)
+        if (!best || st.mtimeMs > best.mtime) best = { mtime: st.mtimeMs, seed: j }
+      } catch { /* 跳过坏文件 */ }
+    }
+    return best ? best.seed : null
   } catch { return null }
 }
 
-/** 写种子 */
-export function writeSeed(shopKey, seed) {
+/** 从凭证库取店铺标识（mallId 优先，其次店铺名） */
+function ownerOf(shopKey) {
+  try {
+    const store = new CredentialStore(CRED_FILE)
+    const a = store.listAccounts().find(x => x.shop_key === shopKey)
+    if (!a) return null
+    return String(a.account_meta?.mall_id || a.mall_id || a.display_label || '').trim() || null
+  } catch { return null }
+}
+
+/** 从种子内容取店铺标识 */
+function ownerOfSeed(seed) {
+  try {
+    const ui = seed.localStorage?.['new_userinfo']
+    if (ui) {
+      const o = JSON.parse(ui)
+      const id = o?.mall_id || o?.mallId || o?.store_id
+      if (id) return String(id).trim()
+    }
+    const fp = seed.localStorage?.['MMS-LOGIN-FP']
+    if (fp) {
+      const o = JSON.parse(fp)
+      const id = o?.mall_id || o?.mallId
+      if (id) return String(id).trim()
+    }
+  } catch { /* ignore */ }
+  return null
+}
+
+const CRED_FILE = path.join(os.homedir(), '.dsh', 'dsagent-accounts.json')
+
+/**
+ * 写种子。
+ *
+ * ★ 2026-11-09：保留**扩展字段**（promoEnv 等）。
+ *   环境画像是「抓一次、用很久」的资产（设备指纹），而 localStorage 种子是
+ *   「登录态」产物，会过期要重刷。之前刷新种子直接整体覆盖 → 环境画像被冲掉，
+ *   纯 Node 签名立刻退化成无效指纹。
+ *   → 刷新时只更新 localStorage/sessionStorage/savedAt，promoEnv 原样留着。
+ */
+export function writeSeed(shopKey, seed, opts = {}) {
   fs.mkdirSync(SEED_DIR, { recursive: true })
   const p = seedPath(shopKey)
+  const prev = (opts.preserve === false) ? null : readSeed(shopKey)
+  const keep = {}
+  if (prev) {
+    for (const k of ['promoEnv', 'promoCookies', 'promoEnvAt']) {
+      if (prev[k] !== undefined && seed[k] === undefined) keep[k] = prev[k]
+    }
+  }
   fs.writeFileSync(p, JSON.stringify({
     savedAt: Date.now(),
     ...seed,
+    ...keep,
   }, null, 1), 'utf8')
   return p
 }
