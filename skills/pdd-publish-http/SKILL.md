@@ -15,21 +15,118 @@ metadata:
 >
 > 纯 HTTP 换图试了 19 次、7 种方案、4 个账号，全部失败。
 
+## 执行入口（宿主按「脚本型」调用本技能）
+
+**唯一入口：`steps/index.mjs`**（与 `contract.json` 的 `entry.script` 一致）
+
+```bash
+# 预览（默认）：只校验商品数据 + 回显上架计划，不开浏览器、零写操作
+node {baseDir}/steps/index.mjs --product-file "<product.json 绝对路径>" --account "<shopKey>"
+
+# 真实上架：L2 写操作，用户明确确认后才允许带 --confirm true
+node {baseDir}/steps/index.mjs --product-file "<product.json 绝对路径>" --account "<shopKey>" --confirm true
+```
+
+⚠ 改入口脚本时必须同步改这两行 + `contract.json`。
+
+### 全部走基座
+
+| 模块 | 用途 |
+|---|---|
+| `pdd-launch.launchStealth()` | 浏览器启动（stealth 参数 + profile 清理）|
+| `pdd-antiban.reserveSlot()` | 请求配额节流 |
+| `pdd-risk.checkCooldown()` | 账号冷却检查 |
+| `pdd-request.request()` | 接口请求（Node 签名 / 浏览器双通道）|
+
+### 步骤 1→16
+
+```
+1 打开发布页（事件驱动等新标签，1.9s）
+2 主图 5 张（uploadFile + 补派发 input/change）
+3 标题
+4 类目检查 + 手动选择 + 下一步
+5 白底图（JS 注入，不弹窗）
+6 属性 + 自动补必填（扫 span.Form_itemRequired）
+6b 详情图上传（detailImages → 详情区 input[type=file]）
+11 规格（按模板 type 分派）
+12 价格库存 + SKU 预览图（rowspan 逻辑列）
+13 参考价（不传则自动 = 最大单买价 + 1）
+14 满件折扣
+15 承诺发货时间
+16 提交（内置必填校验 + .success-title 判成功）
+```
+
+### 规格分派（核心设计）
+
+模板 `template.json` 里每个维度标 `type`，上架时 `switch(dim.type)` 选填充器：
+
+```js
+case 'text':       fillByGroup      // 勾选框 + 输入框按组配对
+case 'checkbox':   fillByGroup      // 预设值点选（含裸输入框兜底）
+case 'size-table': fillSizeTable    // 尺码表（自动切欧码/中国码）
+```
+
+**新类目只需标对 `type`，step11 不用改。**
+
+### 已验证类目（8/8）
+
+| 类目 | catId | 规格 |
+|---|---|---|
+| 餐饮具 > 纸杯 | 16675 | 容量 text |
+| 女装 > T恤 | 8463 | 颜色 group + 尺码 size-table |
+| 基础建材 > 隔音板 | 9683 | 无 |
+| 家居饰品 > 门贴 | 22278 | 无 |
+| 女装 > 休闲裤 | 8475 | 颜色 + 尺码 |
+| 餐饮具 > 保温杯 | 16557 | 无 |
+| 运动鞋 > 跑步鞋 | 12512 | 颜色 group + 鞋码 size-table(欧码) |
+| 女装 > 连衣裙 | 8477 | 颜色 group + 尺码 size-table |
+
+---
+
+### 类目查询（纯 Node，不开浏览器）
+
+选类目 / 拉属性模板**不需要浏览器**。两个接口都已收进基座注册表
+（`mms.categorySearch` / `mms.mallTemplate`），自带签名、节流、Cookie 自愈：
+
+```bash
+# 关键词 → 类目树（拿叶子 catId）
+node {baseDir}/scripts/pdd-category.mjs search --keyword "T恤" --account "<shopKey>"
+
+# 叶子 catId → 属性 + 规格维度（--save 落成标准模板）
+node {baseDir}/scripts/pdd-category.mjs template --cat-id 8463 --account "<shopKey>" --save
+
+# 一条龙：关键词 → 第一个叶子类目 → 模板
+node {baseDir}/scripts/pdd-category.mjs resolve --keyword "保温杯" --account "<shopKey>" --save
+```
+
+实测（2026-11-10，空空商行）：
+`保温杯 → 餐饮具 > 杯子/水杯/水壶 > 保温杯/保冷杯 (catId=16557) → templateId=40001，13 个属性`
+`T恤 → 女装/女士精品 > T恤 > T恤 (catId=8463) → templateId=53657，15 属性 + 2 规格维（颜色分类 115 预设 / 尺码 91 预设），SKU 上限 900`
+
+> **只有叶子类目才有模板**。传一级/二级类目接口返回 200 + 空 modules，
+> CLI 会明确报 `EMPTY_TEMPLATE` 并退出码 1（不会给你一个空模板去填表）。
+
 ---
 
 ## 目录
 
 1. [结论先行](#一结论先行)
-2. [真实成功记录](#二真实成功记录)
-3. [两条发布路径](#三两条发布路径)
-4. [product.json 格式](#四productjson-格式)
-5. [类目参数实测值](#五类目参数实测值)
-6. [已知失败清单](#六已知失败清单)
-7. [风控与限流](#七风控与限流)
-8. [逆向结论](#八逆向结论)
-9. [脚本资产清单](#九脚本资产清单)
-10. [排障速查](#十排障速查)
-11. [教训总结](#十一教训总结)
+2. [**发布默认值**](#一点五发布默认值rpa-上架必守)
+3. [真实成功记录](#二真实成功记录)
+4. [两条发布路径](#三两条发布路径)
+5. [product.json 格式](#四productjson-格式)
+6. [类目参数实测值](#五类目参数实测值)
+7. [已知失败清单](#六已知失败清单)
+8. [风控与限流](#七风控与限流)
+9. [逆向结论](#八逆向结论)
+10. [脚本资产清单](#九脚本资产清单)
+11. [排障速查](#十排障速查)
+12. [教训总结](#十一教训总结)
+13. [**RPA 组件**](#十二rpa-组件7-个独立模块)
+14. [**拼多多基座**](#十三拼多多基座必须用不要自己造轮子)
+15. [**实战知识库**](docs/09-实战知识库.md)
+16. [**规格维度适配**](docs/10-规格维度适配.md)
+17. [**价格与库存**](#十四价格与库存必读)
 
 ---
 
@@ -41,6 +138,49 @@ metadata:
 | 纯 HTTP 能发吗？ | 能，但**不能换图**（8 单成功）|
 | 纯 HTTP 能换主图吗？ | **不能**，19 次全失败 |
 | 为什么？ | `file/create` 恒返回 `40002`，平台拒绝程序化调用，根因未查明 |
+
+---
+
+## 一点五、发布默认值（RPA 上架必守）
+
+填 SKU 表格时，以下两项**不要求用户提供**，按默认值填：
+
+| 字段 | 默认值 | 规则 |
+|---|---|---|
+| **库存数量** | **100** | 每行固定 100，不论规格数 |
+| **单买价** | **拼单价 + 1** | 单位元，保留两位小数 |
+
+### 示例
+
+| 拼单价 | 单买价（自动） | 库存（自动）|
+|---|---|---|
+| 19.90 | 20.90 | 100 |
+| 21.90 | 22.90 | 100 |
+| 99.90 | 100.90 | 100 |
+
+### 代码
+
+```js
+import { fillSkuTable } from './modules/02-form-input/index.mjs'
+
+const DEFAULT_STOCK = 100
+const DEFAULT_SINGLE_GAP = 1   // 单买价 = 拼单价 + 1
+
+const rows = products.map(p => ({
+  quantity: DEFAULT_STOCK,
+  groupPrice: p.groupPrice,
+  singlePrice: Number((p.groupPrice + DEFAULT_SINGLE_GAP).toFixed(2)),
+  outSkuSn: p.itemNo,
+}))
+
+await fillSkuTable(page, rows)
+```
+
+### 注意
+
+- **参考价（商品参考价）仍要单独算**：必须 > 最大单买价。若最大单买价为 25.90，参考价填 26.90
+- 单买价必须严格大于拼单价，`+1` 满足该约束
+- 库存 100 是**默认值**，用户明确指定时以用户为准
 
 ---
 
@@ -401,52 +541,54 @@ post("/garner/mms/file/create", {
 
 ## 九、脚本资产清单
 
-**位置**：`skills\pdd-publish-http\scripts\`
+### 入口（唯一）
 
-### 主流程
+| 文件 | 作用 |
+|---|---|
+| `steps/index.mjs` | **统一入口**：步骤 1→16，走基座，含提交前必填校验 |
+
+### 步骤
+
+| 文件 | 作用 |
+|---|---|
+| `steps/step4.mjs` | 类目检查 + 手动选择（搜索词去 `>` `/`）|
+| `steps/step5.mjs` | 白底图（JS 注入不弹窗）|
+| `steps/step6.mjs` | 属性 + 自动补必填 |
+| `steps/step6b.mjs` | 商品详情图上传（定位 detail-benDi）|
+| `steps/step11.mjs` | 规格（按模板 `type` 分派）|
+| `steps/step12.mjs` | 价格库存（rowspan 逻辑列）|
+| `steps/step13.mjs` | 参考价（不传 = 最大单买价 + 1）|
+| `steps/step14.mjs` | 满件折扣 |
+| `steps/step15.mjs` | 承诺发货时间 |
+| `steps/step16.mjs` | 提交（内置必填校验）|
+
+### 规格填充组件（核心）
+
+| 文件 | 作用 |
+|---|---|
+| `steps/helpers/fill-by-group.mjs` | 勾选框 + 输入框按组配对（预设/自定义/裸输入框三模式）|
+| `steps/helpers/size-table-fill.mjs` | 通用尺码表（自动切欧码/中国码，兼容鞋码）|
+| `steps/helpers/product-schema.mjs` | 入口校验（不开浏览器就拦错，含 SKU 笛卡尔积检查）|
+
+### 工具
 
 | 脚本 | 作用 |
 |---|---|
-| `publish-flow.mjs` | **页面全流程**（推荐，能换图）|
-| `publish-by-copy.mjs` | 复制改包（快，不能换图）|
-| `publish-v2.mjs` | 页面流程 v2（含 AI 视觉填表）|
-| `publish.mjs` | 页面流程 v1 |
-| `batch-publish.mjs` | 批量遍历目录发布 |
+| `scripts/pdd-category.mjs` | 类目搜索 + 模板拉取（纯 Node）|
+| `scripts/pull-tpl-final.mjs` | 批量拉 4 个类目模板 |
+| `scripts/tag-types.mjs` | 给模板标 `type` |
+| `scripts/scan-required.mjs` | 扫必填项写入模板 |
+| `scripts/inject-cookie.mjs` | 把凭证库 cookie 注入浏览器 profile |
+| `scripts/open-keep.mjs` | 打开浏览器并保持 |
+| `scripts/test-8cats.mjs` | 8 类目全量验证 |
+| `scripts/compress-images.mjs` | 图片压缩 |
+| `scripts/img-prep.mjs` | 主图预处理 |
 
-### 类目与属性
+### 已弃用
 
-| 脚本 | 作用 |
-|---|---|
-| `harvest-native-props.mjs` | 拦截页面 `action/edit` 拿权威属性结构 |
-| `category-template.mjs` | 类目模板库 |
-| `attr-harvest.mjs` | 采集类目属性清单 |
-| `attr-fill-generic.mjs` | 通用属性填写 |
-| `attr-composite.mjs` | 复合字段（「添加XX」多行）|
+`scripts/_deprecated/` —— 旧版 `publish*.mjs` / `attr-*` / `spec-*` / `sku-*` / `vision-*` 等 24 个脚本，
+已被 `steps/index.mjs` 取代。保留仅作历史参考，**不要再用**。
 
-### 表单填写（DOM 流程内部）
-
-`stage-nav.mjs` / `stage-submit.mjs` / `field-basic.mjs` / `field-images.mjs` / `field-service.mjs` / `field-shipping.mjs` / `spec-dims.mjs` / `spec-row-fill.mjs` / `sku-table.mjs` / `sku-thumb.mjs`
-
-### 图片
-
-`img-prep.mjs` / `compress-images.mjs` / `imgprep.py`
-
-### 视觉辅助
-
-`vision-fill.mjs` / `vision-cache.mjs` / `analyze_spec_ui.py`
-
-### 共享依赖
-
-| 路径 | 作用 |
-|---|---|
-| `skills/_shared/pdd-antiban.mjs` | 节流（账号级 4-6s / 接口级 1.8s）|
-| `skills/_shared/pdd-risk.mjs` | 风控（20 次/分 + 冷却 + 滑块 + 账号锁）|
-| `skills/_shared/pdd-shadow-hook.mjs` | 破解滑块 closed shadow root |
-| `skills/_shared/pdd-slider-solver.mjs` | 滑块识别与拖拽 |
-| `skills/_shared/pdd-http.mjs` | 凭证库 HTTP 通道 |
-| `lib/pdd-image-preupload.js` | 页面内图片上传 |
-
----
 
 ## 十、排障速查
 
@@ -493,14 +635,242 @@ post("/garner/mms/file/create", {
 
 ---
 
+## 十三、拼多多基座（必须用，不要自己造轮子）
+
+> ★ 2026-11-10 定稿：所有上架脚本必须走基座，禁止直接用裸 fetch / 裸 puppeteer。
+
+### 基座模块（`skills/_shared/`）
+
+| 模块 | 用途 | 关键导出 |
+|---|---|---|
+| `pdd-launch.mjs` | 启动 / 连接浏览器 | `launchStealth`、`STEALTH_ARGS`、`clearProfileLocks` |
+| `pdd-request.mjs` | 接口请求（Node + Browser 双通道）| `request`、`invalidateStoreCookieCache` |
+| `pdd-antiban.mjs` | 防风控节流 | `reserveSlot`、`canUse`、`backoffWait`、`getAccountState` |
+| `pdd-risk.mjs` | 滑块 / 冷却 / 账号锁 | `guard`、`checkCooldown`、`markCooldown`、`solveSlider` |
+| `pdd-vodka-signer.mjs` | vodka 域 0as 签名 | `signForAccount`、`initSandbox` |
+| `pdd-seed-store.mjs` | localStorage 种子 | `readSeed`、`writeSeed`、`exportSeedFromBrowser` |
+| `pdd-seed-auto.mjs` | 种子自动刷新 | `ensureSeed`、`seedStatus` |
+| `pdd-http.mjs` | Cookie 工具 | `cookiesOf`、`call` |
+| `pdd-guard.mjs` | 任务级守卫 | `openTask`、`withPddGuard` |
+| `pdd-slider-solver.mjs` | 滑块求解 | `solveSliderInPage`、`diagnoseSlider` |
+
+### 三条必须遵守的规则
+
+**① 接口请求走 `request()`，不要裸 fetch**
+
+```js
+import { request } from '../../_shared/pdd-request.mjs'
+
+const r = await request('/draco-ms/mms/template/mall?catId=16675', {}, {
+  method: 'GET',
+  account: acc,          // 凭证库账号对象
+  shopKey: acc.shop_key,
+  page: p,               // 传了就有浏览器兜底
+})
+// r = { ok, data, ec, channel, error_msg }
+```
+
+**为什么**：`template/mall` 用裸 fetch 一定 40002；`request()` 会自动加 Anti-Content 签名，并按需节流。
+
+**② 浏览器用 connect，不要 kill chrome**
+
+```js
+// ✅ 对：扫端口找已有浏览器
+const ports = execSync('Get-NetTCPConnection -State Listen ...')
+for (const pt of ports) {
+  const j = await (await fetch(`http://127.0.0.1:${pt}/json/version`)).json()
+  if (/Chrome/i.test(j.Browser)) {
+    const b = await puppeteer.connect({ browserURL: `http://127.0.0.1:${pt}` })
+    if ((await b.pages()).some(x => /mms.pinduoduo.com/.test(x.url()))) return b
+  }
+}
+
+// ❌ 错：Get-Process chrome | Stop-Process -Force   ← 会杀掉用户窗口 + 丢登录态
+```
+
+**③ 40002 第一次就停，不要重试**
+
+```js
+if (!r.ok && r.ec === 40002) {
+  return { ok: false, error: '限流，请等 30 分钟' }   // 不要循环重试
+}
+```
+
+重试只会加重限流，且**同一账号/同一通道都无效**，换账号也一样。
+
+### 请求前先拿配额
+
+```js
+import * as AB from '../../_shared/pdd-antiban.mjs'
+
+const slot = await AB.reserveSlot('pdd_mms', '/draco-ms/mms/template/mall')
+if (slot.waitMs > 0) await new Promise(r => setTimeout(r, slot.waitMs))
+```
+
+---
+
+## 十四、价格与库存（必读）
+
+### 四个价格字段
+
+| 字段 | 页面表头 | 含义 | 谁填 |
+|---|---|---|---|
+| `multiPrice` | `*拼单价(元)` | 2 人拼团价，**必须低于单买价** | step12 |
+| `price` | `*单买价(元)` | 单独购买价 | step12 |
+| `market_price` | 商品参考价 | 划线价，**不得高于最高单买价的 5 倍** | step13 |
+| `discount` | 满件折扣 | 5.0~9.9，页面默认 9.5 | step14 |
+
+### 商品数据里的写法
+
+```json
+{
+  "price": 39.9,          // 单买价（SKU 行没写 price 时用它）
+  "discount": 9.5,        // 满件折扣
+  "skus": [
+    {
+      "specs": { "颜色分类": "白色", "尺码": "M" },
+      "stock": 100,       // → 库存
+      "multiPrice": 29.9, // → 拼单价
+      "price": 39.9,      // → 单买价
+      "itemNo": "白色-M"  // → 规格编码
+    }
+  ]
+}
+```
+
+### 三条硬规则
+
+**① 拼单价必须 < 单买价**
+
+平台校验：单买价至少比拼单价高 1 元。否则提交报错：
+```
+单买价至少比拼单价高1元
+```
+
+**② 参考价 ≤ 最高单买价 × 5**
+
+不传 `price` 给 step13 时，**自动计算**（推荐）：
+
+```js
+// steps/step13.mjs
+let val = opts.value
+if (val === undefined || val === null || val === '') {
+  let maxPrice = 0
+  for (const r of skuRows) { const p = Number(r.price); if (p > maxPrice) maxPrice = p }
+  val = (maxPrice + 1).toFixed(2)   // 最大单买价 + 1
+}
+```
+
+实例：连衣裙最高单买价 39.9 → 参考价自动 40.9（安全，远低于 199.5 上限）。
+
+**③ 无规格类目 = 1 行 SKU**
+
+纸杯/保温杯/隔音板/门贴这类无规格类目，SKU 表只有 1 行且**没有规格列**：
+
+```
+表头：0=*库存 1=*拼单价 2=*单买价 3=规格编码 4=商品编码 5=状态
+```
+
+step12 会自动判断：表头里没有 `颜色分类/尺码/鞋码/容量/款式/尺寸` → 直接用 td 索引，不做 rowspan 推算。
+
+⚠ 不能包含「规格编码」——它含「规格」二字会被误判成规格列，导致整体错位一列。
+
+### 库存
+
+| 字段 | 页面 | 说明 |
+|---|---|---|
+| `stock` / `quantity` | `*库存` | 整数，按行填 |
+
+### 常见错误
+
+| 报错 | 原因 | 修法 |
+|---|---|---|
+| `单买价至少比拼单价高1元` | 拼单价 ≥ 单买价 | 单买价 = 拼单价 + 至少 1 |
+| `参考价不得高于最高规格单买价的5倍: xxx元` | 传了过大的 `price` | 不传 `price`，让 step13 自动算 |
+| `拼单价 39.9≠`（回读不一致）| 列定位错（规格编码被误判成规格列）| 已修，见上 |
+| `库存 100≠`（回读不一致）| rowspan 推算偏移 | 已修 |
+
+### 实测价格（8 类目验证时用的）
+
+| 类目 | 拼单价 | 单买价 | 参考价（自动）| 库存 |
+|---|---|---|---|---|
+| 纸杯 | 10.8 / 11.8 | 11.8 / 12.8 | 13.8 | 500 |
+| 女装T恤 | 29.9 | 39.9 | 40.9 | 100 |
+| 跑步鞋 | 129 | 159 | 160 | 100 |
+| 保温杯 | 39.9 | 49.9 | 50.9 | 200 |
+| 连衣裙 | 29.9 | 39.9 | 40.9 | 100 |
+| 休闲裤 | 29.9 | 39.9 | 40.9 | 100 |
+
+---
+
 ## 附：文件位置
 
 | 内容 | 路径 |
 |---|---|
 | 本文档 | `DSAgent-Plugin\skills\pdd-publish-http\SKILL.md` |
+| **实战知识库** | `DSAgent-Plugin\skills\pdd-publish-http\docs\09-实战知识库.md` |
 | 脚本 | `DSAgent-Plugin\skills\pdd-publish-http\scripts\` |
-| 类目模板 | `DSAgent-Plugin\artifacts\pdd-native-props\` |
-| 运行日志 | `DSAgent-Plugin\artifacts\pdd-publish-by-copy\run-*.log` |
+| 步骤 | `DSAgent-Plugin\skills\pdd-publish-http\steps\` |
+| **类目模板** | `DSAgent-Plugin\artifacts\pdd-templates\<类目>-<catId>\` |
+| 基座模块 | `DSAgent-Plugin\skills\_shared\pdd-*.mjs` |
 | 千手扩展 | `Desktop\觅千手\` |
 | 淘宝逆向资料 | `Desktop\童装\发布技能\` |
 | 拼多多 JS 分析 | `Desktop\童装\pdd_js_analysis\` |
+
+---
+
+## 十二、RPA 组件（7 个独立模块）
+
+**位置**：`modules/`，每个组件一个文件夹，`index.mjs` 入口 + `README.md` 说明。
+
+| # | 组件 | 文件 | 主要导出 |
+|---|---|---|---|
+| 01 | 图片/视频上传 | `modules/01-image-upload/index.mjs` | `uploadImages` / `probeImageRegion` |
+| 02 | 输入框（含 SKU 表格）| `modules/02-form-input/index.mjs` | `fillInput` / `fillSkuTable` / `fillCustomSpecValues` |
+| 03 | 按钮 | `modules/03-button/index.mjs` | `clickButton` / `findButton` / `listButtons` |
+| 04 | 下拉选择 | `modules/04-select/index.mjs` | `selectOptions` / `listOptions` / `closeAllSelects` |
+| 05 | 单选框 | `modules/05-radio/index.mjs` | `selectRadio` / `listRadios` |
+| 06 | SKU 预览图 | `modules/06-sku-thumb/index.mjs` | `setSkuThumbs` / `probeSkuThumbs` |
+| 07 | 商品属性批量 | `modules/07-attributes/index.mjs` | `fillAttributesByName` / `listAttributes` |
+
+### 完整上架示例（第 2 步 SKU 区）
+
+```js
+import { fillSkuTable } from './modules/02-form-input/index.mjs'
+import { fillAttributesByName } from './modules/07-attributes/index.mjs'
+import { setSkuThumbs } from './modules/06-sku-thumb/index.mjs'
+import { clickButton } from './modules/03-button/index.mjs'
+
+// ① 属性（按名称，不写死序号）
+await fillAttributesByName(page, {
+  '品牌': ['无品牌/无注册商标'],
+  '适用场景': ['家用', '办公'],
+  '重要材质': ['原木浆纸'],
+})
+
+// ② SKU 表格：库存默认 100，单买价 = 拼单价 + 1
+const DEFAULT_STOCK = 100
+const DEFAULT_SINGLE_GAP = 1
+await fillSkuTable(page, skus.map(s => ({
+  quantity: DEFAULT_STOCK,
+  groupPrice: s.price,
+  singlePrice: Number((s.price + DEFAULT_SINGLE_GAP).toFixed(2)),
+  outSkuSn: s.itemNo,
+})))
+
+// ③ 预览图
+await setSkuThumbs(page, { urls: galleryUrls })
+
+// ④ 参考价（必须 > 最大单买价）
+const maxSingle = Math.max(...skus.map(s => s.price + DEFAULT_SINGLE_GAP))
+await fillInput(page, { trackingId: 'goods_advice_price', value: (maxSingle + 1).toFixed(2) })
+
+// ⑤ 提交
+await clickButton(page, { text: '提交并上架', waitNavigation: true })
+```
+
+### 组件使用原则
+
+1. **一律按需引入单个组件**（`import from './modules/0X-xxx/index.mjs'`），不引总入口，避免加载无关代码
+2. **值必须先探测**：下拉/单选/属性的可选值用 `listOptions` / `listRadios` / `listAttributes` 先读，不能硬编码
+3. **不要写死序号**：属性 id 是 `basic.propertys.{序号}.value`，序号随类目变 → 按名称填

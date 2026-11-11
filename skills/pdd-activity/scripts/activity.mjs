@@ -95,15 +95,26 @@ const mode = argOf('mode') || 'overview'
       console.warn('[pdd] Cookie 清理跳过：' + String(e.message).slice(0, 60))
     }
   }
-  const browser = await puppeteer.launch({
-    executablePath: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-    userDataDir: profile, headless: false,
-    defaultViewport: { width: 1400, height: 900 },
-    args: ['--no-sandbox', '--disable-blink-features=AutomationControlled'],
-  })
-  const page = (await browser.pages())[0] || await browser.newPage()
-  const cdp = await page.target().createCDPSession()
-  await cdp.send('Network.enable')
+  // ★ 2026-11-10：**按需开浏览器** + 走统一启动入口。
+  //   ① act.* 接口都在 mms 域，纯 Node 可通（实测 act.statics / act.effectData 都 OK）
+  //   ② 手搓 puppeteer.launch 拿不到 launchOptions 里的「让常驻签名服务释放 Profile 锁」，
+  //      守护进程占着 Profile 时直接 "Failed to launch the browser process"
+  //   ③ 之前无条件开浏览器，只读模式也要等 20s+，纯浪费
+  const NEED_BROWSER = ['enroll', 'quit', 'records'].includes(mode) || process.argv.includes('--browser')
+  const { launchOptions } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-launch.mjs')))
+  let browser = null
+  let page = null
+  let cdp = null
+  if (NEED_BROWSER) {
+    browser = await puppeteer.launch(launchOptions(SHOP, {
+      args: ['--no-sandbox', '--disable-blink-features=AutomationControlled'],
+    }))
+    page = (await browser.pages())[0] || await browser.newPage()
+    cdp = await page.target().createCDPSession()
+    await cdp.send('Network.enable')
+  }
+  /** 安全关闭（纯 Node 模式 browser 为 null） */
+  async function closeB() { if (!browser) return; try { await browser.close() } catch { /* ignore */ } browser = null; page = null; cdp = null }
 
   // ★ 风控 L3：滑块遮罩自动过
   const ensureNoSlider = async (label) => {
@@ -111,7 +122,7 @@ const mode = argOf('mode') || 'overview'
       console.warn(`[pdd-activity] ${label}：检测到滑块遮罩，尝试自动过滑块...`)
       const solved = await autoSolveSlider(SHOP, page)
       if (!solved.ok) {
-        await browser.close()
+        await closeB()
         emit({ ok: false, failureKind: 'risk_control', text: `滑块自动过失败：${solved.text}\n请手动过验证后重试。` })
         process.exit(2)
       }
@@ -121,7 +132,7 @@ const mode = argOf('mode') || 'overview'
   }
 
   // hook 活动相关响应 + 签名配对（报名需要）
-  await page.evaluateOnNewDocument(() => {
+  if (page) await page.evaluateOnNewDocument(() => {
     window.__sigPair = null
     const O = window.XMLHttpRequest.prototype.open
     const S = window.XMLHttpRequest.prototype.send
@@ -161,7 +172,7 @@ const mode = argOf('mode') || 'overview'
     ['subsidy', 'brand_subsidy/merchant/query'],
     ['outerPrice', 'activity/outer_activity_price_info'],
   ]
-  cdp.on('Network.responseReceived', async (e) => {
+  if (cdp) cdp.on('Network.responseReceived', async (e) => {
     if (e.response.status !== 200) return
     const u = e.response.url
     if (!/mms\.pinduoduo\.com/.test(u)) return
@@ -198,16 +209,16 @@ const mode = argOf('mode') || 'overview'
   }
 
   // 打开营销活动首页 + 报名记录页（records 模式要后者）
-  for (const u of [
+  for (const u of (page ? [
     'https://mms.pinduoduo.com/act/index?SourceType=MMSActicon',
     ...(mode === 'records' || mode === 'quit' ? ['https://mms.pinduoduo.com/act/register_record'] : []),
-  ]) {
+  ] : [])) {
     try {
       await page.goto(u, { waitUntil: 'domcontentloaded', timeout: 50000 })
       await new Promise(r => setTimeout(r, 14000))
       await ensureNoSlider(u)   // ★ 风控 L3
       if (/\/login/i.test(page.url())) {
-        await browser.close()
+        await closeB()
         emit({ ok: false, failureKind: 'token_expired', text: '拼多多商家后台登录态失效，请到「账号连接」重新登录。' })
         process.exit(2)
       }
@@ -464,14 +475,14 @@ const mode = argOf('mode') || 'overview'
         ok: false, failureKind: 'api_error',
         text: 'quit 模式必须带 --activity-goods-id（报名记录主键）。\n先用 --mode records 拿到 activityGoodsId。',
       })
-      await browser.close(); process.exit(2)
+      await closeB(); process.exit(2)
     }
     if (!process.argv.includes('--confirm')) {
       emit({
         ok: false, needConfirm: true, mode, activityGoodsId: agid, activityId: aid || null, goodsId: gid || null,
         text: `【取消报名预览 · 需用户确认】\n报名记录：agid=${agid}${aid ? ` 活动=${aid}` : ''}${gid ? ` 商品=${gid}` : ''}\n接口：POST /lakemms/activityGoods/cancelEnroll\n\n确认后请带 --confirm true 重新调用。注意：这是不可撤销的真实操作（L2）。`,
       })
-      await browser.close(); process.exit(0)
+      await closeB(); process.exit(0)
     }
     const sig = await page.evaluate(() => window.__sigPair || null).catch(() => null)
     const mallId0 = await page.evaluate(() => window.__mallId || null).catch(() => null)
@@ -517,14 +528,14 @@ const mode = argOf('mode') || 'overview'
     const goodsId = argOf('goods-id')
     if (!activityId || !goodsId) {
       emit({ ok: false, failureKind: 'api_error', text: 'enroll 模式必须带 --activity-id 和 --goods-id' })
-      await browser.close(); process.exit(2)
+      await closeB(); process.exit(2)
     }
     if (!process.argv.includes('--confirm')) {
       emit({
         ok: false, needConfirm: true, mode, activityId, goodsId,
         text: `【活动报名预览 · 需用户确认】\n活动：${activityId}\n商品：${goodsId}\n\n链路：enrollPopups → lowPriceCheckV3（低价校验）→ enrollV2（提交）\n\n确认后请带 --confirm true 重新调用。注意：这是不可撤销的真实操作（L2）。`,
       })
-      await browser.close(); process.exit(0)
+      await closeB(); process.exit(0)
     }
 
     // ★ 真实执行：在活动页上下文里按页面同款链路发请求
@@ -540,7 +551,7 @@ const mode = argOf('mode') || 'overview'
       const pre = await guard.beforeCall('https://mms.pinduoduo.com/leekmms/activity/query/enrollPopups')
       if (!pre.allow) {
         emit({ ok: false, failureKind: 'rate_limit', text: `报名前被风控闸门拦下：${pre.reason}` })
-        await browser.close(); process.exit(0)
+        await closeB(); process.exit(0)
       }
     }
     // ★ 2026-11-05：报名链路必须带 VerifyAuthToken（写操作，且 evaluate 绕过插件链）
@@ -620,17 +631,22 @@ const mode = argOf('mode') || 'overview'
       : `报名失败：${JSON.stringify(r.enroll?.json).slice(0, 400)}\n低价校验：${JSON.stringify(r.low?.json).slice(0, 200)}\n\n常见原因：\n① sku_activity_price 不满足活动折扣（需先用 price_calculation 算活动价）\n② 未勾选协议 / 命中砍价确认\n③ 活动已满 / 商品不符门槛`
   } else {
     emit({ ok: false, failureKind: 'api_error', text: `未知 mode：${mode}。可用：overview / list / types / forbid / stats / enroll` })
-    await browser.close(); process.exit(2)
+    await closeB(); process.exit(2)
   }
   emit(out)
   // ★ 2026-11-04：原来的 clearInterval(hb) 随迁移一并去掉（心跳由 guard.startHeartbeat 管理）
   await guard.close()
-  await browser.close()
+  await closeB()
 })().catch(async (e) => {
+  // ★ 2026-11-10 修：**这里在外层作用域，访问不到 try 里的 SHOP**。
+  //   原代码直接写 SHOP → 任何错误进来都会先抛 `ReferenceError: SHOP is not defined`，
+  //   把真实错误整个吞掉，只留一个看不懂的堆栈（表现为「技能全挂」）。
+  //   → 用 argOf('account') 兜底。
+  const _shop = argOf('account') || ''
   // ★ 风控异常 → 友好提示
   const { checkCooldown, fmtRemain } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-risk.mjs'))).catch(() => ({}))
   if (e?.riskCode && checkCooldown) {
-    const cd = checkCooldown(SHOP)
+    const cd = checkCooldown(_shop)
     emit({
       ok: false, failureKind: 'rate_limit',
       text: `命中平台频控（code=${e.riskCode}${e.riskMsg ? `：${e.riskMsg}` : ''}），已记冷却 ${fmtRemain(cd.remainMs)}。\n期间请勿重复调用（会延长封禁）。\n若急需使用，可在浏览器窗口手动过滑块验证，然后重试。`,
@@ -642,7 +658,7 @@ const mode = argOf('mode') || 'overview'
   const n = normalizeError ? normalizeError(e, '活动报名') : null
   if (n) {
     const { recordToAntiban } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-error.mjs'))).catch(() => ({}))
-    if (recordToAntiban) await recordToAntiban(SHOP, null, n.failureKind === 'risk_control' ? 'captcha' : null).catch(() => {})
+    if (recordToAntiban) await recordToAntiban(_shop, null, n.failureKind === 'risk_control' ? 'captcha' : null).catch(() => {})
   }
   if (n) {
     emit({ ok: false, failureKind: n.failureKind, text: n.text })
@@ -650,5 +666,5 @@ const mode = argOf('mode') || 'overview'
   }
   emit({ ok: false, failureKind: 'api_error', text: `执行异常：${e?.message || String(e)}` })
   process.exit(1)
-})
+}).then(() => process.exit(0))
 

@@ -72,3 +72,12 @@ skills/douyin-uni-prom/contract.json
 # ── 测试脚本（本地诊断用，不入库） ────────────────────────
 dev/_*.py
 dev/_*.txt
+
+# ── 根目录临时调试脚本（本次排查 PDD 时产生，防再堆积）──────
+/_*.mjs
+/_*.json
+/_*.txt
+profs.txt
+# PDD 登录令牌（真实凭据，绝不入库）
+skills/pdd-ai-video/.cache/
+**/ptj-token.json

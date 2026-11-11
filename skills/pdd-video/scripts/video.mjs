@@ -75,6 +75,23 @@ const argOf = (n) => {
   return v.startsWith('--') ? undefined : v
 }
 const emit = (obj) => { process.stdout.write('__DSAGENT_RESULT__' + JSON.stringify(obj) + '\n') }
+
+/**
+ * 收尾退出。
+ *
+ * ★ 不要直接用 process.exit()：Node 24 + undici keep-alive socket 还挂着时，
+ *   进程退出会撞 libuv 断言（"Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)"），
+ *   退出码变成 -1073740791 —— 上层会当成崩溃，即使结果已经正常打印。
+ *   → 设 exitCode，主动关掉 undici agent，让事件循环自己空掉；1.5s 兜底硬退。
+ */
+const finish = async (code) => {
+  process.exitCode = code
+  try {
+    const { getGlobalDispatcher } = await import('undici').catch(() => ({}))
+    await getGlobalDispatcher?.()?.close?.()
+  } catch { /* ignore */ }
+  setTimeout(() => process.exit(code), 1500).unref()
+}
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 const mode = argOf('mode') || 'list'
@@ -95,7 +112,7 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
     const any = store.listAccounts().filter(a => a.platform === 'pdd_mms')
     SHOP = argOf('account') || any.slice(-1)[0]?.shop_key
   }
-  if (!SHOP) { emit({ ok: false, failureKind: 'not_bound', text: '未绑定拼多多商家后台账号' }); process.exit(2) }
+  if (!SHOP) { emit({ ok: false, failureKind: 'not_bound', text: '未绑定拼多多商家后台账号' }); await finish(2) }
   if (mmsAccs.length > 1 && !argOf('account')) {
     console.error(`[pdd-video] 多个账号可用，默认取 ${SHOP}；可用 --account 指定：\n` + mmsAccs.map(a => `  ${a.shop_key}  ${a.display_label || ''}`).join('\n'))
   }
@@ -141,7 +158,7 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
       ok: false, failureKind: 'rate_limit',
       text: `账号 ${SHOP} 当前不可执行：${guard.reason}。期间请勿重复调用（会延长封禁）。`,
     })
-    process.exit(2)
+    await finish(2)
   }
   guard.startHeartbeat()
   // 收尾统一走 guard.close()（放锁 + 打印汇总）
@@ -150,20 +167,20 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
   // ── upload：文件校验（不启浏览器）──
   const file = argOf('file')
   if (mode === 'upload') {
-    if (!file) { emit({ ok: false, failureKind: 'api_error', text: 'upload 模式必须带 --file <视频路径>' }); process.exit(2) }
-    if (!fs.existsSync(file)) { emit({ ok: false, failureKind: 'api_error', text: `文件不存在：${file}` }); process.exit(2) }
+    if (!file) { emit({ ok: false, failureKind: 'api_error', text: 'upload 模式必须带 --file <视频路径>' }); await finish(2) }
+    if (!fs.existsSync(file)) { emit({ ok: false, failureKind: 'api_error', text: `文件不存在：${file}` }); await finish(2) }
     const sizeMB = fs.statSync(file).size / 1024 / 1024
     const ext = path.extname(file).toLowerCase()
     if (!['.mp4', '.mov', '.mkv', '.webm', '.avi', '.flv', '.wmv', '.m4v'].includes(ext)) {
-      emit({ ok: false, failureKind: 'api_error', text: `不支持的格式 ${ext}（支持 mp4/mov/mkv/webm/avi/flv/wmv/m4v）` }); process.exit(2)
+      emit({ ok: false, failureKind: 'api_error', text: `不支持的格式 ${ext}（支持 mp4/mov/mkv/webm/avi/flv/wmv/m4v）` }); await finish(2)
     }
-    if (sizeMB > 500) { emit({ ok: false, failureKind: 'api_error', text: `文件 ${sizeMB.toFixed(1)}MB 超过 500MB` }); process.exit(2) }
+    if (sizeMB > 500) { emit({ ok: false, failureKind: 'api_error', text: `文件 ${sizeMB.toFixed(1)}MB 超过 500MB` }); await finish(2) }
     if (!has('confirm')) {
       emit({
         ok: false, needConfirm: true, mode: 'upload', file,
         text: `【多多视频上传预览 · 需用户确认】\n文件：${path.basename(file)}\n大小：${sizeMB.toFixed(2)}MB\n格式：${ext}\n\n链路（DOM 注入，页面自己走 10 步）：\n  ① prePublish/clear → ② publish/page/query\n  ③ galerie/signature（视频票据）\n  ④ upload_init → ⑤ upload_part × N → ⑥ upload_complete\n  ⑦ meta/query（拿 vid）→ ⑧ 封面票据 → ⑨ store_image → ⑩ prePublish/add\n\n确认后请带 --confirm true 重新调用。\n加 --publish true 可上传后直接发布。`,
       })
-      process.exit(0)
+      await finish(0)
     }
   }
 
@@ -175,27 +192,44 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
         ok: false, needConfirm: true, mode: 'delete',
         text: `【多多视频删除预览 · 需用户确认】\n\n未指定 --video-id，将删除待发布队列里的**第一个**视频。\n\n用 --mode list 查看队列里的 vid。\n\n确认后请带 --confirm true 重新调用（可加 --video-id 指定）。`,
       })
-      process.exit(0)
+      await finish(0)
     }
     if (!has('confirm')) {
       emit({
         ok: false, needConfirm: true, mode: 'delete', videoId: vid,
         text: `【多多视频删除预览 · 需用户确认】\n视频 vid：${vid}\n\n删除后不可恢复。\n\n确认后请带 --confirm true 重新调用。`,
       })
-      process.exit(0)
+      await finish(0)
     }
   }
 
-  const browser = await puppeteer.launch(launchOptions(SHOP, {
-    args: [
-      '--disable-features=CalculateNativeWinOcclusion,IntensiveWakeUpThrottling',
-      '--disable-backgrounding-occluded-windows',
-      '--disable-renderer-backgrounding',
-      '--disable-background-timer-throttling',
-    ],
-  }))
-  const page = (await browser.pages())[0] || await browser.newPage()
-  await page.evaluateOnNewDocument(STEALTH_SCRIPT)
+  // ★ 2026-11-10：**按需开浏览器**。
+  //   live 域纯 Node 已打通（anti-content 签名 + live 域专属 L_PASS_ID 票据），
+  //   读类模式（list / anchor / qualify / topics）完全不需要浏览器。
+  //   只有「上传视频」这种必须走页面 DOM 注入的模式才开。
+  const NEED_BROWSER = ['upload', 'delete'].includes(mode)
+  let browser = null
+  let page = null
+  if (NEED_BROWSER || process.argv.includes('--browser')) {
+    browser = await puppeteer.launch(launchOptions(SHOP, {
+      args: [
+        '--disable-features=CalculateNativeWinOcclusion,IntensiveWakeUpThrottling',
+        '--disable-backgrounding-occluded-windows',
+        '--disable-renderer-backgrounding',
+        '--disable-background-timer-throttling',
+      ],
+    }))
+    page = (await browser.pages())[0] || await browser.newPage()
+    await page.evaluateOnNewDocument(STEALTH_SCRIPT)
+  }
+
+  /** 安全关闭浏览器（纯 Node 模式下 browser 为 null，直接跳过） */
+  async function closeBrowser() {
+    if (!browser) return
+    try { await browser.close() } catch { /* ignore */ }
+    browser = null
+    page = null
+  }
 
   /** 带重试的 evaluate（避开偶发 detached Frame） */
   async function ev(fn, ...args) {
@@ -281,18 +315,36 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
     })
     return { status: r.status, json: r.raw }
   }
-  /** 取待发布队列 */
+  /** 取待发布队列
+   *
+   *  ★ 2026-11-11：**失败必须抛错，不能返回 []**。
+   *    原实现 `return r.json?.result?.result?.list || []` —— 接口失败时
+   *    `result` 是 undefined → 返回 [] → list 模式报「0 个视频」，
+   *    把「没取到」伪装成「本来就没有」，用户完全看不出问题。
+   */
   const getQueue = async () => {
     const r = await api('/mms/amco/prePublish/query', { pageSize: 50, pageNum: 1 })
-    return r.json?.result?.result?.list || []
+    const j = r?.json
+    if (!r || r.status !== 200 || (j && j.success === false)) {
+      const e = new Error(
+        `待发布队列取数失败：${j?.errorCode ?? j?.error_code ?? r?.status ?? 'unknown'}`
+        + (j?.errorMsg ? `（${j.errorMsg}）` : '')
+      )
+      e.__apiFail = true
+      e.ec = j?.errorCode ?? j?.error_code
+      throw e
+    }
+    return j?.result?.result?.list || j?.result?.list || []
   }
 
   const out = { ok: true, mode, shopKey: SHOP }
 
   try {
-    await page.goto(HOME, { waitUntil: 'domcontentloaded', timeout: 90000 }).catch(() => {})
-    const ready = await waitReady(400, 30000)
-    if (!ready) {
+    // ★ 纯 Node 模式（读类）不需要页面，跳过就绪检查
+    if (page) {
+      await page.goto(HOME, { waitUntil: 'domcontentloaded', timeout: 90000 }).catch(() => {})
+      const ready = await waitReady(400, 30000)
+      if (!ready) {
       const url = await ev(() => location.href) || ''
       const len = await ev(() => (document.body?.innerText || '').length) || 0
       out.ok = false; out.failureKind = 'token_expired'
@@ -308,9 +360,10 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
         '可用账号：',
         ...mmsAccs.map(a => `  ${a.shop_key}  ${a.display_label || ''}`),
       ].join('\n')
-      emit(out); process.exit(2)
+      await closeBrowser(); emit(out); await finish(2)
+      }
+      await sleep(6000)
     }
-    await sleep(6000)
 
     // ══════════════════ upload（DOM 注入）══════════════════
     if (mode === 'upload') {
@@ -321,7 +374,7 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
       if (!inputs.length) {
         out.ok = false; out.failureKind = 'api_error'
         out.text = '页面找不到上传 input（input[type=file]）'
-        emit(out); process.exit(2)
+        await closeBrowser(); emit(out); await finish(2)
       }
       console.error('[pdd-video] DOM 注入文件，页面自己走上传链路...')
       await inputs[0].uploadFile(file)
@@ -351,7 +404,7 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
       if (!uploaded) {
         out.ok = false; out.failureKind = 'api_error'
         out.text = `上传超时（180s）。页面文本长度 ${beforeTxt.length}，未见发布面板刷新。`
-        emit(out); process.exit(2)
+        await closeBrowser(); emit(out); await finish(2)
       }
 
       // 取 vid：查队列（多重试，上传后服务端要时间落库）
@@ -658,7 +711,7 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
         if (!list.length) {
           out.ok = false; out.failureKind = 'api_error'
           out.text = '待发布队列已空，没有可删除的视频'
-          emit(out); process.exit(2)
+          await closeBrowser(); emit(out); await finish(2)
         }
         vid = list[0].vid
         out.autoPicked = true
@@ -887,6 +940,21 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
       const r = await api('/api/backbone/video/query', {
         status, pageSize: Math.min(100, limit), page: 1, startTime: start, endTime: end,
       })
+      // ★ 2026-11-10：**接口报错不能被当成「0 个视频」**。
+      //   之前 40002 时 r.json.result 为空 → feeds=[] → 走待发布兜底 → 报「已发布视频 0 个」，
+      //   看起来一切正常，实际接口已经失败了。这种假成功比直接报错更危险。
+      if (r.status !== 200 || (r.json && r.json.success === false)) {
+        const code = r.json?.errorCode
+        const msg = r.json?.errorMsg || ''
+        if (code === 40002) {
+          throw new Error(
+            `video/query 被频控（40002 ${msg || '系统异常'}）。`
+            + '该接口参数组合尚未摸清（实测页面内直发同样 40002），且失败会连带账号冷却。'
+            + '先用 --mode list（待发布队列，纯 Node 稳定可用）。'
+          )
+        }
+        throw new Error(`video/query 失败：${code || r.status} ${msg}`)
+      }
       const res = r.json?.result
       const feeds = res?.feeds || []
 
@@ -927,7 +995,7 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
           '先上传一条：',
           '  --mode upload --file x.mp4 --confirm true',
         ].join('\n')
-        emit(out); process.exit(2)
+        await closeBrowser(); emit(out); await finish(2)
       }
 
       // 指定了 feedId 就过滤
@@ -938,7 +1006,7 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
           out.ok = false; out.failureKind = 'api_error'
           out.text = `未找到 feedId=${feedId} 的视频。\n\n当前有 ${feeds.length} 个：\n` +
             items.slice(0, 10).map((f, i) => `  [${i}] feedId=${f.feedId ?? f.id ?? '—'} ${String(f.desc || f.title || '').slice(0, 40)}`).join('\n')
-          emit(out); process.exit(2)
+          await closeBrowser(); emit(out); await finish(2)
         }
       }
 
@@ -1067,14 +1135,21 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
     out.ok = false
     out.failureKind = n.failureKind
     out.text = n.text
-    emit(out); process.exit(2)
+    await closeBrowser(); emit(out); await finish(2)
+  } finally {
+    // ★ 2026-11-10：**必须关浏览器**。
+    //   不关的话 Chrome 进程会残留并占着 Profile 锁，
+    //   下一个技能（或常驻签名服务）就起不来，报
+    //   "Failed to launch the browser process" —— 而且看不出真正原因。
+    //   实测残留 31 个 chrome.exe 后，守护进程的 /domaincookies 直接 500。
+    await closeBrowser()
   }
 
-  emit(out)
-  process.exit(out.ok ? 0 : 2)
+  await closeBrowser(); emit(out)
+  await finish(out.ok ? 0 : 2)
 })().catch(async (e) => {
   const { normalizeError } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-error.mjs'))).catch(() => ({}))
   const n = normalizeError ? normalizeError(e, '多多视频') : { failureKind: 'exception', text: `异常：${e?.message?.slice(0, 200)}` }
   emit({ ok: false, failureKind: n.failureKind, text: n.text })
-  process.exit(2)
+  await finish(2)
 })

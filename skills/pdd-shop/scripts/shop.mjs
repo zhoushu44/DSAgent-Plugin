@@ -43,12 +43,21 @@ const emit = (obj) => { process.stdout.write('__DSAGENT_RESULT__' + JSON.stringi
 
 const mode = argOf('mode') || 'overview'
 const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 20))
-// ★ 2026-10-27 修：goods 模式默认走 browser transport。
-//   原因：http/t3 通道的 PUA 解码用的是 pdd-risksdk.mjs 里的**静态** PUA_MAP，
-//   而拼多多的码点是动态的（本次实测 E573→0，静态表里是 E515→6），
-//   导致 goodsUv/goodsVcr 全部解成空串或 0%。
-//   browser transport 有「DOM 明文优先 + 动态 PUA 映射推导」两重兜底。
-const TRANSPORT = argOf('transport') || (mode === 'goods' ? 'browser' : 'http')
+// ★★ 2026-11-11：goods 模式默认改成 **http（t3 纯 Node 真签名）**。
+//
+//   原默认是 'browser'，理由是「http/t3 的 PUA 解码用**静态** PUA_MAP，
+//   而码点是动态的 → goodsUv/goodsVcr 全解成空串或 0%」。
+//
+//   **这个理由已经过时**：t3 分支现在用的是 `buildPuaMap()` **动态推导**
+//   （见下方 goods 分支注释「不再用静态表」），实测 PUA 覆盖 10/10、uv/pv 正确。
+//
+//   而 browser 通道有两个硬伤（实测 2026-11-11）：
+//     ① **日期不受控** —— 页面自己决定查哪天，`--date` 完全不起作用
+//     ② 走页面 hook 抓响应 → 拿到什么算什么，空列表被当成「没有数据」
+//
+//   t3 通道能真正控制 `startDate/endDate/queryType`。
+//   需要 DOM 明文兜底时显式 `--transport browser`。
+const TRANSPORT = argOf('transport') || 'http'
 
 ;(async () => {
   const puppeteer = require('puppeteer-core')
@@ -115,10 +124,30 @@ const TRANSPORT = argOf('transport') || (mode === 'goods' ? 'browser' : 'http')
 
     // ── goods 模式：走 t3 通道（真签名 + webSpiderRule + CDP Cookie），不依赖凭证库 ──
     if (mode === 'goods') {
-      const pad = (n) => String(n).padStart(2, '0')
+      // （pad/now/TODAY 已在下方统一声明，勿重复）
       const now = new Date()
-      const TODAY = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
-      const dateArg = argOf('date') || TODAY
+      
+      // ★★ 2026-11-11：**默认日期改昨天 + queryType 从 6 改 1**。
+      //
+      //   实测（同一个账号，只改一个变量）：
+      //     queryType=6 + startDate=2026-11-09  → statDate=2026-11-11（今天的）
+      //     queryType=1 + startDate=2026-11-09  → statDate=2026-11-09 ✅ 认日期
+      //     queryType=2/3 + startDate=2026-11-09 → statDate=2026-11-09 ✅
+      //     queryType=4 → 2000000（无权限）
+      //     queryType=5/7 → 空
+      //
+      //   → **queryType=6 是「今日实时」语义，会忽略 startDate/endDate**。
+      //     原代码用 6 + 日期=TODAY，等于永远查「今天」；
+      //     而生意参谋当天不出数 → goodsDetailList 恒为 [] →
+      //     被当成「没有数据」，其实是查错了口径。
+      //   → 1 = 按日期查（本处采用），需要今日实时请显式 --query-type 6。
+      const pad = (n) => String(n).padStart(2, '0')
+      const _now2 = now
+      const _y = new Date(now)
+      _y.setDate(_y.getDate() - 1)
+      const YESTERDAY = `${_y.getFullYear()}-${pad(_y.getMonth() + 1)}-${pad(_y.getDate())}`
+      const dateArg = argOf('date') || YESTERDAY
+      if (!argOf('date')) console.error(`[pdd-shop] goods 默认查昨天（${YESTERDAY}）：生意参谋当天不出数`)
 
       console.error('[pdd-shop] goods 使用 t3 通道（真签名 + webSpiderRule + CDP Cookie）...')
       const { call: callT3, createSession } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-client.mjs')))
@@ -137,7 +166,8 @@ const TRANSPORT = argOf('transport') || (mode === 'goods' ? 'browser' : 'http')
           session: sess,
           url: 'https://mms.pinduoduo.com' + apiPath('shop.legacyGoodsDetailVO'),
           body: {
-            startDate: dateArg, endDate: dateArg, queryType: 6,
+            startDate: dateArg, endDate: dateArg,
+            queryType: Number(argOf('query-type') || 1),   // ★ 1=按日期查；6=今日实时（忽略日期）
             sortCol: 0, sortType: 1, pageNum: 1, pageSize: limit, actVs: 1,
           },
           referer: 'https://mms.pinduoduo.com/sycm/goods_effect',
@@ -158,6 +188,44 @@ const TRANSPORT = argOf('transport') || (mode === 'goods' ? 'browser' : 'http')
         }
 
         const rawList = r.json.result?.goodsDetailList || []
+
+        // ★★ 2026-11-11：**空列表不能当成功**。
+        //
+        //   故障现场：goodsDetailList 返回 [] 时，下面照常构造 items=[]、
+        //   输出 ok:true「商品数据明细（0 个）」—— 把「接口没给数据」伪装成
+        //   「这家店真的没有商品数据」，用户看到的是正常结果，实际啥也没拿到。
+        //
+        //   空列表的三种真实原因（必须区分，处置完全不同）：
+        //     ① 该日确实无数据（比如选的是今天、数据还没生成）→ 换日期
+        //     ② result 结构变了 / PUA 字段全解不出来        → 接口变更，要修代码
+        //     ③ 被风控静默降级（返回 200 但结果被清空）      → 停手，别重试
+        //
+        //   这里统一报错并给出可执行建议，绝不返回假成功。
+        if (!rawList.length) {
+          const hasResult = r.json && typeof r.json === 'object' && 'result' in r.json
+          emit({
+            ok: false, mode, transport: 't3', shopKey: SHOP, date: dateArg,
+            failureKind: hasResult ? 'empty_result' : 'api_error',
+            ec: r.json?.error_code ?? null,
+            suggestion: [
+              `① 换日期：--date 前一天（今日数据通常未生成）`,
+              `② 若连续多日都空 → 接口结构可能变更，需核对 goodsDetailList 字段`,
+              `③ 若伴随 54001/40002 → 账号被风控，停手等待，别连续重试`,
+            ],
+            text: [
+              `商品明细返回**空列表**（goodsDetailList: []），这不是「没有数据」，是没取到。`,
+              `  日期：${dateArg}  接口：${'/sydney/api/goodsDataShow/queryGoodsDetailVOList'}`,
+              `  原始返回：${JSON.stringify(r.json).slice(0, 240)}`,
+              ``,
+              `可能原因与处置：`,
+              `  ① 该日期确实无数据（尤其选「今天」时，平台通常次日才生成）`,
+              `     → 试 --date ${(() => { const d = new Date(dateArg); d.setDate(d.getDate() - 1); const p = n => String(n).padStart(2, '0'); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}` })()}`,
+              `  ② 接口结构变更（goodsDetailList 字段名/层级变了）→ 需修代码`,
+              `  ③ 被风控静默降级（200 但结果被清空）→ 停手，等冷却，别重试`,
+            ].join('\n'),
+          })
+          process.exit(2)
+        }
         // ★ 2026-10-27 修：先用整表动态推导 PUA 映射，再逐字段解码
         const pua = buildPuaMap(rawList)
         const dec = (v) => {
@@ -345,6 +413,32 @@ const TRANSPORT = argOf('transport') || (mode === 'goods' ? 'browser' : 'http')
     }
 
     const get = async (url, body, referer) => {
+      // ★ 2026-11-08：Node 优先
+      //   有凭证库 Cookie + 种子 → 先走 pdd-request 纯 Node（0.06~0.5s）
+      //   失败 → 自动降级到原来的 callT1（简化签名）
+      //   实测：店铺信息/流量/评分/商品概览 四个接口全部可纯 Node
+      try {
+        const { request: nodeReq } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-request.mjs')).href)
+        const accObj = store.listAccounts().find(a => a.shop_key === SHOP)
+        if (accObj?.cookies) {
+          const seedFile = path.join(homedir(), '.dsh', 'pdd-risk-seeds', String(SHOP).replace(/[^\w.-]/g, '_') + '.json')
+          let ls = {}
+          if (fs.existsSync(seedFile)) ls = JSON.parse(fs.readFileSync(seedFile, 'utf8')).localStorage || {}
+          if (Object.keys(ls).length) {
+            const nr = await nodeReq(url, body, {
+              account: { cookies: accObj.cookies, localStorage: ls },
+              shopKey: SHOP,
+              method: /commonMallInfo/.test(url) ? 'GET' : 'POST',
+              extraHeaders: referer ? { referer } : undefined,
+            })
+            if (nr.ok) return { ok: true, data: nr.data }
+            console.error(`[pdd-shop] Node 失败 ec=${nr.ec}，降级 callT1`)
+          }
+        }
+      } catch (e) {
+        console.error(`[pdd-shop] Node 通道异常，降级 callT1：${String(e.message).slice(0, 60)}`)
+      }
+
       // ★ 2026-11-04：节流统一走闸门 beforeCall（账号级时间槽，落盘跨进程）。
       const pre = await guard.beforeCall(url)
       if (!pre.allow) throw Object.assign(new Error(`账号不可用：${pre.reason}`), { __blocked: true })

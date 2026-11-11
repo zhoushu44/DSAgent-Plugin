@@ -212,6 +212,16 @@ if (mode === 'margin') {
   }
   guard.startHeartbeat()
   process.on('exit', () => { try { guard.close() } catch { /* ignore */ } })
+  // ★ 2026-11-09：退出前关掉基座常驻的混合签名浏览器（否则 node 进程挂住不退出）。
+  //   ⚠️ 不用 process.on('beforeExit') —— 异步 beforeExit 处理器会让 Node 反复触发
+  //      （loop 空了→触发→处理器又把它填上→再触发），进程永远不退出。
+  //   改为：在流程末尾**显式**调用 shutdown()。
+  const shutdown = async () => {
+    try {
+      const { closeChannels } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-request.mjs')).href)
+      await closeChannels()
+    } catch { /* ignore */ }
+  }
 
 
   // ★ 2026-11-03：改用 _shared/pdd-launch 的统一 Profile 解析。
@@ -232,10 +242,28 @@ if (mode === 'margin') {
   //
   //   launchOptions() 内建「显式候选链」+ 目录缺失时抛 PDD_PROFILE_MISSING，
   //   比这里的静默借用更安全，也与 pdd-works 保持一致。
-  let launchOpts
-  try {
+  // ★ 2026-11-10 修：**launchOptions() 必须惰性调用**。
+  //   它内部会触发「让常驻签名服务释放 Profile 锁」——纯 Node 模式下也调它，
+  //   就会把守护进程的 Chrome 关掉；而 skipLaunch=true 又不会再开浏览器
+  //   → 混合签名找不到浏览器 → "Failed to launch the browser process"（等 12s 才失败）。
+  //   → 这里只做 Profile 存在性预检（纯读），真正的 launchOptions 等要 launch 时再取。
+  let _launchOpts = null
+  const getLaunchOpts = async () => {
+    if (_launchOpts) return _launchOpts
     const { launchOptions } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-launch.mjs')).href)
-    launchOpts = launchOptions(SHOP)
+    _launchOpts = launchOptions(SHOP)
+    return _launchOpts
+  }
+  let launchOpts = null
+  try {
+    const { profileCandidates } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-launch.mjs')).href)
+    const base = path.join(homedir(), '.dsh', 'browser-profiles', 'accounts')
+    const has = profileCandidates(SHOP).some(d => fs.existsSync(path.join(base, d)))
+    if (!has) {
+      const e = new Error('PDD_PROFILE_MISSING')
+      e.code = 'PDD_PROFILE_MISSING'
+      throw e
+    }
   } catch (e) {
     if (e?.code === 'PDD_PROFILE_MISSING') {
       emit({
@@ -248,8 +276,12 @@ if (mode === 'margin') {
     }
     throw e
   }
-  const profile = launchOpts.userDataDir
-  console.warn(`[pdd-promo] 使用 Profile: ${launchOpts.resolvedProfile}`)
+  // ★ 惰性：这里只解析目录（纯读，不触发 /release）。
+  //   launchOpts 本身在真正 launch 时才构造（见 getLaunchOpts）。
+  const { resolveProfileDir } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-profile-map.mjs')).href)
+  const _resolved = await resolveProfileDir(SHOP, { create: false })
+  const profile = _resolved.dir
+  console.warn(`[pdd-promo] 使用 Profile: ${path.basename(profile)}`)
   // ★ 2026-11-03：Cookie 域清理默认关闭（原 2026-10-28 的默认开启已撤回）。
   //
   //   撤回原因（_shared/pdd-launch.mjs L142-144 同结论）：
@@ -270,28 +302,151 @@ if (mode === 'margin') {
     }
   }
 
-  // ★ 2026-11-03：启动前清残留 Profile 锁。
+  // ★ 2026-11-09：**Node-first**
+  //
+  //   推广域签名已在基座打通（浏览器签名 + Node 发请求，见 _shared/pdd-promo-signer-hybrid.mjs），
+  //   读接口不必再「开 3 个页面收割页面自己发的 XHR」—— 那样一轮要 ~40s，
+  //   而且拿到的字段取决于页面渲染了什么（常常是空的）。
+  //
+  //   现在：Node 直接调接口，字段全、毫秒级；浏览器只留给真正需要 DOM 的模式。
+  //   ⚠️ daily 曾留浏览器：它要「按天」的 impression/click/ctr 序列，怕口径算错 CTR。
+  //      ★ 2026-11-09 已解开：queryRangeReport 传 startDate/endDate 就能拿 N 天
+  //        逐日序列（默认 body 只给 2 天，这是当初不敢用的真正原因）。
+  //        CTR 仍按「总点击÷总曝光」加权算，不用每日 CTR 算术平均（见 daily 块）。
+  const NODE_ONLY_MODES = new Set(['overview', 'goods', 'rates', 'units', 'daily'])
+  // ★ 2026-11-09：写操作也 Node 优先（混合签名通道已通）
+  //   浏览器只在「Node 被明确拒绝、需要补发」时才开 ——
+  //   写操作开个可见窗口纯属浪费，而且会和混合签名器抢同一个 Profile 锁。
+  const WRITE_MODES = ['pause', 'resume', 'delete', 'create', 'maxcost', 'roi']
+  // --browser 可强制走浏览器；--all 需要 unitList（来自页面收割），不打延迟
+  const deferBrowser = WRITE_MODES.includes(mode) && !process.argv.includes('--browser')
+    && !process.argv.includes('--all')
+  // 诊断族模式：Node 诊断采到了就不用开抽屉页面（原 ~50s）
+  let diagNodeOk = false
+  let nodeData = null
+  if (NODE_ONLY_MODES.has(mode)) {
+    try {
+      const { collectPromoViaNode } = await import(pathToFileURL(path.join(HERE, 'promo-node.mjs')).href)
+      nodeData = await collectPromoViaNode({
+        shopKey: SHOP, account: { shopKey: SHOP, cookies: {} }, guard, mode,
+        // daily 要按天序列：把 --days 传给采集器，由它算 startDate
+        ...(mode === 'daily' ? { days: argOf('days') || 7 } : {}),
+      })
+      console.warn(`[pdd-promo] Node 通道：收集 ${nodeData.summary.collected} 项 / 失败 ${nodeData.summary.failed}`)
+      if (!nodeData.ok) console.warn('[pdd-promo] Node 数据不足，回落浏览器收割')
+    } catch (e) {
+      console.warn('[pdd-promo] Node 通道异常，回落浏览器：' + String(e.message).slice(0, 90))
+      nodeData = null
+    }
+  }
+  const useNodeOnly = !!nodeData?.ok
+
+  // ★ 2026-11-09：诊断族模式（diagnose / item / balance / auto）的 Node 预采集
+  //   必须在「要不要开浏览器」**之前**跑 —— 采到了就不用开抽屉页面。
+  //   诊断接口 v2 只要 {adId, platform:1}；单元详情同理（原先必须开抽屉才发得出请求）。
+  // ★ 按需采集：item 只查 1 个单元时不要全店 50 个都采（实测全采 641s，
+  //   按需 10s 出头）。上限取 --limit（默认 10）。
+  let diagPre = null
+  if (['diagnose', 'item', 'balance', 'auto'].includes(mode) && !useNodeOnly) {
+    try {
+      const { collectPromoViaNode, collectDiagnoseViaNode } = await import(pathToFileURL(path.join(HERE, 'promo-node.mjs')).href)
+      const pre = await collectPromoViaNode({ shopKey: SHOP, account: { shopKey: SHOP, cookies: {} }, guard, mode: 'units' })
+      if (pre.ok) {
+        const ads = pre.byApi?.list?.adInfos || []
+        // ① item 模式：先按用户给的 goods-id / ad-id 定位到具体单元
+        let want = []
+        if (argOf('ad-id')) want = [String(argOf('ad-id'))]
+        else if (argOf('goods-id')) {
+          const hit = ads.find(a => String(a.goodsId) === String(argOf('goods-id')))
+          if (hit) want = [String(hit.adId ?? hit.id)]
+        }
+        // ② 其余模式：按 --limit（默认 10）取前 N 个
+        const LIMIT = Math.max(1, parseInt(argOf('limit') || '10', 10) || 10)
+        const allIds = ads.map(u => String(u.adId ?? u.id)).filter(Boolean)
+        const adIds = want.length ? want : allIds.slice(0, LIMIT)
+        console.warn(`[pdd-promo] Node 通道：单元列表 ${allIds.length} 个，按需采 ${adIds.length} 个${want.length ? '（用户指定）' : `（limit=${LIMIT}）`}`)
+        diagPre = { units: pre.byApi }
+        if (adIds.length) {
+          const dg = await collectDiagnoseViaNode({ adIds, shopKey: SHOP, account: { shopKey: SHOP, cookies: {} }, guard })
+          console.warn(`[pdd-promo] Node 通道：诊断 ${dg.summary.diagnosed}/${dg.summary.requested} 个 / 失败 ${dg.summary.failed}`)
+          diagPre.diagnosis = dg
+          if (dg.ok) diagNodeOk = true
+        }
+      } else {
+        console.warn('[pdd-promo] Node 单元列表拿不到，回落浏览器')
+      }
+    } catch (e) {
+      console.warn('[pdd-promo] 诊断 Node 预采集异常，回落浏览器：' + String(e.message).slice(0, 90))
+    }
+  }
+
+  // ★ 启动前清残留 Profile 锁。
   //   上次被强杀/崩溃时 SingletonLock 会留下，导致 puppeteer.launch 直接
   //   `Failed to launch the browser process!`，而报错指不到真正原因。
   //   launchOptions() 已解析出 userDataDir，这里只负责把锁清掉。
   const { clearProfileLocks } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-launch.mjs')).href)
   clearProfileLocks(profile)
 
-  const browser = await puppeteer.launch({
-    ...launchOpts,          // executablePath / userDataDir / args / defaultViewport 全部来自统一入口
-    headless: false,
-    ignoreDefaultArgs: ['--enable-automation'],
-  })
-  const page = (await browser.pages())[0] || await browser.newPage()
+  // 诊断族：Node 采到诊断数据就不开浏览器；--browser 可强制
+  const skipLaunch = useNodeOnly
+    || (WRITE_MODES.includes(mode) && !process.argv.includes('--browser') && !process.argv.includes('--all'))
+    || (['diagnose', 'item', 'balance', 'auto'].includes(mode) && diagNodeOk && !process.argv.includes('--browser'))
+
+  let browser = null
+  let page = null
+  if (!skipLaunch) {
+    browser = await puppeteer.launch({
+      ...(await getLaunchOpts()),   // executablePath / userDataDir / args / defaultViewport 全部来自统一入口
+      headless: false,
+      ignoreDefaultArgs: ['--enable-automation'],
+    })
+    page = (await browser.pages())[0] || await browser.newPage()
+  }
+  // ★ 写操作的浏览器兜底：只在真的需要时才开（见 promo-write.mjs 的 noBrowserFallback）
+  const ensureBrowser = async () => {
+    if (page) return true
+    try {
+      clearProfileLocks(profile)
+      browser = await puppeteer.launch({
+        ...(await getLaunchOpts()), headless: false, ignoreDefaultArgs: ['--enable-automation'],
+      })
+      page = (await browser.pages())[0] || await browser.newPage()
+      await page.evaluateOnNewDocument(STEALTH_SCRIPT)
+      // 签名 hook：捕获页面自己发的 mms-gateway 请求的 {Anti-Content, crawlerInfo} 配对
+      await page.evaluateOnNewDocument(() => {
+        window.__sigPair = null
+        const O = window.XMLHttpRequest.prototype.open
+        const S = window.XMLHttpRequest.prototype.send
+        const SH = window.XMLHttpRequest.prototype.setRequestHeader
+        window.XMLHttpRequest.prototype.open = function (m, u) { this.__u = u; this.__h = {}; return O.apply(this, arguments) }
+        window.XMLHttpRequest.prototype.setRequestHeader = function (k, v) { this.__h[k] = v; return SH.apply(this, arguments) }
+        window.XMLHttpRequest.prototype.send = function (b) {
+          try {
+            if (/mms-gateway/.test(this.__u) && String(b || '').includes('crawlerInfo')) {
+              window.__sigPair = { anti: this.__h['Anti-Content'], crawlerInfo: JSON.parse(String(b)).crawlerInfo }
+            }
+          } catch { /* ignore */ }
+          return S.apply(this, arguments)
+        }
+      })
+      await page.goto('https://yingxiao.pinduoduo.com/mains/promotionOverview',
+        { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {})
+      await new Promise(r => setTimeout(r, 6000))
+      return true
+    } catch (e) {
+      console.error('[pdd-promo] 浏览器兜底启动失败：' + String(e.message).slice(0, 90))
+      return false
+    }
+  }
   // ★ 注入反检测（webdriver / plugins / languages / chrome.runtime）
-  await page.evaluateOnNewDocument(STEALTH_SCRIPT);
+  if (page) await page.evaluateOnNewDocument(STEALTH_SCRIPT);
   // ★ 2026-11-05：把接口注册表注入页面，供 evaluate 内的 RP() 读取
   //   （evaluate 的函数体在浏览器执行，无法 import Node 模块）
-  await page.evaluateOnNewDocument((apiTable) => {
+  if (page) await page.evaluateOnNewDocument((apiTable) => {
     window.__PDD_API__ = apiTable
   }, PDD_API_FOR_PAGE);
-  const cdp = await page.target().createCDPSession()
-  await cdp.send('Network.enable')
+  const cdp = page ? await page.target().createCDPSession() : null
+  if (cdp) await cdp.send('Network.enable')
 
   // ══════════════════════════════════════════════════════════════════════
   // ★ 2026-11-03：推广域登录态「用时现取」——运行期内联 SSO 桥接
@@ -350,19 +505,26 @@ if (mode === 'margin') {
     return false
   }
 
-  const yxReady = await bridgeYingxiaoLogin()
-  if (!yxReady) {
-    await browser.close()
-    emit({
-      ok: false, failureKind: 'token_expired',
-      text: `【推广域登录态不可用】已尝试 3 次 SSO 桥接，仍未拿到 yingxiao.pinduoduo.com 票据。\n\n`
-        + `判据：mms 会话存在但推广域换不到票。\n\n`
-        + `处置（按优先级）：\n`
-        + `① 到「账号连接」→ 拼多多商家后台 → 重新扫码登录（会自动打通推广域）\n`
-        + `② 若刚登录过仍失败，可能是账号风控冷却，等 90 秒再试\n`
-        + `③ 若反复失败，需单独登录推广后台（yingxiao 是独立登录域）`,
-    })
-    process.exit(2)
+  // ★ 2026-11-09：SSO 桥接只在**浏览器路径**里做。
+  //   Node 通道的推广域 Cookie 由混合签名器（同一个 Profile 的浏览器）提供，
+  //   票据已经在 Profile 里，不需要再桥接一次。
+  if (page) {
+    const yxReady = await bridgeYingxiaoLogin()
+    if (!yxReady) {
+      if (browser) await browser.close()
+      emit({
+        ok: false, failureKind: 'token_expired',
+        text: `【推广域登录态不可用】已尝试 3 次 SSO 桥接，仍未拿到 yingxiao.pinduoduo.com 票据。\n\n`
+          + `判据：mms 会话存在但推广域换不到票。\n\n`
+          + `处置（按优先级）：\n`
+          + `① 到「账号连接」→ 拼多多商家后台 → 重新扫码登录（会自动打通推广域）\n`
+          + `② 若刚登录过仍失败，可能是账号风控冷却，等 90 秒再试\n`
+          + `③ 若反复失败，需单独登录推广后台（yingxiao 是独立登录域）`,
+      })
+      if (browser) await browser.close()
+      await shutdown()
+      process.exit(2)
+    }
   }
 
   // ★ 风控 L3：滑块遮罩自动过
@@ -371,8 +533,9 @@ if (mode === 'margin') {
       console.warn(`[pdd-promo] ${label}：检测到滑块遮罩，尝试自动过滑块...`)
       const solved = await autoSolveSlider(SHOP, page)
       if (!solved.ok) {
-        await browser.close()
+        if (browser) await browser.close()
         emit({ ok: false, failureKind: 'risk_control', text: `滑块自动过失败：${solved.text}\n请手动过验证后重试。` })
+        await shutdown()
         process.exit(2)
       }
       console.warn(`[pdd-promo] 滑块已过：${solved.text}`)
@@ -428,6 +591,22 @@ if (mode === 'margin') {
   }
 
   const byApi = {}
+  // ★ 2026-11-09：先把 Node 通道拿到的数据灌进来（浏览器收割只做补充）
+  if (nodeData?.byApi) {
+    const { normalizeByApi } = await import(pathToFileURL(path.join(HERE, 'promo-node.mjs')).href)
+    Object.assign(byApi, normalizeByApi(nodeData.byApi))
+  }
+  // ★ 诊断族预采集的数据（单元列表 + 每个 adId 的诊断/详情）
+  if (diagPre) {
+    const { normalizeByApi } = await import(pathToFileURL(path.join(HERE, 'promo-node.mjs')).href)
+    Object.assign(byApi, normalizeByApi(diagPre.units || {}))
+    if (diagPre.diagnosis) {
+      Object.assign(byApi, {
+        adDiagnosisByAd: diagPre.diagnosis.adDiagnosisByAd,
+        promotionDetailByAd: diagPre.diagnosis.promotionDetailByAd,
+      })
+    }
+  }
   const APIS = [
     ['accountAll', 'reinhardt/homepage/v3/accountAll'],
     ['dailyCost', 'reinhardt/invoice/getAdvertiserDailyCosts'],
@@ -449,7 +628,7 @@ if (mode === 'margin') {
   ]
   // ★ 主通道：页面内 hook XHR 的 load 事件（CDP getResponseBody 在快跳转时大面积失败，
   //   实测 42 个请求只成功 0 个；页面内 hook 42/42 全拿到）
-  await page.evaluateOnNewDocument(() => {
+  if (page) await page.evaluateOnNewDocument(() => {
     window.__caps = []
     const O = XMLHttpRequest.prototype.open
     const S = XMLHttpRequest.prototype.send
@@ -470,7 +649,7 @@ if (mode === 'margin') {
       return S.apply(this, arguments)
     }
   })
-  cdp.on('Network.responseReceived', async (e) => {
+  if (cdp) cdp.on('Network.responseReceived', async (e) => {
     if (e.response.status !== 200) return
     const u = e.response.url
     if (!/mms-gateway/.test(u)) return
@@ -493,7 +672,7 @@ if (mode === 'margin') {
 
   // ★ 签名 hook 必须在导航前注入（evaluateOnNewDocument 只对之后的导航生效）
   //   捕获页面自己发的 mms-gateway 请求的 {Anti-Content 头, crawlerInfo body} 配对
-  await page.evaluateOnNewDocument(() => {
+  if (page) await page.evaluateOnNewDocument(() => {
     window.__sigPair = null
     const O = window.XMLHttpRequest.prototype.open
     const S = window.XMLHttpRequest.prototype.send
@@ -591,12 +770,13 @@ if (mode === 'margin') {
   }
 
   // 打开推广各页让页面自己发请求（报表页含商品维度 queryEntityReport）
+  // ★ 2026-11-09：Node 通道已拿到数据时跳过这一段（省 ~40s）
   const PAGES = [
     'https://yingxiao.pinduoduo.com/mains/promotionOverview',
     'https://yingxiao.pinduoduo.com/goods/report/promotion/overView',
     'https://yingxiao.pinduoduo.com/goods/promotion/list',
   ]
-  for (const u of PAGES) {
+  for (const u of (page ? PAGES : [])) {
     try {
       await page.goto(u, { waitUntil: 'domcontentloaded', timeout: 45000 })
       await new Promise(r => setTimeout(r, 13000))
@@ -605,13 +785,14 @@ if (mode === 'margin') {
       if (isLoginPage(page.url())) {
         const esc = await waitSsoEscape(8)
         if (!esc.ok) {
-          await browser.close()
+          if (browser) await browser.close()
           const wasSso = isSsoRelay(esc.url)
           emit({
             ok: false,
             failureKind: 'token_expired',
             text: `【MMS 登录态失效】拼多多商家后台已登出，推广域无法进入。\n\n当前 URL：${esc.url.slice(0, 110)}\n\n说明：\n· mms.pinduoduo.com 主域和 yingxiao.pinduoduo.com 推广域共用同一套 SSO 登录态\n· 主域失效时，推广域也会被重定向到 /login/sso 且无法自动换票\n· 账号连接页可能仍显示「有效」——那是 Cookie 结构检查，不代表 session 没过期\n\n处置（二选一）：\n① 打开浏览器访问 mms.pinduoduo.com，若出现「点击头像直接登录」点一下即可恢复\n② 若点头像仍失败，到「账号连接」→ 拼多多商家后台 → 重新扫码登录`,
           })
+          await shutdown()
           process.exit(2)
         }
         console.warn('[pdd-promo] SSO 已自动跳回，继续')
@@ -622,6 +803,8 @@ if (mode === 'margin') {
   // ★★ diagnose 模式：必须打开「诊断抽屉」URL 才会触发诊断接口
   //   格式：/goods/promotion/list?adId=<推广ID>&drawerTab=promoteDiagnosis
   //   不带 drawerTab 时抽屉不打开，queryStableCostAdDiagnosis 不会发。
+  // ★ 2026-11-09：Node 已采到诊断数据时**整段跳过**（原先每个单元要开一次抽屉 + 等 12s，
+  //   10 个单元 = 2 分钟）。诊断接口 v2 只要 {adId, platform:1}，Node 直接调。
   if (mode === 'diagnose' || mode === 'balance' || mode === 'item') {
     // 1) 先从推广列表拿 adId
     let adIds = []
@@ -636,10 +819,24 @@ if (mode === 'margin') {
     }
     // 也接受用户显式指定
     if (argOf('ad-id')) adIds = [String(argOf('ad-id'))]
-    const MAX_DIAG = Math.min(adIds.length, parseInt(argOf('limit') || '10', 10) || 10)
-    console.warn(`[pdd-promo] diagnose：共 ${adIds.length} 个推广单元，逐个打开诊断抽屉（上限 ${MAX_DIAG}）`)
+    // ★ 2026-11-09：limit 是**诊断上限**（不是「遍历全店」）。
+    //   原来 MAX_DIAG 截了 for 循环，但 `adIds` 仍是全店 50 个，而且
+    //   日志/索引都按全店算，会给人「只查了 10 个」其实是「查了前 10 个」的误解。
+    const LIMIT = Math.max(1, parseInt(argOf('limit') || '10', 10) || 10)
+    adIds = adIds.slice(0, LIMIT)
+    const MAX_DIAG = adIds.length
+    console.warn(`[pdd-promo] diagnose：${ads.length} 个单元中取 ${adIds.length} 个，需开抽屉的 ${adIds.filter(a => !byApi.adDiagnosisByAd?.[String(a)]).length} 个`)
     for (let i = 0; i < MAX_DIAG; i++) {
       const adId = adIds[i]
+      // ★ Node 已采到该单元诊断 → 跳过抽屉（省 ~13s/单元）
+      if (byApi.adDiagnosisByAd?.[String(adId)]) {
+        console.warn(`[pdd-promo] ${adId} 诊断已由 Node 提供，跳过抽屉`)
+        continue
+      }
+      if (!page) {
+        console.warn(`[pdd-promo] ${adId} 无浏览器可用，跳过（Node 也没采到）`)
+        continue
+      }
       const diagUrl = `https://yingxiao.pinduoduo.com/goods/promotion/list?adId=${adId}&drawerTab=promoteDiagnosis`
       try {
         await page.goto(diagUrl, { waitUntil: 'domcontentloaded', timeout: 45000 })
@@ -648,12 +845,13 @@ if (mode === 'margin') {
         if (isLoginPage(page.url())) {
           const esc = await waitSsoEscape(6)
           if (!esc.ok) {
-            await browser.close()
+            if (browser) await browser.close()
             emit({
               ok: false,
               failureKind: 'token_expired',
               text: `【MMS 登录态失效】诊断第 ${adId} 个单元时被重定向到登录页。\n\n当前 URL：${esc.url.slice(0, 110)}\n\n处置：到「账号连接」→ 拼多多商家后台 → 重新登录（扫码）`,
             })
+            await shutdown()
             process.exit(2)
           }
         }
@@ -869,7 +1067,7 @@ if (mode === 'margin') {
       // ★ 追加：全店速率表（付费分析的一部分）
       try {
         // unitList 可能没抓到（goods 模式不导航推广列表页），补抓一次
-        if (!(byApi.unitList?.adInfos || []).length) {
+        if (page && !(byApi.unitList?.adInfos || []).length) {
           await page.goto('https://yingxiao.pinduoduo.com/goods/promotion/list', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {})
           await new Promise(r => setTimeout(r, 12000))
           const _caps = await page.evaluate(() => window.__caps || []).catch(() => [])
@@ -921,8 +1119,19 @@ if (mode === 'margin') {
     const REPORT_URL = 'https://yingxiao.pinduoduo.com/goods/report/promotion/overView'
     const quickLabel = { 1: '今日', 2: '昨日', 7: '近 7 日', 30: '近 30 日', 90: '近 90 日' }[days] || null
 
-    /** 从 hook 缓冲取 dailyReportList 最长的一份 */
+    /** 从 hook 缓冲取 dailyReportList 最长的一份；Node 通道则直接取已采到的 */
     const harvest = async () => {
+      // ★ 2026-11-09：Node 通道优先（page 为 null 时 window.__caps 根本不存在）
+      const nodeRr = byApi.rangeReport || nodeData?.byApi?.rangeReport
+      if (Array.isArray(nodeRr) && nodeRr.length) {
+        let best = []
+        for (const c of nodeRr) {
+          const l = (c?.dailyReportList) || []
+          if (l.length > best.length) best = l
+        }
+        if (best.length) return best
+      }
+      if (!page) return []
       const caps = await page.evaluate(() => window.__caps || []).catch(() => [])
       let best = []
       for (const c of caps) {
@@ -936,49 +1145,57 @@ if (mode === 'margin') {
       return best
     }
 
-    // ① 直接导航（不清缓冲——页面这次发的请求就是要用的数据）
-    await page.goto(REPORT_URL, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {})
-    await new Promise(r => setTimeout(r, 14000))
+    // ① Node 通道已采到按天序列 → 直接用（省掉导航 + 14s 等待 + 点日期控件）
     let raw = await harvest()
+    if (raw.length >= days) {
+      console.warn(`[pdd-promo] daily：Node 通道拿到 ${raw.length} 天（够 ${days} 天）`)
+    } else if (page) {
+      // ② 浏览器兜底：直接导航（不清缓冲——页面这次发的请求就是要用的数据）
+      await page.goto(REPORT_URL, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {})
+      await new Promise(r => setTimeout(r, 14000))
+      raw = await harvest()
 
-    // ② 天数不够 → 点日期控件的快捷选项（实测 class: DateAreaV2_quickWrapper）
-    if (raw.length < days && quickLabel) {
-      console.warn(`[pdd-promo] daily：拿到 ${raw.length} 天，点击「${quickLabel}」…`)
-      const clicked = await page.evaluate((label) => {
-        const cands = [...document.querySelectorAll('div,span,li,a,button')]
-          .filter(e => {
-            const t = (e.textContent || '').replace(/\s+/g, '').trim()
-            return t === label.replace(/\s+/g, '') && e.children.length === 0
-          })
-        if (!cands.length) return ''
-        cands[0].click()
-        return label
-      }, quickLabel).catch(() => '')
-      if (clicked) {
-        await new Promise(r => setTimeout(r, 14000))
-        const got = await harvest()
-        if (got.length > raw.length) raw = got
-        console.warn(`[pdd-promo] daily：点击后拿到 ${raw.length} 天`)
-      } else {
-        console.warn(`[pdd-promo] daily：未找到「${quickLabel}」快捷选项（class DateAreaV2_quickWrapper 可能已改版）`)
+      // ②b 天数不够 → 点日期控件的快捷选项（实测 class: DateAreaV2_quickWrapper）
+      if (raw.length < days && quickLabel) {
+        console.warn(`[pdd-promo] daily：拿到 ${raw.length} 天，点击「${quickLabel}」…`)
+        const clicked = await page.evaluate((label) => {
+          const cands = [...document.querySelectorAll('div,span,li,a,button')]
+            .filter(e => {
+              const t = (e.textContent || '').replace(/\s+/g, '').trim()
+              return t === label.replace(/\s+/g, '') && e.children.length === 0
+            })
+          if (!cands.length) return ''
+          cands[0].click()
+          return label
+        }, quickLabel).catch(() => '')
+        if (clicked) {
+          await new Promise(r => setTimeout(r, 14000))
+          const got = await harvest()
+          if (got.length > raw.length) raw = got
+          console.warn(`[pdd-promo] daily：点击后拿到 ${raw.length} 天`)
+        } else {
+          console.warn(`[pdd-promo] daily：未找到「${quickLabel}」快捷选项（class DateAreaV2_quickWrapper 可能已改版）`)
+        }
       }
-    }
 
-    // ③ 仍不够 → 试 URL query 参数（兜底，可能无效）
-    if (raw.length < days) {
-      const end = new Date()
-      const start = new Date(Date.now() - (days - 1) * 86400000)
-      const fmt = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
-      for (const u of [
-        `${REPORT_URL}?beginDate=${fmt(start)}&endDate=${fmt(end)}`,
-        `${REPORT_URL}?startDate=${fmt(start)}&endDate=${fmt(end)}`,
-      ]) {
-        await page.goto(u, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {})
-        await new Promise(r => setTimeout(r, 12000))
-        const got = await harvest()
-        if (got.length > raw.length) raw = got
-        if (raw.length >= days) break
+      // ③ 仍不够 → 试 URL query 参数（兜底，可能无效）
+      if (raw.length < days) {
+        const end = new Date()
+        const start = new Date(Date.now() - (days - 1) * 86400000)
+        const fmt = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+        for (const u of [
+          `${REPORT_URL}?beginDate=${fmt(start)}&endDate=${fmt(end)}`,
+          `${REPORT_URL}?startDate=${fmt(start)}&endDate=${fmt(end)}`,
+        ]) {
+          await page.goto(u, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {})
+          await new Promise(r => setTimeout(r, 12000))
+          const got = await harvest()
+          if (got.length > raw.length) raw = got
+          if (raw.length >= days) break
+        }
       }
+    } else {
+      console.warn(`[pdd-promo] daily：Node 只拿到 ${raw.length} 天（要 ${days}），且无浏览器兜底`)
     }
 
     const v = (o) => (o && typeof o === 'object' ? o.value : (o ?? null))
@@ -1199,7 +1416,7 @@ if (mode === 'margin') {
     const NUM = (v) => (v && typeof v === 'object' && 'value' in v) ? parseFloat(v.value) : (typeof v === 'number' ? v : null)
     let rawUnits = byApi.unitList?.adInfos || []
     // 没抓到就补抓一次
-    if (!rawUnits.length) {
+    if (page && !rawUnits.length) {
       await page.goto('https://yingxiao.pinduoduo.com/goods/promotion/list', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {})
       await new Promise(r => setTimeout(r, 12000))
       const _c = await page.evaluate(() => window.__caps || []).catch(() => [])
@@ -1213,7 +1430,7 @@ if (mode === 'margin') {
     //   这里在页面里批量做：找所有编辑图标 → 逐个点 → 读 input value
     let domRoiMap = {}
     try {
-      domRoiMap = await page.evaluate(async () => {
+      domRoiMap = page ? await page.evaluate(async () => {
         const out = {}
         // 找所有行的「预算及出价」单元格，读净目标投产比文本
         //   单元格格式：「预算日限额：100.00 元 (剩 100%) 净目标投产比：2.13 流量差」
@@ -1239,7 +1456,7 @@ if (mode === 'margin') {
           if (adId) out[adId] = parseFloat(mRoi[1])
         }
         return out
-      }).catch(() => ({}))
+      }).catch(() => ({})) : {}
     } catch { /* 忽略，用兜底 */ }
     const domRoiCnt = Object.keys(domRoiMap).length
     if (domRoiCnt) console.error(`[auto] 从 DOM 读到 ${domRoiCnt} 个单元的净目标投产比`)
@@ -2497,17 +2714,22 @@ if (mode === 'margin') {
 
   // ── 写操作（L2）：pause / resume / delete / create / maxcost / roi ──
   // 签名 pair 从页面 hook 拿（导航前已注入）；没有就主动触发一个页面请求
-  let sigPair = await page.evaluate(() => window.__sigPair || null).catch(() => null)
-  if (!sigPair) {
-    await page.evaluate(() => new Promise((resolve) => {
-      const x = new XMLHttpRequest()
-      x.open('POST', RP('promo.adGroups') || '/mms-gateway/venus/api/goods/promotion/listAdGroupInfo')
-      x.setRequestHeader('Content-Type', 'application/json')
-      x.onload = () => resolve(); x.onerror = () => resolve()
-      x.send(JSON.stringify({ withAdCount: true }))
-    })).catch(() => {})
-    await new Promise(r => setTimeout(r, 1500))
+  // ★ 2026-11-09：只在**已经有 page** 时取（Node 优先路径下 page 为 null，
+  //   浏览器按需再开，见 ensureBrowser）
+  let sigPair = null
+  if (page) {
     sigPair = await page.evaluate(() => window.__sigPair || null).catch(() => null)
+    if (!sigPair) {
+      await page.evaluate(() => new Promise((resolve) => {
+        const x = new XMLHttpRequest()
+        x.open('POST', '/mms-gateway/venus/api/goods/promotion/listAdGroupInfo')
+        x.setRequestHeader('Content-Type', 'application/json')
+        x.onload = () => resolve(); x.onerror = () => resolve()
+        x.send(JSON.stringify({ withAdCount: true }))
+      })).catch(() => {})
+      await new Promise(r => setTimeout(r, 1500))
+      sigPair = await page.evaluate(() => window.__sigPair || null).catch(() => null)
+    }
   }
   // ★ --all：自动取全部推广单元 ID（从 hook 到的 unitList）
   if (process.argv.includes('--all')) {
@@ -2517,7 +2739,6 @@ if (mode === 'margin') {
     }
   }
 
-  const WRITE_MODES = ['pause', 'resume', 'delete', 'create', 'maxcost', 'roi']
   if (WRITE_MODES.includes(mode)) {
     const unitId = argOf('unit-id') || argOf('ad-id')
     const unitIds = (argOf('unit-ids') || '').split(',').map(s => s.trim()).filter(Boolean)   // 批量：逗号分隔
@@ -2527,7 +2748,8 @@ if (mode === 'margin') {
     const planId = argOf('plan-id') || 0         // 计划 ID（delete 需要，从 units/detail 取）
     if (!unitId && !unitIds.length && !goodsId) {
       emit({ ok: false, failureKind: 'api_error', text: `${mode} 模式必须带 --unit-id / --unit-ids(批量) / --goods-id` })
-      await browser.close()
+      if (browser) await browser.close()
+      await shutdown()
       process.exit(2)
     }
     const ids = unitIds.length ? unitIds : (unitId ? [unitId] : [])
@@ -2540,104 +2762,117 @@ if (mode === 'margin') {
         maxCost: maxCostYuan || null, roi: roi || null,
         text: `【推广${verb}预览 · 需用户确认】\n目标：${ids.length ? `${ids.length} 个推广单元（${ids.slice(0, 10).join(', ')}${ids.length > 10 ? '…' : ''}）` : `商品 ${goodsId}`}\n操作：${verb}${detail ? `（${detail}）` : mode === 'create' ? '（稳定成本推广，默认系统建议出价 + 日限额不限）' : ''}\n\n确认无误后请带 --confirm true 重新调用。注意：这是不可撤销的真实操作（L2）。`,
       })
-      await browser.close()
+      if (browser) await browser.close()
+      await shutdown()
       process.exit(0)
     }
-    // 真实执行：在页面上下文里发请求（带 Anti-Content 签名）
-    // ★ 取 captcha 通行证（有则带，10 分钟内不再弹滑块）
-    const { getCaptchaToken: _getTok, saveCaptchaToken: _saveTok, extractCaptchaToken: _extractTok } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-risk.mjs')))
-    const vtkToken = _getTok(SHOP)?.token || null
-    const r = await page.evaluate(async (m, uid, gid, mcYuan, roiVal, sig, pid, ids, vtk) => {
-      const yuanToApi = (y) => Math.round(Number(y) * 100)   // 元 → 分
-      // ★ 2026-11-05：路径统一从基座注册表取（PDD 升级只改 pdd-api.mjs）
-      const RP = (n) => {
-        const s = window.__PDD_API__ && window.__PDD_API__[n]
-        return s ? s.path : ''
+    // ── 真实执行 ──
+    // ★ 2026-11-09：**Node 优先**（混合通道：Chrome 签名 + Node 发请求）
+    //   ① 参数不够 → 本地拦掉，不发请求
+    //   ② Node 被拦（54001/40001，服务端明确拒绝、未执行）→ 才降级浏览器补一次
+    //   ③ 网络异常（超时等）→ **绝不自动重试**（不确定服务端是否已执行）
+    const { validatePromoWrite, execPromoWrite, describePromoWriteResult, PROMO_WRITE_VERB: W_VERB }
+      = await import(pathToFileURL(path.join(HERE, 'promo-write.mjs')).href)
+    const wargs = { unitId, unitIds: ids, goodsId, maxCostYuan, roi, planId }
+    const bad = validatePromoWrite(mode, wargs)
+    if (bad) {
+      emit({ ok: false, failureKind: 'api_error', mode, text: `${mode} 模式参数不全：${bad}` })
+      if (browser) await browser.close()
+      await shutdown()
+      process.exit(2)
+    }
+
+    let r = await execPromoWrite({ mode, ...wargs, shopKey: SHOP, account: { shopKey: SHOP, cookies: {} } })
+
+    // Node 被明确拒绝 → 有浏览器就补一次（服务端未执行，安全）
+    if (!r.ok && r.safeToRetry) {
+      // ★ 现在才开浏览器（Node 优先路径下 page 一直是 null）
+      const opened = page ? true : await ensureBrowser()
+      if (opened && !sigPair && page) {
+          sigPair = await page.evaluate(() => window.__sigPair || null).catch(() => null)
+          if (!sigPair) {
+            await page.evaluate(() => new Promise((resolve) => {
+              const x = new XMLHttpRequest()
+              x.open('POST', '/mms-gateway/venus/api/goods/promotion/listAdGroupInfo')
+              x.setRequestHeader('Content-Type', 'application/json')
+              x.onload = () => resolve(); x.onerror = () => resolve()
+              x.send(JSON.stringify({ withAdCount: true }))
+            })).catch(() => {})
+            await new Promise(r => setTimeout(r, 1500))
+            sigPair = await page.evaluate(() => window.__sigPair || null).catch(() => null)
+          }
       }
-      const APIs = {
-        pause: RP('promo.updateStatus') || '/mms-gateway/venus/api/global/unit/batchUpdateStatus',
-        resume: RP('promo.updateStatus') || '/mms-gateway/venus/api/global/unit/batchUpdateStatus',
-        delete: RP('promo.delete') || '/mms-gateway/venus/api/goods/promotion/virtual/delete',
-        create: RP('promo.batchCreate') || '/mms-gateway/venus/api/promotion/batchCreate',
-        maxcost: RP('promo.updateMaxCost') || '/mms-gateway/venus/api/goods/promotion/update/max/cost',
-        roi: RP('promo.updateBid') || '/mms-gateway/venus/api/promotion/batchUpdateBid',
+      if (opened && page && sigPair) {
+        console.error(`[pdd-promo] Node 被拒（ec=${r.ec}），降级浏览器补发`)
+        const rr = await page.evaluate(async (m, uid, gid, mcYuan, roiVal, sig, pid, ids) => {
+        const RP = (n) => {
+          const s = window.__PDD_API__ && window.__PDD_API__[n]
+          return s ? s.path : ''
+        }
+        const APIs = {
+          pause: RP('promo.updateStatus') || '/mms-gateway/venus/api/global/unit/batchUpdateStatus',
+          resume: RP('promo.updateStatus') || '/mms-gateway/venus/api/global/unit/batchUpdateStatus',
+          delete: RP('promo.delete') || '/mms-gateway/venus/api/goods/promotion/virtual/delete',
+          create: RP('promo.batchCreate') || '/mms-gateway/venus/api/promotion/batchCreate',
+          maxcost: RP('promo.updateMaxCost') || '/mms-gateway/venus/api/goods/promotion/update/max/cost',
+          roi: RP('promo.updateBid') || '/mms-gateway/venus/api/promotion/batchUpdateBid',
+        }
+        const adId = uid ? Number(uid) : 0
+        const adIds = (ids || []).map(x => Number(x)).filter(x => x > 0)
+        const useIds = adIds.length ? adIds : (adId ? [adId] : [])
+        const UNLIMITED = { value: '1000000.00', unitCode: 1 }
+        const mn = (y) => (!y || y === 'unlimited' || Number(y) === 0) ? UNLIMITED : { value: String(y), unitCode: 1 }
+        const bodies = {
+          pause: { adIdList: useIds, dataOperateStatus: 2 },
+          resume: { adIdList: useIds, dataOperateStatus: 1 },
+          delete: { goodsId: gid ? Number(gid) : 0, adId, planId: pid || 0 },
+          create: { adInfoList: [{ goodsId: gid ? Number(gid) : 0, maxCost: mn(mcYuan), bidType: 1, targetRoi: roiVal ? { value: String(roiVal), unitCode: 1 } : undefined, isAdvertiserEnableAdvanced: true }] },
+          maxcost: { adId, maxCost: mn(mcYuan) },
+          roi: { updateBidList: [{ adId, targetRoi: { value: String(roiVal || '0'), unitCode: 1 }, isAdvertiserEnableAdvanced: true, optionalOptimizationMessageInfoList: [{ optimizationGoal: 3, dataOperateStatus: 2 }, { optimizationGoal: 4, dataOperateStatus: 2 }, { optimizationGoal: 5, dataOperateStatus: 2 }] }] },
+        }
+        const headers = { 'Content-Type': 'application/json' }
+        let body = bodies[m]
+        if (sig) { body = { ...body, crawlerInfo: sig.crawlerInfo }; headers['Anti-Content'] = sig.anti }
+        try {
+          const resp = await fetch(APIs[m], { method: 'POST', credentials: 'include', headers, body: JSON.stringify(body) })
+          return { status: resp.status, json: await resp.json().catch(() => null) }
+        } catch (e) { return { status: -1, json: null, err: e.message } }
+      }, mode, unitId, goodsId, maxCostYuan, roi, sigPair, planId, ids).catch(() => null)
+
+      if (rr?.json) {
+        const w = await import(pathToFileURL(path.join(HERE, 'promo-write.mjs')).href)
+        const ok2 = w.isPromoWriteOk(rr.json)
+        if (ok2) {
+          r = { ok: true, channel: 'browser-fallback', json: rr.json, ec: null, hint: '', failureKind: '', safeToRetry: false }
+        } else {
+          r = { ...r, ok: false, browserFallbackTried: true }
+        }
       }
-      const adId = uid ? Number(uid) : 0
-      const adIds = (ids || []).map(x => Number(x)).filter(x => x > 0)
-      const useIds = adIds.length ? adIds : (adId ? [adId] : [])
-      // maxCost/targetRoi 是 {value, unitCode} 对象（unitCode:1=元）
-      // 页面实证：不限 = value "1000000.00"
-      const UNLIMITED = { value: '1000000.00', unitCode: 1 }
-      const bodies = {
-        // ★ 实测成功（2026-10-21）：{adIdList, dataOperateStatus}（不是 operateStatus/adStatus）
-        pause: { adIdList: useIds, dataOperateStatus: 2 },
-        resume: { adIdList: useIds, dataOperateStatus: 1 },
-        // 删除：实测 {goodsId, adId, planId} 参数结构正确（部分推广类型返回"不支持删除广告"）
-        delete: { goodsId: gid ? Number(gid) : 0, adId, planId: pid || 0 },
-        // 创建：adInfoList 数组（真实抓包 2026-10-21），maxCost/targetRoi 为对象
-        create: {
-          adInfoList: [{
-            goodsId: gid ? Number(gid) : 0,
-            maxCost: (!mcYuan || mcYuan === 'unlimited') ? UNLIMITED : { value: String(mcYuan), unitCode: 1 },
-            bidType: 1,
-            targetRoi: roiVal ? { value: String(roiVal), unitCode: 1 } : undefined,
-            isAdvertiserEnableAdvanced: true,
-          }],
-        },
-        // 日限额：★ 实测成功 —— {adId, maxCost:{value, unitCode}}（对象，元为单位）
-        maxcost: { adId, maxCost: (!mcYuan || mcYuan === 'unlimited') ? UNLIMITED : { value: String(mcYuan), unitCode: 1 } },
-        // 投产比：★ 实测抓包（2026-10-21）—— body 是 updateBidList 数组
-        roi: {
-          updateBidList: [{
-            adId,
-            targetRoi: { value: String(roiVal || '0'), unitCode: 1 },
-            isAdvertiserEnableAdvanced: true,
-            optionalOptimizationMessageInfoList: [
-              { optimizationGoal: 3, dataOperateStatus: 2 },
-              { optimizationGoal: 4, dataOperateStatus: 2 },
-              { optimizationGoal: 5, dataOperateStatus: 2 },
-            ],
-          }],
-        },
-      }
-      const url = APIs[m]
-      let body = bodies[m]
-      // 注入签名（crawlerInfo 进 body + Anti-Content 进头）
-      const headers = { 'Content-Type': 'application/json' }
-      if (sig) {
-        body = { ...body, crawlerInfo: sig.crawlerInfo }
-        headers['Anti-Content'] = sig.anti
-      }
-      // ★ 带上 captcha 通行证
-      if (vtk) headers['VerifyAuthToken'] = vtk
-      try {
-        const resp = await fetch(url, {
-          method: 'POST', credentials: 'include', headers, body: JSON.stringify(body),
-        })
-        return { status: resp.status, json: await resp.json().catch(() => null) }
-      } catch (e) { return { status: -1, json: null, err: e.message } }
-    }, mode, unitId, goodsId, maxCostYuan, roi, sigPair, planId, ids, vtkToken)
-    const ok = r.json?.success === true || r.json?.errorCode === 1000 || r.json?.error_code === 1000000
-    const succ = r.json?.result?.successList || []
-    const fail = r.json?.result?.failedList || []
+    }
+    }
+
     emit({
-      ok, mode, unitId: unitId || null, unitIds: ids, goodsId: goodsId || null,
+      ok: r.ok, mode, unitId: unitId || null, unitIds: ids, goodsId: goodsId || null,
       maxCost: maxCostYuan || null, roi: roi || null,
-      successCount: succ.length, failedCount: fail.length,
+      channel: r.channel,
+      successCount: (r.json?.result?.successList || []).length,
+      failedCount: (r.json?.result?.failedList || []).length,
       raw: r.json,
-      text: ok
-        ? `推广${verb}成功${ids.length > 1 ? `（${succ.length} 个单元）` : ids.length ? `（单元 ${ids[0]}）` : `（商品 ${goodsId}）`}${detail ? `，${detail}` : ''}。` +
-          (fail.length ? `\n失败 ${fail.length} 个：${JSON.stringify(fail).slice(0, 200)}` : '')
-        : `推广${verb}失败：${r.json?.error_msg || r.json?.errorMsg || JSON.stringify(r.json).slice(0, 300)}\n\n可能原因：\n① 单元不存在或已被删\n② 该操作需要页面会话签名（yingxiao 域风控，自己发请求会被 54001 拦）\n③ 参数结构需按实际页面调整（不同出价类型 bidType 不同）\n变通：到 yingxiao.pinduoduo.com 后台手动操作。`,
+      text: r.ok
+        ? describePromoWriteResult(r, { mode, unitIds: ids, goodsId, detail })
+        : describePromoWriteResult(r, { mode, unitIds: ids, goodsId, detail }),
     })
-    await browser.close()
-    process.exit(0)
+    if (browser) await browser.close()
+    await shutdown()
+    process.exit(r.ok ? 0 : 2)
   }
 
   emit(out)
   // ★ 2026-11-04：clearInterval(hb) 随迁移去掉（心跳由 guard.startHeartbeat 管理）
   await guard.close()
-  await browser.close()
+  if (browser) await browser.close()
+  // ★ 关掉基座的混合签名浏览器 —— 它是活跃句柄，不关 node 进程不会退出
+  await shutdown()
 })().catch(async (e) => {
   // ★ 风控异常 → 友好提示 + 记账号健康分
   const { checkCooldown, fmtRemain } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-risk.mjs')))
@@ -2669,7 +2904,12 @@ if (mode === 'margin') {
     process.exit(2)
   } catch { /* ignore */ }
   emit({ ok: false, failureKind: 'api_error', text: `执行异常：${e?.message || String(e)}` })
+  if (process.env.PDD_PROMO_DEBUG_STACK) console.error(e?.stack || e)
+  try {
+    const { closeChannels } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-request.mjs')).href)
+    await closeChannels()
+  } catch { /* ignore */ }
   process.exit(1)
-})
+}).then(() => process.exit(0))
 }
 

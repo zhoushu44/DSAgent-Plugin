@@ -87,44 +87,106 @@ const wantCsv = process.argv.includes('--csv')
   //   问题：shopKey 目录缺失时会静默落到那个固定目录 → 用未知账号的登录态操作，
   //   查到的可能是别的店铺数据。现在 launchOptions 内建「显式候选链」，
   //   找不到就抛 PDD_PROFILE_MISSING，绝不静默借用。
-  const { launchOptions } = await import(`file:///${PLUGIN_ROOT}/skills/_shared/pdd-launch.mjs`)
-  let browser
-  try {
-    browser = await puppeteer.launch(launchOptions(SHOP))
-  } catch (e) {
-    if (e?.code === 'PDD_PROFILE_MISSING') {
-      emit({ ok: false, failureKind: 'not_bound', text: e.message })
-      process.exit(2)
-    }
-    throw e
+  // ★ 2026-11-08：Node 优先 —— 先探测凭证库 Cookie + 种子能否纯 Node 工作
+  //   能通就完全不开浏览器（overview/list/detail/sku 全部走 Node）
+  //   不通才启动浏览器（写操作仍需浏览器）
+  const WRITE_MODES = new Set(['offsale', 'onsale', 'delete', 'commit', 'edit', 'batch'])
+  const isWriteMode = WRITE_MODES.has(mode)
+
+  const acc0 = store.listAccounts().find(a => a.shop_key === SHOP)
+  let ACC0 = null
+  if (acc0?.cookies) {
+    try {
+      const seedFile = path.join(homedir(), '.dsh', 'pdd-risk-seeds', String(SHOP).replace(/[^\w.-]/g, '_') + '.json')
+      let ls = {}
+      if (fs.existsSync(seedFile)) ls = JSON.parse(fs.readFileSync(seedFile, 'utf8')).localStorage || {}
+      if (Object.keys(ls).length) ACC0 = { cookies: acc0.cookies, localStorage: ls }
+    } catch { }
   }
-  const page = (await browser.pages())[0] || await browser.newPage()
+
+  let nodeOK = false
+  if (ACC0 && !isWriteMode) {
+    try {
+      const { request: probeReq } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-request.mjs')).href)
+      const pr = await probeReq('/glide/v2/mms/addProperties/goodsList', {
+        page_num: 1, page_size: 1, only_query_no_props_goods: false, only_query_un_auth_brand: false,
+      }, { account: ACC0, shopKey: SHOP })
+      nodeOK = pr.ok
+      if (nodeOK) console.warn('[pdd-works] 纯 Node 可用，不启动浏览器')
+    } catch { }
+  }
+
+  const { launchOptions } = await import(`file:///${PLUGIN_ROOT}/skills/_shared/pdd-launch.mjs`)
+  let browser = null
+  if (!nodeOK) {
+    try {
+      browser = await puppeteer.launch(launchOptions(SHOP))
+    } catch (e) {
+  if (process.env.PDD_DEBUG_STACK) { console.error('=== STACK ==='); console.error(e.stack); }
+      if (e?.code === 'PDD_PROFILE_MISSING') {
+        emit({ ok: false, failureKind: 'not_bound', text: e.message })
+        process.exit(2)
+      }
+      throw e
+    }
+  }
+  const page = browser ? ((await browser.pages())[0] || await browser.newPage()) : null
   // ★ 注入反检测（webdriver / plugins / languages / chrome.runtime）
-  await page.evaluateOnNewDocument(STEALTH_SCRIPT);
+  if (page) await page.evaluateOnNewDocument(STEALTH_SCRIPT);
   // safeEval：页面跳转会导致 frame detached，重试遍历所有 frame
   const safeEval = async (fn, arg) => {
+    if (!page) return null
     for (let i = 0; i < 12; i++) {
       for (const f of page.frames()) { try { return await f.evaluate(fn, arg) } catch { /* 换下一个 frame */ } }
       await new Promise(r => setTimeout(r, 1500))
     }
     return null
   }
+  if (page) {
   await page.goto('https://mms.pinduoduo.com/goods/goods_list', { waitUntil: 'domcontentloaded', timeout: 60000 })
   await new Promise(r => setTimeout(r, 9000))
   if (/\/login/i.test(page.url())) {
-    await browser.close()
-    emit({ ok: false, failureKind: 'token_expired', text: '拼多多商家后台登录态失效，请到「账号连接」重新登录。' })
-    process.exit(2)
+    // ★ 2026-11-08：不再直接退出
+    //   浏览器 profile 里的 Cookie 可能过期，但凭证库里的 Cookie + 种子仍可纯 Node 工作。
+    //   先探测一次 Node 通道：通了就继续（后续请求走 Node，不需要页面）；
+    //   不通才判定真的掉登录。
+    let nodeUsable = false
+    try {
+      const probeAcc = store.listAccounts().find(a => a.shop_key === SHOP)
+      if (probeAcc?.cookies) {
+        const seedFile = path.join(homedir(), '.dsh', 'pdd-risk-seeds', String(SHOP).replace(/[^\w.-]/g, '_') + '.json')
+        let ls = {}
+        if (fs.existsSync(seedFile)) ls = JSON.parse(fs.readFileSync(seedFile, 'utf8')).localStorage || {}
+        const { request: probeReq } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-request.mjs')).href)
+        const pr = await probeReq('/earth/api/mallInfo/commonMallInfo', {}, {
+          account: { cookies: probeAcc.cookies, localStorage: ls },
+          shopKey: SHOP,
+          method: 'GET',
+        })
+        nodeUsable = pr.ok
+        if (pr.ok) {
+          console.warn('[pdd-works] 浏览器 profile 已过期，但凭证库 Cookie 有效 → 继续（走纯 Node）')
+        }
+      }
+    } catch { /* ignore */ }
+
+    if (!nodeUsable) {
+      await browser?.close()
+      emit({ ok: false, failureKind: 'token_expired', text: '拼多多商家后台登录态失效，请到「账号连接」重新登录。' })
+      process.exit(2)
+    }
   }
+  }
+  if (!page) console.warn('[pdd-works] 无浏览器（纯 Node 模式），跳过页面交互')
   // ★ 风控 L3：滑块遮罩检测（有则中止，避免无效点击加重风控）
-  const hasSlider = async () => await safeEval(() => {
+  const hasSlider = async () => !page ? false : await safeEval(() => {
     const ms = Array.from(document.querySelectorAll('[class*="Modal"], [class*="modal"], [class*="MDL"], [class*="Dialog"], [class*="mask"]'))
       .filter(m => { const r = m.getBoundingClientRect(); return r.width > 200 && r.height > 150 })
       .map(m => (m.innerText || '').replace(/\n/g, ' ').slice(0, 40))
     return ms.some(t => /滑块|拼图|安全验证/.test(t))
   })
   if (await hasSlider()) {
-    await browser.close()
+    await browser?.close()
     emit({
       ok: false, failureKind: 'risk_control',
       text: '页面出现滑块验证（拼图），账号已被平台风控。\n'
@@ -133,18 +195,20 @@ const wantCsv = process.argv.includes('--csv')
     process.exit(2)
   }
   // ★ 风控 L3：滑块遮罩检测 + 自动过（detectSlider/autoSolveSlider 已在顶部 import）
-  if (await detectSlider(page)) {
+  //   纯 Node 模式没有 page，跳过所有页面级风控检测
+  if (page && await detectSlider(page)) {
     console.warn('[pdd-works] 检测到滑块遮罩，尝试自动过滑块...')
     const solved = await autoSolveSlider(SHOP, page)
     if (!solved.ok) {
-      await browser.close()
+      await browser?.close()
       emit({ ok: false, failureKind: 'risk_control', text: `滑块自动过失败：${solved.text}\n请手动过验证后重试。` })
       process.exit(2)
     }
     console.warn(`[pdd-works] 滑块已过：${solved.text}`)
     await new Promise(r => setTimeout(r, 2000))
   }
-  await ensureAntiContent(page)
+  // 纯 Node 模式没有 page，ensureAntiContent 只能在浏览器里跑
+  if (page) await ensureAntiContent(page)
 
   // ★ 风控 L1：接口级节流（落盘跨进程）+ L2：遇控即停
   //   2026-10-24：切到 pdd-client 统一入口（t1 简化签名 / t2 真签名自动选）
@@ -152,9 +216,21 @@ const wantCsv = process.argv.includes('--csv')
   const accForT1 = store.listAccounts().find(a => a.shop_key === SHOP)
   let COOKIES_T1 = accForT1 ? Object.entries(accForT1.cookies || {}).map(([k, v]) => `${k}=${v}`).join('; ') : ''
 
+  // ★ 2026-11-08：构造统一账号对象（供 pdd-request 纯 Node 通道）
+  let ACC = null
+  try {
+    if (accForT1?.cookies) {
+      const seedFile = path.join(homedir(), '.dsh', 'pdd-risk-seeds', String(SHOP).replace(/[^\w.-]/g, '_') + '.json')
+      let ls = {}
+      if (fs.existsSync(seedFile)) ls = JSON.parse(fs.readFileSync(seedFile, 'utf8')).localStorage || {}
+      ACC = { cookies: accForT1.cookies, localStorage: ls }
+    }
+  } catch { /* 无种子走浏览器 */ }
+
   // ★ 2026-10-24：43001 时用当前浏览器页面的 Cookie 兜底
   //   凭证库快照可能是几天前的旧票，而浏览器 Profile 里的是新的（实测 5 个账号全踩）
   async function freshCookiesFromPage() {
+    if (!page) return null
     try {
       const s = await page.target().createCDPSession()
       await s.send('Network.enable')
@@ -209,7 +285,32 @@ const wantCsv = process.argv.includes('--csv')
     return null
   }
 
+  /**
+   * 统一请求
+   *
+   * ★ 2026-11-08：改走基座 pdd-request（Node 优先）
+   *   有 account → 纯 Node（0.06~2.6s）；失败且有 page → 自动降级浏览器
+   *   实测：店铺信息 57ms、店铺流量（补日期后）通过
+   */
+
+  // ★ 顶层导入：call() 和 overview/list 分支都要用
+  const { request } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-request.mjs')).href)
+
   const call = async (url, body) => {
+    const nodeAccount = ACC ? { cookies: ACC.cookies, localStorage: ACC.localStorage || {} } : null
+    const r = await request(url, body, {
+      page,
+      account: nodeAccount || undefined,
+      shopKey: SHOP,
+      guard,
+      extraHeaders: { referer: 'https://mms.pinduoduo.com/goods/goods_list' },
+    })
+    if (r.ok) return r.raw
+    // 失败时按原逻辑抛错（保持 skill 的错误提示不变）
+    const code = r.ec
+      throw Object.assign(new Error(`接口失败 ec=${code}`), { ec: code, __raw: r.raw, __hint: r.hint })
+  }
+  const _oldCallUnused = async (url, body) => {
     // ★ 通道选择：vodka/glide 走 t2（真签名），其余 t1（简化签名）
     const needT2 = /\/vodka\/|\/glide\//.test(url)
     // ★ 2026-11-04：节流统一走闸门 beforeCall（账号级时间槽，落盘跨进程）。
@@ -274,39 +375,70 @@ const wantCsv = process.argv.includes('--csv')
 
   const rows = []
   if (mode === 'overview' || mode === 'list') {
-    const r = await call(LIST_URL, listBody)
-    const goods = r?.result?.goods_list || []
-    // 汇总（未在售集合）
-    const off = await call(LIST_URL, { ...listBody, is_onsale: 0 }).catch(() => null)
-    const offCount = (off?.result?.goods_list || []).length
-    for (const g of goods.slice(0, limit)) {
+    /**
+     * ★ 2026-11-08：改用 listGoodsFull（纯 Node）
+     *
+     *   原实现调 mall/goodsList —— 该接口长期 54001「操作太过频繁」，
+     *   浏览器也进不去（页面重定向），导致 overview 长期不可用。
+     *
+     *   新方案：glide/goodsList（稳定 289ms）+ 并发 skuInfo 补价格
+     *   实测：180 个商品 5.6 秒拿全（含价格/库存/在售/SKU数/销量）
+     */
+    const { listGoodsFull } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-goods-full.mjs')).href)
+    let full
+    try {
+      full = await listGoodsFull(
+        (p, b, o) => request(p, b, { page, account: ACC || undefined, shopKey: SHOP, guard, ...o }),
+        ACC || { cookies: {}, localStorage: {} },
+        SHOP,
+        { max: limit > 0 ? Math.max(limit, 50) : 0, concurrency: 5, useCache: true }
+      )
+    } catch (e) {
+      emit({ ok: false, failureKind: 'api_error', text: `商品列表获取失败：${String(e.message).slice(0, 120)}` })
+      await browser?.close(); process.exit(2)
+    }
+
+    const goods = full.goods || []
+    const onSale = goods.filter(g => g.isOnSale === true)
+    const offSale = goods.filter(g => g.isOnSale !== true)
+
+    for (const g of goods.slice(0, limit || goods.length)) {
       rows.push({
-        goods_id: g.id, title: g.goods_name, cat: [g.cat_name_1, g.cat_name_2, g.cat_name_3].filter(Boolean).join('>'),
-        sku_count: (g.sku_group_price || []).length,
-        price_range: (g.sku_group_price || []).length ? `${Math.min(...g.sku_group_price) / 100}~${Math.max(...g.sku_group_price) / 100}元` : '—',
-        is_onsale: g.is_onsale, thumb: g.hd_thumb_url || g.thumb_url || '',
+        goods_id: g.id,
+        title: g.title,
+        cat: (g.catIds || []).join('>'),
+        sku_count: g.skuCount ?? 0,
+        price_range: g.price != null
+          ? (g.priceMax && g.priceMax !== g.price ? `${g.price}~${g.priceMax}元` : `${g.price}元`)
+          : '—',
+        stock: g.stock ?? null,
+        sold: g.soldQty ?? null,
+        is_onsale: g.isOnSale,
+        thumb: g.thumb || '',
       })
     }
+
     const summary = mode === 'overview'
-      ? { on_sale: goods.length, not_on_sale: offCount, total_shown: goods.length + offCount }
+      ? { on_sale: onSale.length, not_on_sale: offSale.length, total_shown: goods.length }
       : undefined
+
     emit({
       ok: true, mode, shopKey: SHOP,
       summary,
       total: goods.length,
       items: rows,
       text: mode === 'overview'
-        ? `拼多多商品总览：在售 ${goods.length} 个、未在售 ${offCount} 个。最新 ${rows.length} 条：\n` + rows.slice(0, 10).map((r, i) => `  ${i + 1}. [${r.goods_id}] ${r.title.slice(0, 30)} | ${r.sku_count}SKU | ${r.price_range}`).join('\n')
-        : `拼多多商品列表：共 ${goods.length} 个在售，返回前 ${rows.length} 条。\n` + rows.map((r, i) => `  ${i + 1}. [${r.goods_id}] ${r.title.slice(0, 30)} | ${r.sku_count}SKU | ${r.price_range}`).join('\n'),
+        ? `拼多多商品总览：在售 ${onSale.length} 个、未在售 ${offSale.length} 个（共 ${full.total} 个）。最新 ${rows.length} 条：\n` + rows.slice(0, 10).map((r, i) => `  ${i + 1}. [${r.goods_id}] ${r.title.slice(0, 30)} | ${r.sku_count}SKU | ${r.price_range} | 库存${r.stock ?? '-'}`).join('\n')
+        : `拼多多商品列表：共 ${goods.length} 个，返回前 ${rows.length} 条。\n` + rows.map((r, i) => `  ${i + 1}. [${r.goods_id}] ${r.title.slice(0, 30)} | ${r.sku_count}SKU | ${r.price_range} | 库存${r.stock ?? '-'}`).join('\n'),
     })
     if (wantCsv) {
       const dir = path.join(process.cwd(), 'artifacts', 'pdd-works')
       fs.mkdirSync(dir, { recursive: true })
-      const csv = ['goods_id,title,cat,sku_count,price_range,is_onsale', ...rows.map(r => [r.goods_id, `"${r.title.replace(/"/g, '""')}"`, `"${r.cat}"`, r.sku_count, `"${r.price_range}"`, r.is_onsale].join(','))].join('\n')
+      const csv = ['goods_id,title,cat,sku_count,price_range,stock,sold,is_onsale', ...rows.map(r => [r.goods_id, `"${r.title.replace(/"/g, '""')}"`, `"${r.cat}"`, r.sku_count, `"${r.price_range}"`, r.stock, r.sold, r.is_onsale].join(','))].join('\n')
       fs.writeFileSync(path.join(dir, `pdd-goods-${mode}-${Date.now()}.csv`), csv, 'utf8')
     }
   } else if (mode === 'detail' || mode === 'sku') {
-    if (!goodsId) { emit({ ok: false, failureKind: 'api_error', text: 'detail/sku 模式必须带 --goods-id' }); await browser.close(); process.exit(2) }
+    if (!goodsId) { emit({ ok: false, failureKind: 'api_error', text: 'detail/sku 模式必须带 --goods-id' }); await browser?.close(); process.exit(2) }
     const r = await call('https://mms.pinduoduo.com/vodka/v2/mms/query/sku/info', { goodsId: Number(goodsId) })
     const skus = r?.result || []
     const items = skus.map(s => ({
@@ -322,14 +454,14 @@ const wantCsv = process.argv.includes('--csv')
     })
   } else if (mode === 'offsale' || mode === 'onsale' || mode === 'delete') {
     // ── 写操作（L2）：下架 / 上架 / 删除 ──
-    if (!goodsId) { emit({ ok: false, failureKind: 'api_error', text: `${mode} 模式必须带 --goods-id` }); await browser.close(); process.exit(2) }
+    if (!goodsId) { emit({ ok: false, failureKind: 'api_error', text: `${mode} 模式必须带 --goods-id` }); await browser?.close(); process.exit(2) }
     if (!process.argv.includes('--confirm')) {
       const verb = mode === 'offsale' ? '下架' : mode === 'onsale' ? '上架' : '删除'
       emit({
         ok: false, needConfirm: true, mode, goodsId,
         text: `【${verb}预览 · 需用户确认】\n商品：${goodsId}\n操作：${verb}${mode === 'delete' ? '（删除需先下架；接口直删可能被服务端会话绑定拦截，下架 100% 可靠）' : ''}\n\n确认无误后请带 --confirm true 重新调用。注意：这是不可撤销的真实操作（L2）。`,
       })
-      await browser.close()
+      await browser?.close()
       process.exit(0)
     }
     const gid = Number(goodsId)
@@ -375,7 +507,7 @@ const wantCsv = process.argv.includes('--csv')
       })
     }
   } else if (mode === 'commit') {
-    if (!goodsId) { emit({ ok: false, failureKind: 'api_error', text: 'commit 模式必须带 --goods-id' }); await browser.close(); process.exit(2) }
+    if (!goodsId) { emit({ ok: false, failureKind: 'api_error', text: 'commit 模式必须带 --goods-id' }); await browser?.close(); process.exit(2) }
     const r = await call('https://mms.pinduoduo.com/glide/v2/mms/query/commit/on_shop/detail', { goods_id: Number(goodsId) })
     const res = r?.result || {}
     fs.mkdirSync(path.join(process.cwd(), 'artifacts', 'pdd-works'), { recursive: true })
@@ -391,17 +523,17 @@ const wantCsv = process.argv.includes('--csv')
   } else if (mode === 'edit') {
     // ── 编辑商品（复用发布引擎，入口改为编辑页）──
     // 链路：读现有提交体（on_shop/detail）→ 合并用户改动 → 编辑页 hijack 改包 → commit/submit
-    if (!goodsId) { emit({ ok: false, failureKind: 'api_error', text: 'edit 模式必须带 --goods-id' }); await browser.close(); process.exit(2) }
+    if (!goodsId) { emit({ ok: false, failureKind: 'api_error', text: 'edit 模式必须带 --goods-id' }); await browser?.close(); process.exit(2) }
     const productFile = argOf('product-file')
     const productStr = argOf('product')
     if (!productFile && !productStr) {
       emit({ ok: false, failureKind: 'api_error', text: 'edit 模式必须带 --product-file 或 --product（要改成的商品数据）' })
-      await browser.close(); process.exit(2)
+      await browser?.close(); process.exit(2)
     }
     // 读商品数据
     let prodRaw = ''
     try { prodRaw = productFile ? fs.readFileSync(productFile, 'utf8') : productStr } catch (e) {
-      emit({ ok: false, failureKind: 'api_error', text: `读取商品文件失败：${e.message}` }); await browser.close(); process.exit(2)
+      emit({ ok: false, failureKind: 'api_error', text: `读取商品文件失败：${e.message}` }); await browser?.close(); process.exit(2)
     }
     // 读现有提交体（合并基准）
     const cur = await call('https://mms.pinduoduo.com/glide/v2/mms/query/commit/on_shop/detail', { goods_id: Number(goodsId) })
@@ -410,9 +542,9 @@ const wantCsv = process.argv.includes('--csv')
     fs.writeFileSync(path.join(process.cwd(), 'artifacts', 'pdd-works', `edit-before-${goodsId}.json`), JSON.stringify(cur, null, 2), 'utf8')
     if (!Object.keys(curRes).length) {
       emit({ ok: false, failureKind: 'api_error', text: `读不到商品 ${goodsId} 的提交体（可能已下架/删除/接口频控）` })
-      await browser.close(); process.exit(2)
+      await browser?.close(); process.exit(2)
     }
-    await browser.close()
+    await browser?.close()
 
     // 调发布引擎（hijack 模式），入口传 goodsId 走编辑页
     const { pddPublish2 } = await import(`file:///${PLUGIN_ROOT}/lib/pdd-publish2.js`)
@@ -476,9 +608,9 @@ const wantCsv = process.argv.includes('--csv')
   } else {
     emit({ ok: false, failureKind: 'api_error', text: `未知 mode：${mode}。可用：overview / list / detail / sku / commit / edit / spec-pool` })
   }
-  clearInterval(hb)
+  if (typeof hb !== 'undefined' && hb) clearInterval(hb)
   if (sessForT2) await sessForT2.close().catch(() => {})
-  await browser.close()
+  await browser?.close()
 })().catch(async (e) => {
   if (typeof sessForT2 !== 'undefined' && sessForT2) await sessForT2.close().catch(() => {})
   // ★ 风控异常 → 友好提示（而不是裸的 RISK_54001）
@@ -528,8 +660,16 @@ const wantCsv = process.argv.includes('--csv')
     emit({ ok: false, failureKind: n.failureKind, text: n.text })
     process.exit(2)
   } catch { /* ignore */ }
+  if (process.env.PDD_DEBUG_STACK) console.error('=== OUTER STACK ===\n' + (e?.stack || String(e)))
   emit({ ok: false, failureKind: 'api_error', text: `执行异常：${e?.message || String(e)}` })
   process.exit(1)
+}).then(() => {
+  // ★ 2026-11-10：**统一收尾退出**。
+  //   各模式分支 emit 之后都没有 exit，代码跑到末尾但进程不退出：
+  //   纯 Node 通道下 jsdom / undici 的句柄要等 GC，事件循环不空 →
+  //   调用方 WaitForExit 超时，把「成功」误判成「卡死」。
+  //   这里统一硬退（emit 用的是 process.stdout.write 同步写，已 flush）。
+  process.exit(0)
 })
 
 

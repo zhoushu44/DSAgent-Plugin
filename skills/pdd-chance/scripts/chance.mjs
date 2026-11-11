@@ -64,6 +64,22 @@ const require = createRequire(PKG_BASE)
 const argOf = (n) => { const i = process.argv.indexOf(`--${n}`); return i >= 0 && i + 1 < process.argv.length ? process.argv[i + 1] : undefined }
 const emit = (obj) => { process.stdout.write('__DSAGENT_RESULT__' + JSON.stringify(obj) + '\n') }
 
+/**
+ * 收尾退出。
+ *
+ * ★ 不要直接跑完就结束：Node 24 + undici 的 keep-alive socket 还挂在校验池里，
+ *   事件循环不会空 → 进程「假卡死」（结果早已打印，但调用方以为超时）。
+ *   → 主动关 undici agent + 设 exitCode，1.5s 兜底硬退。
+ */
+const finish = async (code) => {
+  process.exitCode = code
+  try {
+    const { getGlobalDispatcher } = await import('undici').catch(() => ({}))
+    await getGlobalDispatcher?.()?.close?.()
+  } catch { /* ignore */ }
+  setTimeout(() => process.exit(code), 1500).unref()
+}
+
 const mode = argOf('mode') || 'list'
 const pageNo = Math.max(1, parseInt(argOf('page') || '1', 10) || 1)
 const size = Math.min(100, Math.max(1, parseInt(argOf('size') || '35', 10) || 35))
@@ -117,7 +133,11 @@ const confirm = process.argv.includes('--confirm') && argOf('confirm') !== 'fals
 const PRICE_LABEL_NAMES = { 0: '品质档', 1: '主流档', 2: '引流档' }
 
 ;(async () => {
-  const puppeteer = require('puppeteer-core')
+  // ★ 2026-11-10：puppeteer **按需加载**。
+  //   之前无条件 require('puppeteer-core')：纯 Node 模式虽然不开浏览器，
+  //   但 puppeteer 模块会留下未清的事件循环句柄 → 结果早就打印完了进程却不退出
+  //   （表现为「卡死」，实际 stdout 已经有完整 JSON）。
+  let puppeteer = null
   const { CredentialStore } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/lib/services/credential-store.js')))
   const { checkCooldown, detectSlider, autoSolveSlider, fmtRemain, getCaptchaToken, saveCaptchaToken, extractCaptchaToken, tryAcquireAccountLock, releaseAccountLock, heartbeatAccountLock } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-risk.mjs')))
   const getTok = getCaptchaToken, saveTok = saveCaptchaToken, extractTok = extractCaptchaToken
@@ -197,20 +217,28 @@ const PRICE_LABEL_NAMES = { 0: '品质档', 1: '主流档', 2: '引流档' }
 
   }
 
-  const browser = await puppeteer.launch({
-    executablePath: CHROME_PATH,
-    userDataDir: profile,
-    headless: false,
-    defaultViewport: null,        // ★ 用真实窗口尺寸（SDK 会采集 innerWidth/screen.*）
-    ignoreDefaultArgs: ['--enable-automation'],
-    args: STEALTH_ARGS,
-  })
-  const page = (await browser.pages())[0] || await browser.newPage()
-  // ★ 注入反检测（webdriver / plugins / languages / chrome.runtime）
-  await page.evaluateOnNewDocument(STEALTH_SCRIPT)
+  // ★ 2026-11-10：**按需开浏览器** + 走统一启动入口。
+  //   ① chance.* 接口都在 mms 域，纯 Node 早就通了（anti-content + 凭证库 Cookie）。
+  //      只有 publish（页面表单）/ follow-check（要页面上下文）真的需要页面。
+  //      之前无条件开浏览器 + 硬等 22s（12s+10s）→ 单次 3~5 分钟，纯浪费。
+  //   ② 手搓 puppeteer.launch 拿不到 launchOptions 里的
+  //      「让常驻签名服务释放 Profile 锁」逻辑 → 守护进程占着 Profile 时直接 Failed to launch。
+  const NEED_BROWSER = ['publish', 'follow-check'].includes(mode) || process.argv.includes('--browser')
+  const { launchOptions } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-launch.mjs')))
+  let browser = null
+  let page = null
+  if (NEED_BROWSER) {
+    puppeteer = require('puppeteer-core')
+    browser = await puppeteer.launch(launchOptions(SHOP, { args: STEALTH_ARGS }))
+    page = (await browser.pages())[0] || await browser.newPage()
+    // ★ 注入反检测（webdriver / plugins / languages / chrome.runtime）
+    await page.evaluateOnNewDocument(STEALTH_SCRIPT)
+  }
+  /** 安全关闭（纯 Node 模式 browser 为 null） */
+  async function closeB() { if (!browser) return; try { await closeB() } catch { /* ignore */ } browser = null; page = null }
 
-  // ★ 凭证库有 PASS_ID 就注入，覆盖 profile 里的旧票
-  if (storePid) {
+  // ★ 凭证库有 PASS_ID 就注入，覆盖 profile 里的旧票（仅浏览器模式）
+  if (page && storePid) {
     try {
       const jar = Object.entries(storeAcc.cookies).filter(([, v]) => v !== '' && v != null)
       const cookieList = jar.flatMap(([name, value]) => ([
@@ -223,8 +251,9 @@ const PRICE_LABEL_NAMES = { 0: '品质档', 1: '主流档', 2: '引流档' }
       console.error(`[chance] Cookie 注入失败: ${e.message?.slice(0, 80)}`)
     }
   }
-  await page.evaluateOnNewDocument(STEALTH_SCRIPT);
+  // ★ 这两者在纯 Node 模式下 page 为 null —— 必须安全返回，不能崩
   const safeEval = async (fn, arg) => {
+    if (!page) return null
     for (let i = 0; i < 15; i++) {
       for (const f of page.frames()) { try { return await f.evaluate(fn, arg) } catch { /* 换 */ } }
       await new Promise(r => setTimeout(r, 1500))
@@ -232,6 +261,7 @@ const PRICE_LABEL_NAMES = { 0: '品质档', 1: '主流档', 2: '引流档' }
     return null
   }
   const safeGoto = async (url, opts) => {
+    if (!page) return null
     for (let k = 0; k < 4; k++) {
       try { return await page.goto(url, opts) } catch (e) {
         if (/detached Frame|Session closed/i.test(e.message) && k < 3) { await new Promise(r => setTimeout(r, 2000)); continue }
@@ -240,6 +270,11 @@ const PRICE_LABEL_NAMES = { 0: '品质档', 1: '主流档', 2: '引流档' }
     }
   }
 
+  // ══════════════════════════════════════════════════════════════
+  //  ★ 2026-11-10：以下「建会话 / 过滑块 / hook 签名 / 预热机会商品页」
+  //    全部只在浏览器模式下有意义。纯 Node 模式直接跳过（省 22s+）。
+  // ══════════════════════════════════════════════════════════════
+  if (page) {
   // ① 商品列表建会话（机会商品页需要 mms 会话）
   await safeGoto('https://mms.pinduoduo.com/goods/goods_list', { waitUntil: 'domcontentloaded', timeout: 60000 })
   await new Promise(r => setTimeout(r, 12000))
@@ -247,7 +282,7 @@ const PRICE_LABEL_NAMES = { 0: '品质档', 1: '主流档', 2: '引流档' }
     // ★ 2026-10-24：区分「真未登录」与「接口要签名但页面没跳登录」
     //   机会商品页需要 mms 会话，但 /opportunity-goods/* 本身不要签名。
     //   若页面跳登录页，说明该 profile 的票据确实失效。
-    await browser.close()
+    await closeB()
     emit({
       ok: false, failureKind: 'token_expired',
       text: [
@@ -268,7 +303,7 @@ const PRICE_LABEL_NAMES = { 0: '品质档', 1: '主流档', 2: '引流档' }
     const solved = await autoSolveSlider(SHOP, page)
     console.error(`[chance] ${solved.text}`)
     if (!solved.ok) {
-      await browser.close()
+      await closeB()
       emit({ ok: false, failureKind: 'risk_control', text: `滑块自动过失败：${solved.text}` })
       process.exit(2)
     }
@@ -309,6 +344,7 @@ const PRICE_LABEL_NAMES = { 0: '品质档', 1: '主流档', 2: '引流档' }
   }
   const sig = await page.evaluate(() => window.__sig).catch(() => null)
   console.error(`[chance] 签名: ${sig ? '有' : '无（该域不需要，无影响）'}`)
+  }  // ← 结束 if (page)：浏览器初始化段
 
   // ★ 2026-11-04：节流已统一由 pdd-guard 的 beforeCall 负责（内部就是 reserveSlot）。
   //   原来的进程内 `lastHit` Map + MIN_GAP 兜底已删除 —— 它曾经是"假节流"的证据，
@@ -321,7 +357,30 @@ const PRICE_LABEL_NAMES = { 0: '品质档', 1: '主流档', 2: '引流档' }
     // ★ 2026-11-05：优先走基座注册表；未登记的路径回退到原来的直发逻辑
     const regName = CHANCE_API_MAP[apiPath]
     if (regName) {
-      const rr = await pddApi(page, regName, body, { shopKey: SHOP, guard, raw: true })
+      // ★ 2026-11-10：纯 Node 模式下 page 为 null。
+      //   必须传 account（凭证库 Cookie + 种子）让基座走纯 Node；
+      //   传 null 当 page 会导致 no_channel。
+      const nodeAccount = storeAcc?.cookies
+        ? { cookies: storeAcc.cookies, localStorage: (await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-seed-store.mjs')))).readSeed(SHOP)?.localStorage || {} }
+        : null
+      const rr = await pddApi(nodeAccount ? null : page, regName, body, {
+        shopKey: SHOP, guard, raw: true,
+        account: nodeAccount || undefined,
+        ...(nodeAccount && page ? { fallbackPage: page } : {}),
+      })
+      // ★ 2026-11-11：**失败必须抛错，不能返回 null**。
+      //   原来 `return rr.raw ?? null` —— 接口失败时 pddApi 返回 {ok:false, raw:null}，
+      //   调用方拿到 null → `r?.result || {}` → `list = []` →
+      //   报 ok:true「0 条商机」，把「没取到」伪装成「本来就没有」，用户完全看不出。
+      //   实测同一模式在 pdd-shop --mode goods 上就踩过（goodsDetailList 恒空）。
+      if (!rr || rr.ok !== true) {
+        const ec = rr?.ec ?? rr?.failureKind ?? 'unknown'
+        const e = new Error(`接口 ${regName} 取数失败：${ec}${rr?.hint ? `（${String(rr.hint).slice(0, 70)}）` : ''}`)
+        e.__apiFail = true
+        e.ec = rr?.ec
+        e.failureKind = rr?.failureKind
+        throw e
+      }
       return rr.raw ?? null
     }
     const pre = await guard.beforeCall('https://mms.pinduoduo.com' + apiPath)
@@ -480,7 +539,7 @@ const PRICE_LABEL_NAMES = { 0: '品质档', 1: '主流档', 2: '引流档' }
     //   组合 3 个只读接口：热词推荐 + 热搜关联商品 + 类目信息
     if (!chanceId) {
       emit({ ok: false, failureKind: 'api_error', text: '--mode detail 需要 --chance-id' })
-      await browser.close(); process.exit(2)
+      await closeB(); process.exit(2)
     }
     // ★ 2026-11-05 修：`get_keywords_recommend` 本身就是**商机详情接口**，
     //   实测返回 { chance_id, image_url, goods_name, group_price, hot_index,
@@ -491,7 +550,7 @@ const PRICE_LABEL_NAMES = { 0: '品质档', 1: '主流档', 2: '引流档' }
     const d = kw?.result || {}
     if (!d.chance_id) {
       emit({ ok: false, failureKind: 'api_error', text: `商机 ${chanceId} 查不到详情（可能已过期/已下架）。请用 --mode pick 重新选。原始：${JSON.stringify(kw).slice(0, 200)}` })
-      await browser.close(); process.exit(2)
+      await closeB(); process.exit(2)
     }
     const hotKeywords = (d.hot_keywords || []).map(k => k.keyword).filter(Boolean)
     const hotList = (d.hot_keywords || []).filter(k => k.hot)
@@ -559,13 +618,13 @@ const PRICE_LABEL_NAMES = { 0: '品质档', 1: '主流档', 2: '引流档' }
      */
     if (!chanceId) {
       emit({ ok: false, failureKind: 'api_error', text: '--mode publish 需要 --chance-id' })
-      await browser.close(); process.exit(2)
+      await closeB(); process.exit(2)
     }
     const productFile = argOf('product-file')
     let product = null
     if (productFile) {
       try { product = JSON.parse(fs.readFileSync(productFile, 'utf8')) }
-      catch (e) { emit({ ok: false, failureKind: 'api_error', text: `读取 product-file 失败：${e.message}` }); await browser.close(); process.exit(2) }
+      catch (e) { emit({ ok: false, failureKind: 'api_error', text: `读取 product-file 失败：${e.message}` }); await closeB(); process.exit(2) }
     }
     // 校验商机有效性：**用详情接口**（get_keywords_recommend），不用 home_list 回捞
     //   ★ 2026-11-05 修：home_list 有分页/排序漂移，目标商机可能在第 6 页之后 → 误判"不在池中"
@@ -575,7 +634,7 @@ const PRICE_LABEL_NAMES = { 0: '品质档', 1: '主流档', 2: '引流档' }
     const pubDetail = pubKw?.result || pubKw || {}
     if (!pubDetail.chance_id) {
       emit({ ok: false, failureKind: 'api_error', text: `商机 ${chanceId} 无效或已下架（详情接口查不到）。请用 --mode pick 重新选。原始：${JSON.stringify(pubKw).slice(0, 200)}` })
-      await browser.close(); process.exit(2)
+      await closeB(); process.exit(2)
     }
     // labels 尽量从 home_list 补（找不到不影响发布，只是预览少一行）
     let pubCard = null
@@ -620,7 +679,7 @@ const PRICE_LABEL_NAMES = { 0: '品质档', 1: '主流档', 2: '引流档' }
       const qr = await call(`${BASE}/quick_release`, { chance_id: chanceId })
       if (!qr?.success && qr?.error_code !== 1000000) {
         emit({ ok: false, failureKind: 'api_error', text: `quick_release 失败：${qr?.error_msg || JSON.stringify(qr).slice(0, 200)}` })
-        await browser.close(); process.exit(1)
+        await closeB(); process.exit(1)
       }
       const resQr = qr?.result && typeof qr.result === 'object' ? qr.result : qr
       const draftId = resQr?.draft_id || resQr?.goods_commit_id || resQr?.draftId || resQr?.goodsCommitId
@@ -766,7 +825,7 @@ const PRICE_LABEL_NAMES = { 0: '品质档', 1: '主流档', 2: '引流档' }
     const hideGroup = groups.find(g => g.params_key === 'hide_labels')
     if (!labelGroup) {
       emit({ ok: false, failureKind: 'api_error', text: 'get_filters 未返回 labels 组，平台结构可能已变更。' })
-      await browser.close(); process.exit(2)
+      await closeB(); process.exit(2)
     }
     // 中文名映射（服务端只给 title，英文 name 要靠实测枚举）
     const NAME_HINTS = {
@@ -825,12 +884,13 @@ const PRICE_LABEL_NAMES = { 0: '品质档', 1: '主流档', 2: '引流档' }
     })
   } else {
     emit({ ok: false, failureKind: 'api_error', text: `未知 mode：${mode}。可用：pick / labels / list / detail / publish / mine / collection / follow-check / mission / filters / cates` })
-    await browser.close(); process.exit(2)
+    await closeB(); process.exit(2)
   }
-  await browser.close()
-})().catch(e => {
+  await closeB()
+  await finish(0)
+})().catch(async e => {
   emit({ ok: false, failureKind: 'api_error', text: `执行异常：${e?.message || String(e)}` })
-  process.exit(1)
+  await finish(1)
 })
 
 
