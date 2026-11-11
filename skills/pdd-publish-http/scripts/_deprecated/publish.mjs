@@ -201,7 +201,12 @@ const maxSizes = parseInt(argOf('max-sizes') || '3', 10)
 const categoryKw = argOf('category') || '儿童睡衣'
 
 const emit = (obj) => {
-  process.stdout.write('__DSAGENT_RESULT__' + JSON.stringify(obj) + '\n')
+  process.stdout.write('__DSAGENT_RESULT__' + JSON.stringify({
+    ...obj,
+    // 宿主取失败原因只认 message / error / error_message / detail / reason；
+    // 只写 text 会让真实原因被吞掉，宿主只能报「未知错误」。
+    message: obj.message ?? (typeof obj.text === 'string' ? obj.text : undefined),
+  }) + '\n')
 }
 
 if (!productFile && !productStr && !fromPack) {

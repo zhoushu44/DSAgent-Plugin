@@ -32,7 +32,12 @@ const PLUGIN_ROOT = path.resolve(HERE, '..', '..', '..')
 const require = createRequire(path.join(PLUGIN_ROOT, 'package.json'))
 
 const sleep = ms => new Promise(r => setTimeout(r, ms))
-const emit = (obj) => process.stdout.write('__DSAGENT_RESULT__' + JSON.stringify(obj) + '\n')
+const emit = (obj) => process.stdout.write('__DSAGENT_RESULT__' + JSON.stringify({
+  ...obj,
+  // 宿主取失败原因只认 message / error / error_message / detail / reason；
+  // 只写 text 会让真实原因被吞掉，宿主只能报「未知错误」（2026-11 睡衣工作流 10 轮全红的真凶之一）。
+  message: obj.message ?? (typeof obj.text === 'string' ? obj.text : undefined),
+}) + '\n')
 const log = (...a) => console.log('[' + new Date().toTimeString().slice(0, 8) + ']', ...a)
 
 /** 参数解析（支持 --key value / --key=value / --flag） */
