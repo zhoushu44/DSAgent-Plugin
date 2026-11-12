@@ -123,19 +123,28 @@
 
 ## 六、C 类：无登录态 / 权限（15 个）—— 需要用户操作一次
 
+> ⚠️ **本节结论已于 2026-11-10 部分推翻，见 PDD-KNOWLEDGE.md「十一、视频域（live）纯 Node」**。
+> live 域**不需要** `VerifyAuthToken`、也**没有** `msfe-pc-cookie-captcha-token`；
+> 真正的门槛是 `anti-content` 签名 + live 域专属票据 `L_PASS_ID`。
+> 账号登录过 live 域后，读接口可纯 Node 跑通（实测 list / qualify / topics / published / data / permission）。
+
 ```
-live.pinduoduo.com/n-creator/video/home → 302 到 /login
-Profile 里没有 msfe-pc-cookie-captcha-token → 拿不到 VerifyAuthToken
+live.pinduoduo.com/n-creator/video/home → 该 Profile 从未登录过 live 域时 302 到 /login
+→ 取不到 live 域专属票据 L_PASS_ID（不是 VerifyAuthToken）
 ```
 
-**基座已就位**：live 域的 Node 通道已经写好了（Chrome 取票 + Node 发请求），
+**基座已就位**：live 域的 Node 通道（`anti-content` 签名 + `L_PASS_ID` 按域取票），
 只要该 Profile 登录过一次 live.pinduoduo.com，**基座自动接管，不用改任何 skill**。
 
-**现在**：live 域返回 40001 时会明确提示「该 Profile 需先登录 live.pinduoduo.com」。
+**现在**：live 域返回 40001 时会明确提示票据问题；`pdd-video` 另有一层
+「Node 失败 → 自动拉起浏览器重试一次」的兜底（2026-11-12 补）。
 
 接口：`video.list / query / publish / publishPage / publishQualification / signedContract /
 topicList / prePublishDelete / videoFlowCard / replayPromotionCfg / anchorInfo /
 statsOverview / statsTrend / weeklyReport / mallDiagnosis`
+
+**其中 `video.query`（`/api/backbone/video/query`）当前整体不可用**：四种参数组合
+（含页面内直发）全返回 `40002 系统异常`，且连带 30s 账号冷却。查已发布视频用 `video.list`。
 
 ### AI 素材域（4 个）—— E 类：连接层失败
 

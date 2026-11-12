@@ -82,9 +82,11 @@ metadata:
 
 - **账号已绑定**：「账号连接」页已绑定**拼多多商家后台**（`live.pinduoduo.com` 走 mms SSO）。
 - **登录态有效**：失效时返回 `token_expired`。
+- **该账号必须登录过一次 live 域**：live 域用自己那套票据（`L_PASS_ID`），凭证库里没有就取不到。
+  实测同一家店两个账号，只有一个登录过多多视频创作者后台 → 另一个 node 恒 40001（会自动兜底走浏览器）。
 - **上传/删除是 L2 写操作**：必须两步走——先不带 `--confirm` 拿预览给用户看，**明确同意后**才带 `--confirm` 执行。
 - **视频文件要求**：本地绝对路径，`.mp4/.wmv/.mov/.avi/.m4v`，单文件 ≤500MB。
-- **Chrome 可用**（签名与上传需要页面环境）。
+- **Chrome 可用**：读类模式优先纯 Node；但 Node 失败时会自动拉起浏览器兜底，所以 Chrome 仍需可用。
 
 <!-- PRECONDITIONS:END -->
 
@@ -338,12 +340,16 @@ feed 结构（chunk 2990-59211e1343c3e949.js 官方构造逻辑）：
 | 坑 | 说明 |
 |---|---|
 | `live.pinduoduo.com` 是独立域 | 但通过 `generateAccessToken` + `calpis/mms/user/login` 打通，**不用单独扫码** |
-| 接口不在 mms 域 | 所以 `pdd-client` 的三通道签名用不上，走浏览器页面上下文 |
-| `prePublish/query` 返回结构 | **双层 result**：`{result:{result:{list,total,hasMore}}}`，已做多形态兼容 |
+| **读类走纯 Node，写类必须浏览器** | 2026-11-10 起 live 域 Node 通道已打通（`anti-content` 签名 + live 域专属 `L_PASS_ID`），`list/qualify/topics/published/data/permission` 都不开浏览器；`upload/delete` 需要页面上下文，启动即开浏览器 |
+| **票据要按域取** | mms 用 `PASS_ID`，live 用 `L_PASS_ID` + `HEARTBEAT_PASS_ID`。拿 mms 的票打 live 域 → HTTP 403 + `40001`（空文案，看着像未登录，其实是票不对域） |
+| **冷启动会误报 40001** | 签名守护进程里还没有该账号的 live 票据时首次调用会 40001。已有自动兜底：Node 失败会自动拉起浏览器重试一次（实测有效）；也可手动 `daemonWarm(shopKey)` 预热 |
+| **`prePublish/query` 返回结构** | **双层 result**：`{result:{result:{list,total,hasMore}}}`，已做多形态兼容 |
 | 埋点接口噪声 | `/api/pmm/*` `/xg/pfb/*` 是埋点，已排除 |
 | **不拿签名票据 → upload_init 403** | 必须先调 `/live/galerie/signature`（`bucket_tag=backbone-video-sign`） |
-| `/kiwi/obs/anchor/info` 是 GET | POST 会 405 |
-| `/api/backbone/video/query` 的 status | 0~4 有效，5 报 BAD_PARAMS，-1 = 全部 |
+| **发布不能用 fetch 直调** | `/api/backbone/video/publish` 是强校验接口，fetch 稳定返回 `2000000`；必须 CDP 真实点击，让页面拦截器注入 `anti-content` |
+| `/kiwi/obs/anchor/info` 是 GET | POST 会 405；且该接口服务端常返回 `50000 http error:500`（平台侧） |
+| `/api/backbone/video/query` 的 status | 0~4 有效，5 报 BAD_PARAMS，-1 = 全部。**但该接口当前整体不可用**：四种参数组合（含页面内直发）全返回 `40002 系统异常`，且会连带 30s 账号冷却 → 查已发布视频请用 `--mode list` |
+| **40002 不要重试** | 接口级持久频控，重试只会延长封禁。代码里 `40002/100001` **不触发**浏览器兜底（只有 40001/43001/54001/54003/429/430 才兜底） |
 
 ## 上传要求（页面提示）
 

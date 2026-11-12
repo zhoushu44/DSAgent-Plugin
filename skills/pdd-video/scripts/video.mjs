@@ -92,6 +92,27 @@ const finish = async (code) => {
   } catch { /* ignore */ }
   setTimeout(() => process.exit(code), 1500).unref()
 }
+
+/**
+ * ★ 2026-11-12：**早退必须真正中断**。
+ *
+ *   背景（d86f088 引入的回归）：那一轮把 `process.exit(0)` 批量换成了 `await finish(0)`，
+ *   目的是绕开「undici keep-alive 未关 → 进程退出撞 libuv 断言」。
+ *   但 finish() 只做两件事：设 exitCode + 挂一个 **unref** 的 1.5s 定时器 ——
+ *   它 **不终止执行流**。unref 的定时器甚至不能保证进程存活到那一刻。
+ *
+ *   后果（L2 安全门禁失效，实测复现）：
+ *     `--mode upload` 不带 --confirm 时，打印完「上传预览 · 需用户确认」后，
+ *     代码继续往下跑 → 拉起浏览器 → 真的把视频传上去了。
+ *     预览门禁形同虚设 —— 用户没确认也照发。
+ *
+ *   现在：早退一律走 halt() —— 先关连接池（拿到 finish 的防断言收益），
+ *   再 process.exit() 真断。调用点必须自己保证浏览器已关（现有早退点均已 closeBrowser）。
+ */
+const halt = async (code) => {
+  await finish(code)
+  process.exit(code)
+}
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 const mode = argOf('mode') || 'list'
@@ -112,7 +133,7 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
     const any = store.listAccounts().filter(a => a.platform === 'pdd_mms')
     SHOP = argOf('account') || any.slice(-1)[0]?.shop_key
   }
-  if (!SHOP) { emit({ ok: false, failureKind: 'not_bound', text: '未绑定拼多多商家后台账号' }); await finish(2) }
+  if (!SHOP) { emit({ ok: false, failureKind: 'not_bound', text: '未绑定拼多多商家后台账号' }); await halt(2) }
   if (mmsAccs.length > 1 && !argOf('account')) {
     console.error(`[pdd-video] 多个账号可用，默认取 ${SHOP}；可用 --account 指定：\n` + mmsAccs.map(a => `  ${a.shop_key}  ${a.display_label || ''}`).join('\n'))
   }
@@ -158,7 +179,7 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
       ok: false, failureKind: 'rate_limit',
       text: `账号 ${SHOP} 当前不可执行：${guard.reason}。期间请勿重复调用（会延长封禁）。`,
     })
-    await finish(2)
+    await halt(2)
   }
   guard.startHeartbeat()
   // 收尾统一走 guard.close()（放锁 + 打印汇总）
@@ -167,20 +188,20 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
   // ── upload：文件校验（不启浏览器）──
   const file = argOf('file')
   if (mode === 'upload') {
-    if (!file) { emit({ ok: false, failureKind: 'api_error', text: 'upload 模式必须带 --file <视频路径>' }); await finish(2) }
-    if (!fs.existsSync(file)) { emit({ ok: false, failureKind: 'api_error', text: `文件不存在：${file}` }); await finish(2) }
+    if (!file) { emit({ ok: false, failureKind: 'api_error', text: 'upload 模式必须带 --file <视频路径>' }); await halt(2) }
+    if (!fs.existsSync(file)) { emit({ ok: false, failureKind: 'api_error', text: `文件不存在：${file}` }); await halt(2) }
     const sizeMB = fs.statSync(file).size / 1024 / 1024
     const ext = path.extname(file).toLowerCase()
     if (!['.mp4', '.mov', '.mkv', '.webm', '.avi', '.flv', '.wmv', '.m4v'].includes(ext)) {
-      emit({ ok: false, failureKind: 'api_error', text: `不支持的格式 ${ext}（支持 mp4/mov/mkv/webm/avi/flv/wmv/m4v）` }); await finish(2)
+      emit({ ok: false, failureKind: 'api_error', text: `不支持的格式 ${ext}（支持 mp4/mov/mkv/webm/avi/flv/wmv/m4v）` }); await halt(2)
     }
-    if (sizeMB > 500) { emit({ ok: false, failureKind: 'api_error', text: `文件 ${sizeMB.toFixed(1)}MB 超过 500MB` }); await finish(2) }
+    if (sizeMB > 500) { emit({ ok: false, failureKind: 'api_error', text: `文件 ${sizeMB.toFixed(1)}MB 超过 500MB` }); await halt(2) }
     if (!has('confirm')) {
       emit({
         ok: false, needConfirm: true, mode: 'upload', file,
         text: `【多多视频上传预览 · 需用户确认】\n文件：${path.basename(file)}\n大小：${sizeMB.toFixed(2)}MB\n格式：${ext}\n\n链路（DOM 注入，页面自己走 10 步）：\n  ① prePublish/clear → ② publish/page/query\n  ③ galerie/signature（视频票据）\n  ④ upload_init → ⑤ upload_part × N → ⑥ upload_complete\n  ⑦ meta/query（拿 vid）→ ⑧ 封面票据 → ⑨ store_image → ⑩ prePublish/add\n\n确认后请带 --confirm true 重新调用。\n加 --publish true 可上传后直接发布。`,
       })
-      await finish(0)
+      await halt(0)
     }
   }
 
@@ -192,35 +213,64 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
         ok: false, needConfirm: true, mode: 'delete',
         text: `【多多视频删除预览 · 需用户确认】\n\n未指定 --video-id，将删除待发布队列里的**第一个**视频。\n\n用 --mode list 查看队列里的 vid。\n\n确认后请带 --confirm true 重新调用（可加 --video-id 指定）。`,
       })
-      await finish(0)
+      await halt(0)
     }
     if (!has('confirm')) {
       emit({
         ok: false, needConfirm: true, mode: 'delete', videoId: vid,
         text: `【多多视频删除预览 · 需用户确认】\n视频 vid：${vid}\n\n删除后不可恢复。\n\n确认后请带 --confirm true 重新调用。`,
       })
-      await finish(0)
+      await halt(0)
     }
   }
 
   // ★ 2026-11-10：**按需开浏览器**。
   //   live 域纯 Node 已打通（anti-content 签名 + live 域专属 L_PASS_ID 票据），
-  //   读类模式（list / anchor / qualify / topics）完全不需要浏览器。
-  //   只有「上传视频」这种必须走页面 DOM 注入的模式才开。
+  //   读类模式（list / anchor / qualify / topics）优先不启动浏览器。
+  //   只有「上传视频」这种必须走页面 DOM 注入的模式才**启动即开**。
   const NEED_BROWSER = ['upload', 'delete'].includes(mode)
+  const BROWSER_ARGS = [
+    '--disable-features=CalculateNativeWinOcclusion,IntensiveWakeUpThrottling',
+    '--disable-backgrounding-occluded-windows',
+    '--disable-renderer-backgrounding',
+    '--disable-background-timer-throttling',
+  ]
   let browser = null
   let page = null
+  // ★ 2026-11-12：读类模式的**懒加载浏览器兜底**。
+  //   原实现里 NEED_BROWSER 只有 upload/delete，读类模式 page 恒为 null；
+  //   而 pdd-request 的「Node 失败 → 降级浏览器」分支要求传入 page（hasPage），
+  //   于是 Node 一旦 40001，直接报错，**一点兜底都没有**。
+  //   现在：Node 先跑；只有失败且属于「可兜底错误」时才按需拉浏览器重试一次。
+  let ensurePagePromise = null
+  let nodeDead = false          // Node 通道已确认不可用 → 本进程后续直接走浏览器，避免每次重撞
+  /**
+   * 按需拉起浏览器。
+   * @param {boolean} navigate 是否顺便打开多多视频首页并等就绪。
+   *   upload/delete 走主流程里既有的 goto + waitReady，所以传 false 避免重复等待；
+   *   读类兜底需要页面停在 live 域（fetch 的 credentials:'include' 要同源），传 true。
+   */
+  async function ensurePage(navigate = true) {
+    if (page) return page
+    if (ensurePagePromise) return ensurePagePromise
+    ensurePagePromise = (async () => {
+      console.error('[pdd-video] 拉起浏览器…')
+      const b = await puppeteer.launch(launchOptions(SHOP, { args: BROWSER_ARGS }))
+      const pg = (await b.pages())[0] || await b.newPage()
+      await pg.evaluateOnNewDocument(STEALTH_SCRIPT)
+      browser = b
+      page = pg
+      if (navigate) {
+        await pg.goto(HOME, { waitUntil: 'domcontentloaded', timeout: 90000 }).catch(() => {})
+        await waitReady(400, 30000)
+      }
+      return pg
+    })().catch((e) => { ensurePagePromise = null; throw e })
+    return ensurePagePromise
+  }
+
   if (NEED_BROWSER || process.argv.includes('--browser')) {
-    browser = await puppeteer.launch(launchOptions(SHOP, {
-      args: [
-        '--disable-features=CalculateNativeWinOcclusion,IntensiveWakeUpThrottling',
-        '--disable-backgrounding-occluded-windows',
-        '--disable-renderer-backgrounding',
-        '--disable-background-timer-throttling',
-      ],
-    }))
-    page = (await browser.pages())[0] || await browser.newPage()
-    await page.evaluateOnNewDocument(STEALTH_SCRIPT)
+    await ensurePage(false)
   }
 
   /** 安全关闭浏览器（纯 Node 模式下 browser 为 null，直接跳过） */
@@ -229,6 +279,7 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
     try { await browser.close() } catch { /* ignore */ }
     browser = null
     page = null
+    ensurePagePromise = null
   }
 
   /** 带重试的 evaluate（避开偶发 detached Frame） */
@@ -286,34 +337,85 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
    *   · 有 account 时先试纯 Node，失败自动降级浏览器
    *   · 签名位置（header/body）由基座决定，skill 不再关心
    *
-   * 视频域目前没有 Node 方案（需 VerifyAuthToken），会自动走浏览器。
-   * 代码已统一，将来打通 Node 时无需改这里。
+   * ★ 2026-11-12：**补齐真正的浏览器兜底**。
+   *   基座的降级分支要求传 page（hasPage）；之前读类模式 page 恒为 null，
+   *   所以「自动降级浏览器」从来没生效过 —— Node 一失败就是硬失败。
+   *   现在按下面的顺序走：
+   *     ① page 已存在（upload/delete/--browser）→ 正常传，基座自己降级
+   *     ② 纯 Node 调用 → 成功就用
+   *     ③ Node 失败且是「可能因为通道问题」的错误 → ensurePage() 拉浏览器重试一次
+   *     ④ 浏览器也失败 → 如实报错（不再重试，避免加重风控）
+   *
+   *   哪些错误值得兜底：40001/43001（票据不在 Node 侧）、54001/54003（签名被拒）、
+   *   HTTP 429/430（网关限流，浏览器有时能过）、以及 node 通道异常。
+   *   ★ 40002/100001 是接口级持久频控，**不兜底**（重试只会延长封禁）。
    */
+  const FALLBACK_EC = new Set([40001, 43001, 54001, 54003])
+  const shouldFallback = (r) => {
+    if (!r) return true                                   // Node 抛异常
+    if (r.status === 0) return true                       // 通道层失败（no_channel / 网络）
+    if (r.status === 429 || r.status === 430) return true // 网关限流
+    const ec = r.raw?.errorCode ?? r.raw?.error_code
+    return FALLBACK_EC.has(ec)
+  }
+  let __request = null
+  const getRequest = async () => {
+    if (!__request) ({ request: __request } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-request.mjs')).href))
+    return __request
+  }
+  const callWithFallback = async (p, bd, opts = {}) => {
+    const request = await getRequest()
+    const baseOpts = { account: ACC, shopKey: SHOP, guard, domain: 'live', ...opts }
+
+    // ① 已经有页面 → 交给基座（内部就是 Node 优先、失败降级浏览器）
+    if (page) {
+      return request(p, bd || {}, { ...baseOpts, page })
+    }
+    // Node 已确认不可用 → 直接浏览器，不再白撞一次
+    if (nodeDead) {
+      return request(p, bd || {}, { ...baseOpts, page: await ensurePage(), forceBrowser: true })
+    }
+
+    // ② 纯 Node
+    let r
+    try {
+      r = await request(p, bd || {}, baseOpts)
+    } catch (e) {
+      r = { ok: false, status: 0, raw: null, ec: 'node_throw', hint: String(e?.message).slice(0, 120) }
+    }
+    if (r.ok || !shouldFallback(r)) return r
+
+    // ③ 兜底：拉浏览器重试一次
+    const why = r.ec ?? r.status ?? 'unknown'
+    try {
+      const pg = await ensurePage()
+      const r2 = await request(p, bd || {}, { ...baseOpts, page: pg, forceBrowser: true })
+      if (r2.ok) {
+        nodeDead = true
+        console.error(`[pdd-video] Node 失败（${why}）→ 浏览器兜底成功`)
+      }
+      return r2
+    } catch (e) {
+      // 浏览器也起不来 → 把原始错误如实返回（提示里带上兜底失败原因）
+      if (r && typeof r === 'object') {
+        r.hint = `${r.hint ? r.hint + '；' : ''}浏览器兜底不可用：${String(e?.message).slice(0, 100)}`
+      }
+      return r
+    }
+  }
   const api = async (p, bd, opts = {}) => {
     p = resolvePath(p)
-    const { request } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-request.mjs')).href)
-    const r = await request(p, bd || {}, {
-      page,
-      account: ACC,        // 有种子时会先试 Node
-      shopKey: SHOP,
-      guard,
-      domain: 'live',
-    })
-    return { status: r.status, json: r.raw }
+    const r = await callWithFallback(p, bd, opts)
+    // ★ 2026-11-12：把 ec / hint / channel 一并带出。
+    //   原来只回 {status, json}，上层拿不到「为什么失败」（典型：兜底也起不来时
+    //   status=0 / json=null → getQueue 只能报「取数失败：0」，真正原因全丢了）。
+    return { status: r.status, json: r.raw, ec: r.ec, hint: r.hint, channel: r.channel }
   }
   /** 统一 GET */
   const apiGet = async (p) => {
     p = resolvePath(p)
-    const { request } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-request.mjs')).href)
-    const r = await request(p, {}, {
-      page,
-      account: ACC,
-      shopKey: SHOP,
-      guard,
-      domain: 'live',
-      method: 'GET',
-    })
-    return { status: r.status, json: r.raw }
+    const r = await callWithFallback(p, {}, { method: 'GET' })
+    return { status: r.status, json: r.raw, ec: r.ec, hint: r.hint, channel: r.channel }
   }
   /** 取待发布队列
    *
@@ -326,12 +428,16 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
     const r = await api('/mms/amco/prePublish/query', { pageSize: 50, pageNum: 1 })
     const j = r?.json
     if (!r || r.status !== 200 || (j && j.success === false)) {
+      const code = j?.errorCode ?? j?.error_code ?? r?.ec ?? (r?.status || 'unknown')
+      // 通道层失败（status=0，通常 = 浏览器兜底也起不来）时，hint 才是真正原因
+      const detail = j?.errorMsg || (r?.status === 0 ? r?.hint : '')
       const e = new Error(
-        `待发布队列取数失败：${j?.errorCode ?? j?.error_code ?? r?.status ?? 'unknown'}`
-        + (j?.errorMsg ? `（${j.errorMsg}）` : '')
+        `待发布队列取数失败：${code}`
+        + (detail ? `（${String(detail).slice(0, 160)}）` : '')
+        + (r?.channel === 'browser' ? '［已尝试浏览器兜底］' : '')
       )
       e.__apiFail = true
-      e.ec = j?.errorCode ?? j?.error_code
+      e.ec = code
       throw e
     }
     return j?.result?.result?.list || j?.result?.list || []
@@ -360,7 +466,7 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
         '可用账号：',
         ...mmsAccs.map(a => `  ${a.shop_key}  ${a.display_label || ''}`),
       ].join('\n')
-      await closeBrowser(); emit(out); await finish(2)
+      await closeBrowser(); emit(out); await halt(2)
       }
       await sleep(6000)
     }
@@ -374,7 +480,7 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
       if (!inputs.length) {
         out.ok = false; out.failureKind = 'api_error'
         out.text = '页面找不到上传 input（input[type=file]）'
-        await closeBrowser(); emit(out); await finish(2)
+        await closeBrowser(); emit(out); await halt(2)
       }
       console.error('[pdd-video] DOM 注入文件，页面自己走上传链路...')
       await inputs[0].uploadFile(file)
@@ -404,7 +510,7 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
       if (!uploaded) {
         out.ok = false; out.failureKind = 'api_error'
         out.text = `上传超时（180s）。页面文本长度 ${beforeTxt.length}，未见发布面板刷新。`
-        await closeBrowser(); emit(out); await finish(2)
+        await closeBrowser(); emit(out); await halt(2)
       }
 
       // 取 vid：查队列（多重试，上传后服务端要时间落库）
@@ -711,7 +817,7 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
         if (!list.length) {
           out.ok = false; out.failureKind = 'api_error'
           out.text = '待发布队列已空，没有可删除的视频'
-          await closeBrowser(); emit(out); await finish(2)
+          await closeBrowser(); emit(out); await halt(2)
         }
         vid = list[0].vid
         out.autoPicked = true
@@ -995,7 +1101,7 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
           '先上传一条：',
           '  --mode upload --file x.mp4 --confirm true',
         ].join('\n')
-        await closeBrowser(); emit(out); await finish(2)
+        await closeBrowser(); emit(out); await halt(2)
       }
 
       // 指定了 feedId 就过滤
@@ -1006,7 +1112,7 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
           out.ok = false; out.failureKind = 'api_error'
           out.text = `未找到 feedId=${feedId} 的视频。\n\n当前有 ${feeds.length} 个：\n` +
             items.slice(0, 10).map((f, i) => `  [${i}] feedId=${f.feedId ?? f.id ?? '—'} ${String(f.desc || f.title || '').slice(0, 40)}`).join('\n')
-          await closeBrowser(); emit(out); await finish(2)
+          await closeBrowser(); emit(out); await halt(2)
         }
       }
 
@@ -1135,7 +1241,7 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
     out.ok = false
     out.failureKind = n.failureKind
     out.text = n.text
-    await closeBrowser(); emit(out); await finish(2)
+    await closeBrowser(); emit(out); await halt(2)
   } finally {
     // ★ 2026-11-10：**必须关浏览器**。
     //   不关的话 Chrome 进程会残留并占着 Profile 锁，
@@ -1146,10 +1252,10 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
   }
 
   await closeBrowser(); emit(out)
-  await finish(out.ok ? 0 : 2)
+  await halt(out.ok ? 0 : 2)
 })().catch(async (e) => {
   const { normalizeError } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-error.mjs'))).catch(() => ({}))
   const n = normalizeError ? normalizeError(e, '多多视频') : { failureKind: 'exception', text: `异常：${e?.message?.slice(0, 200)}` }
   emit({ ok: false, failureKind: n.failureKind, text: n.text })
-  await finish(2)
+  await halt(2)
 })
