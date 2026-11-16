@@ -112,7 +112,11 @@ const ckOf = (x) => {
   if (typeof v === 'string') return v.split(';').filter(Boolean).length
   return 0
 }
-const usable = all.filter(x => ckOf(x) > 0 && x.status !== 'reauth_required')
+// ★ status 不作为硬性排除：reauth_required 时 cookie 可能仍有效，
+//   真正是否可用由后面「实际请求能不能通」决定；这里只要求有 cookie
+const usable = all.filter(x => ckOf(x) > 0)
+// 排序：status=valid 的优先
+usable.sort((a, b) => (b.status === 'valid' ? 1 : 0) - (a.status === 'valid' ? 1 : 0))
 let acc = null
 acc = usable.find(x => x.shop_key === shopKey)
 if (!acc) acc = usable.find(x => x.display_label === shopKey)

@@ -61,6 +61,7 @@ import path from 'node:path'
 import { pathToFileURL, fileURLToPath } from 'node:url'
 import { fillByGroup } from './helpers/fill-by-group.mjs'
 import { fillSizeTable as fillSizeTableGeneric } from './helpers/size-table-fill.mjs'
+import { stopSizeChart, hasStopButton } from './helpers/stop-sizechart.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const PLUGIN = path.resolve(__dirname, '..', '..', '..')
@@ -771,18 +772,19 @@ export async function step11_fillSpecs(page, opts = {}) {
           if (!added.ok) { r = added; break }
           await waitDim(specs[i].name, 4000)
         }
-        // ★ 通用尺码表填充（兼容服装尺码 与 运动鞋码）
+        // ★ 通用尺码表填充（传 dim 让 guessTab 按模板 group 精确切标签页）
         r = await fillSizeTableGeneric(page, specs[i].name, specs[i].values, {
           tabHint: tplDim.tabHint || '',
+          dim: tplDim,
         })
         r.name = specs[i].name
         r.mode = 'size-table(generic)'
-        // 只有服装尺码才需要填身高/体重
-        if (r.ok && /尺码/.test(specs[i].name) && !/鞋码/.test(specs[i].name)) {
-          const chart = await readSizeChart(opts.catId || 0)
-          const sc = await fillSizeChartTable(page, specs[i].values, chart)
-          r.sizeChart = sc
-          if (!sc.ok) warnings.push('尺码表身高/体重未全填: ' + (sc.error || ''))
+
+        // ★ 勾完值后停用尺码表（不填身高/体重/衣长等参数）
+        if (r.ok) {
+          const sc = await stopSizeChart(page)
+          r.sizeChartStop = sc
+          if (!sc.ok) warnings.push('停用尺码表失败: ' + (sc.reason || ''))
         }
         break
       }

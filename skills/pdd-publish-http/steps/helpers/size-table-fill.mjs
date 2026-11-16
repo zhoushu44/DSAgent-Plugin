@@ -16,15 +16,37 @@ import { findDim } from './find-dim.mjs'
 
 const norm = s => String(s || '').replace(/[\s\u3000]/g, '').trim()
 
-/** 判断目标值属于哪类标签页 */
-export function guessTab(values, tabHint = '') {
+/**
+ * 判断目标值属于哪个标签页
+ * ★ 优先：按模板 presetValues 的 group 精确查（120 → 身高）
+ * ★ 兜底：按值的形态猜（M → 中国码，40 → 欧码）
+ *
+ * @param {string[]} values   目标值
+ * @param {object}   [dim]    模板维度（含 presetValues）
+ * @param {string}   [tabHint] 模板显式指定的标签页
+ */
+export function guessTab(values, dim = null, tabHint = '') {
   if (tabHint) return tabHint
+
+  // ① 按模板 group 查（最准）
+  const pv = dim?.presetValues || []
+  if (pv.length) {
+    const norm = s => String(s || '').replace(/[\s\u3000]/g, '').trim()
+    const groupSet = new Set()
+    for (const v of values) {
+      const hit = pv.find(x => norm(x.value) === norm(v))
+      if (hit?.group) groupSet.add(hit.group)
+    }
+    // 所有目标值都在同一个 group → 用这个 group
+    if (groupSet.size === 1) return [...groupSet][0]
+    // 多个 group → 用第一个（正常不会出现）
+    if (groupSet.size > 1) return [...groupSet][0]
+  }
+
+  // ② 兜底：按形态猜
   const vs = values.map(v => String(v).trim())
-  // 纯字母码 → 中国码
   if (vs.some(v => /^(XXS|XS|S|M|L|XL|XXL|XXXL|4XL|5XL|均码)$/i.test(v))) return '中国码'
-  // 三段式 160/84A → 中国码
   if (vs.some(v => /^\d{3}\/\d{2}[A-Z]$/.test(v))) return '中国码'
-  // 纯数字（34、40、42.5）→ 欧码
   if (vs.every(v => /^\d+(\.\d+)?$/.test(v))) return '欧码'
   return ''
 }
@@ -154,7 +176,7 @@ export async function fillSizeTable(page, dimName, values, opts = {}) {
   if (!found.ok) return { ok: false, error: `找不到「${dimName}」维度块（共 ${found.count || 0} 个：${(found.names || []).join('/')}）` }
 
   // 切标签页
-  const tab = guessTab(values, opts.tabHint)
+  const tab = guessTab(values, opts.dim || null, opts.tabHint)
   let switched = { ok: true, skipped: true }
   if (tab) {
     switched = await switchSizeTab(page, found.idx, tab)

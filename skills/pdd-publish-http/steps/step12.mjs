@@ -49,13 +49,25 @@ export async function readSkuTable(page) {
     const C = { stock: pick('库存'), multi: pick('拼单价'), price: pick('单买价'), sn: pick('规格编码'), outSn: pick('商品编码'), status: pick('状态') }
 
     const hasSpecColR = heads.some(h => /颜色分类|尺码|鞋码|容量|款式|尺寸/.test(h))
+    // ★ 2026-11-15 修正：不依赖 grid 索引（写入后页面重渲染，rowspan 变化导致错位）
+    //   行内 text input 顺序固定：库存 → 拼单价 → 单买价 → 规格编码
+    //   规格列只有文字无 input，预览图是 file input（已过滤）
+    const HEAD_ORDER = ['库存', '拼单价', '单买价', '规格编码']
+    const inputsOfRow = (ri) => {
+      const tr = trs[ri]
+      if (!tr) return []
+      return [...tr.querySelectorAll('td input')].filter(e =>
+        ['text', 'number', ''].includes((e.type || 'text').toLowerCase())
+      )
+    }
     const val = (ri, c) => {
       if (c < 0) return ''
-      // ★ 无规格类目（无规格列）→ 直接用 td 索引
-      const td = hasSpecColR ? grid[ri]?.get(c) : trs[ri]?.querySelectorAll('td')[c]
-      if (!td) return ''
-      const inp = [...td.querySelectorAll('input')].find(e => ['text', 'number', ''].includes((e.type || 'text').toLowerCase()))
-      return inp ? inp.value : (td.innerText || '').trim()
+      const head = heads[c]
+      if (!head) return ''
+      const pos = HEAD_ORDER.findIndex(k => head.includes(k))
+      if (pos < 0) return ''
+      const inp = inputsOfRow(ri)[pos]
+      return inp ? inp.value : ''
     }
 
     // ★ 调试：记录每行的 td 数与逻辑列映射
