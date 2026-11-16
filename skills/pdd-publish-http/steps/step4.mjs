@@ -54,14 +54,32 @@ function xpFirst(page, xpath) {
   }, xpath).catch(() => null)
 }
 
-/** 读显示的类目文字 */
+/** 读当前真实选中的类目（看带 cateItemCard_checked 的卡片，不用过时的 XPath 节点） */
 export async function readShownCategory(page) {
-  return page.evaluate((xp) => {
-    const r = document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null)
+  return page.evaluate(() => {
+    // ① 首选：带 checked 类的类目卡片（data-tracking-params 里有 choosen_cate=<catId>）
+    const card = document.querySelector('[data-tracking-viewid="choose_cate"][class*="cateItemCard_checked"]')
+    if (card) {
+      const params = card.getAttribute('data-tracking-params') || ''
+      const m = params.match(/choosen_cate=(\d+)/)
+      return {
+        found: true,
+        text: (card.innerText || '').replace(/\s+/g, ' ').trim(),
+        catId: m ? Number(m[1]) : 0,
+      }
+    }
+    // ② 兜底：老 XPath（弹框未打开时的展示节点）
+    const r = document.evaluate('//*[@id="selectedCateId"]/div[1]/div[1]', document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null)
     const el = r.singleNodeValue
-    if (!el) return { found: false, text: '' }
-    return { found: true, text: (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim() }
-  }, XP.shown).catch(() => ({ found: false, text: '' }))
+    if (!el) return { found: false, text: '', catId: 0 }
+    const params = el.getAttribute('data-tracking-params') || ''
+    const m = params.match(/choosen_cate=(\d+)/)
+    return {
+      found: true,
+      text: (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim(),
+      catId: m ? Number(m[1]) : 0,
+    }
+  }).catch(() => ({ found: false, text: '', catId: 0 }))
 }
 
 /** 按 catId 或类目名读模板 */
@@ -91,58 +109,72 @@ function tplNames(tpl) {
 
 function isMatch(shownText, tpl) {
   if (!shownText) return false
-  const s = norm(shownText)
-  return tplNames(tpl).some(n => {
-    const t = norm(n)
-    return t && (s.includes(t) || t.includes(s))
-  })
+  // ★ 页面类目路径必须与模板标题**完全相等**才算一致。
+  //   模板 category.name 形如「童装/婴儿装/亲子装 > 儿童家居服 > 家居服套装」。
+  //   不相等 → 走第 3 步手动选择。
+  const normPath = s => String(s || '')
+    .replace(/[＞›»]/g, '>')
+    .replace(/[／]/g, '/')
+    .replace(/[\s\u3000]/g, '')
+    .trim()
+  const target = normPath(tpl?.category?.name || tpl?.category?.fullName || '')
+  if (!target) return false
+  return normPath(shownText) === target
 }
 
-/** 手动选择类目：三步（按文字找「选择分类」按钮） */
+/** 手动选择类目 —— 严格按用户给定的 4 步流程与选择器 */
 async function manualPick(page, tpl, log, force = false) {
   const c = tpl.category
-  // ★ 搜索词（用户指定规则）：
-  //   类目标题「女装/女士精品 > T恤 > T恤」→ 去掉 > / 和所有空格 → 「女装女士精品T恤T恤」
+  // ★ 搜索词（用户规则）：类目标题去掉 > / 和所有空格
   const fullPath = c.fullName || c.name || c.leafName || (Array.isArray(c.path) ? c.path.join(' > ') : '')
   const keyword = String(fullPath)
     .replace(/\s*>\s*/g, '')
     .replace(/[/／]/g, '')
     .replace(/[\s\u3000]/g, '')
     .trim()
-  const keywordList = [keyword]
   const catId = Number(c.catId)
 
-  // 步骤一：点「选择分类」按钮（按文字直接找）
-  const btnH = await page.evaluateHandle(() => {
-    const nm = s => String(s || '').replace(/[\s\u3000]/g, '').trim()
-    return [...document.querySelectorAll('button, a, span, div')].find(e => {
-      const t = nm(e.innerText)
-      return /选择分类|选择商品分类|修改分类/.test(t) && t.length <= 10 && e.getBoundingClientRect().width > 20
-    }) || null
-  }).catch(() => null)
-  const btn = btnH ? btnH.asElement() : null
+  // ── 第 1 步：找「手动选择商品分类」按钮
+  //   策略：先 data-tracking-viewid，再 XPath，最后**按文本包含「分类」**兜底
+  let btn = await page.$('button[data-tracking-viewid="manually_select_product_category"]').catch(() => null)
   if (!btn) {
-    // 页面上没有「选择分类」按钮但有「下一步」→ 说明类目已默认选好，直接继续
-    // ★ forceManual 模式下不跳过，直接返回失败让上层处理
+    const h = await page.evaluateHandle(() => {
+      const r = document.evaluate('//*[@id="selectedCateId"]/div[2]/button', document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null)
+      return r.singleNodeValue
+    }).catch(() => null)
+    btn = h ? h.asElement() : null
+  }
+  if (!btn) {
+    // ★ 按文本包含「分类」找按钮（用户要求）
+    const h = await page.evaluateHandle(() => {
+      const cands = [...document.querySelectorAll('button')].filter(e => {
+        const r = e.getBoundingClientRect()
+        if (r.width < 10 || r.height < 10) return false
+        const t = (e.innerText || '').replace(/\s+/g, '').trim()
+        return t.includes('分类') && t.length <= 16
+      })
+      // 优先含「手动选择」，否则第一个
+      return cands.find(e => /手动选择/.test(e.innerText || '')) || cands[0] || null
+    }).catch(() => null)
+    btn = h ? h.asElement() : null
+  }
+  if (!btn) {
     if (!force) {
       const hasNext = await page.evaluate(() => !!document.getElementById('bottomSubmitBtnId')).catch(() => false)
-      if (hasNext) { log('  步骤一 无「选择分类」按钮，类目已默认选中，继续'); return { ok: true, shown: '' } }
+      if (hasNext) { log('  第1步 无「手动选择商品分类」，类目已默认选中，继续'); return { ok: true, shown: '' } }
     }
-    return { ok: false, error: '步骤一：找不到「选择分类」按钮' }
+    return { ok: false, error: '第1步：找不到「手动选择商品分类」按钮' }
   }
   await btn.evaluate(el => { el.scrollIntoView({ block: 'center' }); el.click() }).catch(() => { })
-  log('  步骤一 已点「选择分类」')
+  log('  第1步 已点「手动选择商品分类」')
+  await sleep(1500)
 
-  // 步骤二：逐个关键词试，搜到目标类目就停
-  let inpH = await xpFirst(page, XP.searchInput)
-  let inp = inpH ? inpH.asElement() : null
-  if (!inp) inp = await page.$(SEL_SEARCH).catch(() => null)
-  if (!inp) {
-    inp = await page.$('input[placeholder*="关键词搜索分类"], input[placeholder*="类目"]').catch(() => null)
-  }
-  if (!inp) return { ok: false, error: '步骤二：找不到类目搜索输入框' }
+  // ── 第 2 步：输入类目（input[data-tracking-viewid="key_words_search"]）后带左键点击
+  let inp = await page.$('input[data-tracking-viewid="key_words_search"]').catch(() => null)
+  if (!inp) inp = await page.$('input[placeholder*="关键词搜索分类"]').catch(() => null)
+  if (!inp) return { ok: false, error: '第2步：找不到类目搜索输入框' }
 
-  // 步骤二：输入（★ 输入后必须再点一下输入框，下拉才会出来）
+  await inp.click().catch(() => { })
   await inp.evaluate((el, v) => {
     const set = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set
     el.focus()
@@ -150,123 +182,89 @@ async function manualPick(page, tpl, log, force = false) {
     el.dispatchEvent(new Event('input', { bubbles: true }))
     el.dispatchEvent(new Event('change', { bubbles: true }))
   }, keyword).catch(() => { })
-  log(`  步骤二 输入「${keyword}」`)
+  log(`  第2步 输入「${keyword}」`)
+  // ★ 输入后带左键点击（mousedown/mouseup 走真实按下-抬起）
+  const ibox = await inp.boundingBox().catch(() => null)
+  if (ibox) await page.mouse.click(ibox.x + ibox.width / 2, ibox.y + ibox.height / 2).catch(() => { })
+  await sleep(1500)
 
-  // ★ 点一下输入框，触发下拉
-  await inp.click().catch(() => { })
-  await inp.evaluate(el => {
-    el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
-    el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }))
-    el.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-  }).catch(() => { })
-  log('  步骤二 已点输入框触发下拉')
-
-  // ★ 等搜索结果出现 → 点第 1 项（点里面的 span，触发选中）
+  // ── 第 3 步：点下拉第一个 li[1]（li.SPP_searchItem 第一个）
   let picked = false
   for (let i = 0; i < 40; i++) {
-    picked = await page.evaluate(() => {
-      const li = document.querySelector('li[class*="SPP_searchItem"]')
-      if (!li) return false
+    const box = await page.evaluate(() => {
+      const ul = document.querySelectorAll('ul')
+      let li = null
+      // 优先用户给的固定路径 /html/body/div[6]/div/div/div/div/ul/li[1]
+      for (const u of ul) {
+        const cand = u.querySelector('li[class*="SPP_searchItem"]')
+        if (cand) { li = cand; break }
+      }
+      if (!li) return null
       const r = li.getBoundingClientRect()
-      if (r.width < 20 || r.height < 10) return false
-      li.scrollIntoView({ block: 'center' })
-      // 优先点里面的 highlight/important span（真正绑事件的是它）
-      const inner = li.querySelector('span[class*="SPP_important"]') || li.querySelector('span') || li
-      inner.click()
-      li.click()
-      return true
-    }).catch(() => false)
-    if (picked) break
+      if (r.width < 20 || r.height < 10) return null
+      return { x: r.x + Math.min(200, r.width / 2), y: r.y + r.height / 2, text: (li.innerText || '').trim() }
+    }).catch(() => null)
+
+    if (box) {
+      await page.mouse.click(box.x, box.y).catch(() => { })
+      await sleep(1000)
+      const cur = await page.evaluate(() => {
+        const b = document.querySelector('button[data-tracking-click-viewid="cate_confirm"]')
+        return b ? (b.getAttribute('data-tracking-params') || '') : ''
+      }).catch(() => '')
+      if (cur.includes(`cat_id=${catId}`)) { picked = true; log(`  第3步 已选第一个: ${box.text}`); break }
+      // 兜底补一次合成点击
+      await page.evaluate(() => {
+        const li = document.querySelector('li[class*="SPP_searchItem"]')
+        if (!li) return
+        const inner = li.querySelector('span') || li
+        inner.click(); li.click()
+      }).catch(() => { })
+      await sleep(700)
+      const cur2 = await page.evaluate(() => {
+        const b = document.querySelector('button[data-tracking-click-viewid="cate_confirm"]')
+        return b ? (b.getAttribute('data-tracking-params') || '') : ''
+      }).catch(() => '')
+      if (cur2.includes(`cat_id=${catId}`)) { picked = true; log(`  第3步 已选第一个: ${box.text}`); break }
+    }
     await sleep(400)
   }
-  log('  步骤二 点搜索结果: ' + (picked ? '✅' : '❌ 没等到 li.SPP_searchItem'))
-  await sleep(1000)
+  if (!picked) return { ok: false, error: `第3步：未选中目标 cat_id=${catId}` }
 
-  // ★ 点完再校验确认按钮的 cat_id；不符就重新搜一次
+  // ── 第 4 步：确定 button[data-tracking-click-viewid="cate_confirm"]（cat_id=目标）
   let confParams = await page.evaluate(() => {
     const b = document.querySelector('button[data-tracking-click-viewid="cate_confirm"]')
     return b ? (b.getAttribute('data-tracking-params') || '') : ''
   }).catch(() => '')
-  if (confParams && !confParams.includes(`cat_id=${catId}`)) {
-    log(`  ⚠ 首次点选没生效（cat_id=${confParams}），重试一次`)
-    // 清空重输
-    await inp.evaluate((el) => {
-      const set = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set
-      el.focus(); if (set) set.call(el, ''); else el.value = ''
-      el.dispatchEvent(new Event('input', { bubbles: true }))
-    }).catch(() => { })
-    await sleep(500)
-    await inp.evaluate((el, v) => {
-      const set = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set
-      el.focus(); if (set) set.call(el, v); else el.value = v
-      el.dispatchEvent(new Event('input', { bubbles: true }))
-      el.dispatchEvent(new Event('change', { bubbles: true }))
-      el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
-      el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }))
-    }, keyword).catch(() => { })
-    await sleep(1500)
-    // 再点第 1 项
-    await page.evaluate(() => {
-      const li = document.querySelector('li[class*="SPP_searchItem"]')
-      if (!li) return
-      li.scrollIntoView({ block: 'center' })
-      ;(li.querySelector('span') || li).click()
-      li.click()
-    }).catch(() => { })
-    await sleep(800)
-    confParams = await page.evaluate(() => {
-      const b = document.querySelector('button[data-tracking-click-viewid="cate_confirm"]')
-      return b ? (b.getAttribute('data-tracking-params') || '') : ''
-    }).catch(() => '')
-  }
-  if (confParams) log(`  确认按钮: ${confParams}`)
+  log(`  第4步 确认按钮: ${confParams}`)
 
-  // 步骤三：点「确定」
-  // 步骤三：点「确定」
-  //   ① 主：button[data-tracking-click-viewid="cate_confirm"]（此时带 cat_id=目标）
-  //   ② 兜底：用户给的固定 XPath
-  //   ③ 兜底：面板里带「确定/确认」的按钮
   let conf = false
-  const confH = await xpFirst(page, XP.confirmBtn)
-  const confEl = confH ? confH.asElement() : null
-  if (confEl) {
-    confParams = await confEl.evaluate(el => el.getAttribute('data-tracking-params') || '').catch(() => '')
-    await confEl.evaluate(e => { e.scrollIntoView({ block: 'center' }); e.click() }).catch(() => { })
+  const confBtn = await page.$('button[data-tracking-click-viewid="cate_confirm"]').catch(() => null)
+  if (confBtn) {
+    const bb = await confBtn.boundingBox().catch(() => null)
+    if (bb) await page.mouse.click(bb.x + bb.width / 2, bb.y + bb.height / 2).catch(() => { })
+    else await confBtn.evaluate(e => { e.scrollIntoView({ block: 'center' }); e.click() }).catch(() => { })
     conf = true
-    if (confParams && !confParams.includes(`cat_id=${catId}`)) log(`  ⚠ 确认按钮 cat_id: ${confParams}（期望 ${catId}）`)
-    else if (confParams) log(`  ✅ 确认按钮 cat_id 匹配: ${confParams}`)
   }
   if (!conf) {
-    conf = await page.evaluate((xp) => {
-      const el = document.evaluate(xp, document, null, 9, null).singleNodeValue
-      if (!el) return false
-      const r = el.getBoundingClientRect()
-      if (r.width < 10) return false
-      el.scrollIntoView({ block: 'center' })
-      el.click()
-      return true
-    }, XP.confirmBtn2).catch(() => false)
-  }
-  if (!conf) {
+    // 兜底：用户给的固定 XPath /html/body/div[5]/div/div/div[1]/div[3]/div[2]/div/div[2]/button[1]
     conf = await page.evaluate(() => {
-      const inp = document.querySelector('input[data-tracking-viewid="key_words_search"]')
-      let root = inp
-      for (let k = 0; k < 6 && root?.parentElement; k++) root = root.parentElement
-      const scope = root || document.body
-      const btns = [...scope.querySelectorAll('button')].filter(b => b.getBoundingClientRect().width > 10)
-      const target = btns.find(b => /确定|确认/.test(b.innerText || '')) || btns[0]
-      if (target) { target.scrollIntoView({ block: 'center' }); target.click(); return true }
-      return false
+      const el = document.evaluate('/html/body/div[5]/div/div/div[1]/div[3]/div[2]/div/div[2]/button[1]', document, null, 9, null).singleNodeValue
+      if (!el) return false
+      el.scrollIntoView({ block: 'center' }); el.click(); return true
     }).catch(() => false)
   }
-  if (!conf) return { ok: false, error: '步骤三：找不到「确定」按钮' }
-  log('  步骤三 已点确定')
-  await sleep(1500)
+  if (!conf) return { ok: false, error: '第4步：找不到「确认」按钮' }
+  log('  第4步 已点确认')
 
-  const after = await readShownCategory(page)
-  const ok = isMatch(after.text, tpl)
-  log(`  步骤四 类目: ${after.text || '(空)'} → ${ok ? '✅一致' : '❌仍不一致'}`)
-  return { ok, shown: after.text, keyword, confirmParams: '' }
+  // 等弹框关闭即可
+  await page.waitForFunction(() => !document.querySelector('input[data-tracking-viewid="key_words_search"]'), { timeout: 15000 }).catch(() => { })
+  await sleep(2500)
+
+  // ★ 第4步确认按钮的 cat_id 已等于目标，即视为选类目成功。
+  //   不再回读页面类目文字做二次校验（页面文字刷新有延迟，会误判为「仍不一致」）。
+  log(`  第4步 ✅ 类目已确认 cat_id=${catId}`)
+  return { ok: true, shown: '', keyword, confirmParams: confParams }
 }
 
 /**
@@ -302,18 +300,21 @@ export async function ensureCategory(page, opts = {}) {
     const shown = await readShownCategory(page)
     log(`类目检查: ${shown.found ? '"' + shown.text + '"' : '(节点存在但无文字)'} | 模板: ${tpl.category.fullName || tpl.category.name}`)
 
-    if (shown.found && isMatch(shown.text, tpl)) {
-      // 一致 → 直接到第 5 步
+    // ★ 判定一致性：优先用卡片里的 choosen_cate 与模板 catId 比对；
+    //   没有 catId 时再退回文字路径比较。
+    const sameCat = shown.catId ? Number(shown.catId) === Number(tpl.category.catId) : isMatch(shown.text, tpl)
+    if (shown.found && sameCat) {
+      // 出现且一致 → 跳第 2 步（点 #bottomSubmitBtnId）
       log('  ✅ 一致，跳到第 5 步')
       return { ok: true, matched: true, manual: false, shown: shown.text }
     }
-    // 不一致 → 手动三步
+    // 出现但不一致 → 走第 3 步「手动选择商品分类」
     log('  → 不一致，走手动选择分类')
     const r = await manualPick(page, tpl, log)
     return { ok: r.ok, matched: false, manual: true, shown: r.shown, error: r.error }
   }
 
-  // ② 没有 selectedCateId → 直接手动三步
+  // 没出现 → 直接跳第 3 步「手动选择商品分类」
   log('类目检查: (未出现 selectedCateId) → 走手动选择分类')
   const r = await manualPick(page, tpl, log)
   return { ok: r.ok, matched: false, manual: true, shown: r.shown, error: r.error }

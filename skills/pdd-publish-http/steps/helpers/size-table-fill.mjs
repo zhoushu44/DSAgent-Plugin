@@ -12,6 +12,8 @@
  *   4) 若维度里有区间值表（身高/体重 或 脚长），勾表头区间值再填
  */
 
+import { findDim } from './find-dim.mjs'
+
 const norm = s => String(s || '').replace(/[\s\u3000]/g, '').trim()
 
 /** 判断目标值属于哪类标签页 */
@@ -29,18 +31,18 @@ export function guessTab(values, tabHint = '') {
 
 /** 找维度块索引 */
 export async function findSizeDim(page, dimName) {
-  return page.evaluate((name) => {
+  // ★ 统一走 find-dim 的三层定位（外层标题 → 内层标题 → 内容特征）
+  const r = await findDim(page, dimName)
+  if (r.ok) return r
+  // 兜到底：任何带尺码表特征的块
+  return page.evaluate(() => {
     const dims = [...document.querySelectorAll('.property-container-v2')]
     for (let i = 0; i < dims.length; i++) {
-      const t = (dims[i].querySelector('.property-name-title')?.innerText || '').trim()
-      if (t.includes(name)) return { ok: true, idx: i, why: 'title' }
-    }
-    for (let i = 0; i < dims.length; i++) {
       const txt = dims[i].innerText || ''
-      if (/尺码表|鞋码表|全选以下规格值|\d{3}\/\d{2}[A-Z]/.test(txt)) return { ok: true, idx: i, why: 'content' }
+      if (/全选以下规格值|尺码表/.test(txt)) return { ok: true, idx: i, why: 'fallback-content' }
     }
-    return { ok: false, count: dims.length, names: dims.map(c => (c.querySelector('.property-name-title')?.innerText || '').trim()) }
-  }, dimName).catch(e => ({ ok: false, error: String(e.message).slice(0, 80) }))
+    return { ok: false, count: dims.length }
+  }).catch(e => ({ ok: false, error: String(e.message).slice(0, 80) }))
 }
 
 /** 切换标签页 */

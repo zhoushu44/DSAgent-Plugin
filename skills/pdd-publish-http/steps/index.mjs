@@ -25,6 +25,7 @@ const loadShared = f => import(pathToFileURL(path.join(SHARED, f)).href)
 const loadStep = f => import(pathToFileURL(path.join(__dirname, f)).href)
 const loadTpl = () => import(pathToFileURL(path.join(PLUGIN, 'skills/pdd-publish-http/templates/index.mjs')).href)
 const { validateProduct, summarize } = await import(pathToFileURL(path.join(__dirname, 'helpers', 'product-schema.mjs')).href)
+const { cutTitle, titleWeight } = await import(pathToFileURL(path.join(__dirname, 'helpers', 'title-weight.mjs')).href)
 
 const emit = (obj) => {
   console.log('__DSAGENT_RESULT__' + JSON.stringify(obj))

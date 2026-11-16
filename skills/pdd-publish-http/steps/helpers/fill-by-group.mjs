@@ -22,20 +22,36 @@
  * @param {string[]} values 目标值
  * @param {object} [dim] 模板维度（allowCustom / isAllValue）
  */
+import { findDim } from './find-dim.mjs'
+
 export async function fillByGroup(page, dimName, values, dim = {}) {
   const results = []
+
+  const located = await findDim(page, dimName)
+  const dimIdx = located.ok ? located.idx : -1
 
   for (let idx = 0; idx < values.length; idx++) {
     const v = values[idx]
     const r = await page.evaluate(async (args) => {
-      const { name, val, index, allowCustom, isAllValue } = args
+      const { name, val, index, allowCustom, isAllValue, dimIdx } = args
       const norm = s => String(s || '').replace(/[\s\u3000]/g, '').trim()
       const sleepIn = ms => new Promise(x => setTimeout(x, ms))
 
-      // ── 找维度容器 ──
+      // ── 找维度容器（三层定位：外层标题 → 内层标题 → 内容特征）──
       let box = null
-      for (const c of document.querySelectorAll('.property-container-v2')) {
-        if (norm(c.querySelector('.property-name-title')?.innerText) === norm(name)) { box = c; break }
+      if (typeof dimIdx === "number" && dimIdx >= 0) {
+        box = document.querySelectorAll(".property-container-v2")[dimIdx] || null
+      }
+      if (!box) {
+        for (const c of document.querySelectorAll(".property-container-v2")) {
+          if (norm(c.querySelector(".property-name-title")?.innerText) === norm(name)) { box = c; break }
+        }
+      }
+      if (!box) {
+        for (const c of document.querySelectorAll(".property-container-v2")) {
+          const it = norm(c.querySelector('[class*="wrapperTitle"]')?.innerText || "")
+          if (it && (it === norm(name) || it.startsWith(norm(name)))) { box = c; break }
+        }
       }
       if (!box) return { ok: false, reason: `找不到维度「${name}」` }
 
@@ -191,7 +207,7 @@ export async function fillByGroup(page, dimName, values, dim = {}) {
         valueNow: inp ? inp.value : '',
         cbChecked: cbState,
       }
-    }, { name: dimName, val: v, index: idx, allowCustom: dim?.allowCustom, isAllValue: dim?.isAllValue })
+    }, { name: dimName, val: v, index: idx, allowCustom: dim?.allowCustom, isAllValue: dim?.isAllValue, dimIdx })
       .catch(e => ({ ok: false, reason: String(e.message).slice(0, 150) }))
 
     if (!r.ok) { results.push({ value: v, ok: false, error: r.reason, available: r.available }); continue }

@@ -41,9 +41,16 @@ skills/pdd-publish-http/
 └── scripts/            工具
     ├── harvest-native-props.mjs  抓属性结构（备用）
     ├── compress-images.mjs       图片压缩
-    ├── img-prep.mjs              图片预处理
-    └── imgprep.py
+    ├── img-prep.mjs              图片预处理（体积压缩到平台上限）
+    └── pdd-category.mjs          类目树查询
 ```
+
+> 已删除（2026-11，逻辑已吸收进 `_shared/PDD-KNOWLEDGE.md` 第十八 / 十九章）：
+>
+> | 文件 | 原因 |
+> |---|---|
+> | `imgprep.py` | 「宽度统一 750 + 超 1500 均分切分」规则已记入知识库；本目录 `img-prep.mjs` 负责体积压缩。两套并存会混淆 |
+> | `analyze_spec_ui.py` | 规格区视觉识别方案（`dim_type` → 交互策略映射）已记入知识库；脚本本身硬编码了工作区外绝对路径与 API key，不适合留库 |
 
 ---
 

@@ -13,7 +13,9 @@
  */
 import fs from 'node:fs'
 import path from 'node:path'
+import { titleWeight, cutTitle, hanCount } from './title-weight.mjs'
 
+// ★ 平台口径：汉字=2字符，ASCII=1字符，总权重 ≤60（=30个汉字）
 const MAX_TITLE = 60
 const MAX_MAIN_IMAGES = 5
 const MAX_DETAIL_IMAGES = 50
@@ -41,11 +43,20 @@ export function validateProduct(product, tpl = null, opts = {}) {
   const checkFiles = opts.checkFiles !== false
   const p = { ...(product || {}) }
 
-  // ══ 1 标题 ══
-  const title = String(p.title || '').trim()
-  if (!title) errors.push('title（标题）必填')
-  else if (title.length > MAX_TITLE) errors.push(`title 超过 ${MAX_TITLE} 字（当前 ${title.length}）`)
-  p.title = title
+  // ══ 1 标题（平台口径：汉字=2字符，总权重≤60）══
+  const rawTitle = String(p.title || '').trim()
+  if (!rawTitle) {
+    errors.push('title（标题）必填')
+  } else {
+    const w = titleWeight(rawTitle)
+    if (w > MAX_TITLE) {
+      const cut = cutTitle(rawTitle, MAX_TITLE)
+      warnings.push(`title 超平台限制已截断：${w} → ${cut.weight} 字符（汉字${hanCount(rawTitle)}个，截掉「${cut.removed}」）`)
+      p.title = cut.text
+    } else {
+      p.title = rawTitle
+    }
+  }
 
   // ══ 2 主图 ══
   let images = Array.isArray(p.images) ? p.images.filter(Boolean) : []
