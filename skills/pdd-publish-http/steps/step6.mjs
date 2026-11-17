@@ -35,6 +35,7 @@
  *    <input readonly placeholder="规格类型1">
  */
 import path from 'node:path'
+import { fillIngredientList } from './helpers/fill-ingredient-list.mjs'
 import os from 'node:os'
 import fs from 'node:fs'
 import { pathToFileURL, fileURLToPath } from 'node:url'
@@ -84,7 +85,10 @@ export async function mapLabelsToFormIds(page) {
       const id = item.id || ''
       if (!id) continue
       const sel = item.querySelector('[data-testid="beast-core-select"]')
-      if (!sel) continue
+      // ★ 2026-11-16：成分列表组件（材质成分这类）
+      //   判断依据：form-item 里有 IngredientList 类名的元素
+      //   有就走成分列表流程，没有就走下拉框流程
+      const ingredientEl = item.querySelector('[class*="IngredientList"]')
 
       // 属性名：取最内层 label 的文本
       let label = ''
@@ -99,6 +103,23 @@ export async function mapLabelsToFormIds(page) {
           .trim()
       }
       if (!label) continue
+
+      if (!sel && !ingredientEl) continue
+
+      if (ingredientEl) {
+        // 成分列表型：从按钮文字读已选/上限
+        const btn = [...item.querySelectorAll('button')].find(b => /\(\d+\/\d+\)/.test(b.innerText || ''))
+        const t = (btn?.innerText || '').replace(/\s+/g, '')
+        const m = t.match(/\((\d+)\/(\d+)\)/)
+        out[label] = {
+          formItemId: id,
+          mode: 'ingredient',
+          placeholder: '',
+          readonly: false,
+          ingredient: { selected: m ? Number(m[1]) : 0, max: m ? Number(m[2]) : 0 },
+        }
+        continue
+      }
 
       const input = sel.querySelector('[data-testid="beast-core-select-htmlInput"]')
       const multi = sel.querySelector('[class*="ST_selectValueMultiple"]')
@@ -200,9 +221,16 @@ export async function step6_fillAttributes(page, opts = {}) {
 
     // ★ 2026-11-16 重扫：平台属性是级联的，选好一个后下一个才渲染
     //   只在开头扫一次会导致后面的属性全部「页面找不到」
-    for (let i = 0; i < 20; i++) {
+    // ★ 2026-11-16 再修：不是「扫到 N 个就停」，而是「必须扫到当前要填的这个 label」
+    //   原因：级联属性（如「材质成分」选完「面料俗称」才出现）
+    //        只看数量会在新属性出现前就返回旧 map
+    const normWant = String(label || '').replace(/[*＊\s]/g, '').replace(/^重要/, '').trim()
+    for (let i = 0; i < 24; i++) {
       const fresh = await mapLabelsToFormIds(page)
-      if (Object.keys(fresh).length >= Math.min(wantCount, 3)) { labelMap = fresh; break }
+      const keys = Object.keys(fresh)
+      const hitNow = keys.some(k => String(k).replace(/[*＊\s]/g, '').replace(/^重要/, '').trim() === normWant)
+      labelMap = fresh
+      if (hitNow) break
       await new Promise(r => setTimeout(r, 250))
     }
 
@@ -236,12 +264,26 @@ export async function step6_fillAttributes(page, opts = {}) {
 
     console.log('[s6] 填', label, '=', JSON.stringify(vals), '  id=', hit.formItemId)
 
+    // ★ 2026-11-16：成分列表组件（如「材质成分」）单独走
+    if (hit.mode === 'ingredient') {
+      const ir = await fillIngredientList(page, hit.formItemId, vals, (m) => console.log('[s6]' + m))
+      res.results.push({ label, formItemId: hit.formItemId, mode: 'ingredient', ...ir })
+      if (!ir.ok) res.errors.push(`${label}: ${ir.error || '成分列表填充失败'}`)
+      continue
+    }
+
+    // ★ 2026-11-16 最终：不探测，直接按「模板选项数量」决定要不要输入筛选
+    //   选项特别长（> 20）→ 下拉是虚拟列表，只渲染可见几项，必须输入筛选
+    //   其他 → 走原逻辑（品牌/型号/货号因为 placeholder 含「搜索」会自动输入）
+    const optCount = tplByLabel.get(label)?.options?.length || 0
+    const needSearch = /品牌|型号|货号/.test(label) || optCount > 20
+
     // 调组件
     const r = await S.selectOptions(page, {
       formItemId: hit.formItemId,
       values: vals,
       timeoutMs: opts.timeoutMs ?? 30000,
-      search: /品牌|型号|货号/.test(label),
+      search: needSearch,
     }).catch(e => ({ ok: false, error: String(e.message).slice(0, 150) }))
 
     res.results.push({ label, formItemId: hit.formItemId, mode: hit.mode, ...r })
@@ -308,7 +350,16 @@ export async function fillRequiredRemaining(page) {
         || el.querySelector('input')
       if (h) { h.scrollIntoView({ block: 'center' }); h.click() }
     }, t.id).catch(() => { })
-    await sleep(900)
+    // ★ 2026-11-16 修：等选项真正渲染出来（最多 5 秒），不要固定 900ms
+    for (let k = 0; k < 20; k++) {
+      const n = await page.evaluate(() => {
+        const list = [...document.querySelectorAll('li,[role="option"],[data-testid*="option"],[class*="option"]')]
+          .filter(e => { const r = e.getBoundingClientRect(); return r.width > 30 && r.height > 14 })
+        return list.length
+      }).catch(() => 0)
+      if (n > 0) break
+      await sleep(250)
+    }
 
     // 抓选项（按离属性框距离过滤，排除页脚客服）
     const opts = await page.evaluate((fid) => {
