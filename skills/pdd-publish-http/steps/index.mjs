@@ -301,6 +301,13 @@ try {
   const r6 = await m6.default(p, { values: av, catId })
   steps.push({ step: 6, ok: !!r6.ok, autoRequired: (r6.autoRequired || []).filter(x => x.ok).map(x => x.label) })
   log('6', r6.ok ? '✅' : '⚠ ' + (r6.errors || []).join(','))
+  // ★ 调试：打印每个属性的填写明细
+  if (r6.results?.length) {
+    const bad = r6.results.filter(x => x.ok === false)
+    if (bad.length) log('  未填写:', JSON.stringify(bad.map(x => ({ label: x.label, err: x.error }))))
+  }
+  if (r6.unmapped?.length) log('  页面找不到:', r6.unmapped.join(','))
+  if (r6.droppedAttrs?.length) log('  值被剔除:', JSON.stringify(r6.droppedAttrs))
   if (r6.autoRequired?.length) log('  自动补必填:', r6.autoRequired.filter(x => x.ok).map(x => x.label).join(','))
 
   // ── 6b 详情图 ──
@@ -343,6 +350,11 @@ try {
   const r12 = await m12.default(p, { rows, thumbs, verify: true })
   steps.push({ step: 12, ok: !!r12.ok, filled: r12.filled })
   log('12', r12.ok ? `✅ ${r12.filled} 行` : '❌ ' + (r12.errors || []).join(','))
+  if (r12.write?.done) {
+    log('   写入明细:', JSON.stringify(r12.write.done.map(d => ({ i: d.i, ok: d.ok, acts: d.acts?.map(a => a[0] + ':' + a[1]).join(' ') }))))
+    log('   列号:', JSON.stringify(r12.write.cols))
+  }
+  if (r12.warnings?.length) log('   警告:', r12.warnings.join('; '))
   if (!r12.ok) throw new Error('价格库存失败: ' + (r12.errors || []).join(','))
 
   // ── 13 参考价 ──

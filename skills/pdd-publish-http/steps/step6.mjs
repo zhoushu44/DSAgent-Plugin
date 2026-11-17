@@ -89,7 +89,15 @@ export async function mapLabelsToFormIds(page) {
       // 属性名：取最内层 label 的文本
       let label = ''
       const lab = item.querySelector('label')
-      if (lab) label = (lab.textContent || '').replace(/[*＊]/g, '').replace(/\s+/g, '').trim()
+      // ★ 2026-11-16 归一化：平台会在 label 前加标记
+      //   "*被里材质" → "被里材质"；"重要安全等级" → "安全等级"
+      if (lab) {
+        label = (lab.textContent || '')
+          .replace(/[*＊]/g, '')
+          .replace(/^重要/, '')
+          .replace(/\s+/g, '')
+          .trim()
+      }
       if (!label) continue
 
       const input = sel.querySelector('[data-testid="beast-core-select-htmlInput"]')
@@ -127,6 +135,29 @@ export async function mapLabelsToFormIds(page) {
  * }>}
  */
 export async function step6_fillAttributes(page, opts = {}) {
+  // ★ 属性值预校验（2026-11-16）：不在模板选项里的值直接剔除，避免「值不合规」
+  if (opts.values && opts.catId) {
+    try {
+      const T = await import(pathToFileURL(path.join(PLUGIN, 'skills/pdd-publish-http/templates/index.mjs')).href)
+      const tpl = T.loadTemplate(opts.catId)
+      if (tpl?.attributes?.length) {
+        const dropped = []
+        for (const [label, val] of Object.entries(opts.values)) {
+          const at = tpl.attributes.find(a => a.label === label)
+          if (!at || !at.options?.length) continue   // 无选项的属性（输入框）不校验
+          const hit = at.options.find(o => String(o.value) === String(val))
+          if (!hit) {
+            dropped.push({ label, value: val, options: at.options.slice(0, 5).map(o => o.value) })
+            delete opts.values[label]
+          }
+        }
+        if (dropped.length) {
+          opts._droppedAttrs = dropped
+        }
+      }
+    } catch { /* 校验失败不影响主流程 */ }
+  }
+
   const { S } = await loadModules()
   const values = opts.values || opts.attrValues || {}
   const strict = opts.strict !== false
@@ -167,8 +198,15 @@ export async function step6_fillAttributes(page, opts = {}) {
     }
 
     // 找 formItemId
-    const hit = labelMap[label]
-      || labelMap[Object.keys(labelMap).find(k => k.includes(label) || label.includes(k))]
+    // ★ 2026-11-16 归一化匹配（去 * 和「重要」）
+    const normL = (s) => String(s || '').replace(/[*＊]/g, '').replace(/^重要/, '').replace(/\s+/g, '').trim()
+    const wantL = normL(label)
+    let hitKey = Object.keys(labelMap).find(k => normL(k) === wantL)
+    if (!hitKey) hitKey = Object.keys(labelMap).find(k => {
+      const kk = normL(k)
+      return kk.includes(wantL) || wantL.includes(kk)
+    })
+    const hit = hitKey ? labelMap[hitKey] : null
     if (!hit?.formItemId) {
       res.results.push({ label, ok: false, error: '页面上找不到该属性（可能该类目无此属性，或页面未渲染完）' })
       res.unmapped.push(label)

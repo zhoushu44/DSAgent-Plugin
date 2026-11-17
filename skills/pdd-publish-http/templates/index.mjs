@@ -237,10 +237,29 @@ export function normalizeMall(raw) {
       presetValues: vals,
       presetCount: vals.length,
 
-      // ── 兼容旧字段（type 由 controlType + valueType 推导）──
-      type: (p.control_type === 3) ? 'checkbox'
-          : (p.value_type === 1) ? 'number'
-          : 'text',
+      // ── type 推导（2026-11-16 修正：加入 group 判定）──
+      //
+      //   判定顺序（优先级从高到低）：
+      //   ① control_type=0 且无预设值  → text（输入框型，如纸杯容量）
+      //   ② 有 group 且 group 是尺码标签 → size-table（尺码表型）
+      //      尺码标签：通用/中国码/欧码/英码/德码/美码/均码/身高/国际标准/法码/日本码
+      //      这类维度标题藏在 sizeStandardWrapper_wrapperTitle，不是 property-name-title
+      //   ③ control_type=3 → checkbox（普通勾选，如颜色分类）
+      //   ④ value_type=1 → number
+      //   ⑤ 其余 → text
+      type: (() => {
+        const SIZE_TAB_RE = /通用|中国码|欧码|英码|德码|美码|均码|身高|国际标准|法码|日本码|韩国码/
+        const groups = [...new Set(vals.map(v => v.group).filter(Boolean))]
+        // ① 输入框型
+        if (p.control_type === 0 && vals.length === 0) return 'text'
+        // ② 尺码表型（有 group 且 group 命中尺码标签）
+        if (groups.length && groups.some(g => SIZE_TAB_RE.test(g))) return 'size-table'
+        // ③ 普通勾选
+        if (p.control_type === 3) return 'checkbox'
+        // ④ 数值输入
+        if (p.value_type === 1) return 'number'
+        return 'text'
+      })(),
       allowCustom: allowCustom,
       maxCustomValues: p.input_max_num ?? 0,
 
@@ -447,16 +466,21 @@ export function validateSpecs(tpl, specs = []) {
     maxDims: sp.maxDims ?? 0,
   }
 
-  // 该类目不开放规格
+  // 该类目模板无预置规格（mode=none）
+  // ★ 2026-11-16：mode=none 只表示「平台没有预置维度」，页面通常仍支持自己添加
+  //   （如床上四件套显示「添加规格类型(0/2)」），所以不再报错
   if (out.mode === 'none') {
-    if (specs.length) out.errors.push('该类目不开放规格（is_spec=false），不能填 specs')
-    else out.ok = true
+    if (!specs.length) { out.ok = true; return out }
+    // 有 specs → 放行，靠页面自己限制维数
+    out.ok = true
     return out
   }
 
   if (!specs.length) { out.ok = true; return out }
 
-  if (specs.length > out.maxDims) {
+  // ★ 2026-11-16：maxDims=0 表示模板没记录（或该维度是页面自行添加的），
+  //   此时跳过校验，交给页面自己限制（页面会显示「添加规格类型(N/2)」）
+  if (out.maxDims > 0 && specs.length > out.maxDims) {
     out.errors.push(`规格最多 ${out.maxDims} 维，当前 ${specs.length} 维`)
     return out
   }
@@ -469,6 +493,13 @@ export function validateSpecs(tpl, specs = []) {
 
     const d = byName.get(s.name)
     if (!d) {
+      // ★ 2026-11-16：模板无预置维度（mode=none）时允许任意维度名，
+      //   由页面「添加规格类型」下拉决定哪些可用；有预置但名字不在里面的仍然报错
+      if (!dims.length) {
+        out.warnings = out.warnings || []
+        out.warnings.push(`维度「${s.name}」不在模板内（模板无预置维度），将由页面决定是否可添加`)
+        continue
+      }
       out.errors.push(`规格维度「${s.name}」不在模板内（可用：${dims.map(x => x.name).join('/')}）`)
       continue
     }

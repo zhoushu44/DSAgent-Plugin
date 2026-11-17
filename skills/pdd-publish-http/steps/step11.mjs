@@ -47,7 +47,7 @@
  * ══════════════════════════════════════════════════════════════
  *  IF 1  !specs.length              → 跳过整步
  *  IF 2  无模板                      → 走页面自适应
- *  IF 3  mode === 'none'            → 报错（该类目不能加规格）
+ *  IF 3  mode === 'none'            → 模板无预置维度，仍走「添加规格类型」流程（页面支持 0/2）
  *  IF 4  validateSpecs 失败          → 报错
  *  然后逐维度：
  *    ① 第 1 维：点「初始类型」下拉选名
@@ -62,6 +62,7 @@ import { pathToFileURL, fileURLToPath } from 'node:url'
 import { fillByGroup } from './helpers/fill-by-group.mjs'
 import { fillSizeTable as fillSizeTableGeneric } from './helpers/size-table-fill.mjs'
 import { stopSizeChart, hasStopButton } from './helpers/stop-sizechart.mjs'
+import { fillCustomSpec } from './helpers/fill-custom-spec2.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const PLUGIN = path.resolve(__dirname, '..', '..', '..')
@@ -194,36 +195,83 @@ async function pickDimensionName(page, dimName, isFirst) {
   const picked = await page.evaluate((name) => {
     const norm = s => String(s || '').replace(/[\s\u3000]/g, '').trim()
 
-    // 找可见的选项元素
-    const cands = [
-      ...document.querySelectorAll('[class*="option"], [class*="Option"], [role="option"], [class*="dropdown"] li, [class*="Dropdown"] li'),
-    ]
-    for (const it of cands) {
-      const r = it.getBoundingClientRect()
-      if (r.width < 20 || r.height < 10) continue
-      const t = norm(it.innerText)
-      if (t === name || t.startsWith(name)) {
-        it.click()
-        return { ok: true, matched: t }
+    // ★ 2026-11-16 取纯维度名：li 里可能含「常用/热门」标签
+    //   结构：<li><div>尺寸<span>常用</span></div></li>
+    //   → 要的只是「尺寸」
+    const cleanDimName = (el) => {
+      // 优先：找 MmsUiMmsTag wrapper 的第一个文本子节点
+      const tagW = el.querySelector('[class*="MmsUiMmsTag___wrapper"], [class*="MmsUiMmsTag___behindWrapper"]')
+      if (tagW) {
+        // 取第一个文本节点
+        for (const n of tagW.childNodes) {
+          if (n.nodeType === 3) {
+            const t = norm(n.textContent)
+            if (t) return t
+          }
+        }
+        // 没有文本节点就当第一个子元素的 textContent
+        const first = tagW.firstElementChild
+        if (first) {
+          const t = norm(first.textContent)
+          if (t && t.length <= 12) return t
+        }
       }
+      // 兜底：整段文字去掉「常用/热门/推荐」后缀
+      return norm(el.innerText).replace(/(常用|热门|推荐|自定义)$/, '')
     }
 
-    // 兜底：扫可见小元素
+    // ★ 2026-11-16 修正：优先用 role=listbox + role=option（实测四件套/所有类目通用）
+    //   旧选择器会抓到页面底部的「官方 客服」等无关元素
+    const listbox = document.querySelector('ul[role="listbox"]')
+    let cands = []
+    if (listbox) {
+      cands = [...listbox.querySelectorAll('li[role="option"]')]
+    }
+    if (!cands.length) {
+      cands = [...document.querySelectorAll('[role="option"], [class*="dropdown"] li, [class*="Dropdown"] li')]
+    }
+    if (!cands.length) {
+      cands = [...document.querySelectorAll('[class*="option"], [class*="Option"]')]
+    }
+
+    // 过滤可见 + 文字合理的
+    const visibleCands = cands.filter(it => {
+      const r = it.getBoundingClientRect()
+      if (r.width < 15 || r.height < 8) return false
+      const t = norm(it.innerText)
+      return t && t.length <= 20 && !/^官方|^客服$/.test(t)
+    })
+
+    // ① 精确匹配
+    for (const it of visibleCands) {
+      const t = norm(it.innerText)
+      if (t === name) { it.click(); return { ok: true, matched: cleanDimName(it), via: 'exact' } }
+    }
+
+    // ② 前缀匹配（如「尺寸(常用)」→「尺寸」）
+    for (const it of visibleCands) {
+      const t = norm(it.innerText)
+      if (t.startsWith(name)) { it.click(); return { ok: true, matched: cleanDimName(it), via: 'prefix' } }
+    }
+
+    // ③ 包含匹配（如「重要尺寸」）
+    for (const it of visibleCands) {
+      const t = norm(it.innerText)
+      if (t.includes(name)) { it.click(); return { ok: true, matched: cleanDimName(it), via: 'includes' } }
+    }
+
+    // ④ 兜底：再扫一遍可见小元素（极少数下拉不走 role=option）
     for (const el of document.querySelectorAll('div,span,li,a')) {
       const r = el.getBoundingClientRect()
-      if (r.width < 20 || r.height < 12) continue
+      if (r.width < 15 || r.height < 10) continue
       const t = norm(el.innerText)
       if (t === name && el.children.length <= 2) {
         el.click()
-        return { ok: true, matched: t, fallback: true }
+        return { ok: true, matched: cleanDimName(el), via: 'fallback' }
       }
     }
-
-    // 列出可见备选
-    const visible = cands
-      .map(it => norm(it.innerText))
-      .filter(t => t && t.length <= 20)
-      .slice(0, 30)
+    // 列出可见备选（只列真实选项）
+    const visible = visibleCands.map(it => norm(it.innerText)).slice(0, 30)
     return { ok: false, reason: `下拉里找不到「${name}」`, visible }
   }, dimName).catch(e => ({ ok: false, reason: String(e.message).slice(0, 120) }))
 
@@ -632,7 +680,94 @@ async function addDimension(page, tplDim, spec, isFirst) {
   const warnings = []
 
   // ① 选维度名
-  const picked = await pickDimensionName(page, spec.name, isFirst)
+  // ★ 2026-11-16 简化：二维规格的维度名不影响结果（值都是自定义输入）
+  //   规则：先按原名找；找不到按常见名试；再不行选下拉第一个
+  const COMMON_DIMS = ['颜色', '尺寸', '尺码', '型号', '款式', '规格']
+  const uniqCands = [...new Set([spec.name, ...COMMON_DIMS.filter(x => x !== spec.name)])]
+
+  let picked = null
+  let usedName = spec.name
+
+  for (let ci = 0; ci < uniqCands.length; ci++) {
+    const nm = uniqCands[ci]
+    picked = await pickDimensionName(page, nm, isFirst)
+    if (picked.ok) { usedName = picked.matched || nm; break }
+    if (ci < uniqCands.length - 1) {
+      try {
+        await page.evaluate(() => {
+          const b = [...document.querySelectorAll('button, a, span, div')].find(e => {
+          const t = (e.innerText || '').replace(/\s+/g, '')
+          // ★ 包含文本匹配，支持「添加规格类型(0/2)」「添加规格类型」「＋添加规格类型」
+          //   排除「AI添加规格」
+          if (!/添加规格类型/.test(t)) return false
+          if (/AI/.test(t)) return false
+          const r = e.getBoundingClientRect()
+          return r.width > 10 && r.height > 8 && e.children.length <= 3
+        })
+          if (b) b.click()
+        })
+        await new Promise(r => setTimeout(r, 700))
+      } catch { }
+    }
+  }
+
+  if (!picked?.ok) {
+    try {
+      await page.evaluate(() => {
+        const b = [...document.querySelectorAll('button, a, span, div')].find(e => {
+          const t = (e.innerText || '').replace(/\s+/g, '')
+          // ★ 包含文本匹配，支持「添加规格类型(0/2)」「添加规格类型」「＋添加规格类型」
+          //   排除「AI添加规格」
+          if (!/添加规格类型/.test(t)) return false
+          if (/AI/.test(t)) return false
+          const r = e.getBoundingClientRect()
+          return r.width > 10 && r.height > 8 && e.children.length <= 3
+        })
+        if (b) b.click()
+      })
+      await new Promise(r => setTimeout(r, 800))
+    } catch { }
+    const first = await page.evaluate(() => {
+      const norm = s => String(s || '').replace(/[\s\u3000]/g, '').trim()
+      // ★ 取纯维度名（去「常用」标签）
+      const cleanDimName = (el) => {
+        const tagW = el.querySelector('[class*="MmsUiMmsTag___wrapper"], [class*="MmsUiMmsTag___behindWrapper"]')
+        if (tagW) {
+          for (const n of tagW.childNodes) {
+            if (n.nodeType === 3) { const t = norm(n.textContent); if (t) return t }
+          }
+          const firstEl = tagW.firstElementChild
+          if (firstEl) { const t = norm(firstEl.textContent); if (t && t.length <= 12) return t }
+        }
+        return norm(el.innerText).replace(/(常用|热门|推荐|自定义)$/, '')
+      }
+      const lb = document.querySelector('ul[role="listbox"]')
+      let cands = lb ? [...lb.querySelectorAll('li[role="option"]')] : []
+      if (!cands.length) cands = [...document.querySelectorAll('[role="option"]')]
+      const vis = cands.filter(it => {
+        const r = it.getBoundingClientRect()
+        if (r.width < 15 || r.height < 8) return false
+        const t = norm(it.innerText)
+        return t && t.length <= 20 && !/^官方|^客服$/.test(t)
+      })
+      if (!vis.length) return { ok: false, available: cands.map(x => norm(x.innerText)).slice(0, 20) }
+      const el = vis[0]
+      const pure = cleanDimName(el)
+      el.click()
+      return { ok: true, matched: pure }
+    }).catch(e => ({ ok: false, reason: String(e.message).slice(0, 100) }))
+    if (first.ok) {
+      picked = { ok: true, matched: first.matched }
+      usedName = first.matched
+    } else {
+      picked = { ok: false, reason: '下拉里没有可用选项', visible: first.available || [] }
+    }
+  }
+
+  if (picked?.ok && usedName !== spec.name) {
+    warnings.push(`维度名「${spec.name}」已用「${usedName}」替代`)
+  }
+  spec = { ...spec, name: usedName }
   if (!picked.ok) return { ok: false, name: spec.name, error: picked.error || picked.reason || '选维度名失败', detail: picked }
 
   // ② 探测真实控件
@@ -684,193 +819,135 @@ async function addDimension(page, tplDim, spec, isFirst) {
  * }>}
  */
 export async function step11_fillSpecs(page, opts = {}) {
+  const log = typeof opts.log === 'function' ? opts.log : (...a) => console.log('[s11]', ...a)
   const specs = Array.isArray(opts.specs) ? opts.specs : []
 
-  // ── IF 1：没传 specs → 跳过
+  // ══【0】入参
   if (!specs.length) {
     return { ok: true, skipped: true, reason: '未提供 specs' }
   }
 
-  // ── 读模板
+  // ══【1】读模板
   let tpl = null
-  if (opts.catId) {
-    try {
-      const T = await loadTplModule()
-      tpl = T.loadTemplate(Number(opts.catId))
-    } catch { /* 模板读失败不阻断 */ }
-  }
+  try {
+    const T = await loadTplModule()
+    tpl = opts.catId ? T.loadTemplate(Number(opts.catId)) : null
+  } catch { }
 
-  // ── IF 2：无模板 → 页面自适应
-  if (!tpl) {
-    const results = []
-    for (let i = 0; i < specs.length; i++) {
-      const r = await addDimension(page, { controlType: -1, valueType: 0 }, specs[i], i === 0)
-      results.push(r)
-      if (!r.ok) break
-    }
-    return { ok: results.every(r => r.ok), mode: 'unknown', results }
-  }
+  const tplDims = tpl?.specs?.dimensions || []
+  const presetDimCount = tplDims.length
+  log(`   模板预置维度 ${presetDimCount} 个` + (presetDimCount ? '：' + tplDims.map(d => d.name).join(' / ') : '（无，走添加规格）'))
 
-  // ── IF 3：模板说不能加规格
-  if (tpl.specs?.mode === 'none') {
+  const warnings = []
+
+  // ══【2】预置维度 = 0 → 添加规格流程
+  if (presetDimCount === 0) {
+    log('   → 走【添加规格】流程')
+    const r = await fillCustomSpec(page, specs, { log })
     return {
-      ok: false,
-      mode: 'none',
-      error: `类目「${tpl.category?.name}」不开放规格（is_spec=false），不能填 specs`,
+      ok: r.ok,
+      mode: 'add-spec',
+      results: r.dims,
+      warnings: [...warnings, ...(r.warnings || [])],
+      error: r.ok ? '' : (r.errors || []).join('; '),
     }
   }
 
-  // ── IF 4：预校验
-  const T = await loadTplModule()
-  const v = T.validateSpecs(tpl, specs)
-  if (!v.ok) {
-    return { ok: false, mode: tpl.specs.mode, error: v.errors.join('; '), errors: v.errors }
+  // ══【2b】核对数量
+  if (specs.length > presetDimCount) {
+    warnings.push(`传了 ${specs.length} 维，模板预置 ${presetDimCount} 维，多出的用「添加规格」补`)
   }
 
-  // ── 逐维度
+  // ══【3】逐维度判断 + 【4】执行
   const results = []
-  const warnings = [...(v.warnings || [])]
-
   for (let i = 0; i < specs.length; i++) {
-    const tplDim = (tpl.specs.dimensions || []).find(d => d.name === specs[i].name) || {}
+    const spec = specs[i]
+    const tplDim = tplDims.find(d => cleanName(d.name) === cleanName(spec.name)) || tplDims[i] || null
 
-    // ★★ 核心分派：以模板里的 type 为准（text / checkbox / size-table / size-code）
-    //     模板没标 type 时才回退到现场探测
-    const dimType = tplDim.type || ''
+    // 判断：预设值数量 = 0 ？
+    const presetCount = tplDim?.presetValues?.length ?? 0
+    const hasPreset = presetCount > 0
 
-    // ★ 维度块是否存在（轮询最多 6 秒，等页面渲染完；选完第一维后第二维常自动出现）
-    const waitDim = async (name, maxMs = 6000) => {
-      const t0 = Date.now()
-      while (Date.now() - t0 < maxMs) {
-        const ok = await page.evaluate((n) => {
-          const dims = [...document.querySelectorAll('.property-container-v2')]
-          if (dims.some(c => (c.querySelector('.property-name-title')?.innerText || '').includes(n))) return true
-          const root = document.querySelector('#newSpec')
-          if (root && (root.innerText || '').includes(n)) return true
-          // 尺码表特征（标题可能为空）
-          if (/尺码/.test(n)) {
-            for (let k = 1; k < dims.length; k++) {
-              if (/尺码表|全选以下规格值|\d{3}\/\d{2}[A-Z]/.test(dims[k].innerText || '')) return true
-            }
-          }
-          return false
-        }, name).catch(() => false)
-        if (ok) return true
-        await new Promise(r => setTimeout(r, 250))
-      }
-      return false
+    let fillMode = null
+    let why = ''
+
+    if (!hasPreset) {
+      if (tplDim?.controlType === 0) { fillMode = 'input'; why = 'ct=0 无预设值' }
+      else if (tplDim?.valueType === 1) { fillMode = 'number'; why = 'vt=1 无预设值' }
+      else { fillMode = 'text'; why = '无预设值，按文本框' }
+    } else {
+      const groups = tplDim.presetValues.map(v => v.group).filter(Boolean)
+      const isSizeTab = groups.some(g => SIZE_TAG_RE.test(g))
+      if (isSizeTab) { fillMode = 'size-table'; why = `group=${[...new Set(groups)].slice(0, 2).join('/')}` }
+      else { fillMode = 'checkbox'; why = `group=${[...new Set(groups)].slice(0, 2).join('/')}，非尺码标签` }
     }
 
-    const autoExists = await waitDim(specs[i].name, i === 0 ? 3000 : 6000)
+    log(`   [${i + 1}/${specs.length}] ${spec.name}  预设=${presetCount}  →  ${fillMode}（${why}）`)
 
     let r
-    switch (dimType) {
-      // ── 尺码表型（女装：标签页 + 值网格 + 身高体重区间）──
-      case 'size-table': {
-        if (!autoExists) {
-          const added = await addDimension(page, tplDim, specs[i], i === 0)
-          if (!added.ok) { r = added; break }
-          await waitDim(specs[i].name, 4000)
-        }
-        // ★ 通用尺码表填充（传 dim 让 guessTab 按模板 group 精确切标签页）
-        r = await fillSizeTableGeneric(page, specs[i].name, specs[i].values, {
-          tabHint: tplDim.tabHint || '',
-          dim: tplDim,
-        })
-        r.name = specs[i].name
-        r.mode = 'size-table(generic)'
-
-        // ★ 勾完值后停用尺码表（不填身高/体重/衣长等参数）
-        if (r.ok) {
-          const sc = await stopSizeChart(page)
-          r.sizeChartStop = sc
-          if (!sc.ok) warnings.push('停用尺码表失败: ' + (sc.reason || ''))
-        }
-        break
-      }
-      // ── 勾选型（颜色/鞋码：预设值点选）──
-      case 'checkbox': {
-        if (!autoExists) {
-          const added = await addDimension(page, tplDim, specs[i], i === 0)
-          if (added.ok) await waitDim(specs[i].name, 4000)
-          if (!added.ok) { r = added; break }
-        }
-        // ★ 通用：勾选框 + 输入框按组配对（预设值/自定义都走这里）
-        r = fillByGroup
-          ? await fillByGroup(page, specs[i].name, specs[i].values, tplDim)
-          : await fillByClick(page, specs[i].name, specs[i].values, tplDim)
-        r.name = specs[i].name
-        r.mode = 'group(tpl)'
-        break
-      }
-      // ── 输入型（纸杯容量：checkbox + 输入框组合）──
-      case 'text': {
-        if (!autoExists) {
-          const added = await addDimension(page, tplDim, specs[i], i === 0)
-          if (added.ok) await waitDim(specs[i].name, 4000)
-          if (!added.ok) { r = added; break }
-        }
-        // ★ 通用：勾选框 + 输入框按组配对
-        r = fillByGroup
-          ? await fillByGroup(page, specs[i].name, specs[i].values, tplDim)
-          : await fillByInput(page, specs[i].name, specs[i].values, tplDim)
-        r.name = specs[i].name
-        r.mode = 'group(tpl)'
-        break
-      }
-      // ── 模板没标 type → 回退现场探测 ──
-      default: {
-        const isSizeLike = /尺码|码数|size/i.test(specs[i].name)
-        if (i > 0 && autoExists && isSizeLike) {
-          r = await fillBySizeTable(page, specs[i].name, specs[i].values)
-          r.name = specs[i].name
-          r.mode = 'size-table(auto)'
-          if (r.ok) {
-            const chart = await readSizeChart(opts.catId || 0)
-            r.sizeChart = await fillSizeChartTable(page, specs[i].values, chart)
-          }
-        } else if (i > 0 && autoExists) {
-          const st = await readSpecState(page)
-          const ui = st.dims.find(d => d.name.includes(specs[i].name))
-          r = ui?.controlGuess === 'checkbox'
-            ? await fillByClick(page, specs[i].name, specs[i].values, tplDim)
-            : await fillByInput(page, specs[i].name, specs[i].values, tplDim)
-          r.name = specs[i].name
-          r.mode = 'auto-dim'
-        } else {
-          r = await addDimension(page, tplDim, specs[i], i === 0)
-        }
-      }
+    if (fillMode === 'size-table') {
+      r = await runSizeTable(page, spec, tplDim, log)
+    } else {
+      r = await addDimension(page, tplDim || { controlType: -1, valueType: 0 }, spec, i === 0)
     }
-    results.push(r)
-    if (r.warnings?.length) warnings.push(...r.warnings)
+
+    results.push({ name: spec.name, mode: fillMode, ...r })
     if (!r.ok) {
-      return { ok: false, mode: tpl.specs.mode, results, warnings, error: r.error || '未知失败', failedStep: r.name, failedDetail: r.detail, failedResults: r.results }
+      return {
+        ok: false,
+        mode: 'preset',
+        results,
+        warnings,
+        error: `${spec.name}: ${r.error || '填充失败'}`,
+      }
     }
   }
 
-  // ── IF 10：SKU 行数（等行数达到预期，最多 8 秒）
-  const expectedRows = specs.reduce((n, s) => n * s.values.length, 1)
-  let actualRows = 0
-  for (let i = 0; i < 40; i++) {
-    actualRows = await countSkuRows(page)
-    if (actualRows >= expectedRows) break
+  // ══【5】校验行数
+  const expected = specs.reduce((a, s) => a * (s.values?.length || 1), 1)
+  let actual = 0
+  for (let k = 0; k < 40; k++) {
+    actual = await countSkuRows(page)
+    if (actual >= expected) break
     await new Promise(r => setTimeout(r, 200))
   }
+  log(`   行数校验：期望 ${expected}，实际 ${actual}`)
 
-  if (actualRows !== expectedRows) {
+  if (actual !== expected) {
     return {
       ok: false,
-      mode: tpl.specs.mode,
+      mode: 'preset',
       results,
       warnings,
-      expectedRows,
-      actualRows,
-      error: `SKU 行数不符：预期 ${expectedRows}（${specs.map(s => s.values.length).join('×')}），实际 ${actualRows}`,
+      actualRows: actual,
+      error: `SKU 行数不符：预期 ${expected}，实际 ${actual}`,
     }
   }
 
-  return { ok: true, mode: tpl.specs.mode, results, warnings, expectedRows, actualRows }
+  // ══【6】返回
+  return { ok: true, mode: 'preset', results, warnings, actualRows: actual }
+}
+
+// 维度名归一化（去星号/空格/「重要」前缀）
+function cleanName(s) {
+  return String(s || '').replace(/[*＊\s]/g, '').replace(/^重要/, '').trim()
+}
+
+// 尺码标签正则
+const SIZE_TAG_RE = /通用|中国码|欧码|英码|德码|美码|均码|身高|国际标准|法码|日本码|韩国码/
+
+
+// 尺码表填充（含停用）
+async function runSizeTable(page, spec, tplDim, log) {
+  const tabHint = tplDim?.presetValues?.find(v => String(v.value) === String(spec.values?.[0]))?.group || ''
+  log(`      尺码表 tabHint=${tabHint || '(无)'}`)
+  const r = await fillSizeTableGeneric(page, spec.name, spec.values, { tabHint, dim: tplDim, log })
+  if (r.ok) {
+    const s = await stopSizeChart(page)
+    log(`      停用尺码表 ${s.ok ? '✅' : '❌ ' + (s.reason || '')}`)
+    return { ...r, stopSizeChart: s }
+  }
+  return r
 }
 
 export default step11_fillSpecs
