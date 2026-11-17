@@ -164,6 +164,9 @@ if (RISK?.checkCooldown) {
 }
 
 const { browser, page: p0 } = await launchStealth(realShopKey, puppeteer)
+// ★ 2026-11-16 提速：launch 后是 about:blank，可以直接 goto
+//   原做法轮询等「页面变成 mms 域名」，实测最多要 7.8s
+await sleep(600)
 let p = p0
 const src = { browser, get p() { return p }, set p(v) { p = v },
   params: product, catId, tpl, log, sleep,
@@ -196,7 +199,9 @@ const steps = []
 try {
   // ── 1 打开发布页 ──
   log('=== 1 打开发布页 ===')
-  await pick(/goods_list|goods\/category/)
+  // ★ 2026-11-16 提速：第1步不需要 pick()
+  //   页面刚 launch 时是 about:blank，pick 会白等 20×250ms
+  //   直接 goto 就行
   await p.goto('https://mms.pinduoduo.com/goods/goods_list', { waitUntil: 'domcontentloaded' }).catch(() => { })
   await p.waitForSelector('button[data-tracking-viewid="new_product_releasing"]', { timeout: 25000 }).catch(() => { })
   const tp = browser.waitForTarget(t => /goods\/category/.test(t.url()), { timeout: 25000 }).catch(() => null)
