@@ -36,6 +36,7 @@
  */
 import path from 'node:path'
 import { fillIngredientList } from './helpers/fill-ingredient-list.mjs'
+import { fillSelectByJs, fillIngredientByJs } from './helpers/attr-fill-js.mjs'
 import os from 'node:os'
 import fs from 'node:fs'
 import { pathToFileURL, fileURLToPath } from 'node:url'
@@ -273,25 +274,17 @@ export async function step6_fillAttributes(page, opts = {}) {
 
     // ★ 2026-11-16：成分列表组件（如「材质成分」）单独走
     if (hit.mode === 'ingredient') {
-      const ir = await fillIngredientList(page, hit.formItemId, vals, (m) => console.log('[s6]' + m))
+      const ir = await fillIngredientByJs(page, label, vals, { log: (m) => console.log('[s6]' + m) })
       res.results.push({ label, formItemId: hit.formItemId, mode: 'ingredient', ...ir })
       if (!ir.ok) res.errors.push(`${label}: ${ir.error || '成分列表填充失败'}`)
       continue
     }
 
-    // ★ 2026-11-16 最终：不探测，直接按「模板选项数量」决定要不要输入筛选
-    //   选项特别长（> 20）→ 下拉是虚拟列表，只渲染可见几项，必须输入筛选
-    //   其他 → 走原逻辑（品牌/型号/货号因为 placeholder 含「搜索」会自动输入）
-    const optCount = tplByLabel.get(label)?.options?.length || 0
-    const needSearch = /品牌|型号|货号/.test(label) || optCount > 20
-
-    // 调组件
-    const r = await S.selectOptions(page, {
-      formItemId: hit.formItemId,
-      values: vals,
-      timeoutMs: opts.timeoutMs ?? 30000,
-      search: needSearch,
-    }).catch(e => ({ ok: false, error: String(e.message).slice(0, 150) }))
+    // ★ 2026-11-16：改用 JS 直填组件（轮询版）
+    //   实测 0.87s/属性（原 selectOptions 2.32s/属性）
+    //   支持：普通下拉、虚拟列表（自动输入筛选）、多选（自动关面板）
+    const r = await fillSelectByJs(page, label, vals, { log: (m) => console.log('[s6]' + m) })
+      .catch(e => ({ ok: false, error: String(e.message).slice(0, 150) }))
 
     res.results.push({ label, formItemId: hit.formItemId, mode: hit.mode, ...r })
     if (!r?.ok) res.errors.push(`${label}: ${r?.error || '失败'}`)

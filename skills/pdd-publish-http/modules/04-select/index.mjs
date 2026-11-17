@@ -297,7 +297,8 @@ export async function selectOptions(page, opts = {}) {
         input.dispatchEvent(new Event('change', { bubbles: true }))
         return true
       }, targetOf(opts), v).catch(() => false)
-      if (typed) await page.evaluate(() => new Promise(r => setTimeout(r, 1200)))
+      // ★ 2026-11-16：输入后直接进「找选项」循环
+      //   那里已有 timeout 轮询，会等到筛选结果出现；不用额外等待
     }
 
     // 找选项并点
@@ -320,7 +321,8 @@ export async function selectOptions(page, opts = {}) {
 
       if (r.ok) { picked = r.selected; break }
       if (r.options?.length) { opts0 = r.options; break }
-      await page.evaluate(() => new Promise(r => setTimeout(r, 400)))
+      // ★ 2026-11-16 提速：轮询间隔 400ms → 40ms
+      await page.evaluate(() => new Promise(r => setTimeout(r, 40)))
     }
 
     if (!picked) {
@@ -331,7 +333,23 @@ export async function selectOptions(page, opts = {}) {
     }
 
     res.tried.push({ value: v, ok: true, picked })
-    await page.evaluate(() => new Promise(r => setTimeout(r, 600)))
+    // ★ 2026-11-16 提速：选完轮询等回填（原来死等 600ms）
+    for (let k = 0; k < 60; k++) {
+      const filled = await page.evaluate((o) => {
+        const S = window.__pddSel3
+        const el = S.findSelect(o)
+        if (!el) return true
+        // 多选：看 tag
+        const tags = el.querySelectorAll('[data-testid="beast-core-tagGroup-tag"]')
+        if (tags.length) return true
+        // 单选：看 input value
+        const input = el.querySelector('[data-testid="beast-core-select-htmlInput"]')
+        if (!input) return true
+        return String(input.value || '').trim().length > 0
+      }, targetOf(opts)).catch(() => true)
+      if (filled) break
+      await page.evaluate(() => new Promise(r => setTimeout(r, 40)))
+    }
 
     // ★ 单选选完自动关（不用手动关）；多选继续留在面板里
     if (!isMulti) break
