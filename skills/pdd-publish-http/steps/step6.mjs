@@ -219,19 +219,26 @@ export async function step6_fillAttributes(page, opts = {}) {
   for (const [label, rawVal] of entries) {
     const vals = Array.isArray(rawVal) ? rawVal.map(String) : [String(rawVal)]
 
-    // ★ 2026-11-16 重扫：平台属性是级联的，选好一个后下一个才渲染
-    //   只在开头扫一次会导致后面的属性全部「页面找不到」
-    // ★ 2026-11-16 再修：不是「扫到 N 个就停」，而是「必须扫到当前要填的这个 label」
-    //   原因：级联属性（如「材质成分」选完「面料俗称」才出现）
-    //        只看数量会在新属性出现前就返回旧 map
+    // ★ 2026-11-16 优化：先看当前 map 里有没有这个 label
+    //   有 → 直接填，不重扫（大部分属性属于这种）
+    //   没有 → 才重扫（级联新出现的属性，如「材质成分」）
     const normWant = String(label || '').replace(/[*＊\s]/g, '').replace(/^重要/, '').trim()
-    for (let i = 0; i < 24; i++) {
-      const fresh = await mapLabelsToFormIds(page)
-      const keys = Object.keys(fresh)
-      const hitNow = keys.some(k => String(k).replace(/[*＊\s]/g, '').replace(/^重要/, '').trim() === normWant)
-      labelMap = fresh
-      if (hitNow) break
-      await new Promise(r => setTimeout(r, 250))
+    const hasNow = Object.keys(labelMap).some(k =>
+      String(k).replace(/[*＊\s]/g, '').replace(/^重要/, '').trim() === normWant
+    )
+    console.log('[s6-dbg] ' + label + ' hasNow=' + hasNow + ' mapKeys=' + Object.keys(labelMap).length)
+    if (!hasNow) {
+      console.log('[s6-dbg]   ↳ 重扫（map 里没有 ' + label + '）')
+      // 只有这种情况才重扫
+      for (let i = 0; i < 24; i++) {
+        const fresh = await mapLabelsToFormIds(page)
+        labelMap = fresh
+        const hitNow = Object.keys(fresh).some(k =>
+          String(k).replace(/[*＊\s]/g, '').replace(/^重要/, '').trim() === normWant
+        )
+        if (hitNow) break
+        await new Promise(r => setTimeout(r, 250))
+      }
     }
 
     // 预校验：值是否在模板选项内
@@ -288,16 +295,31 @@ export async function step6_fillAttributes(page, opts = {}) {
 
     res.results.push({ label, formItemId: hit.formItemId, mode: hit.mode, ...r })
     if (!r?.ok) res.errors.push(`${label}: ${r?.error || '失败'}`)
-    // 等该属性的选中值回填（最多 1.5s，元素/值出现即走）
-    for (let i = 0; i < 6; i++) {
+    // ★ 2026-11-16 优化：回填确认改成「只看输入框 value」，不等 innerText
+    //   旧写法读 el.innerText，label 里本来就有「请选择」文字 → 永远判为未填 → 等满 1.5 秒
+    //   新写法：直接读该 form-item 里的 input value，非空即成功（通常 50ms 内返回）
+    for (let i = 0; i < 8; i++) {
       const done = await page.evaluate((fid) => {
         const el = document.getElementById(fid)
         if (!el) return true
-        const t = (el.innerText || '').replace(/\s+/g, '')
-        return t.length > 0 && !/请选择|^$/.test(t)
+        // 有 input 就看 value（下拉框、输入框都是这种）
+        const inputs = [...el.querySelectorAll('input')].filter(e => {
+          const t = (e.type || 'text').toLowerCase()
+          return t === 'text' || t === 'number' || t === ''
+        })
+        if (inputs.length) {
+          return inputs.some(e => String(e.value || '').trim().length > 0)
+        }
+        // 没有 input（成分列表等）→ 看按钮计数 (N/M) 里 N > 0
+        const btn = [...el.querySelectorAll('button')].find(b => /\(\d+\/\d+\)/.test(b.innerText || ''))
+        if (btn) {
+          const m = (btn.innerText || '').replace(/\s+/g, '').match(/\((\d+)\/(\d+)\)/)
+          return m ? Number(m[1]) > 0 : true
+        }
+        return true
       }, hit.formItemId).catch(() => true)
       if (done) break
-      await new Promise(r => setTimeout(r, 250))
+      await new Promise(r => setTimeout(r, 100))
     }
   }
 

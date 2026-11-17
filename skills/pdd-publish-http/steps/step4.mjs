@@ -257,9 +257,24 @@ async function manualPick(page, tpl, log, force = false) {
   if (!conf) return { ok: false, error: '第4步：找不到「确认」按钮' }
   log('  第4步 已点确认')
 
-  // 等弹框关闭即可
-  await page.waitForFunction(() => !document.querySelector('input[data-tracking-viewid="key_words_search"]'), { timeout: 15000 }).catch(() => { })
-  await sleep(2500)
+  // ★ 2026-11-16 优化：等「类目文字真的出现」而不是等按钮消失
+  //   旧写法等按钮不可见，6 秒超时就跳过 → 页面其实还在处理 → 点下一步必卡
+  //   新写法等 selectedCateId 里出现目标类目名（最多等 20 秒）
+  // 目标类目名：优先用传进来的 tpl（manualPick 的参数），没有就用空
+  const wantName = String(
+    tpl?.category?.name
+    || tpl?.category?.fullName?.split('>').pop()
+    || ''
+  ).trim()
+  await page.waitForFunction((want) => {
+    const el = document.getElementById('selectedCateId')
+    if (!el) return false
+    const t = (el.innerText || '').replace(/\s+/g, '')
+    if (!t) return false
+    // 有目标类目名就返回 true；没给名字则只要非空就算
+    return want ? t.includes(want) : t.length > 0
+  }, { timeout: 20000 }, wantName).catch(() => { })
+  await sleep(300)
 
   // ★ 第4步确认按钮的 cat_id 已等于目标，即视为选类目成功。
   //   不再回读页面类目文字做二次校验（页面文字刷新有延迟，会误判为「仍不一致」）。

@@ -38,7 +38,12 @@ const argOf = (name, dflt = '') => {
 const hasFlag = (name) => process.argv.includes('--' + name)
 
 const sleep = ms => new Promise(r => setTimeout(r, ms))
-const log = (...a) => console.log('[pdd]', ...a)
+// ★ 带时间戳的 log（用来定位每步耗时）
+const __t0 = Date.now()
+const log = (...a) => {
+  const s = ((Date.now() - __t0) / 1000).toFixed(1)
+  console.log('[pdd +' + s + 's]', ...a)
+}
 
 // ─── 参数 ────────────────────────────────────────────────
 let product = null
