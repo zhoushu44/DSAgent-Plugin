@@ -173,17 +173,38 @@ export async function step6_fillAttributes(page, opts = {}) {
   const tplByLabel = new Map()
   if (tpl?.attributes) for (const a of tpl.attributes) tplByLabel.set(a.label, a)
 
-  // ② 扫页面拿 label → formItemId（等属性区渲染，元素出现即返回）
+  // ② 扫页面拿 label → formItemId
+  //   ★ 2026-11-16 修正：不能「扫到任意 1 个就停」——
+  //     页面是分批渲染的，先出来「运费模板」，属性区还没渲染完
+  //     要等「扫到的属性数 >= 模板属性数」（最多等 20 秒）
+  const wantCount = Math.max(tpl?.attributes?.length || 0, 3)
   let labelMap = {}
-  for (let i = 0; i < 60; i++) {
+  for (let i = 0; i < 80; i++) {
     labelMap = await mapLabelsToFormIds(page)
-    if (Object.keys(labelMap).length) break
+    const got = Object.keys(labelMap).length
+    if (got >= wantCount) break
+    if (i === 0 || got !== (labelMap._lastGot || -1)) {
+      console.log('[s6] 等待属性渲染：' + got + '/' + wantCount)
+    }
+    labelMap._lastGot = got
     await new Promise(r => setTimeout(r, 250))
   }
+  delete labelMap._lastGot
 
-  // ③ 逐个填
+  // ★ 调试日志：扫到几个属性
+  console.log('[s6] 扫到属性', Object.keys(labelMap).length, '个:', Object.keys(labelMap).slice(0,15).join(',') || '(空)')
+
+  // ③ 逐个填（★ 每次重新扫 labelMap：级联属性要选完上一个才出现下一个）
   for (const [label, rawVal] of entries) {
     const vals = Array.isArray(rawVal) ? rawVal.map(String) : [String(rawVal)]
+
+    // ★ 2026-11-16 重扫：平台属性是级联的，选好一个后下一个才渲染
+    //   只在开头扫一次会导致后面的属性全部「页面找不到」
+    for (let i = 0; i < 20; i++) {
+      const fresh = await mapLabelsToFormIds(page)
+      if (Object.keys(fresh).length >= Math.min(wantCount, 3)) { labelMap = fresh; break }
+      await new Promise(r => setTimeout(r, 250))
+    }
 
     // 预校验：值是否在模板选项内
     const t = tplByLabel.get(label)
@@ -212,6 +233,8 @@ export async function step6_fillAttributes(page, opts = {}) {
       res.unmapped.push(label)
       continue
     }
+
+    console.log('[s6] 填', label, '=', JSON.stringify(vals), '  id=', hit.formItemId)
 
     // 调组件
     const r = await S.selectOptions(page, {
