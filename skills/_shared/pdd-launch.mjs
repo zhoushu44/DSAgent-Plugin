@@ -77,6 +77,34 @@ export const STEALTH_ARGS = [
  * @param {object} extra 额外参数
  * @returns {{ executablePath, userDataDir, profileMissing?: boolean, resolvedProfile?: string, headless, defaultViewport, args, ignoreDefaultArgs, ...}}
  */
+/**
+ * 合并 Chrome 启动参数：后者同名参数覆盖前者
+ * 例：mergeArgs(['--window-position=0,0','--no-first-run'], ['--window-position=-32000,-32000'])
+ *     → ['--no-first-run','--window-position=-32000,-32000']
+ */
+export function mergeArgs(base, over) {
+  const out = [...base]
+  for (const a of over) {
+    const s = String(a)
+    const name = s.split('=')[0]
+    const idx = out.findIndex(x => String(x).split('=')[0] === name)
+
+    // ★ disable-features / enable-features 是列表型，要合并值而不是覆盖
+    //   否则会丢掉 STEALTH_ARGS 里的 IsolateOrigins,site-per-process
+    if (idx >= 0 && /^--(disable|enable)-features$/.test(name)) {
+      const oldVal = String(out[idx]).split('=').slice(1).join('=')
+      const newVal = s.split('=').slice(1).join('=')
+      const merged = [...new Set([...oldVal.split(','), ...newVal.split(',')].map(x => x.trim()).filter(Boolean))]
+      out[idx] = name + '=' + merged.join(',')
+      continue
+    }
+
+    if (idx >= 0) out.splice(idx, 1)
+    out.push(s)
+  }
+  return out
+}
+
 export function launchOptions(shopKey, extra = {}) {
   const base = path.join(homedir(), '.dsh', 'browser-profiles', 'accounts')
   let profile = path.join(base, shopKey)
@@ -188,7 +216,13 @@ export function launchOptions(shopKey, extra = {}) {
     headless: false,
     // ★★★ 关键修正：null = 用真实窗口尺寸，不强制覆盖 innerWidth/innerHeight
     defaultViewport: null,
-    args: [...STEALTH_ARGS, ...(extra.args || [])],
+    // ★ 2026-11-16：extra.args 与 STEALTH_ARGS 同名时后者覆盖前者
+    //   原因：Chrome 对重复参数只认一个，直接 append 会出现
+    //         --window-position=0,0 + --window-position=-32000,-32000 并存
+    //         --disable-features=A,B + --disable-features=C,D 并存
+    //         → 不确定哪个生效，导致「屏幕外模式」失效、渲染被节流
+    //   做法：按「参数前缀（= 之前）」去重，extra.args 优先
+    args: mergeArgs(STEALTH_ARGS, extra.args || []),
     ignoreDefaultArgs: ['--enable-automation'],   // ★ 去掉「Chrome 正受自动化软件控制」提示
     ...extra,
   }
@@ -465,4 +499,133 @@ export async function launchStealth(shopKey, puppeteer, extra = {}) {
     console.error(`[pdd-launch] ⚠ WebGL 指纹注入失败，降级为原生指纹：${String(e && e.message || e).slice(0, 100)}`)
   }
   return { browser, page }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  无干扰模式：spawn 启动 Chrome，窗口在屏幕外
+// ═══════════════════════════════════════════════════════════════════
+/**
+ * 无干扰模式启动（窗口移到 -32000,-32000，用户看不见）
+ *
+ * ★ 为什么不用 puppeteer.launch()
+ *   puppeteer.launch() 会追加 23 个默认参数，其中 --start-maximized
+ *   会把窗口最大化拖回主屏，--window-position 失效。
+ *   实测：puppeteer.launch + window-position 在拼多多发布页会导致
+ *         类目搜索下拉无选项、属性填充慢 6 倍。
+ *   所以必须用 spawn 直接启动，只传必要参数。
+ *
+ * ★ 关键参数
+ *   --window-position=-32000,-32000                窗口在屏幕外
+ *   --disable-features=CalculateNativeWinOcclusion 不判定「窗口被遮挡」
+ *   --disable-backgrounding-occluded-windows       不做后台降频
+ *
+ * 实测：童装睡衣批量 10 套 10/10 成功，平均 63s/套（2026-11-16）
+ *
+ * @param {string} shopKey 账号
+ * @param {object} puppeteer puppeteer-core 模块
+ * @param {object} [extra] { args, visible, log, timeoutMs }
+ * @returns {Promise<{browser, page, proc, port, close}>}
+ */
+export async function launchNoWindowStealth(shopKey, puppeteer, extra = {}) {
+  const { spawn } = await import("node:child_process")
+  const net = await import("node:net")
+  const log = extra.log || (() => { })
+
+  const opts = launchOptions(shopKey, {})
+  const profile = opts.userDataDir
+  const visible = extra.visible === true
+
+  // 清残留锁
+  for (const n of ["SingletonLock", "SingletonCookie", "SingletonSocket", "DevToolsActivePort"]) {
+    try { fs.rmSync(path.join(profile, n), { force: true, recursive: true }) } catch { }
+  }
+  fs.mkdirSync(profile, { recursive: true })
+
+  // 找空闲端口
+  const port = await new Promise((resolve, reject) => {
+    const srv = net.createServer()
+    srv.on("error", reject)
+    srv.listen(0, "127.0.0.1", () => {
+      const pt = srv.address().port
+      srv.close(() => resolve(pt))
+    })
+  })
+
+  const args = [
+    "--user-data-dir=" + profile,
+    "--remote-debugging-port=" + port,
+    "--remote-debugging-address=127.0.0.1",
+    // ★ 反检测参数（等价 STEALTH_ARGS，但不含 --start-maximized）
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-blink-features=AutomationControlled",
+    "--no-default-browser-check",
+    "--no-first-run",
+    "--lang=zh-CN",
+    // ★ 窗口位置
+    visible ? "--window-position=100,50" : "--window-position=-32000,-32000",
+    "--window-size=1440,900",
+    // ★ 关键：不判定遮挡、不降频
+    "--disable-features=CalculateNativeWinOcclusion,IntensiveWakeUpThrottling,IsolateOrigins,site-per-process",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-renderer-backgrounding",
+    "--disable-background-timer-throttling",
+    ...(extra.args || []),
+    "about:blank",
+  ]
+
+  log("[no-window] spawn chrome 端口=" + port)
+  const proc = spawn(CHROME_PATH, args, { stdio: ["ignore", "pipe", "pipe"] })
+  let stderrTail = ""
+  proc.stderr.on("data", d => { stderrTail = (stderrTail + String(d)).slice(-1500) })
+
+  // 等 DevTools 端口
+  const timeout = extra.timeoutMs || 30000
+  const t0 = Date.now()
+  let info = null
+  while (Date.now() - t0 < timeout) {
+    await new Promise(r => setTimeout(r, 120))
+    try {
+      const r = await fetch("http://127.0.0.1:" + port + "/json/version", { signal: AbortSignal.timeout(500) })
+      info = await r.json()
+      break
+    } catch { }
+  }
+  if (!info) {
+    try { proc.kill() } catch { }
+    throw new Error("Chrome 未就绪（" + timeout + "ms）" + stderrTail.slice(-300))
+  }
+  log("[no-window] DevTools 就绪 " + info.Browser + " (" + (Date.now() - t0) + "ms)")
+
+  const browser = await puppeteer.connect({
+    browserURL: "http://127.0.0.1:" + port,
+    defaultViewport: null,
+  })
+
+  let pages = await browser.pages()
+  let page = pages[0]
+  if (!page) page = await browser.newPage()
+
+  // 注入指纹（与 launchStealth 一致）
+  try {
+    const fpMod = await import("./pdd-fingerprint.mjs")
+    const langs = fpMod.pickLanguages(shopKey)
+    await page.evaluateOnNewDocument("window.__PDD_LANGS__ = " + JSON.stringify(langs) + ";")
+    const fp = fpMod.webglFingerprintScript(shopKey)
+    if (fp) await page.evaluateOnNewDocument(fp)
+  } catch (e) {
+    log("[no-window] 指纹注入失败（降级原生）：" + String(e && e.message || e).slice(0, 100))
+  }
+  await page.evaluateOnNewDocument(STEALTH_SCRIPT)
+
+  return {
+    browser,
+    page,
+    proc,
+    port,
+    close: async () => {
+      try { await browser.disconnect() } catch { }
+      try { proc.kill() } catch { }
+    },
+  }
 }

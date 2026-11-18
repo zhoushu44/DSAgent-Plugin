@@ -143,7 +143,7 @@ if (!hasCookie) {
 const realShopKey = acc.shop_key
 
 const { default: puppeteer } = await import(pathToFileURL(path.join(PLUGIN, 'node_modules/puppeteer-core/lib/cjs/puppeteer/puppeteer-core.js')).href)
-const { launchStealth } = await loadShared('pdd-launch.mjs')
+const { launchStealth, launchNoWindowStealth } = await loadShared('pdd-launch.mjs')
 let AB = null, RISK = null
 try { AB = await loadShared('pdd-antiban.mjs') } catch { }
 try { RISK = await loadShared('pdd-risk.mjs') } catch { }
@@ -163,7 +163,16 @@ if (RISK?.checkCooldown) {
   if (cd?.cooling) emit({ ok: false, failureKind: 'rate_limit', text: `账号冷却中，剩余 ${Math.ceil((cd.until - Date.now()) / 1000)}s` })
 }
 
-const { browser, page: p0 } = await launchStealth(realShopKey, puppeteer)
+// ★ 2026-11-16 无干扰模式：spawn 启动 Chrome（窗口在屏幕外）
+//   为什么不用 puppeteer.launch：它会追加 23 个默认参数（--start-maximized 等）
+//   导致 --window-position=-32000,-32000 失效、下拉渲染异常
+//   spawn 只传必要参数，实测 10/10 成功、63s/套
+//   ★ 加 --visible 或 PDD_VISIBLE=1 可看窗口
+const WANT_VISIBLE = process.argv.includes('--visible') || process.env.PDD_VISIBLE === '1'
+const { browser, page: p0 } = WANT_VISIBLE
+  ? await launchStealth(realShopKey, puppeteer)
+  : await launchNoWindowStealth(realShopKey, puppeteer)
+if (!WANT_VISIBLE) log('浏览器: 无干扰模式（窗口屏幕外）')
 // ★ 2026-11-16 提速：launch 后是 about:blank，可以直接 goto
 //   原做法轮询等「页面变成 mms 域名」，实测最多要 7.8s
 await sleep(600)
