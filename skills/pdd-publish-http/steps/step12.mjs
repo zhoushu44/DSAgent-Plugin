@@ -195,17 +195,85 @@ export async function step12_fillSkuPrices(page, opts = {}) {
   result.write = writeRes
   if (!writeRes?.ok) { result.errors.push(writeRes?.reason || '写入失败'); return result }
 
-  // SKU 预览图
+  // ══ SKU 预览图 ══
+  // ★ 2026-11-16 重写（回归 c18a0ff 的极简版做法）
+  //   判据关键：上传成功后 input[type="file"] 会【消失】，只留 background-image 缩略图
+  //   所以不能「有没有 file input」当完成判据，要看「格子里有没有真实背景图 / http img」
   if (opts.thumbs?.length) {
-    const rowHandles = await page.$$('#sku tbody tr')
     result.thumbs = []
-    for (let i = 0; i < rowHandles.length; i++) {
+
+    // 读所有行的预览图状态
+    const readThumbState = () => page.evaluate(() => {
+      const tb = [...document.querySelectorAll('table')].find(t => /拼单价/.test(t.innerText || ''))
+        || document.querySelector('#sku')
+      if (!tb) return []
+      return [...tb.querySelectorAll('tbody tr')].map((tr, ri) => {
+        const tds = [...tr.querySelectorAll('td')]
+        // 预览图列：优先找有 file input 的 td
+        let td = tds.find(x => x.querySelector('input[type="file"]'))
+        if (!td) {
+          // 没 file input → 按表头找（rowspan 会少几个 td，要算偏移）
+          const heads = [...tb.querySelectorAll('thead th')].map(th => th.textContent.trim())
+          const col = heads.findIndex(h => /预览图/.test(h))
+          const offset = tds.length < heads.length ? heads.length - tds.length : 0
+          td = col >= 0 ? tds[col - offset] : null
+        }
+        if (!td) return { ri, hasThumb: false, hasFile: false }
+        let hasThumb = false
+        for (const e of td.querySelectorAll('*')) {
+          const r = e.getBoundingClientRect()
+          if (r.width < 20 || r.height < 20 || r.width > 300) continue
+          if (/url\(/.test(getComputedStyle(e).backgroundImage || '')) { hasThumb = true; break }
+          if (e.tagName === 'IMG' && (e.src || '').startsWith('http')) { hasThumb = true; break }
+        }
+        return { ri, hasThumb, hasFile: tds.some(x => x.querySelector('input[type="file"]')) }
+      })
+    }).catch(() => [])
+
+    const slots = await readThumbState()
+
+    for (let i = 0; i < slots.length; i++) {
       const file = opts.thumbs[i] || opts.thumbs[0]
       if (!file) continue
-      const fi = await rowHandles[i].$('input[type="file"]').catch(() => null)
-      if (!fi) { result.thumbs.push({ i, ok: false, reason: '无file input' }); continue }
-      try { await fi.uploadFile(file); result.thumbs.push({ i, ok: true }) }
-      catch (e) { result.thumbs.push({ i, ok: false, reason: String(e.message).slice(0, 80) }) }
+
+      // 已有图 → 跳过
+      if (slots[i]?.hasThumb) {
+        result.thumbs.push({ i, ok: true, already: true })
+        continue
+      }
+
+      // 拿该行的 file input
+      const el = await page.evaluateHandle((ri) => {
+        const tb = [...document.querySelectorAll('table')].find(t => /拼单价/.test(t.innerText || ''))
+          || document.querySelector('#sku')
+        if (!tb) return null
+        const tr = [...tb.querySelectorAll('tbody tr')][ri]
+        if (!tr) return null
+        tr.scrollIntoView({ block: 'center' })
+        return tr.querySelector('input[type="file"]') || null
+      }, i).then(h => h.asElement()).catch(() => null)
+
+      if (!el) {
+        result.thumbs.push({ i, ok: false, reason: '无 file input' })
+        continue
+      }
+
+      try {
+        await sleep(200)
+        await el.uploadFile(file)
+      } catch (e) {
+        result.thumbs.push({ i, ok: false, reason: String(e.message).slice(0, 80) })
+        continue
+      }
+
+      // 等缩略图出现（最多 8 秒，16 × 500ms）
+      let ok = false
+      for (let w = 0; w < 16; w++) {
+        await sleep(500)
+        const st = await readThumbState()
+        if (st[i]?.hasThumb) { ok = true; break }
+      }
+      result.thumbs.push({ i, ok, ...(ok ? {} : { reason: '上传后未出现缩略图' }) })
     }
   }
 
