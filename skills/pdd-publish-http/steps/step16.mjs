@@ -81,7 +81,11 @@ async function readPageError(page) {
     const toasts = []
     for (const el of document.querySelectorAll('[class*="toast"],[class*="Toast"],[class*="message"],[class*="Message"]')) {
       const x = (el.innerText || '').replace(/\s+/g, ' ').trim()
-      if (x && x.length < 150 && /失败|错误|必填|请|不能|超/.test(x) && !toasts.includes(x)) toasts.push(x)
+      // ★ 2026-11-16 修：排除误报
+      //   「暂无错误内容」「无错误」这类是平台的「校验通过」提示，不是错误
+      if (!x || x.length >= 150) continue
+      if (/暂无错误|无错误|没有错误/.test(x)) continue
+      if (/失败|错误|必填|请|不能|超/.test(x) && !toasts.includes(x)) toasts.push(x)
     }
     return { hasError: toasts.length > 0, count: toasts.length, text: toasts.slice(0, 4).join(' | ') }
   }).catch(() => ({ hasError: false, count: 0, text: '' }))
@@ -258,11 +262,14 @@ export async function step16_submit(page, opts = {}) {
   const cap = opts.timeoutMs ?? 180000
   let success = false
   let successText = ''
+  let leaveCount = 0
   while (Date.now() - t0 < cap) {
     await sleep(1500)
     const url = page.url()
     // 成功：跳成功页
     if (/goods_add\/success/.test(url) || /\/success\?/.test(url)) { success = true; break }
+    // ★ 2026-11-16 新增：提交成功后平台会跳到「商品列表」页（实测）
+    if (/goods\/goods_list/.test(url)) { success = true; successText = '已跳转到商品列表页'; break }
     // ★ 成功：页面出现 .success-title 且文本含「提交成功」（用户实测标志）
     const st = await page.evaluate(() => {
       const el = document.querySelector('.success-title')
@@ -271,12 +278,24 @@ export async function step16_submit(page, opts = {}) {
       return /提交成功|发布成功|上架成功/.test(t) ? t : ''
     }).catch(() => '')
     if (st) { success = true; successText = st; break }
-    // 成功：页面文案
-    const okText = await page.evaluate(() => /发布成功|提交成功|上架成功/.test(document.body.innerText || '')).catch(() => false)
-    if (okText) { success = true; break }
+    // ★ 2026-11-16 删除宽松判据：原来只要页面出现「提交成功」四个字就算成功
+    //   实测问题：提交时会短暂闪一个 toast，1.7 秒就命中 → 误判成功
+    //   但商品实际没创建（后台商品列表里看不到）
+    //   现在只认三种硬标志：
+    //     ① URL 跳 goods_add/success
+    //     ② 页面有 .success-title 且文字匹配
+    //     ③ 页面从 goods_add/index 离开且无错误面板（连续 3 次采样确认）
     // 失败：错误面板
     const err = await readPageError(page)
     if (err.hasError) { result.pageError = err; break }
+
+    // ★ 2026-11-16 新增：页面离开 goods_add/index 且无错误 → 连续 3 次算成功
+    if (!/goods_add\/index/.test(url)) {
+      leaveCount = (typeof leaveCount === 'number' ? leaveCount : 0) + 1
+      if (leaveCount >= 3) { success = true; successText = successText || '页面已离开编辑页'; break }
+    } else {
+      leaveCount = 0
+    }
   }
 
   result.url = page.url()
