@@ -1,7 +1,7 @@
 # 抖店 AI 发品 —— 改包模式（schema patch）技术说明
 
 > 本文记录 `douyin-ai-publish` 的**改包模式**：不点 DOM 填表，直接改 `addWithSchema` 的请求体。
-> 这是照抄拼多多 `pdd-publish-http` 的「拦改重放」思路，落到抖店的实际验证结果。
+> 这是照抄拼多多 `pdd-publish` 的「拦改重放」思路，落到抖店的实际验证结果。
 
 ---
 

@@ -3,7 +3,7 @@
   "id": "xiaohongshu-analytics",
   "entry": {
     "form": "script",
-    "script": "scripts/fetch_data.py"
+    "script": "scripts/fetch.mjs"
   },
   "input": {
     "args": [
@@ -16,7 +16,7 @@
       {
         "name": "note_id",
         "flag": "--note-id",
-        "description": "笔记 ID（detail / trend 模式必填，可从 list 模式的 notes[].raw 或页面链接取）"
+        "description": "笔记 ID（detail / trend 模式必填，可从 list 模式的 notes[].id 取）"
       },
       {
         "name": "limit",
@@ -26,16 +26,19 @@
         "description": "笔记条数上限（默认 50）"
       },
       {
-        "name": "port",
-        "flag": "--port",
-        "type": "integer",
-        "default": 8787,
-        "description": "sign_service 端口（默认 8787）"
-      },
-      {
         "name": "csv",
         "type": "boolean",
         "description": "同时导出 CSV 到 workspace/artifacts/xhs-analytics"
+      },
+      {
+        "name": "fallback",
+        "choices": ["auto", "http", "page"],
+        "default": "auto",
+        "description": "执行通道：auto=先 HTTP 主链路、失败可兜底时自动切页面（默认）；http=只走 HTTP；page=强制走页面兜底"
+      },
+      {
+        "name": "account",
+        "description": "账号 shopKey（可选）；该平台多账号且未绑定时需先向用户确认"
       }
     ]
   },

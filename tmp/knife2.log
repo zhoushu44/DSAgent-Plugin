@@ -1,0 +1,44 @@
+[pdd +0.6s] 基座配额 ok {"waitMs":0,"allowedAt":1794994887306,"cooling":false,"kind":"write"}
+[pdd +3.1s] 浏览器: 无干扰模式（窗口屏幕外）
+[pdd +3.8s] === 1 打开发布页 ===
+[pdd +6.8s] 1 ✅ https://mms.pinduoduo.com/goods/category?id=206583437013&goods_id=1031
+[pdd +6.8s] === 2 主图 ===
+[pdd +9.1s] 2 ✅ 5 张
+[pdd +9.1s] === 3 标题 ===
+[pdd +9.2s] 3 ✅ 数控刀柄BT40高精度ER32动平衡CN
+[pdd +9.2s] === 4 类目+下一步 ===
+[pdd +9.7s]   类目检查: (未出现 selectedCateId) → 走手动选择分类
+[pdd +9.7s]     第1步 已点「手动选择商品分类」
+[pdd +11.2s]     第2步 输入「标准件零部件工业耗材机床配附件刀柄刀杆」
+[pdd +13.8s]     第3步 已选第一个: 标准件/零部件/工业耗材 > 机床配附件 > 刀柄/刀杆
+[pdd +13.8s]     第4步 确认按钮: cat_id=22896
+[pdd +13.9s]     第4步 已点确认
+[pdd +34.2s]     第4步 ✅ 类目已确认 cat_id=22896
+[pdd +34.5s] 4 ✅
+[pdd +34.8s] 5 跳过（无白底图）
+[pdd +34.8s] === 6 属性 ===
+[s6] 等待属性渲染：1/3
+[s6] 等待属性渲染：1/3
+[s6] 等待属性渲染：0/3
+[s6] 等待属性渲染：0/3
+[s6] 扫到属性 4 个: 品牌,产地,材质,商品资质
+[s6-dbg] 品牌 hasNow=true mapKeys=4
+[s6] 填 品牌 = ["无品牌/无注册商标"]   id= basic.propertys.0.value
+[s6]      品牌「无品牌/无注册商标」✅  → 回读 "无品牌/无注册商标"
+[s6-dbg] 产地 hasNow=true mapKeys=4
+[s6] 填 产地 = ["中国大陆"]   id= basic.propertys.1.value
+[s6]      产地「中国大陆」✅  → 回读 "中国大陆"
+[pdd +40.4s] 6 ✅
+[pdd +40.4s]   自动补必填: 商品参考价,承诺发货时间,运费模板
+[pdd +40.4s] === 6b 详情图 (6 张) ===
+[pdd +41.3s] 6b ✅ 6 张
+[pdd +41.3s] 11 跳过（无规格）
+[pdd +41.3s] === 12 价格库存 ===
+[pdd +43.2s] 12 ✅ 1 行
+[pdd +43.2s]    写入明细: [{"i":0,"ok":true,"acts":"stock:true price:true multi:true sn:true"}]
+[pdd +43.2s]    列号: undefined
+[pdd +44.0s] 13 ✅ 89.87
+[pdd +45.3s] 15 ✅ 48小时发货及揽收
+[pdd +45.3s] === 16 提交 ===
+[pdd +49.8s] 16 ✅ goodsId=1031290345839
+__DSAGENT_RESULT__{"ok":true,"goodsId":1031290345839,"url":"https://mms.pinduoduo.com/goods/goods_add/success?goods_id=1031290345839&goods_type=1&goods_commit_id=206583437013&wait_audit=false&isCopyGoods=false&batch_discount=9.5&is_shop=0","steps":[{"step":1,"ok":true},{"step":2,"ok":true,"count":5},{"step":3,"ok":true,"value":"数控刀柄BT40高精度ER32动平衡CNC加工中心BT30刀柄"},{"step":4,"ok":true},{"step":5,"ok":true,"skip":true},{"step":6,"ok":true,"autoRequired":["商品参考价","承诺发货时间","运费模板"]},{"step":"6b","ok":true,"count":6,"locate":"detail-benDi"},{"step":11,"ok":true,"skip":true},{"step":12,"ok":true,"filled":1},{"step":13,"ok":true},{"step":15,"ok":true},{"step":16,"ok":true,"goodsId":1031290345839,"required":{"total":23,"required":9,"missing":[]}}],"required":{"total":23,"required":9,"missing":[]},"text":"上架成功 goodsId=1031290345839"}

@@ -1,6 +1,6 @@
 ---
 name: pdd-works
-description: "拼多多商品管理：查商品列表/总览、单商品 SKU 全量（规格/价格/库存/预览图）、提交体快照（170 字段）、规格池采集；以及下架/上架/删除（L2，接口直调，需确认）。读操作全部 HTTP 无副作用。触发：拼多多商品列表、查拼多多商品、拼多多SKU、拼多多商品详情、拼多多规格池、拼多多下架、拼多多上架、拼多多删除商品、pdd works。排除：拼多多上架发布（用 pdd-publish-http）、采集比价（用 pdd-crawl）。需绑定「拼多多商家后台」账号。"
+description: "拼多多商品管理：查商品列表/总览、单商品 SKU 全量（规格/价格/库存/预览图）、提交体快照（170 字段）、规格池采集；以及下架/上架/删除（L2，接口直调，需确认）。读操作全部 HTTP 无副作用。触发：拼多多商品列表、查拼多多商品、拼多多SKU、拼多多商品详情、拼多多规格池、拼多多下架、拼多多上架、拼多多删除商品、pdd works。排除：拼多多上架发布（用 pdd-publish）、采集比价（用 pdd-crawl）。需绑定「拼多多商家后台」账号。"
 metadata:
   builtin_skill_version: "1.2"
   dsagent:
@@ -85,7 +85,7 @@ metadata:
 
 1. **账号已绑定**：「账号连接」页已绑定**拼多多商家后台**（mms.pinduoduo.com）。
 2. **登录态有效**：失效时技能会返回 `token_expired`，引导用户重新登录。
-3. **Chrome 可用**（签名注入需要页面环境，与 pdd-publish-http 同一机制）。
+3. **Chrome 可用**（签名注入需要页面环境，与 pdd-publish 同一机制）。
 
 ## 输入
 
@@ -153,10 +153,10 @@ node {baseDir}/scripts/query.mjs --mode offsale --goods-id 1018993401073 --confi
 ③ 用户想看某条明细 → --mode detail --goods-id <id>
 ```
 
-### W2：上架后验证（配合 pdd-publish-http）
+### W2：上架后验证（配合 pdd-publish）
 
 ```
-① pdd-publish-http 发布成功 → 拿到 goods_id
+① pdd-publish 发布成功 → 拿到 goods_id
 ② 调 query.mjs --mode detail --goods-id <id>
 ③ 核对：SKU 数 / 规格值 / 拼单价 / 库存 / 预览图(✅) 是否与 product JSON 一致
 ④ 列表有索引延迟（1~2 分钟），查不到就等一会再查，不要当故障
@@ -167,7 +167,7 @@ node {baseDir}/scripts/query.mjs --mode offsale --goods-id 1018993401073 --confi
 ```
 ① 调 query.mjs --mode spec-pool       → 扫全店商品，抽 规格值→spec_id
 ② 产物落在 <workspace>/artifacts/pdd-re/spec-pool.json
-③ 之后 pdd-publish-http 上架会自动读它（行数重建写 spec_id）
+③ 之后 pdd-publish 上架会自动读它（行数重建写 spec_id）
 ④ 新增颜色/尺码后重跑一次即可更新
 ```
 
@@ -185,7 +185,7 @@ node {baseDir}/scripts/query.mjs --mode offsale --goods-id 1018993401073 --confi
 ```
 ① 调 query.mjs --mode commit --goods-id <老商品ID>
    → 170 字段提交体快照（artifacts/pdd-works/commit-<id>.json）
-② pdd-publish-http 的 scripts/reuse.mjs --category "<类目>"
+② pdd-publish 的 scripts/reuse.mjs --category "<类目>"
    → L1 类目记忆 / L2 存量商品（自动提取规格池）/ L3 属性树
 ③ 用快照当基底改 values（标题/图片/价格）→ 提交
 ```
@@ -211,6 +211,6 @@ node {baseDir}/scripts/query.mjs --mode offsale --goods-id 1018993401073 --confi
 
 ## 与其他技能配合
 
-- **上架前**：`spec-pool` 采集规格 → `pdd-publish-http` 上架（自动读 `artifacts/pdd-re/spec-pool.json`）
+- **上架前**：`spec-pool` 采集规格 → `pdd-publish` 上架（自动读 `artifacts/pdd-re/spec-pool.json`）
 - **上架后**：`detail` 验证 SKU/预览图是否落地
 - **复用**：`commit` 拿 170 字段 body → 改 values → 快速发相似商品（三层查一复用的 L2）

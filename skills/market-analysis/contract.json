@@ -48,6 +48,17 @@
         "name": "price_max",
         "type": "number",
         "description": "最高价格"
+      },
+      {
+        "name": "sku",
+        "type": "boolean",
+        "default": false,
+        "description": "同时采集每个商品的 SKU 明细（颜色/尺码/券前价/券后价/库存），逐商品调用商品详情接口"
+      },
+      {
+        "name": "sku_limit",
+        "type": "integer",
+        "description": "SKU 明细最多采集多少个商品，默认 48"
       }
     ]
   },

@@ -196,7 +196,7 @@ export function launchOptions(shopKey, extra = {}) {
   // ★★ 2026-11-10：让常驻签名服务**让出 Profile 锁**。
   //
   //   背景：推广域签名服务（pdd-signer-daemon）为了热签名，会长期持有这个账号的
-  //   Chrome（同一 userDataDir）。浏览器类技能（pdd-video / pdd-publish-http /
+  //   Chrome（同一 userDataDir）。浏览器类技能（pdd-video / pdd-publish /
   //   pdd-activity …）也要用同一个 Profile 起 Chrome → Profile 锁冲突 →
   //   "Failed to launch the browser process!"（这个报错还不指向真正原因）。
   //
@@ -303,6 +303,10 @@ export function profileCandidates(shopKey) {
  * @param {string} dir userDataDir 绝对路径
  */
 export function clearProfileLocks(dir) {
+  // ★ 2026-11-19：入口必须挡空值。种子维护（pdd-seed-auto）在 profileDir 还没解析出来时
+  //   会传 undefined 进来，然后 path.join 抛 "The \"path\" argument must be of type string"，
+  //   日志里就是一条看着像致命错误、其实无害的告警。
+  if (!dir || typeof dir !== 'string') return
   for (const name of ['SingletonLock', 'SingletonCookie', 'SingletonSocket', 'lockfile']) {
     try { fs.rmSync(path.join(dir, name), { force: true }) } catch { /* 不存在或正被占用 */ }
   }

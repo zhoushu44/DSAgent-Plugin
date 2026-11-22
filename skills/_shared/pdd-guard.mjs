@@ -13,11 +13,11 @@
  *   pdd-video         ✅      ✅        ❌          ❌         ✅      ❌       ❌
  *   pdd-works         ✅      ✅        ✅          ❌         ✅      ❌       ✅
  *   pdd-shop          ✅      ✅        ✅          ❌         ✅      ❌       ❌
- *   pdd-publish-http  ❌      ❌        ❌          ❌         ❌      ❌       ❌   ← 最严的商品发布域，零风控
+ *   pdd-publish  ❌      ❌        ❌          ❌         ❌      ❌       ❌   ← 最严的商品发布域，零风控
  *   pdd-link-matrix   ✅      ❌        ❌          ❌         ✅      ❌       ❌
  *
  * 四个真实问题：
- *   ① **pdd-publish-http 完全裸奔**：它打的是 /glide/ /vodka/（最严的商品发布域），
+ *   ① **pdd-publish 完全裸奔**：它打的是 /glide/ /vodka/（最严的商品发布域），
  *      却是唯一没有账号锁、没有冷却检查、没有节流的技能。而它恰恰是最容易被封的动作。
  *   ② **pdd-chance 用进程内 2s 节流**（`lastHit` Map）：每次 execute_skill 都是新进程，
  *      等于零节流。这正是 pdd-http 在 2026-10-27 修过的同一个 bug，另一个技能里还在。
@@ -28,7 +28,7 @@
  *
  * 本模块把上述 8 个维度收敛成**一次调用**：
  *
- *   const g = await openTask('pdd-publish-http', shopKey)   // 开任务（锁 + 冷却 + 健康分）
+ *   const g = await openTask('pdd-publish', shopKey)   // 开任务（锁 + 冷却 + 健康分）
  *   await g.beforeCall(url)                                  // 每次请求前：节流 + 签名决策
  *   await g.afterCall(url, json)                             // 每次响应后：错误归因 + 记账
  *   await g.close()                                          // 收尾（放锁 + 汇总）
@@ -59,6 +59,8 @@ import * as fs from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
+/** 插件根（skills/_shared 上两级）。不要用 process.cwd() —— 技能脚本的 cwd 是 skills/<skill> */
+const PLUGIN_ROOT_DIR = path.resolve(HERE, '..', '..')
 const load = (f) => import(pathToFileURL(path.join(HERE, f)).href)
 
 let _risk = null
@@ -303,8 +305,29 @@ export async function openTask(skill, shopKey, opts = {}) {
 
   // ── ③ 账号级互斥锁 ──
   let locked = false
+  /** 进程级兜底释放：SIGTERM / SIGINT / 未捕获异常 / 正常退出时放锁（SIGKILL 拦不到，靠 pid 存活判定兜） */
+  let exitRelease = null
   if (!skipLock && m.risk.tryAcquireAccountLock) {
-    const r = await m.risk.tryAcquireAccountLock(shopKey, skill, lockWaitMs)
+    // ★ 2026-11-19：等锁期间必须持续往 stderr 打心跳。
+    //   外层技能看门狗是「60 秒无任何输出即 SIGKILL」（skill-service.ts IDLE_TIMEOUT）。
+    //   以前这里 lockWaitMs=300_000，等锁时一句话都不打 → 60 秒必被杀，
+    //   而 SIGKILL 不触发 exit 钩子 → 锁不释放 → 下一次又等 300 秒 → 永远失败。
+    //   现在：每 15 秒打一行进度，让看门狗看到「我还活着」。
+    //   （pdd-risk 内部也只在首次进入等待时打一行，这里补周期性心跳。）
+    let lockTimer = null
+    if (lockWaitMs > 0) {
+      const every = Math.min(15_000, Math.max(5_000, Math.floor(lockWaitMs / 4)))
+      lockTimer = setInterval(() => {
+        log(`仍在等待账号锁（最多 ${Math.round(lockWaitMs / 1000)}s）…`)
+      }, every)
+      if (lockTimer.unref) lockTimer.unref()
+    }
+    let r
+    try {
+      r = await m.risk.tryAcquireAccountLock(shopKey, skill, lockWaitMs)
+    } finally {
+      if (lockTimer) clearInterval(lockTimer)
+    }
     if (!r.ok) {
       return makeGuard({
         skill, shopKey, blocked: true,
@@ -312,46 +335,64 @@ export async function openTask(skill, shopKey, opts = {}) {
       })
     }
     locked = true
-  }
 
-  // ══ ④ 种子自动维护（2026-11-07）══════════════════════════════
+  // ★ 2026-11-19：注册进程级兜底释放。
+  //   事故背景：技能被看门狗 SIGKILL 后 exit 钩子不执行 → 锁留在盘上 →
+  //   下一次调用等 300s 且零输出 → 又被 60s idle 看门狗杀 → 新锁再留下 → 死循环。
+  //   SIGKILL 拦不住（由 pdd-risk 的 pid 存活判定兜），但其余退出路径都应该立刻放锁。
+  exitRelease = () => {
+    try { _risk?.releaseAccountLock?.(shopKey) } catch { /* ignore */ }
+  }
+  process.once('exit', exitRelease)
+  process.once('SIGINT', () => { try { exitRelease?.() } finally { process.exit(130) } })
+  process.once('SIGTERM', () => { try { exitRelease?.() } finally { process.exit(143) } })
+  process.once('uncaughtException', (e) => {
+    try { exitRelease?.() } catch { /* ignore */ }
+    log(`未捕获异常，已释放账号锁：${String(e?.message || e).slice(0, 120)}`)
+    process.exit(1)
+  })
+
+  // ★ 2026-11-19 关键补充：Windows 上信号根本投递不到（kill('SIGTERM') = TerminateProcess），
+  //   所以必须走协议式退出 —— 父进程往 stdin 写 __DSAGENT_TERMINATE__，这里读到就放锁。
+  //   这才是「被看门狗终止时也能释放锁」真正生效的那条路径。
+  try {
+    const { installTerminateGuard, onTerminate } = await import(new URL('./terminate-guard.mjs', import.meta.url).href)
+    installTerminateGuard()
+    onTerminate(exitRelease)
+  } catch { /* 钩子装不上不影响主流程，pid 存活判定仍能兜 */ }
+}
+
+  // ══ ④ 种子自动维护（2026-11-07，2026-11-19 重写）════════════
   //   纯 Node 签名依赖 localStorage 种子（_nano_fp / MMS-LOGIN-FP / ISLOGIN）。
-  //   种子会随登录态变化失效 → 签名被拒 → 降级浏览器 → 变慢。
   //
-  //   这里做自动检查：
-  //     · 种子不存在 → 阻塞导出（否则纯 Node 完全不可用）
-  //     · 种子过期   → 后台异步刷新（不阻塞当前任务）
-  //     · 连续失败   → 由 noteSignFailure 触发
+  //   ★★ 2026-11-19 复盘：这里曾经是「一天之内能用变不能用」的真凶 ★★
   //
-  //   ⚠️ 失败绝不影响业务（catch 后只记日志）。
+  //   事故链：
+  //     ① 我为验证「种子自愈」删了一次种子文件；
+  //     ② 从此每次 openTask 都判定「种子缺失」，触发 ensureSeed；
+  //     ③ ensureSeed 会起一个 Chrome，用**和取数会话同一个 user-data-dir**；
+  //     ④ 两个 Chrome 抢一个 Profile → 后起的取数页面加载不完整
+  //        （实测模块数 687，正常 1186）→ eDaA 不存在 → 签名失败。
+  //
+  //   这就是「以前一直能用、今天突然不行」的原因 —— 不是平台改版，
+  //   是我删种子引入的副作用。
+  //
+  //   最终处置：**在 openTask 里彻底不碰浏览器**。
+  //     种子只影响「纯 Node 快通道」的可用性，不影响浏览器真签名取数。
+  //     种子由登录流程（browser-login）和手动工具维护，不在每次任务启动时抢 Profile。
+  //     代价：纯 Node 通道可能在种子缺失时降级为浏览器，慢一点，但**永远能用**。
+  //     收益：不会再出现「为了省 2 秒反而把整条链路搞死」。
   try {
     const sa = await import(new URL('./pdd-seed-auto.mjs', import.meta.url).href)
-    let acc = m.risk?.getAccountCookies?.(shopKey) || null
-    if (!acc) {
-      // 兜底：直接读凭证库
-      try {
-        const { CredentialStore } = await import(pathToFileURL(path.join(process.cwd(), 'lib/services/credential-store.js')).href)
-        const store = new CredentialStore(path.join(os.homedir(), '.dsh', 'dsagent-accounts.json'))
-        acc = store.listAccounts().find(a => String(a.shop_key) === String(shopKey))?.cookies || null
-      } catch { /* ignore */ }
-    }
-    const health = sa.checkSeedHealth(shopKey, acc || {})
+    const health = sa.checkSeedHealth(shopKey, m.risk?.getAccountCookies?.(shopKey) || {})
     if (health.need) {
-      log(`种子${health.reason}，开始维护…`)
-      const r = await sa.ensureSeed({
-        shopKey,
-        cookies: acc || {},
-        profileDir: m.risk?.getProfileDir?.(shopKey) || undefined,
-        pluginRoot: process.cwd(),
-      })
-      if (r.refreshed) log(`种子已刷新（${r.seed ? Object.keys(r.seed.localStorage || {}).length : 0} 项）`)
-      else if (r.reason) log(`种子维护：${r.reason}`)
+      log(`种子${health.reason}（不影响本次取数；种子仅用于纯 Node 快通道，跳过自动刷新以免抢占 Profile）`)
     }
   } catch (e) {
-    log(`种子维护跳过：${String(e.message).slice(0, 60)}`)
+    log(`种子检查跳过：${String(e.message).slice(0, 60)}`)
   }
 
-  return makeGuard({ skill, shopKey, locked, t0 })
+  return makeGuard({ skill, shopKey, locked, t0, exitRelease, autoProgress: true })
 }
 
 /** 便捷包装：自动 open/close */
@@ -365,9 +406,32 @@ export async function withPddGuard(skill, shopKey, fn, opts = {}) {
   }
 }
 
-function makeGuard({ skill, shopKey, locked = false, blocked = false, reason = '', degraded = '', t0 = Date.now() }) {
+function makeGuard({ skill, shopKey, locked = false, blocked = false, reason = '', degraded = '', t0 = Date.now(), exitRelease = null, autoProgress = false }) {
   const stats = { calls: 0, ok: 0, captcha: 0, rateLimit: 0, session: 0, other: 0, signed: 0, unsigned: 0, securityBlocked: 0 }
   let hb = null
+  let progress = null
+
+  /**
+   * ★ 2026-11-19：通用进度心跳。
+   *
+   * 事故根因（比账号锁更底层）：skill-service 的看门狗是「60 秒内 stdout/stderr
+   * 一个字节都没有 → SIGKILL」（IDLE_TIMEOUT = 60_000，见 skill-service.ts:434）。
+   * 而 pdd-promo overview 正常就要 75~80 秒，中间 Node 通道采集是一大段静默，
+   * 于是「脚本本身没毛病，但一定被看门狗杀掉」——表现正是「技能 60 秒无输出」。
+   *
+   * 所以心跳不能只加在等锁那一处，必须是所有 pdd 技能、所有长阶段的公共保险：
+   * 只要守卫还活着，就每 20 秒打一行，告诉看门狗「我还在跑」。
+   */
+  const startProgress = () => {
+    if (progress || blocked) return
+    progress = setInterval(() => {
+      const s = Math.round((Date.now() - t0) / 1000)
+      try {
+        console.error(`[pdd-guard] ${skill} 运行中 ${s}s（已调用 ${stats.calls} 次，等待平台返回…）`)
+      } catch { /* ignore */ }
+    }, 20_000)
+    if (progress.unref) progress.unref()
+  }
 
   const guard = {
     skill,
@@ -379,6 +443,9 @@ function makeGuard({ skill, shopKey, locked = false, blocked = false, reason = '
 
     /** 是否可用（未拦截） */
     get ready() { return !blocked },
+
+    /** 启动通用进度心跳（所有技能在进入长流程前调用一次，幂等） */
+    startProgress,
 
     /**
      * 每次请求前调用：账号级节流 + 签名决策
@@ -495,7 +562,10 @@ function makeGuard({ skill, shopKey, locked = false, blocked = false, reason = '
     /** 收尾：停心跳 + 放锁 + 打印汇总 */
     async close() {
       if (hb) { clearInterval(hb); hb = null }
+      if (progress) { clearInterval(progress); progress = null }
       if (locked) { try { _risk?.releaseAccountLock?.(shopKey) } catch { /* ignore */ } }
+      // ★ 2026-11-19：正常收尾也要摘掉进程级兜底释放钩子，避免误删后来者的锁
+      if (exitRelease) { try { process.removeListener('exit', exitRelease); } catch { /* ignore */ } }
       // ★ 2026-11-05：记录关闭时刻，供下一次 openTask 做「不背靠背」检查（红线③闭环）
       if (shopKey && !blocked) { try { markProfileClosed(shopKey) } catch { /* ignore */ } }
       const ms = Date.now() - t0
@@ -504,6 +574,11 @@ function makeGuard({ skill, shopKey, locked = false, blocked = false, reason = '
       }
     },
   }
+  // ★ 2026-11-19：守卫一建好就自动挂进度心跳（未拦截时）。
+  //   所有 pdd-* 技能都走 openTask，因此这里挂一次即可覆盖全部技能的长流程，
+  //   无需逐个改脚本。技能里若再显式调用 guard.startProgress() 也不会重复（幂等）。
+  if (autoProgress) startProgress()
+
   return guard
 }
 

@@ -1,0 +1,51 @@
+{
+  "schema": "dsagent/skill-contract@1",
+  "id": "douyin-material-ops",
+  "entry": {
+    "form": "script",
+    "script": "scripts/material-ops.mjs"
+  },
+  "input": {
+    "args": [
+      {
+        "name": "mode",
+        "description": "list=素材清单(默认，只读)；video=按 vid 查元信息(只读)；status=素材审核状态(只读)；add=添加素材(L2)；remove=移除素材(L2)"
+      },
+      {
+        "name": "vid",
+        "description": "视频 ID（video/add/remove 必填），形如 v03c8eg10000dbqlgv7og65rhjvpf390",
+        "flag": "--vid"
+      },
+      {
+        "name": "mid",
+        "description": "素材 ID（remove/status 建议传，从 --mode list 获取）",
+        "flag": "--mid"
+      },
+      {
+        "name": "name",
+        "description": "素材显示名（add 用，建议带 .mp4 后缀；不传则按时长自动生成）",
+        "flag": "--name"
+      },
+      {
+        "name": "status",
+        "description": "list 过滤：1=投放中 / 2=已删除 / all=全部（默认）",
+        "flag": "--status"
+      },
+      {
+        "name": "confirm",
+        "description": "L2 确认：add/remove 必须带 true 才真正执行；省略只出预览",
+        "flag": "--confirm"
+      },
+      {
+        "name": "account",
+        "description": "账号 shopKey（可选）",
+        "flag": "--account"
+      }
+    ]
+  },
+  "output": {
+    "protocol": "dsagent-result",
+    "resultPrefix": "__DSAGENT_RESULT__",
+    "filesMarker": "---[OUTPUT_FILES]"
+  }
+}

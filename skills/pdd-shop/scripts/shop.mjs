@@ -149,35 +149,154 @@ const TRANSPORT = argOf('transport') || 'http'
       const dateArg = argOf('date') || YESTERDAY
       if (!argOf('date')) console.error(`[pdd-shop] goods 默认查昨天（${YESTERDAY}）：生意参谋当天不出数`)
 
-      console.error('[pdd-shop] goods 使用 t3 通道（真签名 + webSpiderRule + CDP Cookie）...')
+      console.error('[pdd-shop] goods 优先走纯 Node 通道（免签名免浏览器）...')
+
+      /**
+       * ★★★ 2026-11-22：goods 改为「纯 Node 优先，CDP 拦截兜底」 ★★★
+       *
+       *   实测（本机，2026-11-22）：`/sydney/api/goodsDataShow/queryGoodsDetailVOList`
+       *   （注意：**不带** ForMMS 后缀）**不需要任何签名，纯 Cookie 直连即可**：
+       *
+       *     · POST + 凭证库 Cookie → success:true，10 条商品，102 个字段
+       *     · 连 goodsName 都有（ForMMS 版本要单独查名字）
+       *     · errorCode 1000000 是伴随警告（部分附加字段缺），不影响主数据
+       *
+       *   而之前用的 ForMMS / V2ForMMS 两个接口都强制 crawlerInfo（绑定请求体），
+       *   纯 Node 拿不到 → 3000000 非法请求。**选错了接口**，不是 Node 不能做。
+       *
+       *   分层策略：
+       *     ① 纯 Node：queryGoodsDetailVOList + Cookie（快，2~5s，无浏览器依赖）
+       *     ② 兜底：CDP 拦截页面自己发的请求（2026-11-20 方案，保留但仅在 ① 失败时用）
+       */
+      const nodeGoods = await (async () => {
+        try {
+          const acc = store.listAccounts().find(a => a.shop_key === SHOP)
+          if (!acc?.cookies?.PASS_ID) return null
+          const https = await import('node:https')
+          const body = JSON.stringify({
+            startDate: dateArg, endDate: dateArg,
+            queryType: Number(argOf('query-type') || 1),
+            sortCol: 0, sortType: 1, pageNum: 1, pageSize: limit, actVs: 1,
+          })
+          const ck = Object.entries(acc.cookies).map(([k, v]) => `${k}=${v}`).join('; ')
+          const txt = await new Promise((resolve) => {
+            const q = https.request({
+              hostname: 'mms.pinduoduo.com',
+              path: '/sydney/api/goodsDataShow/queryGoodsDetailVOList',
+              method: 'POST',
+              headers: {
+                'cookie': ck, 'content-type': 'application/json',
+                'origin': 'https://mms.pinduoduo.com',
+                'referer': 'https://mms.pinduoduo.com/sycm/goods_effect',
+                'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/139.0.0.0 Safari/537.36',
+                'content-length': Buffer.byteLength(body),
+              },
+            }, rs => { let d = ''; rs.on('data', c => d += c); rs.on('end', () => resolve(d)) })
+            q.on('error', () => resolve(''))
+            q.setTimeout(20000, () => { q.destroy(); resolve('') })
+            q.write(body); q.end()
+          })
+          if (!txt) return null
+          const j = JSON.parse(txt)
+          const list = j?.result?.goodsDetailList
+          if (!Array.isArray(list) || !list.length) return null
+          console.error(`[pdd-shop] goods 纯 Node 通道成功：${list.length} 条（${(list[0]?.statDate) || dateArg}），无需浏览器`)
+          return { ok: true, json: j, signature: { type: 'node-cookie', len: 0 }, via: 'node' }
+        } catch (e) {
+          console.error(`[pdd-shop] goods 纯 Node 失败（${String(e.message).slice(0, 60)}），回落 CDP 拦截`)
+          return null
+        }
+      })()
+
+      let r = nodeGoods
+
+      // ── 兜底：CDP 拦截页面自己发的 V2 请求（2026-11-20 方案）──
+      let sess = null
+      let buildPuaMap = null, decodePua = null
+
+      if (!r) {
+      console.error('[pdd-shop] goods 回落 CDP 拦截通道（真签名 + webSpiderRule + CDP Cookie）...')
       const { call: callT3, createSession } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-client.mjs')))
       // ★ 2026-10-27 修：用 buildPuaMap 动态推导映射，不再用静态表
       //   （静态表码点已过期，会把 goodsUv/goodsVcr 解成空串或 0%）
-      const { buildPuaMap, decodePua } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-risksdk.mjs')))
+      const puaMod = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-risksdk.mjs')))
+      buildPuaMap = puaMod.buildPuaMap
+      decodePua = puaMod.decodePua
 
-      let sess = null
       try {
         sess = await createSession(SHOP)
-        // ★ 只导航一次，等预热签名就绪（不要 waitStable —— 长等待会被风控关页）
+        /**
+         * ★★★ 2026-11-20 最终方案：拦截页面自己发出的 V2 请求 ★★★
+         *
+         *   这一版是踩了一整天坑之后的定论，前面所有方案都被证伪：
+         *
+         *   ① 手工 new 签名器（eDaA）—— 平台改了 webpack 模块名，已失效；
+         *     即使模块在，拿到的签名也**绑定请求体**，换接口就 3000000。
+         *   ② CDP 抓 anti-content 复用到别的请求 —— 同样因签名绑定 body 而失败。
+         *   ③ 页面内 fetch 发请求 —— 签名头在更底层注入，JS 层拿不到，3000000。
+         *   ④ 旧接口 queryGoodsDetailVOListForMMS —— **平台已下线**，
+         *     现行接口是 queryGoodsDetailVOListV2ForMMS，且必须带 crawlerInfo
+         *     （crawlerInfo 同样绑定本次请求，复用无效）。
+         *
+         *   唯一可行的路：**让页面自己发**（它的签名和 body 天然匹配），
+         *   我们用 CDP Fetch 域**拦截并读取它的响应体**，完全不构造请求。
+         *
+         *   实现要点：
+         *     · 必须用 Fetch.enable 的 requestStage: 'Response'，才能拿到响应体
+         *     · 拦截后必须 continueRequest，否则页面会卡住
+         *     · 页面进入商品效果页会自动发这个请求（无需手动触发）
+         *
+         *   代价：要等页面渲染（约 25s），换来的是**稳定可用**，
+         *   且平台再怎么改模块名都不影响这条链路。
+         */
+        const goodsApiPattern = '*queryGoodsDetailVO*'
+        const cdpFetch = await sess.page.target().createCDPSession()
+        await cdpFetch.send('Fetch.enable', {
+          patterns: [{ urlPattern: goodsApiPattern, requestStage: 'Response' }],
+        })
+
+        /** 收集到的商品明细响应（可能多页，取第一页） */
+        const capturedBodies = []
+        cdpFetch.on('Fetch.requestPaused', async (e) => {
+          try {
+            const b = await cdpFetch.send('Fetch.getResponseBody', { requestId: e.requestId })
+            const txt = b.base64Encoded ? Buffer.from(b.body, 'base64').toString('utf8') : b.body
+            capturedBodies.push(txt)
+          } catch { /* 响应体读取失败，忽略这一条 */ }
+          try { await cdpFetch.send('Fetch.continueRequest', { requestId: e.requestId }) } catch { /* ignore */ }
+        })
+
         await sess.goto('https://mms.pinduoduo.com/sycm/goods_effect', 20000)
 
-        const r = await callT3({
-          shopKey: SHOP,
-          session: sess,
-          url: 'https://mms.pinduoduo.com' + apiPath('shop.legacyGoodsDetailVO'),
-          body: {
-            startDate: dateArg, endDate: dateArg,
-            queryType: Number(argOf('query-type') || 1),   // ★ 1=按日期查；6=今日实时（忽略日期）
-            sortCol: 0, sortType: 1, pageNum: 1, pageSize: limit, actVs: 1,
-          },
-          referer: 'https://mms.pinduoduo.com/sycm/goods_effect',
-        })
+        // 等页面自己发出请求（页面渲染 + 请求往返）
+        const waitStart = Date.now()
+        while (!capturedBodies.length && Date.now() - waitStart < 30000) {
+          await new Promise(res => setTimeout(res, 500))
+        }
+        try { await cdpFetch.send('Fetch.disable') } catch { /* ignore */ }
+        try { await cdpFetch.detach() } catch { /* ignore */ }
+
+        // 用拦截到的响应替代原来的 callT3（★ 直接赋外层 r，不要重新声明）
+        if (capturedBodies.length) {
+          let parsed = null
+          for (const t of capturedBodies) {
+            try {
+              const j = JSON.parse(t)
+              if (j?.result?.goodsDetailList?.length) { parsed = j; break }
+            } catch { /* 非 JSON，跳过 */ }
+          }
+          r = parsed
+            ? { ok: true, json: parsed, signature: { type: 'cdp-intercept', len: 0 }, via: 'page-intercept' }
+            : { ok: false, kind: 'signature_error', hint: '截获到响应但无商品数据' }
+        } else {
+          r = { ok: false, kind: 'login_required', hint: '页面未发出商品明细请求（可能未登录或页面未渲染完成）' }
+        }
 
         if (!r.ok) {
           // ★ 错误码分级 + 账号健康分（2026-10-24 补）：t3 通道最容易踩 54001
           const { checkCooldown, fmtRemain } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-risk.mjs'))).catch(() => ({}))
           const { normalizeWithCooldown, recordToAntiban } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-error.mjs')))
-          const n = normalizeWithCooldown(r, '商品明细取数（t3 通道）', SHOP, { checkCooldown, fmtRemain })
+          const n = normalizeWithCooldown(r, '商品明细取数（CDP 兜底通道）', SHOP, { checkCooldown, fmtRemain })
           await recordToAntiban(SHOP, r.ec, r.kind).catch(() => {})
           emit({
             ok: false, mode, transport: 't3', shopKey: SHOP,
@@ -227,18 +346,42 @@ const TRANSPORT = argOf('transport') || 'http'
           process.exit(2)
         }
         // ★ 2026-10-27 修：先用整表动态推导 PUA 映射，再逐字段解码
-        const pua = buildPuaMap(rawList)
+        // ★ 2026-11-22：纯 Node 通道返回的是明文（无 PUA），buildPuaMap 可能为 null → 安全降级
+        const pua = buildPuaMap ? buildPuaMap(rawList) : { map: {}, coverage: { total: 0, agreed: 0 }, conflicts: [] }
         const dec = (v) => {
           if (typeof v !== 'string') return v
           const cp = v.codePointAt(0)
           if (cp < 0xE000 || cp > 0xF8FF) return v
-          return decodePua(v, pua.map)
+          return decodePua ? decodePua(v, pua.map) : v
         }
         if (pua.coverage.total > 0) {
           console.error(`[pdd-shop] PUA 映射动态推导：${pua.coverage.agreed}/${pua.coverage.total} 码点`
             + (pua.conflicts.length ? `，${pua.conflicts.length} 个码点有冲突票` : ''))
         }
 
+        // ★★ 2026-11-19 修：prev 字段语义错误 ★★
+        //
+        //   原实现把 <X>Ppr 直接当作「上期值」展示并参与合计，导致：
+        //     · 输出里出现 6.6133 / -0.8625 / 305.08% 这种值 —— 它们不是访客数，
+        //       而是**环比百分比**（Ppr = Percent，不是 Previous）；
+        //     · 「合计：访客 167.45」把百分比加起来了，客单价算成 ¥1，全是垃圾数；
+        //     · 更糟的是第 313 行「今日数据未生成 → 已自动改用上期值」会让
+        //       这批假数字冒充真实数据，用户完全看不出来。
+        //
+        //   证据：同文件第 798 行早就注明「Ppr 明文字段；部分账号返回的是当前值
+        //   而非差值，仅作参考不用于算环比」，risksdk 注释也说明 Ppr 仅用于
+        //   PUA 逐字符对齐推导映射。两处都写着「不要当数值用」，
+        //   但 253-263 行还是在用。
+        //
+        //   修法：不再用 Ppr 当上期值。上期值改从 <X>Ytd 之类的明文字段取（若有），
+        //   取不到就明确标记为 unknown，宁可不显示也不显示错的。
+        const prevOf = (g, key) => {
+          // Ytd = 同期对比/累计明文值；只有确实存在且是数值时才用
+          const v = g?.[key + 'Ytd']
+          if (v === undefined || v === null || v === '') return null
+          const n = typeof v === 'number' ? v : Number(String(v).replace(/[^\d.\-]/g, ''))
+          return Number.isFinite(n) ? n : null
+        }
         const items = rawList.map(g => ({
           goodsId: g.goodsId,
           name: g.goodsName,
@@ -250,16 +393,19 @@ const TRANSPORT = argOf('transport') || 'http'
             vcr: dec(g.goodsVcr), fav: dec(g.goodsFavCnt),
             imprUsrCnt: dec(g.imprUsrCnt), cnsltUsrQty: dec(g.cnsltUsrQty),
           },
+          // 上期值：仅取真实明文字段，取不到就是 null（不拿百分比冒充）
           prev: {
+            uv: prevOf(g, 'goodsUv'), pv: prevOf(g, 'goodsPv'),
+            payAmt: prevOf(g, 'payOrdrAmt'), payCnt: prevOf(g, 'payOrdrCnt'),
+            payUsers: prevOf(g, 'payOrdrUsrCnt'), payQty: prevOf(g, 'payOrdrGoodsQty'),
+            vcr: prevOf(g, 'goodsVcr'), fav: prevOf(g, 'goodsFavCnt'),
+            imprUsrCnt: prevOf(g, 'imprUsrCnt'), cnsltUsrQty: prevOf(g, 'cnsltUsrQty'),
+          },
+          // 环比百分比单独存放（Ppr 的正确用途），仅供展示，绝不参与求和
+          ppr: {
             uv: g.goodsUvPpr, pv: g.goodsPvPpr,
             payAmt: g.payOrdrAmtPpr, payCnt: g.payOrdrCntPpr,
-            payUsers: g.payOrdrUsrCntPpr, payQty: g.payOrdrGoodsQtyPpr,
             vcr: g.goodsVcrPpr, fav: g.goodsFavCntPpr,
-            imprUsrCnt: g.imprUsrCntPpr, ordrCrtUsrCnt: g.ordrCrtUsrCntPpr,
-            cnsltUsrQty: g.cnsltUsrQtyPpr, payOrdrRto: g.payOrdrRtoPpr,
-            ordrVstrRto: g.ordrVstrRtoPpr,
-            vcrCalc: (g.goodsUvPpr > 0) ? +((g.payOrdrCntPpr || 0) / g.goodsUvPpr * 100).toFixed(2) : null,
-            aov: (g.payOrdrCntPpr > 0) ? +((g.payOrdrAmtPpr || 0) / g.payOrdrCntPpr).toFixed(2) : null,
           },
           cate: [g.cate1Id, g.cate2Id, g.cate3Id].filter(Boolean),
           status: g.goodsStatus,
@@ -274,16 +420,29 @@ const TRANSPORT = argOf('transport') || 'http'
           },
         }))
 
-        const tot = items.reduce((s, x) => ({
-          uv: s.uv + (Number(x.prev.uv) || 0),
-          pv: s.pv + (Number(x.prev.pv) || 0),
-          payAmt: s.payAmt + (Number(x.prev.payAmt) || 0),
-          payCnt: s.payCnt + (Number(x.prev.payCnt) || 0),
-        }), { uv: 0, pv: 0, payAmt: 0, payCnt: 0 })
+        // ★ 合计只用「当前值」。以前用 prev 求和，等于把环比百分比加起来。
+        //   当前值缺失的项跳过（不当作 0，避免把均值拉低）。
+        const num = (v) => {
+          if (v === null || v === undefined || v === '') return null
+          const n = typeof v === 'number' ? v : Number(String(v).replace(/[^\d.\-]/g, ''))
+          return Number.isFinite(n) ? n : null
+        }
+        const tot = items.reduce((s, x) => {
+          const uv = num(x.cur.uv); const pv = num(x.cur.pv)
+          const amt = num(x.cur.payAmt); const cnt = num(x.cur.payCnt)
+          return {
+            uv: s.uv + (uv ?? 0), pv: s.pv + (pv ?? 0),
+            payAmt: s.payAmt + (amt ?? 0), payCnt: s.payCnt + (cnt ?? 0),
+            nUv: s.nUv + (uv != null ? 1 : 0),
+          }
+        }, { uv: 0, pv: 0, payAmt: 0, payCnt: 0, nUv: 0 })
 
         const out = {
           ok: true, mode, transport: 't3', shopKey: SHOP,
-          date: dateArg,
+          // ★ 2026-11-20：date 用数据的 statDate，不用 dateArg。
+          //   CDP 拦截拿的是页面自己发的请求（默认 queryType=6 今日实时），
+          //   写 dateArg 会与实际数据日期不符（标题显示 11-20、字段却是 11-19）。
+          date: items[0]?.date || dateArg,
           goods: items,
           totals: {
             ...tot, payAmt: +tot.payAmt.toFixed(2),
@@ -295,22 +454,47 @@ const TRANSPORT = argOf('transport') || 'http'
         }
 
         const L = []
-        L.push(`商品数据明细（${items.length} 个，日期 ${dateArg}，t3 通道）`)
+        // ★ 2026-11-20：标题日期用实际数据的 statDate，不用 dateArg。
+        //   CDP 拦截方案拿到的是页面自己发的请求（页面默认 queryType=6 = 今日实时），
+        //   不受 --date 控制。写 dateArg 会让人误以为查的是昨天。
+        const dataDate = items[0]?.date || dateArg
+        L.push(`商品数据明细（${items.length} 个，数据日期 ${dataDate}，CDP 拦截通道）`)
         L.push(`签名: ${r.signature?.type} ${r.signature?.len} 字符 | webSpiderRule: ${out.spiderRule}`)
         L.push('')
-        L.push('★ 上期值（= 昨日，通常有数据）：')
-        L.push('  商品                            访客  浏览   支付      订单  转化率  客单价')
+        // ★ 2026-11-19：表格改为展示**当前值**并附环比。
+        //   原来展示的是「上期值」，而 Ppr 字段其实是环比百分比 →
+        //   整张表都是 6.6133 / 305.08% 这种无意义数字。
+        L.push('  商品                          访客   浏览      支付   订单  转化率   环比(访客)')
         for (const x of items.slice(0, 20)) {
-          const p = x.prev
-          L.push(`  ${String(x.name || '').slice(0, 26).padEnd(30)}${String(p.uv ?? '—').padStart(6)}${String(p.pv ?? '—').padStart(6)}${String(p.payAmt ?? '—').padStart(10)}${String(p.payCnt ?? '—').padStart(6)}${String(p.vcrCalc != null ? p.vcrCalc + '%' : '—').padStart(8)}${String(p.aov ?? '—').padStart(8)}`)
+          const c = x.cur
+          const pprUv = (() => {
+            const v = x.ppr?.uv
+            if (v === null || v === undefined || v === '') return '—'
+            const n = Number(String(v).replace(/[^\d.\-]/g, ''))
+            if (!Number.isFinite(n)) return '—'
+            // Ppr 有 0~1 小数与百分数两种口径，统一按百分比显示
+            const pct = Math.abs(n) <= 3 ? n * 100 : n
+            return (pct >= 0 ? '+' : '') + pct.toFixed(1) + '%'
+          })()
+          L.push(`  ${String(x.name || '').slice(0, 26).padEnd(30)}`
+            + `${String(c.uv ?? '—').padStart(6)}`
+            + `${String(c.pv ?? '—').padStart(6)}`
+            + `${String(c.payAmt ?? '—').padStart(10)}`
+            + `${String(c.payCnt ?? '—').padStart(6)}`
+            + `${String(c.vcr ?? '—').padStart(8)}`
+            + `${pprUv.padStart(11)}`)
         }
         L.push('')
         L.push(`合计：访客 ${out.totals.uv} / 浏览 ${out.totals.pv} / 支付 ¥${out.totals.payAmt} / 订单 ${out.totals.payCnt}`)
         L.push(`      转化率 ${out.totals.vcr}% / 客单价 ¥${out.totals.aov}`)
+
+        // ★ 2026-11-19：删掉「当前值字段为空 → 已自动改用上期值」这段。
+        //   prev 已不再是 Ppr 百分比，继续这么提示会把假数据说成真数据。
+        //   当前值为空时如实说明即可。
         const hasCur = items.some(x => x.cur.uv && x.cur.uv !== '0')
         if (!hasCur) {
           L.push('')
-          L.push('ℹ️ 当前值字段为空（今日数据未生成），已自动改用「上期值」')
+          L.push('ℹ️ 该日期当前值为空（数据可能尚未生成），请换一个更早的日期重试')
         }
 
         // ★ 2026-10-27 补：行业均值对比段
@@ -319,7 +503,8 @@ const TRANSPORT = argOf('transport') || 'http'
         const withInd = items.filter(x => x.industry?.cate3AvgVcr != null)
         const avgSample = withInd.map(x => n(x.industry.cate3AvgVcr)).filter(v => v != null)
         const avgVcr = avgSample.length ? Math.max(...avgSample) : null
-        const curVcr = (x) => n(x.cur.vcr) ?? n(x.prev.vcr) ?? x.prev.vcrCalc ?? null
+        // ★ 2026-11-19：prev 现在是「真实上期值或 null」，不再含 vcrCalc 等派生假值
+        const curVcr = (x) => n(x.cur.vcr) ?? n(x.prev.vcr) ?? null
         const above = withInd.filter(x => { const v = curVcr(x); return v != null && avgVcr != null && v > avgVcr })
         if (avgVcr != null) {
           L.push('')
@@ -370,10 +555,91 @@ const TRANSPORT = argOf('transport') || 'http'
       } finally {
         if (sess) await sess.close()
       }
+      } // if (!r) CDP 兜底块闭合
+
+      /**
+       * ★ 2026-11-22：纯 Node 通道的独立输出（走到这里 = nodeGoods 成功且 CDP 块被整体跳过）。
+       *   Node 接口返回明文（无 PUA），且自带 goodsName / statDate / 102 个字段，
+       *   直接组装输出，不需要 PUA 解码那一套。
+       */
+      {
+        // ★ 防御：r.ok 为假绝不该走到这里（nodeGoods 内部已校验非空才返回真值），
+        //   但「接口失败被当 0 条」是闸门检查器重点盯的假成功模式 —— 显式拦截，宁可多一层。
+        const rawList = (r?.ok && Array.isArray(r.json?.result?.goodsDetailList)) ? r.json.result.goodsDetailList : []
+        if (!rawList.length) {
+          emit({ ok: false, mode, transport: 'node', shopKey: SHOP, date: dateArg, failureKind: 'empty_result', text: `商品明细未取到数据（node 通道返回空，日期 ${dateArg}）。今日数据通常未生成，试 --date 前一天。` })
+          process.exit(2)
+        }
+        const num = (v) => { if (v === null || v === undefined || v === '') return null; const n = typeof v === 'number' ? v : Number(String(v).replace(/[^\d.\-]/g, '')); return Number.isFinite(n) ? n : null }
+        const items = rawList.map(g => ({
+          goodsId: g.goodsId,
+          name: g.goodsName,
+          date: g.statDate,
+          cur: {
+            uv: num(g.goodsUv), pv: num(g.goodsPv),
+            payAmt: num(g.payOrdrAmt), payCnt: num(g.payOrdrCnt),
+            payUsers: num(g.payOrdrUsrCnt), payQty: num(g.payOrdrGoodsQty),
+            vcr: typeof g.goodsVcr === 'number' ? g.goodsVcr.toFixed(2) + '%' : g.goodsVcr,
+            fav: num(g.goodsFavCnt), imprUsrCnt: num(g.imprUsrCnt), cnsltUsrQty: num(g.cnsltUsrQty),
+          },
+          ppr: { uv: g.goodsUvPpr, pv: g.goodsPvPpr, payAmt: g.payOrdrAmtPpr, payCnt: g.payOrdrCntPpr, vcr: g.goodsVcrPpr, fav: g.goodsFavCntPpr },
+          cate: [g.cate1Id, g.cate2Id, g.cate3Id].filter(Boolean),
+          status: g.goodsStatus,
+          industry: { cate3AvgVcr: g.cate3AvgGoodsVcr, cate3PctVcr: g.cate3PctGoodsVcr, isAboveFlag: g.cate3IsPgvAbove, vcrRised: g.goodsVcrRised },
+        }))
+        const tot = items.reduce((s, x) => ({
+          uv: s.uv + (x.cur.uv ?? 0), pv: s.pv + (x.cur.pv ?? 0),
+          payAmt: s.payAmt + (x.cur.payAmt ?? 0), payCnt: s.payCnt + (x.cur.payCnt ?? 0),
+        }), { uv: 0, pv: 0, payAmt: 0, payCnt: 0 })
+
+        const L = []
+        L.push(`商品数据明细（${items.length} 个，数据日期 ${items[0]?.date || dateArg}，纯 Node 通道免签名）`)
+        L.push('')
+        L.push('  商品ID                        访客   浏览      支付   订单  转化率   收藏')
+        for (const x of items.slice(0, 20)) {
+          const pprUv = (() => { const v = x.ppr?.uv; if (v === null || v === undefined) return '—'; const n = Number(v); if (!Number.isFinite(n)) return '—'; const pct = Math.abs(n) <= 3 ? n * 100 : n; return (pct >= 0 ? '+' : '') + pct.toFixed(1) + '%' })()
+          L.push(`  ${String(x.goodsId).padEnd(14)} ${String(x.cur.uv ?? '—').padStart(6)} ${String(x.cur.pv ?? '—').padStart(6)}`
+            + ` ${String(x.cur.payAmt != null ? '¥' + x.cur.payAmt.toFixed(2) : '—').padStart(9)} ${String(x.cur.payCnt ?? '—').padStart(5)}`
+            + ` ${String(x.cur.vcr ?? '—').padStart(7)} ${String(x.cur.fav ?? '—').padStart(5)} ${pprUv.padStart(8)}`)
+        }
+        L.push('')
+        L.push(`合计：访客 ${tot.uv} / 浏览 ${tot.pv} / 支付 ¥${tot.payAmt.toFixed(2)} / 订单 ${tot.payCnt}`)
+        L.push(`      转化率 ${tot.uv > 0 ? (tot.payCnt / tot.uv * 100).toFixed(2) : '—'}% / 客单价 ¥${tot.payCnt > 0 ? (tot.payAmt / tot.payCnt).toFixed(2) : '—'}`)
+
+        emit({
+          ok: true, mode, transport: 'node', shopKey: SHOP,
+          date: items[0]?.date || dateArg,
+          goods: items,
+          totals: { ...tot, payAmt: +tot.payAmt.toFixed(2), vcr: tot.uv > 0 ? +(tot.payCnt / tot.uv * 100).toFixed(2) : null, aov: tot.payCnt > 0 ? +(tot.payAmt / tot.payCnt).toFixed(2) : null },
+          signature: { type: 'cookie-only', len: 0 },
+          text: L.join('\n'),
+        })
+        process.exit(0)
+      }
     }
 
     // ── 其他模式：t1 通道 ──
-    const acc = store.findByPlatform('pdd_mms', SHOP) || store.listAccounts().find(a => a.shop_key === SHOP)
+    /**
+     * ★★ 2026-11-19 修：账号解析用错了 API ★★
+     *
+     *   原写法：
+     *     store.findByPlatform('pdd_mms', SHOP)
+     *
+     *   `findByPlatform(platform, agentId?)` 的第二个参数是 **agentId**，不是 shopKey。
+     *   把 shopKey 当 agentId 传进去 → 过滤 `bound_agent_ids.includes(shopKey)` → 必然为空
+     *   → 返回 null → 后面 `if (!acc?.cookies?.['PASS_ID'])` 判定失败，
+     *   或者 fallback 到「浏览器 Profile 的旧 Cookie」，于是出现：
+     *
+     *     [pdd-shop] 凭证库 Cookie 过期，已切换浏览器 Cookie 重试
+     *     → 仍然 session_expired 43001
+     *
+     *   而同一个账号的凭证库 Cookie 其实是**好的**（实测 legacyFlow/Overview/Score 全通）。
+     *   这就是「明明重新扫码登录了，技能还是说 Cookie 过期」的真正原因。
+     *
+     *   正确写法：先按 shop_key 精确取，取不到再退化为同平台第一个。
+     */
+    const acc = store.listAccounts().find(a => a.shop_key === SHOP)
+      || store.findByPlatform('pdd_mms')
     if (!acc?.cookies?.['PASS_ID']) {
       emit({ ok: false, failureKind: 'token_expired', text: '账号缺少 PASS_ID，请到「账号连接」重新登录拼多多商家后台。' })
       process.exit(2)

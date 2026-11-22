@@ -1,6 +1,6 @@
 ---
 name: pdd-link-matrix
-description: "拼多多·一款多链接批量铺货：一个款铺 N 条链接、主图分裂（同一 product 换 title+主图多次发布）、批量主图+详情页。风控：每条间隔 30~40s、每条前检查账号冷却、命中风控立即停止（不继续铺）。触发：一个款铺N条链接、主图分裂、批量主图、批量铺货、多条链接、一货多卖、pdd link matrix。排除：单条发布（用 pdd-publish-http）、商品查询（用 pdd-works）。需绑定「拼多多商家后台」账号。"
+description: "拼多多·一款多链接批量铺货：一个款铺 N 条链接、主图分裂（同一 product 换 title+主图多次发布）、批量主图+详情页。风控：每条间隔 30~40s、每条前检查账号冷却、命中风控立即停止（不继续铺）。触发：一个款铺N条链接、主图分裂、批量主图、批量铺货、多条链接、一货多卖、pdd link matrix。排除：单条发布（用 pdd-publish）、商品查询（用 pdd-works）。需绑定「拼多多商家后台」账号。"
 metadata:
   builtin_skill_version: "1.1"
   dsagent:
@@ -97,18 +97,18 @@ metadata:
 
 - 用户说「一个款铺 N 条链接」「主图分裂」→ 本技能
 - 用户给一批关键词，要求每个关键词配一套主图与详情页 → 本技能
-- 单条发布 → 用 `pdd-publish-http`
+- 单条发布 → 用 `pdd-publish`
 
 ## 用法
 
 ```bash
 # 1. 预览（不执行）
-node scripts/matrix.mjs \
+node {baseDir}/scripts/matrix.mjs \
   --product-file base.json \
   --variants '[{"title":"A款 大容量","images":["/img/a1.jpg","/img/a2.jpg"]},{"title":"B款 加厚","images":["/img/b1.jpg"]}]'
 
 # 2. 确认执行（带 --confirm true）
-node scripts/matrix.mjs --product-file base.json --variants '[...]' --confirm true
+node {baseDir}/scripts/matrix.mjs --product-file base.json --variants '[...]' --confirm true
 ```
 
 ### 变体字段
@@ -134,7 +134,7 @@ node scripts/matrix.mjs --product-file base.json --variants '[...]' --confirm tr
 ④ 循环 N 次，每次：
      a. checkAccountUsable —— 冷却中立即停（不铺这条）
      b. 组装该条的 title + 主图（同款不同标题/主图）
-     c. 调 pdd-publish-http 的发布链路（单条）
+     c. 调 pdd-publish 的发布链路（单条）
      d. recordToAntiban(SHOP, ok?1000000:null, ...) —— 累积健康分
      e. 失败且是 risk_control / token_expired / rate_limit → 立即停止后续
      f. 成功且不是最后一条 → sleep 30s + random(0,10s)

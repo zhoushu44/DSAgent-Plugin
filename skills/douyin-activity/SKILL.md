@@ -1,53 +1,68 @@
 ---
 name: douyin-activity
-description: "抖音小店·活动报名查询（只读）：活动总览（可报名活动/类型数）、可报名活动列表、活动类型清单、报名记录列表。数据源：抖店后台 fxg.jinritemai.com 营销活动子应用。全部只读，HTTP + 浏览器 hook 页面响应取数，无平台副作用。触发：抖音活动、抖店活动、抖店报名、大促报名、秒杀报名、活动列表、活动类型、报名记录、douyin activity。排除：商品查询（用 douyin-goods）、订单查询（用 douyin-order）、推广数据（用 douyin-promo）、店铺经营数据（用 douyin-shop）。需绑定「抖音小店」账号。"
+description: "抖音小店·营销活动查询（只读）：营销工具清单（24 个：单品直降/优惠券/满减/赠品/裂变等，含入口URL与适用场景）、营销总览（权限+工具数+活动数+推广数据）、满减多件优惠活动列表、营销推广数据、活动报名权限自检。数据源：抖店后台 fxg.jinritemai.com marketing 域，纯 Node 直连（抖店只读免签）。全部只读，无平台副作用。触发：抖音活动、抖店活动、营销工具、优惠券、满减、单品直降、活动列表、报名权限、douyin activity。排除：商品查询（douyin-goods）、订单查询（douyin-order）、推广数据用 douyin-uni-prom、店铺经营用 douyin-shop。需绑定「抖音小店」账号。"
 metadata:
-  builtin_skill_version: "1.0"
+  builtin_skill_version: "2.0"
   dsagent:
-    display_name: "抖音小店·活动报名"
+    display_name: "抖音小店·营销活动"
     emoji: "🎯"
     requires: {}
 ---
 
-# 抖音小店 · 活动报名
+# 抖音小店 · 营销活动
 
-> **只读技能**：本版本所有操作均为查询，**不产生任何平台写操作**，无需 L2 确认。
+> **只读技能**：所有操作均为查询，**不产生任何平台写操作**，无需 L2 确认。
 >
-> **规划中（L2，本版不实现）**：报名 / 取消报名。
-> contract 已预留 `--confirm` 参数位，写模式落地时按两步走门禁接入。
+> **本版不实现写操作**：报名 / 取消报名（`enroll` / `quit`）会明确返回错误，不假装支持。
+
+## ★ 2026-11-11 重要变更
+
+**本技能从「平台活动报名」重新定位为「营销活动 & 工具」。**
+
+实测发现：本账号 `get_activity_gray = { enable: false, membership: false, msg: "无该配置" }`
+→ 该店铺**没有平台活动报名权限**（抖音大促 / 秒杀等官方活动）
+
+但有**自建营销工具**权限，共 **24 个**（单品直降 / 优惠券 / 满减 / 赠品 / 裂变 / 搭配购…）。
+
+所以现在能查的是「营销工具 + 满减活动 + 营销数据」，不是「官方活动报名」。
+如果将来账号拿到平台活动权限（`enable=true`），再补报名类接口。
+
+**性能**：改造前 goto 页面 + sleep(12000)；现在纯 Node，`overview` 约 4s、单模式 0.5~1s。
 
 ## 何时使用
 
-- 用户说「有哪些活动能报」「抖店活动」「大促报名」→ 用本技能
-- 要看**可报名活动**列表（含活动时间/报名截止）→ `list` 模式
-- 要看**活动类型**（秒杀/满减/多件优惠…）→ `types` 模式
-- 要查**报名记录**（报了哪些/审核状态）→ `records` 模式
-- 要**一眼看活动全貌** → `overview` 模式
+- 「我有哪些营销工具能用」→ `tools`
+- 「优惠券 / 满减 / 单品直降怎么开」→ `tools`（拿入口 URL）
+- 「我的满减活动有哪些」→ `list`
+- 「营销效果怎么样」→ `data`
+- 「我能不能报平台活动」→ `perm`
+- 一眼看营销全貌 → `overview`
 
 ## 能力
 
 | 模式 | 类型 | 说明 |
 |------|------|------|
-| `overview` | 只读 | 活动总览：类型数 + 可报名活动数 + 推荐活动（默认） |
-| `list` | 只读 | 可报名活动列表（活动ID/名称/类型/时间/报名截止） |
-| `types` | 只读 | 活动类型清单（含关键词说明） |
-| `records` | 只读 | 报名记录列表（含活动ID、商品、状态——取消操作的参数来源） |
-| `enroll` | **规划中** | 报名（L2，本版不实现） |
-| `quit` | **规划中** | 取消报名（L2，本版不实现） |
+| `overview` | 只读 | 营销总览：权限 + 工具数 + 满减活动数 + 推广数据字段（默认） |
+| `tools` | 只读 | 营销工具清单（24 个，含名称/描述/标签/入口 URL/适用场景） |
+| `list` | 只读 | 满减/多件优惠活动列表（`--status` 筛选） |
+| `data` | 只读 | 营销推广数据（近 7 天：券领取/使用、营销优惠额、转化率、支付金额） |
+| `perm` | 只读 | 活动报名权限自检（`enable` / `membership`） |
+| `enroll` / `quit` | **不实现** | L2 写操作，明确拒绝 |
 
 ## 前置条件
 
-1. **账号已绑定**：「账号连接」页已绑定**抖音小店（抖店）**账号（platform=`douyin_shop`，抖店后台 `fxg.jinritemai.com`）。★ 与内容平台 `douyin` 是**两套独立登录态**：抖音账号的 Cookie 进不了抖店后台（实测跳登录页），必须单独扫码登录一次抖店。
-2. **登录态有效**：失效时技能会返回 `token_expired`，引导用户重新登录。
-3. **Chrome 可用**（活动子应用需要页面环境取数）。
+1. **账号已绑定**：「账号连接」页已绑定**抖音小店（抖店）**账号（platform=`douyin_shop`）。
+   ★ 与内容平台 `douyin` 是**两套独立登录态**，必须单独扫码登录一次抖店。
+2. **登录态有效**：失效返回 `token_expired`，引导重新登录。
+3. **无需 Chrome**：纯 Node 直连（抖店只读接口免签，实测见 `_douyin_node_probe/REPORT.md`）。
 
 ## 输入
 
 | 参数 | 类型 | 必需 | 说明 |
 |------|------|------|------|
-| `--mode` | string | 否 | overview(默认) / list / types / records |
-| `--limit` | number | 否 | 返回条数上限，默认 20，上限 100 |
-| `--confirm` | flag | 预留 | 写操作确认门禁；本版无写操作，预留参数位 |
+| `--mode` | string | 否 | overview(默认) / tools / list / data / perm |
+| `--limit` | number | 否 | `list` 返回条数上限，默认 20，上限 100 |
+| `--status` | number | 否 | `list` 的活动状态筛选，默认 0 |
 | `--account` | string | 否 | 账号 shopKey；多账号未绑定时先向用户确认 |
 
 ## 输出
@@ -56,50 +71,51 @@ metadata:
 |------|------|
 | `ok` | 是否成功 |
 | `mode` | 实际执行的模式 |
-| `activityTypes` | 活动类型数组——**待探测回填** |
-| `activities` | 可报名活动数组——**待探测回填** |
-| `recommended` | 推荐活动——**待探测回填** |
-| `records` | 报名记录数组——**待探测回填** |
+| `activityPermission` | `{enable, membership, note}` 平台活动权限 |
+| `tools` | 营销工具数组（`name`/`desc`/`listUrl`/`tags`/`scenes`） |
+| `toolCount` | 工具数量 |
+| `total` / `activities` | 满减活动总数 / 活动列表 |
+| `promoData` | 营销推广数据（`stats_data` 含券/优惠/转化指标） |
+| `perf` | 各接口耗时（ms），用于验证纯 Node 收益 |
 | `text` | 面向用户的中文文案，原样转述 |
 
 ## 用法
 
 ```bash
-# 活动总览 / 列表 / 类型 / 报名记录
+# 营销总览
 node {baseDir}/scripts/activity.mjs --mode overview
-node {baseDir}/scripts/activity.mjs --mode list
-node {baseDir}/scripts/activity.mjs --mode types
-node {baseDir}/scripts/activity.mjs --mode records
 
-# ── 写操作（L2，规划中，本版不实现）──
-# 落地后按两步走：先不带 --confirm 拿预览 → 用户同意 → 带 --confirm true 执行
+# 24 个营销工具清单（含入口 URL）
+node {baseDir}/scripts/activity.mjs --mode tools
+
+# 满减活动列表
+node {baseDir}/scripts/activity.mjs --mode list --status 0 --limit 20
+
+# 营销推广数据
+node {baseDir}/scripts/activity.mjs --mode data
+
+# 权限自检
+node {baseDir}/scripts/activity.mjs --mode perm
 ```
 
 ## 工作流
 
-### W1：看有哪些活动能报
+### W1：用户问「我能搞什么促销」
 
 ```
-① 调 activity.mjs --mode overview       → 推荐活动 + 可报名活动数 + 活动类型
-② 用户想看全部 → --mode list
-③ 想知活动类型含义 → --mode types
+① activity.mjs --mode overview   → 权限 + 工具数 + 活动数
+② 若用户要具体入口 → --mode tools → 给出 listUrl
+③ 用户想开某个工具 → 把 listUrl 拼 https://fxg.jinritemai.com 交给用户在浏览器操作
+   （★ 本技能只读，不代用户创建活动）
 ```
 
-### W2：报名一个活动（规划中）
+### W2：用户问「我报了哪些活动」
 
 ```
-① 调 --mode list 拿 activity_id（或从后台活动页看 URL）
-② 调 --mode enroll --activity-id X --goods-id Y  → 拿预览（落地后）
-③ 用户同意后带 --confirm true 执行
-④ ⚠️ 本版未实现 enroll，当前只能查；报名需到抖店后台手动操作
-```
-
-### W3：查我报过哪些活动
-
-```
-① 调 activity.mjs --mode records        → 报名记录（活动ID/商品/状态）
-② 需要看商品规格 → 取商品 ID 后调 douyin-goods --mode sku
-③ 需要看活动效果 → 结合 douyin-shop --mode goods 对比数据
+① activity.mjs --mode perm   → enable=false 说明没有平台活动权限
+② 若 enable=false → 明确告诉用户「该店无平台活动报名权限」，
+   不要硬找报名记录（接口不存在，硬查会返回空）
+③ 若 enable=true → 用 --mode list 查满减活动
 ```
 
 ## 错误处理
@@ -107,48 +123,34 @@ node {baseDir}/scripts/activity.mjs --mode records
 | 场景 | failureKind | 引导动作 |
 |------|-------------|---------|
 | 未绑定抖音小店账号 | `not_bound` | 引导到「账号连接」添加**抖音小店**账号 |
-| 平台有多个账号且未指定 | `need_account_choice` | 把候选账号列表给用户选，把选定 shopKey 填进 `--account` 重调；★ 不要自己挑一个 |
-| 登录态失效 | `token_expired` | 引导到「账号连接」重新登录 |
-| 浏览器 profile 被占用 | `api_error` | 稍后重试，或先关闭已弹出的后台窗口 |
-| 接口未回填（当前为桩） | `api_error` | 先跑 `_douyin_probe` 探测脚本，把真实接口回填进 APIS 常量 |
-| 未知 mode | `api_error` | 用 overview/list/types/records 之一 |
-| 返回空列表 | — | 当前没有可报名活动/报名记录，属正常（不是故障） |
+| 多账号未指定 | `need_account_choice` | 把候选列表给用户选，不要自己挑 |
+| 登录态失效 | `token_expired` | 引导重新登录 |
+| 环境风险 `10001010A` | `api_error` | 冷却 5 分钟；检查是否误带签名字段 |
+| 调 `enroll` / `quit` | `api_error` | 明确说明本版不实现写操作 |
 
 ## 技术说明
 
 ### 取数方式
 
-营销活动是抖店后台内的子应用（`fxg.jinritemai.com`），接口前缀分散
-（探测已见 `/byteshop/*`、`/b/a/api/*`），响应体统一为 `{st, code, msg, data}`。
-风控签名由页面 JS 运行时生成（`verifyFp` / `msToken` / `_bid` / `_lid` 等），
-纯 HTTP 请求恒被拒，故采用「**打开页面 → hook 页面自己发的响应**」
-（`Network.responseReceived` + `Network.getResponseBody`）取数，
-与 `pdd-activity` 同源思路。
+**纯 Node 直连**（2026-11-11 起）。抖店 `marketing` 域只读接口免签 ——
+剥掉 `a_bogus/verifyFp/fp/msToken/__token/_bid/_lid` 后仍返回 `st=0`。
 
-### 接口（待探测回填）
+### 接口
 
-| 用途 | 接口 path 片段 | 状态 |
-|------|----------------|------|
-| 活动总览 / 推荐 | **待探测回填** | ⏳ 未回填 |
-| 可报名活动列表 | **待探测回填** | ⏳ 未回填 |
-| 活动类型清单 | **待探测回填** | ⏳ 未回填 |
-| 报名记录 | **待探测回填** | ⏳ 未回填 |
+| 用途 | 接口 | 参数 |
+|------|------|------|
+| 营销工具清单 | `POST /marketing/pc/v1/common/get_marketing_homepage_tools` | `from_platform=1&appid=1`，body `{}` |
+| 满减活动列表 | `GET /marketing/activity/v1/query_full_discount_activity` | `activity_status&page&pageSize&appid` |
+| 营销推广数据 | `GET /marketing/marketing_data/v1/query_promotion_data` | `source_type&date_type&from_platform&appid` |
+| 活动权限 | `GET /marketing/activity/v1/get_activity_gray` | `from_platform&appid` |
 
-> ⚠️ **当前是桩实现**：`scripts/activity.mjs` 里的 `APIS` 常量只有占位 key，
-> 尚未回填真实接口 path。在回填前，脚本会明确返回
-> `{ok:false, failureKind:'api_error', text:'接口待回填：先跑探测脚本'}`，
-> **不会伪造成功数据**。
+全部登记在基座 `skills/_shared/douyin-registry.mjs`（`marketing.*`）。
 
-### 回填方法
+### 已知坑
 
-1. 跑 `node skills/_douyin_probe/probe.mjs`，打开抖店后台活动页采集接口；
-2. 从 `probe-out/hits-*.json` 里按响应内容定位目标接口；
-3. 把接口 path 片段填进 `scripts/activity.mjs` 的 `APIS` 常量，并删掉桩判断。
-
-### 浏览器环境
-
-- `profileDir('douyin_shop', shopKey)` 定位账号独立 profile（与内容平台 `douyin` 分开）；
-- `tryAcquireProfile` / `releaseProfile` / `clearProfileLocks` 保证同一账号
-  不会并发起两个浏览器；
-- `headless: false` + `--no-sandbox --disable-blink-features=AutomationControlled`
-  保持与 `douyin-works` 一致的反检测配置。
+| 坑 | 现象 | 说明 |
+|---|---|---|
+| 活动子应用路由会重定向 | `/ffa/marketing/activity` → `/ffa/marketing/home` | 直接 goto 子页面拿不到数据，改走接口 |
+| 菜单树里没有活动入口 | `byteshop/menu/navigate` 只返回 21 个节点，无营销项 | 活动权限由 `get_activity_gray` 决定，不由菜单决定 |
+| `tool_cates[].label` 可能为空 | 前 5 个分类 label 是空串 | 用 `strategy_tools` 数组长度判断 |
+| 卡片字段名是 `strategy_name` | 不是 `name`/`title` | 字段口径见 `probe-12-marketing.json` |

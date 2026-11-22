@@ -697,6 +697,7 @@ def _build_html(result: SkillOutput) -> str:
         </div>
         <p class="footnote">报告内所有统计均由本次抓到的 {escape(str(result.collected_count))} 条商品实时计算；标题词和共性分析仅用于观察当前搜索页样本特征。</p>
       </section>
+      {_render_sku_panel(result)}
     </div>
   </div>
 </body>
@@ -828,6 +829,100 @@ def _render_distribution_card(
         f"<strong>{escape(title)}</strong>"
         f"{content}"
         "</div>"
+    )
+
+
+def _render_sku_panel(result: SkillOutput) -> str:
+    """SKU 明细面板：仅当本次开启 SKU 采集时出现。"""
+    if not getattr(result, "with_sku", False):
+        return ""
+
+    rows = list(getattr(result, "sku_rows", []) or [])
+    summary = getattr(result, "sku_summary", {}) or {}
+    errors = list(getattr(result, "sku_errors", []) or [])
+
+    head = (
+        '<div class="section-head"><div>'
+        '<span class="section-kicker">SKU Detail</span>'
+        "<h2>SKU 价格明细</h2>"
+        "</div>"
+        '<div class="tag-row">'
+        f'<span class="tag">覆盖商品 {escape(_format_plain_number(summary.get("succeeded_items", 0)))} 个</span>'
+        f'<span class="tag">SKU {escape(_format_plain_number(len(rows)))} 条</span>'
+        f'<span class="tag">券后价 {escape(str(summary.get("price_after_min") or "-"))} ~ {escape(str(summary.get("price_after_max") or "-"))} 元</span>'
+        "</div></div>"
+    )
+
+    if not rows:
+        note = "本次要求采集 SKU 明细，但没有取到数据。"
+        if errors:
+            note += f"共 {len(errors)} 个商品失败，可查看 JSON 里的 sku_errors。"
+        return f'<section class="panel">{head}<p class="panel-note">{escape(note)}</p></section>'
+
+    product_rows = summary.get("products") or []
+    body_rows = []
+    for item in product_rows:
+        body_rows.append(
+            "<tr>"
+            f'<td>{escape(str(item.get("item_id", "")))}</td>'
+            f'<td>{escape(str(item.get("title", "")))}</td>'
+            f'<td>{escape(str(item.get("shop_name", "")))}</td>'
+            f'<td>{escape(_format_plain_number(item.get("sku_count", 0)))}</td>'
+            f'<td>{escape(_format_plain_number(item.get("color_count", 0)))}</td>'
+            f'<td>{escape(_format_plain_number(item.get("size_count", 0)))}</td>'
+            f'<td>{escape(str(item.get("price_before_min") or "-"))} ~ {escape(str(item.get("price_before_max") or "-"))}</td>'
+            f'<td>{escape(str(item.get("price_after_min") or "-"))} ~ {escape(str(item.get("price_after_max") or "-"))}</td>'
+            f'<td>{escape(_format_plain_number(item.get("in_stock_count", 0)))}</td>'
+            "</tr>"
+        )
+    product_table = (
+        '<table class="detail-table"><thead><tr>'
+        "<th>商品ID</th><th>标题</th><th>店铺</th><th>SKU数</th><th>颜色数</th>"
+        "<th>尺码数</th><th>券前价</th><th>券后价</th><th>有货SKU</th>"
+        f'</tr></thead><tbody>{"".join(body_rows)}</tbody></table>'
+    )
+
+    preview_rows = []
+    for row in rows[:40]:
+        preview_rows.append(
+            "<tr>"
+            f'<td>{escape(str(row.get("item_id", "")))}</td>'
+            f'<td>{escape(str(row.get("sku_id", "")))}</td>'
+            f'<td>{escape(str(row.get("color", "") or "-"))}</td>'
+            f'<td>{escape(str(row.get("size", "") or "-"))}</td>'
+            f'<td>{escape(str(row.get("price_before", "") or "-"))}</td>'
+            f'<td>{escape(str(row.get("price_after", "") or "-"))}</td>'
+            f'<td>{escape(str(row.get("stock", "") or "-"))}</td>'
+            f'<td>{escape(str(row.get("in_stock", "") or "-"))}</td>'
+            "</tr>"
+        )
+    preview_table = (
+        '<table class="detail-table"><thead><tr>'
+        "<th>商品ID</th><th>SKU_ID</th><th>颜色</th><th>尺码/规格</th>"
+        "<th>券前价</th><th>券后价</th><th>库存</th><th>是否有货</th>"
+        f'</tr></thead><tbody>{"".join(preview_rows)}</tbody></table>'
+    )
+
+    note = (
+        f'共请求 {escape(_format_plain_number(summary.get("requested_items", 0)))} 个商品，'
+        f'成功 {escape(_format_plain_number(summary.get("succeeded_items", 0)))} 个，'
+        f'失败 {escape(_format_plain_number(len(errors)))} 个；'
+        f'平均每商品 {escape(str(summary.get("avg_sku_per_item", 0)))} 个 SKU。'
+        "SKU 价格来自商品详情接口，与搜索页展示价可能不同（搜索页价是区间最低值）。"
+    )
+
+    return (
+        f'<section class="panel">{head}'
+        f'<p class="panel-note">{note}</p>'
+        '<div class="detail-scroll">'
+        f"{product_table}"
+        "</div>"
+        '<h3 style="margin-top:24px;">SKU 明细（前 40 条预览）</h3>'
+        '<div class="detail-scroll">'
+        f"{preview_table}"
+        "</div>"
+        '<p class="footnote">完整 SKU 明细见 CSV 文件（sku_csv_path）。</p>'
+        "</section>"
     )
 
 

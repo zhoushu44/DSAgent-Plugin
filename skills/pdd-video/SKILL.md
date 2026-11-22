@@ -1,6 +1,6 @@
 ---
 name: pdd-video
-description: "拼多多·多多视频：读——我的视频列表、主播信息、发布资格、话题列表；写（L2）——上传视频、删除视频。数据源 live.pinduoduo.com/n-creator/video/home（独立域，mms SSO 打通）。触发：多多视频、拼多多视频、商家视频、带货视频、视频列表、发布视频、上传视频、删除视频、内容管理、pdd video。排除：多多直播（未覆盖）、商品上架（用 pdd-publish-http）。需绑定「拼多多商家后台」账号。"
+description: "拼多多·多多视频：读——我的视频列表、主播信息、发布资格、话题列表；写（L2）——上传视频、删除视频。数据源 live.pinduoduo.com/n-creator/video/home（独立域，mms SSO 打通）。触发：多多视频、拼多多视频、商家视频、带货视频、视频列表、发布视频、上传视频、删除视频、内容管理、pdd video。排除：多多直播（未覆盖）、商品上架（用 pdd-publish）。需绑定「拼多多商家后台」账号。"
 metadata:
   builtin_skill_version: "1.1"
   dsagent:
@@ -103,7 +103,7 @@ metadata:
 ```
 ① 确认模式：list（我的视频）/ detail（单个视频数据）/ data（带货数据）
    / anchor（主播信息）/ qualify（发布资格）/ topics（话题列表）
-② 调 node scripts/video.mjs --mode <模式> [--limit N]
+② 调 node {baseDir}/scripts/video.mjs --mode <模式> [--limit N]
 ③ 把 text 原样转述用户；明细类可让用户指定某条再看 detail
 ```
 
@@ -111,10 +111,10 @@ metadata:
 
 ```
 ① 第一步：不带 --confirm 拿「发布预览」给用户看
-   node scripts/video.mjs --mode upload --file <本地视频绝对路径>
+   node {baseDir}/scripts/video.mjs --mode upload --file <本地视频绝对路径>
         [--title 标题] [--desc 描述] [--cover 封面] [--goods-id 带货商品ID]
 ② 用户明确同意后，第二步才带 --confirm 真正上传
-   node scripts/video.mjs --mode upload --file ... --confirm true
+   node {baseDir}/scripts/video.mjs --mode upload --file ... --confirm true
 ③ 报告结果：ok=true → 已上传；平台可能要求审核（正常）
 ```
 
@@ -416,32 +416,32 @@ POST /api/backbone/video/query
 
 ```bash
 # 读
-node scripts/video.mjs --mode list                        # 待发布队列
-node scripts/video.mjs --mode published                   # 已发布视频
-node scripts/video.mjs --mode detail                      # 单个视频数据（全部）
-node scripts/video.mjs --mode detail --feed-id 12345      # 指定视频
-node scripts/video.mjs --mode detail --status -1          # 全部状态
-node scripts/video.mjs --mode data                        # 带货数据
-node scripts/video.mjs --mode data --date-type 3          # 近30日
-node scripts/video.mjs --mode anchor                      # 主播信息
-node scripts/video.mjs --mode qualify                     # 发布资格
-node scripts/video.mjs --mode permission                  # 权限与流量卡奖励
-node scripts/video.mjs --mode topics                      # 话题/内容声明
+node {baseDir}/scripts/video.mjs --mode list                        # 待发布队列
+node {baseDir}/scripts/video.mjs --mode published                   # 已发布视频
+node {baseDir}/scripts/video.mjs --mode detail                      # 单个视频数据（全部）
+node {baseDir}/scripts/video.mjs --mode detail --feed-id 12345      # 指定视频
+node {baseDir}/scripts/video.mjs --mode detail --status -1          # 全部状态
+node {baseDir}/scripts/video.mjs --mode data                        # 带货数据
+node {baseDir}/scripts/video.mjs --mode data --date-type 3          # 近30日
+node {baseDir}/scripts/video.mjs --mode anchor                      # 主播信息
+node {baseDir}/scripts/video.mjs --mode qualify                     # 发布资格
+node {baseDir}/scripts/video.mjs --mode permission                  # 权限与流量卡奖励
+node {baseDir}/scripts/video.mjs --mode topics                      # 话题/内容声明
 
 # 写（L2，两步：先预览，后 --confirm true）
  待发布队列
-node scripts/video.mjs --mode published                   # 已发布视频
-node scripts/video.mjs --mode detail                      # 单个视频数据（全部）
-node scripts/video.mjs --mode published --status -1       # 全部状态
-node scripts/video.mjs --mode anchor                      # 主播信息
-node scripts/video.mjs --mode qualify                     # 发布资格
-node scripts/video.mjs --mode permission                  # 带货/内容权限 + 流量卡奖励
-node scripts/video.mjs --mode topics                      # 话题 / 内容声明
+node {baseDir}/scripts/video.mjs --mode published                   # 已发布视频
+node {baseDir}/scripts/video.mjs --mode detail                      # 单个视频数据（全部）
+node {baseDir}/scripts/video.mjs --mode published --status -1       # 全部状态
+node {baseDir}/scripts/video.mjs --mode anchor                      # 主播信息
+node {baseDir}/scripts/video.mjs --mode qualify                     # 发布资格
+node {baseDir}/scripts/video.mjs --mode permission                  # 带货/内容权限 + 流量卡奖励
+node {baseDir}/scripts/video.mjs --mode topics                      # 话题 / 内容声明
 
 # 写（L2，两步：先预览，后 --confirm true）
-node scripts/video.mjs --mode upload --file /path/video.mp4 [--title 标题] [--desc 描述] [--goods-id 123]
-node scripts/video.mjs --mode upload --file /path/video.mp4 --confirm true
-node scripts/video.mjs --mode upload --file /path/video.mp4 --confirm true --publish true --declaration 11
-node scripts/video.mjs --mode delete --video-id 123
-node scripts/video.mjs --mode delete --video-id 123 --confirm true
+node {baseDir}/scripts/video.mjs --mode upload --file /path/video.mp4 [--title 标题] [--desc 描述] [--goods-id 123]
+node {baseDir}/scripts/video.mjs --mode upload --file /path/video.mp4 --confirm true
+node {baseDir}/scripts/video.mjs --mode upload --file /path/video.mp4 --confirm true --publish true --declaration 11
+node {baseDir}/scripts/video.mjs --mode delete --video-id 123
+node {baseDir}/scripts/video.mjs --mode delete --video-id 123 --confirm true
 ```

@@ -26,6 +26,11 @@ from .config import (
     REQUEST_INTERVAL_SECONDS,
     REQUEST_RETRY_ATTEMPTS,
     REQUEST_RETRY_BACKOFF_SECONDS,
+    SKU_DETAIL_API,
+    SKU_DETAIL_API_VERSION,
+    SKU_DETAIL_BASE_URL,
+    SKU_DETAIL_EXTRA_PARAMS,
+    SKU_DETAIL_REFERER,
 )
 from .types import SearchProduct, SkillError
 
@@ -198,11 +203,17 @@ def _to_skill_error(exc: Exception, *, fallback: str) -> SkillError:
 
 
 class TaobaoMarketAnalysisClient:
-    def __init__(self, *, cna: str = ""):
+    def __init__(
+        self,
+        *,
+        cna: str = "",
+        interval_seconds: float = REQUEST_INTERVAL_SECONDS,
+        jitter_seconds: float = REQUEST_INTERVAL_JITTER_SECONDS,
+    ):
         self._cna = cna.strip()
         self._mtop = MtopCaller(
-            interval_seconds=REQUEST_INTERVAL_SECONDS,
-            interval_jitter_seconds=REQUEST_INTERVAL_JITTER_SECONDS,
+            interval_seconds=interval_seconds,
+            interval_jitter_seconds=jitter_seconds,
             max_attempts=REQUEST_RETRY_ATTEMPTS,
             backoff_seconds=REQUEST_RETRY_BACKOFF_SECONDS,
         )
@@ -229,6 +240,12 @@ class TaobaoMarketAnalysisClient:
             price_max=price_max,
         )
         data_str = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+        # ★ 优先走淘宝基座（纯 Node 自签，绕开网关；基座不可用则回退网关）
+        base_payload = self._fetch_page_via_base(data_str)
+        if base_payload is not None:
+            return base_payload
+
         headers = _browser_headers(
             referer="https://s.taobao.com/",
             origin="https://s.taobao.com",
@@ -258,6 +275,95 @@ class TaobaoMarketAnalysisClient:
         self, payload: dict[str, Any], page: int
     ) -> tuple[list[SearchProduct], int]:
         return parse_search_products(payload, page)
+
+    def _fetch_page_via_base(self, data_str: str) -> dict[str, Any] | None:
+        """走淘宝基座（skills/_shared/run-api.mjs）。不可用或失败返回 None → 调用方回退网关。"""
+        try:
+            import os
+            import subprocess
+            import sys
+            from pathlib import Path
+
+            # 定位 skills/_shared
+            shared = None
+            here = Path(__file__).resolve()
+            for parent in here.parents:
+                cand = parent / "_shared"
+                if (cand / "run-api.mjs").is_file():
+                    shared = cand
+                    break
+            if shared is None:
+                return None
+
+            # 用 taobao_base 统一封装
+            if str(shared) not in sys.path:
+                sys.path.insert(0, str(shared))
+            from taobao_base import TaobaoBase  # noqa: PLC0415
+
+            base = TaobaoBase()
+            ok, _ = base.is_available()
+            if not ok:
+                return None
+
+            r = base.call("search.list", data_json=data_str)
+            if not r.get("ok"):
+                print(
+                    f"[market-analysis] 基座搜索失败，回退网关: "
+                    f"{r.get('failureKind') or r.get('error')} / {r.get('hint', '')}",
+                    file=sys.stderr,
+                )
+                return None
+            results = r.get("results") or []
+            if not results:
+                return None
+            data = results[0].get("data")
+            # 还原成旧网关返回形态，parse_search_products 无需改
+            return {"ret": ["SUCCESS::调用成功"], "data": data}
+        except Exception as exc:                    # noqa: BLE001 — 任何异常都回退
+            try:
+                print(f"[market-analysis] 基座异常，回退网关: {exc}", file=sys.stderr)
+            except Exception:                       # noqa: BLE001
+                pass
+            return None
+
+    def fetch_sku_detail(
+        self,
+        *,
+        item_id: str,
+        timeout: int = 45,
+    ) -> dict[str, Any]:
+        """拉取单商品详情（含 SKU 维度、价格、库存）。
+
+        注意：Referer / Origin 必须与 DETAIL_BASE_URL 同域（tmall），
+        跨域会被 MTOP 判风控（RGV587_ERROR）。
+        """
+        data_str = json.dumps(
+            {"id": str(item_id)}, ensure_ascii=False, separators=(",", ":")
+        )
+        headers = _browser_headers(
+            referer=SKU_DETAIL_REFERER.format(item_id=item_id),
+            origin="https://detail.tmall.com",
+            ua=DEFAULT_USER_AGENT,
+        )
+        try:
+            return self._mtop.call(
+                label="SKU详情",
+                url=f"{SKU_DETAIL_BASE_URL}/h5/{SKU_DETAIL_API}/{SKU_DETAIL_API_VERSION}/",
+                api=SKU_DETAIL_API,
+                version=SKU_DETAIL_API_VERSION,
+                data=data_str,
+                headers=headers,
+                extra_params=dict(SKU_DETAIL_EXTRA_PARAMS),
+                timeout=float(timeout),
+                app_key=MTOP_APP_KEY,
+            )
+        except (
+            TaobaoRiskControlError,
+            TaobaoSessionExpiredError,
+            TaobaoRateLimitError,
+            TaobaoRequestError,
+        ) as exc:
+            raise _to_skill_error(exc, fallback="淘宝SKU详情请求失败。") from exc
 
     def _build_payload(
         self,

@@ -465,7 +465,7 @@ export const PROMO_BODY_DEFAULTS = API_BODY_DEFAULTS
 /* ══════════════════════════════════════════════════════════════════
  * 页面路由表（DOM 驱动型 skill 用）
  * ══════════════════════════════════════════════════════════════════
- * pdd-publish-http / pdd-link-matrix 不发 API 请求，而是打开页面点 DOM，
+ * pdd-publish / pdd-link-matrix 不发 API 请求，而是打开页面点 DOM，
  * 由页面自己发请求。它们依赖的是**页面 URL**，同样会随 PDD 改版变化，
  * 所以也收进基座。
  */

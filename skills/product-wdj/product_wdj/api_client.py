@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import time
 from typing import Any
 
@@ -98,6 +99,23 @@ class TaobaoWdjClient:
             "biz": "pc",
         }
         data_str = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+        # ★ 优先走淘宝基座
+        from .base_bridge import base_available, call_via_base
+        if base_available():
+            try:
+                return call_via_base("wdj.list", {
+                    "itemId": str(item_id),
+                    "userId": user_id,
+                    "pageSize": page_size,
+                    "page": page,
+                    "type": "mix_group",
+                    "tagId": tag_id or "",
+                    "extraInfo": extra_info,
+                    "ecode": 0,
+                    "biz": "pc",
+                })
+            except Exception as exc:              # noqa: BLE001 — 回退网关
+                print(f"[product-wdj] 基座失败，回退网关: {exc}", file=sys.stderr)
         headers = _browser_headers(
             referer=f"https://detail.tmall.com/item.htm?id={item_id}",
             origin="https://detail.tmall.com",
@@ -159,6 +177,19 @@ class TaobaoWdjClient:
             "biz": "pc",
         }
         data_str = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+        # ★ 优先走淘宝基座（answer 接口 referer 特殊，已在 taobao-api.mjs 配好）
+        from .base_bridge import base_available, call_via_base
+        if base_available():
+            try:
+                return call_via_base("wdj.answer", {
+                    "id": str(question_id),
+                    "userId": user_id,
+                    "params": params,
+                    "ecode": 0,
+                    "biz": "pc",
+                })
+            except Exception as exc:              # noqa: BLE001 — 回退网关
+                print(f"[product-wdj] answer 基座失败，回退网关: {exc}", file=sys.stderr)
         headers = _browser_headers(
             referer=f"https://web.m.taobao.com/app/mtb/ask-everyone/detail?id={question_id}",
             origin="https://web.m.taobao.com",

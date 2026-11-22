@@ -8,11 +8,13 @@
  * 物理隔离：全部逻辑收在本文件，index.ts 只传引用进来。
  */
 import { readdir, readFile, writeFile, mkdir } from 'node:fs/promises'
-import { existsSync, unlinkSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, unlinkSync, readFileSync } from 'node:fs'
+import { join, dirname, basename } from 'node:path'
+import { spawn } from 'node:child_process'
 import { parse, stringify } from 'yaml'
-import { detectEntry, parseArgString, type SkillRow } from '../services/skill-service.js'
+import { detectEntry, parseArgString, terminateGracefully, type SkillRow } from '../services/skill-service.js'
 import { loadContract, buildContractArgv, type SkillContract } from '../services/arguments.js'
+import { resolveStepScript, scriptRunner, listWorkflowFiles, findWorkflowFile } from './layout.js'
 import type {
   WorkflowSchedule,
   WorkflowInputDef,
@@ -32,10 +34,96 @@ import type {
 const ERROR_MAX = 2000
 /** 环境级失败：重试无意义，该轮记失败并直接 abort 整个任务（需求 5.4） */
 const ENV_FAILURE_KINDS = new Set(['token_expired', 'risk_control', 'not_bound'])
+/**
+ * script: 步骤的 idle 看门狗。
+ *
+ * ★ 2026-11-19：与 skill-service 同步改动（同一事故的第二个入口）。
+ *   原来单层 60s + SIGKILL，会让「正常但慢」的步骤被误杀，
+ *   且 SIGKILL 让脚本来不及释放账号锁/关浏览器，残留状态会毒化后续所有轮次。
+ *   现在：软阈值只告警，硬阈值才终止，且先 SIGTERM 再 SIGKILL。
+ */
+const SCRIPT_IDLE_SOFT_MS = Number(process.env.DSAGENT_STEP_IDLE_SOFT_MS) || 60_000
+const SCRIPT_IDLE_TIMEOUT_MS = Number(process.env.DSAGENT_STEP_IDLE_TIMEOUT_MS) || 180_000
 /** 标准化日志单条最大字符数（超长截断）—— 提升到 1000 以保留完整 traceback */
 const LOG_LINE_MAX = 1000
 /** 每轮最多保留的日志条数（超出尾部截断）—— 提升到 200 以减少前序日志丢弃 */
 const LOGS_PER_ROUND = 200
+
+/* ─────────────── script: 步骤的辅助函数 ─────────────── */
+
+/** 同步读文件（仅用于「扫描模板名」这种小文件场景） */
+function readFileSyncSafe(file: string): string {
+  try {
+    return readFileSync(file, 'utf8')
+  }
+  catch { return '' }
+}
+
+/**
+ * 找 python 解释器。
+ *
+ * 与 skill-service 的 resolvePython 同源，但这里刻意简化：
+ * script: 步骤多是一次性工具脚本，只依赖标准库 / 常见三方包，
+ * 不需要按「技能依赖命中数」挑最优解释器。
+ */
+let _pyBin: string | null | undefined
+function resolvePythonBin(): string | null {
+  if (_pyBin !== undefined)
+    return _pyBin
+  const explicit = process.env.DSAGENT_PYTHON?.trim()
+  if (explicit && existsSync(explicit)) {
+    _pyBin = explicit
+    return _pyBin
+  }
+  const cands = process.platform === 'win32'
+    ? ['python.exe', 'python3.exe', 'py.exe']
+    : ['python3', 'python']
+  for (const c of cands) {
+    const found = whichSync(c)
+    if (found) {
+      _pyBin = found
+      return _pyBin
+    }
+  }
+  _pyBin = null
+  return _pyBin
+}
+
+/** 极简 which（避免额外依赖） */
+function whichSync(name: string): string | null {
+  if (name.includes('/') || name.includes('\\'))
+    return existsSync(name) ? name : null
+  const dirs = (process.env.PATH ?? '').split(process.platform === 'win32' ? ';' : ':')
+  const exts = process.platform === 'win32'
+    ? (process.env.PATHEXT ?? '.EXE;.CMD;.BAT').split(';')
+    : ['']
+  for (const d of dirs) {
+    if (!d)
+      continue
+    for (const ext of (process.platform === 'win32' && /\.[a-z]+$/i.test(name) ? [''] : exts)) {
+      const p = join(d, name + ext)
+      if (existsSync(p))
+        return p
+    }
+  }
+  return null
+}
+
+/**
+ * 把步骤参数拼成 argv。
+ *
+ * 与技能非契约路径一致：省略空值；spawn 不经过 shell，
+ * 所以带空格/特殊字符的值天然安全，无需加引号。
+ */
+function buildScriptArgv(args: Record<string, string>): string[] {
+  const out: string[] = []
+  for (const [k, v] of Object.entries(args)) {
+    if (v === '' || v === undefined || v === null)
+      continue
+    out.push(`--${k}`, String(v))
+  }
+  return out
+}
 
 /* ─────────────── 依赖注入接口 ─────────────── */
 
@@ -165,6 +253,8 @@ function parseTemplateYaml(text: string): WorkflowTemplate {
         name: String(it.name ?? '').trim(),
         skill: String(it.skill ?? '').trim(),
       }
+      // script: 工作流私有脚本（相对该工作流目录）；与 skill 二选一
+      if (it.script != null) s.script = String(it.script).trim()
       if (it.args && typeof it.args === 'object' && !Array.isArray(it.args)) {
         s.args = Object.fromEntries(
           Object.entries(it.args as Record<string, unknown>).map(([k, v]) => [k, String(v)]),
@@ -318,22 +408,25 @@ export function createWorkflowService(deps: WorkflowServiceDeps) {
     const queued = (tasks ?? []).filter(t => t.status === 'queued' && !stopFlags.has(t.id))
     for (const t of queued) {
       if (runningTasks.size >= MAX_CONCURRENT_TASKS) break
+      // ★ 不要在这里 runningTasks.add()：runTask 自己会抢占，
+      //   这里先加会让 runTask 判定为「已在跑」而直接返回，任务永远不启动。
       if (runningTasks.has(t.id)) continue
-      runningTasks.add(t.id)
       void runTask(t.id)
     }
   }
 
   /* ── 模板 CRUD ── */
 
-  /** 扫描 skills/workflows/*.yaml → 模板摘要列表 */
+  /** 扫描 skills/workflows/*.yaml + skills/workflows/<name>/workflow.yaml → 模板摘要列表 */
   async function listTemplates(): Promise<WorkflowTemplateSummary[]> {
     if (!existsSync(workflowDir)) return []
-    const files = (await readdir(workflowDir)).filter((f) => f.toLowerCase().endsWith('.yaml') || f.toLowerCase().endsWith('.yml'))
+    // 两种布局并存：文件夹优先，单层历史文件随后（见 layout.ts）
+    const refs = listWorkflowFiles(workflowDir)
     const out: WorkflowTemplateSummary[] = []
-    for (const f of files) {
+    for (const ref of refs) {
+      const f = basename(ref.file)
       try {
-        const t = parseTemplateYaml(await readFile(join(workflowDir, f), 'utf8'))
+        const t = parseTemplateYaml(await readFile(ref.file, 'utf8'))
         out.push({
           name: t.name || f.replace(/\.ya?ml$/i, ''),
           category: t.category || '自定义',
@@ -347,35 +440,54 @@ export function createWorkflowService(deps: WorkflowServiceDeps) {
         })
       } catch (e) {
         // 单个坏文件不拖垮整个列表；编排页仍能看到文件名并修复
-        out.push({ name: f.replace(/\.ya?ml$/i, ''), category: '解析失败', mode: 'batch', description: e instanceof Error ? e.message : String(e), inputCount: 0, stepCount: 0 })
+        // 文件夹布局时用「目录名」而不是固定的 workflow.yaml 作为可读标识
+        const label = ref.isFolder ? basename(dirname(ref.file)) : f.replace(/\.ya?ml$/i, '')
+        out.push({ name: label, category: '解析失败', mode: 'batch', description: e instanceof Error ? e.message : String(e), inputCount: 0, stepCount: 0 })
       }
     }
     return out
   }
 
   /**
-   * 按名称定位模板文件：优先 safeFileName(name).yaml（saveTemplate 写入的命名），
-   * 否则扫描目录匹配文件内 name: 字段（历史模板文件名与模板名不一致时仍可打开/删除/执行）。
+   * 按名称定位模板文件。
+   *
+   * 支持两种布局（见 layout.ts）：文件夹 `/<name>/workflow.yaml` 优先，其次单层 `<name>.yaml`，
+   * 最后扫描全部文件比对文件内 `name:` 字段（历史模板文件名与模板名不一致时仍可打开/删除/执行）。
    */
   async function findTemplateFile(name: string): Promise<string | null> {
-    const direct = join(workflowDir, safeFileName(name) + '.yaml')
-    if (existsSync(direct)) return direct
-    if (!existsSync(workflowDir)) return null
-    const files = (await readdir(workflowDir)).filter((f) => /\.ya?ml$/i.test(f))
-    for (const f of files) {
-      try {
-        const t = parseTemplateYaml(await readFile(join(workflowDir, f), 'utf8'))
-        if (t.name === name) return join(workflowDir, f)
-      } catch { /* 坏文件跳过 */ }
-    }
-    return null
+    const ref = await findTemplateRef(name)
+    return ref ? ref.file : null
   }
 
   /** 读取单个模板（解析后对象；找不到返回 null） */
   async function getTemplate(name: string): Promise<WorkflowTemplate | null> {
-    const file = await findTemplateFile(name)
-    if (!file) return null
-    return parseTemplateYaml(await readFile(file, 'utf8'))
+    const ref = await findTemplateRef(name)
+    if (!ref) return null
+    const t = parseTemplateYaml(await readFile(ref.file, 'utf8'))
+    // 带上目录信息：script: 步骤据此解析相对路径
+    ;(t as WorkflowTemplate & { _root?: string })._root = ref.root
+    return t
+  }
+
+  /**
+   * 定位模板并返回「文件 + 资源根目录」。
+   *
+   * 支持两种布局（见 layout.ts）：
+   *   · 文件夹：skills/workflows/<name>/workflow.yaml → root = 该文件夹
+   *   · 单层：  skills/workflows/<name>.yaml          → root = workflowDir
+   */
+  async function findTemplateRef(name: string): Promise<{ file: string, root: string, isFolder: boolean } | null> {
+    return findWorkflowFile(
+      workflowDir,
+      name,
+      safeFileName,
+      (file) => {
+        try {
+          const t = parseTemplateYaml(readFileSyncSafe(file))
+          return t.name || null
+        } catch { return null }
+      },
+    )
   }
 
   /** 读取模板 YAML 原文（导入/导出与编辑器加载用） */
@@ -672,6 +784,8 @@ export function createWorkflowService(deps: WorkflowServiceDeps) {
     roundOk: boolean
     /** 步骤输出变量 → 结果（每轮重置） */
     stepOutputs: Map<string, StepOutput>
+    /** 当前模板所在目录（script: 步骤的相对路径基准；单层 yaml 时 = workflowDir） */
+    workflowRoot?: string
   }
 
   /** 深取值：obj.a.b.0（数字段名转数组下标） */
@@ -704,10 +818,19 @@ export function createWorkflowService(deps: WorkflowServiceDeps) {
 
   /** 步骤执行 → executeSkillCore。契约技能走 buildContractArgv，非契约拼 args 字符串 */
   async function runStep(step: WorkflowStep, ctx: RunCtx, task: WorkflowTask): Promise<StepOutput> {
-    const row = await skill.get(step.skill)
     const renderedArgs: Record<string, string> = {}
     for (const [k, v] of Object.entries(step.args ?? {})) renderedArgs[k] = renderValue(v, ctx)
 
+    // ★ 工作流私有脚本：不走技能注册表，直接执行该工作流目录下的文件
+    if (step.script)
+      return runScriptStep(step, renderedArgs, ctx)
+
+    // skill 与 script 二选一；走到这里说明既没 script 也没合法 skill
+    const skillId = String(step.skill ?? '').trim()
+    if (!skillId)
+      return { ok: false, error: '[skill_error] 步骤既没有 skill: 也没有 script:，无法执行', envFailure: false, raw: '', fields: null, data: null }
+
+    const row = await skill.get(skillId)
     const contract = row?.dir ? loadContract(row.dir) : null
     let explicitArgs: string[] | undefined
     let fromContract = false
@@ -737,7 +860,7 @@ export function createWorkflowService(deps: WorkflowServiceDeps) {
     }
 
     const invoke = () => executeSkill({
-      skillId: step.skill,
+      skillId,
       requestStr: requestStr || step.name,
       explicitArgs,
       chosenShopKey: task.shop ?? '',
@@ -777,6 +900,130 @@ export function createWorkflowService(deps: WorkflowServiceDeps) {
   }
 
   /**
+   * 执行「工作流私有脚本」步骤。
+   *
+   * 与 runStep 的技能路径区别：
+   *   · 不查技能注册表，不需要 contract.json / SKILL.md
+   *   · 脚本路径相对该工作流目录（`scripts:run.py` → `<wfDir>/scripts/run.py`）
+   *   · 参数一律按 `--key value` 拼（脚本自己 argparse）
+   *   · 自带心跳看门狗：宿主侧 60s 无输出会被判死，长任务脚本自己负责打 stderr
+   */
+  async function runScriptStep(
+    step: WorkflowStep,
+    renderedArgs: Record<string, string>,
+    ctx: RunCtx,
+  ): Promise<StepOutput> {
+    const root = ctx.workflowRoot
+    const fail = (error: string): StepOutput => ({
+      ok: false, error, envFailure: false, raw: error, fields: null, data: null,
+    })
+
+    if (!root)
+      return fail('[skill_error] 该步骤使用 script:，但未解析到工作流目录（模板可能来自旧版单层 yaml）')
+
+    let abs: string
+    try {
+      abs = resolveStepScript(root, String(step.script))
+    }
+    catch (e) {
+      return fail(`[skill_error] ${e instanceof Error ? e.message : String(e)}`)
+    }
+
+    const kind = scriptRunner(abs)
+    if (kind === 'other')
+      return fail(`[skill_error] 不支持的脚本类型：${step.script}（仅 .mjs/.cjs/.js/.py）`)
+
+    const exe = kind === 'node' ? process.execPath : resolvePythonBin()
+    if (!exe)
+      return fail(`[skill_error] 未找到 ${kind === 'node' ? 'node' : 'python'} 可执行文件`)
+
+    const argv = buildScriptArgv(renderedArgs)
+    console.log(`[workflow] script 步骤「${step.name}」→ ${abs}`)
+
+    return new Promise<StepOutput>((resolve) => {
+      const proc = spawn(exe, [abs, ...argv], {
+        cwd: root,
+        env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
+
+      let stdout = ''
+      let stderr = ''
+      let finished = false
+      const done = (r: StepOutput) => {
+        if (finished) return
+        finished = true
+        clearInterval(timer)
+        resolve(r)
+      }
+
+      let softWarned = false
+      let terminating = false
+      const timer = setInterval(() => {
+        if (terminating) return
+        const idleFor = Date.now() - lastBeat
+        // 软阈值：只告警，不杀。慢 ≠ 死。
+        if (idleFor > SCRIPT_IDLE_SOFT_MS && !softWarned) {
+          softWarned = true
+          const msg = `[time_out_warn] 步骤「${step.name}」已 ${Math.round(idleFor / 1000)}s 无输出，继续等待（硬上限 ${Math.round(SCRIPT_IDLE_TIMEOUT_MS / 1000)}s）`
+          try { console.log('  ' + msg) } catch { /* ignore */ }
+          stderr += msg + '\n'
+        }
+        // 硬阈值：优雅终止（协议式 sentinel → 宽限 → 强制），给脚本放锁的机会。
+        // ★ 必须 await：否则父进程立刻继续，子进程收不到清理指令。
+        if (idleFor > SCRIPT_IDLE_TIMEOUT_MS) {
+          terminating = true
+          clearInterval(timer)
+          void terminateGracefully(proc).then(() => {
+            done(fail(`[time_out] 脚本 ${Math.round(idleFor / 1000)}s 无输出被终止（脚本需自打 stderr 心跳）`))
+          })
+        }
+      }, 2000)
+      let lastBeat = Date.now()
+
+      proc.stdout?.on('data', (b: Buffer) => {
+        stdout += b.toString('utf8')
+        lastBeat = Date.now()
+        if (stdout.length > 256 * 1024) stdout = stdout.slice(-256 * 1024)
+      })
+      proc.stderr?.on('data', (b: Buffer) => {
+        const s = b.toString('utf8')
+        stderr += s
+        lastBeat = Date.now()
+        // 进度直接转发，编排页能实时看到
+        for (const line of s.split(/\r?\n/)) {
+          if (line.trim()) console.log(`  [${step.name}] ${line.trim()}`)
+        }
+        if (stderr.length > 256 * 1024) stderr = stderr.slice(-256 * 1024)
+      })
+      proc.on('error', (e: Error) => done(fail(`[skill_error] 无法启动脚本：${e.message}`)))
+      proc.on('close', (code: number | null) => {
+        // 解析 __DSAGENT_RESULT__（与技能路径同一协议）
+        let payload: Record<string, unknown> | null = null
+        for (const line of stdout.split('\n').reverse()) {
+          if (!line.startsWith('__DSAGENT_RESULT__')) continue
+          try { payload = JSON.parse(line.slice('__DSAGENT_RESULT__'.length)) } catch { payload = null }
+          break
+        }
+        const ok = code === 0 && (!payload || payload.ok !== false)
+        const failureKind = String(payload?.failure_kind ?? payload?.failureKind ?? (code === 0 ? '' : 'skill_error'))
+        const message = String(payload?.message ?? payload?.text ?? stderr.split('\n').filter(Boolean).pop() ?? '')
+        const fields = payload
+          ? Object.fromEntries(Object.entries(payload).map(([k, v]) => [k, typeof v === 'object' && v !== null ? JSON.stringify(v) : String(v)]))
+          : null
+        done({
+          ok,
+          error: ok ? '' : `[${failureKind}] ${clipError(message)}`,
+          envFailure: !ok && ENV_FAILURE_KINDS.has(failureKind),
+          raw: ok ? pickReadableText(payload, message) : clipError(message),
+          fields,
+          data: payload,
+        })
+      })
+    })
+  }
+
+  /**
    * ★ 从 payload 里取「人类可读结论」用于日志展示
    *
    *   技能脚本的 payload 形状不统一：
@@ -813,6 +1060,20 @@ export function createWorkflowService(deps: WorkflowServiceDeps) {
    * 串行轮次 → 每轮串行步骤；stopRequested 每步后检查；环境级失败直接 abort。
    */
   async function runTask(taskId: string): Promise<void> {
+    // ★ 进程内互斥：createTask 内部会 tryStartQueuedTasks()，runTemplate 又直接调一次，
+    //   两次都会读到 status==='queued'（置 running 是后面的 await），于是同一任务被跑两遍。
+    //   必须在读状态之前抢占，不能靠 status 判重。
+    if (runningTasks.has(taskId)) return
+    runningTasks.add(taskId)
+    try {
+      await runTaskInner(taskId)
+    }
+    finally {
+      runningTasks.delete(taskId)
+    }
+  }
+
+  async function runTaskInner(taskId: string): Promise<void> {
     const task = await getTaskDetail(taskId)
     if (!task || task.status !== 'queued') {
       stopFlags.delete(taskId)
@@ -856,6 +1117,7 @@ export function createWorkflowService(deps: WorkflowServiceDeps) {
           loopTotal: task.target,
           roundOk: true,
           stepOutputs: new Map(),
+          workflowRoot: (t as WorkflowTemplate & { _root?: string })._root || workflowDir,
         }
         let roundError: string | null = null
         let envAbort = false
@@ -875,8 +1137,9 @@ export function createWorkflowService(deps: WorkflowServiceDeps) {
           const stepResult = await executeStepSafe(step, ctx, task)
           const stepDuration = Date.now() - stepStartMs
           // 记录标准化日志行（成功与失败均记）
+          // script: 步骤没有 skill id，用 "script:<相对路径>" 作为可读标识
           roundLogs.push(buildLogLine(
-            round, step.name, step.skill,
+            round, step.name, step.skill || `script:${step.script ?? ''}`,
             stepResult.ok, stepDuration,
             stepResult.ok ? stepResult.raw : stepResult.error,
             stepResult.ok ? undefined : (stepResult.error.match(/^\[([\w-]+)\]/)?.[1]),
@@ -1025,14 +1288,20 @@ export function createWorkflowService(deps: WorkflowServiceDeps) {
 
   /**
    * ★ 按模板名直接创建并启动一个任务（供调度器/自动化调用）
+   *
+   * 注意 createTask 返回的是 **taskId 字符串**（不是任务对象）。
+   * 早期只读 `task?.id`，字符串上没有该属性 → 永远拿不到 →
+   * 所有定期执行都报「创建任务失败：未返回 taskId」。两种形态都兼容。
    */
   async function runTemplate(
     name: string,
     inputs: Record<string, string> = {},
     opts: { shop?: string } = {},
   ): Promise<{ taskId: string }> {
-    const task = await createTask({ workflowName: name, inputs, ...(opts.shop ? { shop: opts.shop } : {}) })
-    const taskId = (task as { id?: string; taskId?: string })?.id ?? (task as { taskId?: string })?.taskId
+    const created = await createTask({ workflowName: name, inputs, ...(opts.shop ? { shop: opts.shop } : {}) })
+    const taskId = typeof created === 'string'
+      ? created
+      : ((created as { id?: string; taskId?: string })?.id ?? (created as { taskId?: string })?.taskId)
     if (!taskId) throw new Error('创建任务失败：未返回 taskId')
     void runTask(taskId).catch(() => {})
     return { taskId }

@@ -34,7 +34,7 @@ metadata:
 **下面第一行就是本技能的可执行入口**（from-pack 模式：1688 素材包 → 15 张图 + product.json）：
 
 ```bash
-# from-pack：素材包目录 → 主图 5 + 详情 10，并顺手产出 product.json（供 pdd-publish-http --product-file 用）
+# from-pack：素材包目录 → 主图 5 + 详情 10，并顺手产出 product.json（供 pdd-publish --product-file 用）
 python {baseDir}/scripts/gen.py --mode from-pack --pack "<素材包目录>" --out "<输出目录>" --workers 8 --category 儿童睡衣
 
 # 单张 / plan 批量

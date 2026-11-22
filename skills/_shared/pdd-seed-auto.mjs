@@ -33,6 +33,7 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 const STATE_FILE = path.join(os.homedir(), '.dsh', 'pdd-seed-state.json')
 const SEED_DIR = path.join(os.homedir(), '.dsh', 'pdd-risk-seeds')
@@ -181,7 +182,10 @@ function markRefreshed(shopKey, result) {
  * @returns {Promise<{ok:boolean, refreshed:boolean, reason:string, seed:object|null}>}
  */
 export async function ensureSeed(opts) {
-  const { shopKey, cookies = {}, profileDir, blocking = false, pluginRoot = process.cwd() } = opts
+  // ★ 2026-11-19：默认值改为模块自身定位出的插件根，不用 process.cwd()。
+  //   技能脚本以 cwd=skills/<skill> 启动，cwd 下的 node_modules / skills/_shared 都不存在，
+  //   导致 exportSeedFromBrowser 动态 import 失败、种子永远修不好。
+  const { shopKey, cookies = {}, profileDir, blocking = false, pluginRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..') } = opts
 
   const health = checkSeedHealth(shopKey, cookies)
 

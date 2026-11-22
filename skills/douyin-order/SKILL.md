@@ -57,9 +57,36 @@ metadata:
 | `ok` | 是否成功 |
 | `mode` | 实际执行的模式 |
 | `counts` | overview 模式：`{all, unpaid, stockUp, expShip, shipDelay, onDelivery, received, closed, outOfStock, inAftersale, haveAftersale, handling}` |
+| **`shipAlert`** | **★ 发货超时告警**（overview）：`{source, pendingTotal, overdueCount, dueWithin24h, overdueOrders[]}` |
 | `items` | 订单数组 |
 | `total` | 当前页订单数 |
 | `text` | 面向用户的中文文案，原样转述 |
+
+### ★ `shipAlert`（2026-11-11 新增，修过两次 bug）
+
+**作用**：把「待发货已超时」的订单单独拎出来，不用用户自己拿今天日期去比。
+
+```json
+"shipAlert": {
+  "source": "stock_up_full",
+  "pendingTotal": 3,
+  "overdueCount": 3,
+  "dueWithin24h": 0,
+  "overdueOrders": [
+    { "id": "...", "expShipTime": "2026/7/29 06:08:44", "overdueBy": "⚠️ 已超时 106 天 5 小时", "amount": 32.5 }
+  ]
+}
+```
+
+**两条实现约束（都踩过）**：
+
+| 坑 | 现象 | 修法 |
+|---|---|---|
+| 忘了过滤状态 | 把已完成的 92 天前订单也算成「待发货超时」，**误报 10 笔** | 只统计 `order_status === 2` |
+| **只看当前页** | `tab=all` 前 10 条里只有 2 笔待发货，**漏掉不在首页的 1 笔（超时 106 天）** | overview 额外查 `tab=stock_up` 全量（pageSize=100） |
+
+> ⚠️ **维护提醒**：`shipAlert` 必须基于 `stock_up` 全量列表，**不能基于 `items`**（`items` 被 `--limit` 截断）。
+> 回归脚本 `skills/_shared/verify-invariants.mjs` 有断言盯着这一点，改坏了会 FAIL。
 
 `items[]` 字段：
 
@@ -72,6 +99,7 @@ actualPayAmount    实付金额（元）
 receiveAmount      商家实收（元）
 payTypeDesc        支付方式（如「抖音月付」）
 createTime / payTime / expShipTime / logisticsTime / receiptTime   本地化时间
+shipDeadline       ★ 发货倒计时/超时判定 {level:'overdue'|'today'|'ok', hoursLeft, text}
 buyerNickname      买家昵称（脱敏）
 receiver / receiverTel   收件人 / 电话（**平台已脱敏**，如「牛*」「1**********」）
 province / city / town / addressDetail   地域（detail 平台已打码）

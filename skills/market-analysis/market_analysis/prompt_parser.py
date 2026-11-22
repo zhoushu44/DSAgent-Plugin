@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import re
 
-from .config import DEFAULT_ITEM_LIMIT, LOCATION_OPTIONS
+from .config import DEFAULT_ITEM_LIMIT, LOCATION_OPTIONS, SKU_DEFAULT_ITEM_LIMIT
 from .types import MarketAnalysisRequest
 
 SORT_PATTERNS = (
@@ -66,6 +66,24 @@ TRAILING_WORDS = (
 ITEM_LIMIT_PATTERNS = (
     r"(?:分析|查看|看下|看一下|看看|查下|查一下|帮我看|帮我分析)?前\s*(\d{1,5})\s*(?:个|条|款|件)?(?:商品|宝贝|数据|结果)?",
     r"先看前\s*(\d{1,5})\s*(?:个|条|款|件)?(?:商品|宝贝|数据|结果)?",
+)
+
+# ── SKU 明细开关 ────────────────────────────────────────
+# 触发：说「要SKU价格 / SKU明细 / 各规格价格」等，采集时顺带拉每个商品的 SKU 价格。
+# ★ 注意：必须带「价格/明细/表」等后缀才算 SKU 开关，
+#   否则「sku收纳盒」这类商品词会被误判成要 SKU 明细，且词被删掉。
+SKU_MARKER_RE = re.compile(
+    r"(?:各|每个|要|带|含|加上|带上|顺便|一起)?\s*sku\s*(?:的\s*)?"
+    r"(?:价格|明细|表|清单|信息|价格表|数据"
+    r"|只取|只采|取|前|看)\s*\d{0,3}\s*(?:个|款|条)?",
+    re.IGNORECASE,
+)
+
+SKU_EXTRA_WORDS = ("规格价格", "规格价", "规格明细", "各规格价格", "规格参数")
+
+SKU_ITEM_LIMIT_PATTERNS = (
+    r"sku\s*(?:只取|只采|取|前|看)\s*(\d{1,3})\s*(?:个|款|条)?",
+    r"前\s*(\d{1,3})\s*(?:个|款|条)\s*(?:商品)?\s*sku",
 )
 
 
@@ -168,6 +186,23 @@ def looks_like_prompt(raw_query: str) -> bool:
     )
 
 
+def infer_with_sku(raw_query: str) -> bool:
+    """是否要 SKU 明细。必须带后缀（价格/明细/表…），避免「sku收纳盒」误判。"""
+    text = raw_query or ""
+    if SKU_MARKER_RE.search(text):
+        return True
+    return any(word in text for word in SKU_EXTRA_WORDS)
+
+
+def infer_sku_item_limit(raw_query: str) -> int:
+    """显式写了「SKU 只取 N 个」才返回 N，否则返回 0（由调用方按 item_limit 兜底）。"""
+    for pattern in SKU_ITEM_LIMIT_PATTERNS:
+        match = re.search(pattern, raw_query, re.IGNORECASE)
+        if match:
+            return max(int(match.group(1)), 1)
+    return 0
+
+
 def extract_keyword(raw_query: str) -> str:
     text = raw_query.strip()
     if not text:
@@ -177,6 +212,28 @@ def extract_keyword(raw_query: str) -> str:
         return text
 
     candidate = re.sub(r"[，。！？,.!?]", " ", text)
+    candidate = SKU_MARKER_RE.sub(" ", candidate)
+    for word in SKU_EXTRA_WORDS:
+        candidate = candidate.replace(word, " ")
+    # 「SKU 只取 N 个」「前 N 个 SKU」这类计数说法不能留在关键词里
+    candidate = re.sub(
+        r"(?:sku)?\s*(?:只取|只采|取|前|看)\s*\d{1,3}\s*(?:个|款|条)?\s*(?:商品)?\s*sku?",
+        " ",
+        candidate,
+        flags=re.IGNORECASE,
+    )
+    candidate = re.sub(
+        r"(?:sku)?\s*(?:只取|只采)\s*\d{1,3}\s*(?:个|款|条)?",
+        " ",
+        candidate,
+        flags=re.IGNORECASE,
+    )
+    candidate = re.sub(
+        r"前\s*\d{1,3}\s*(?:个|款|条)\s*(?:商品)?\s*sku",
+        " ",
+        candidate,
+        flags=re.IGNORECASE,
+    )
 
     for prefix in REQUEST_PREFIXES:
         if candidate.startswith(prefix):
@@ -193,17 +250,21 @@ def extract_keyword(raw_query: str) -> str:
         " ",
         candidate,
     )
+    # 「在浙江发货」「女装在浙江发货」：先删「在+省+发货」，再删「在+省」
+    candidate = re.sub(rf"在\s*({provinces_pattern})\s*(?:发货|地区)?", " ", candidate)
     candidate = re.sub(rf"({provinces_pattern})\s*(?:发货|地区)", " ", candidate)
     candidate = re.sub(
-        r"(?:综合排序|综合|销量排序|销量优先|按销量|信用排序|按信用|价格从低到高|价格从高到低|价格升序|价格降序)",
+        r"(?:综合排序|综合|销量排序|销量优先|按销量|按信用|信用排序|排序|价格从低到高|价格从高到低|价格升序|价格降序)",
         " ",
         candidate,
     )
     candidate = re.sub(
-        r"(?:帮我|请帮我|请|麻烦|给我|查看|看下|看一下|看看|查下|查一下|分析|研究)",
+        r"(?:帮我|请帮我|请|麻烦|给我|查看|看下|看一下|看看|查下|查一下|分析|研究|采集|抓取|拉取|加上|带上|包含|一起|顺便)",
         " ",
         candidate,
     )
+    # 单独成词的「要」才删（避免把「要保暖内衣」变成「保暖内衣」）
+    candidate = re.sub(r"(?:^|\s)要(?=\s|$)", " ", candidate)
     candidate = re.sub(r"(?:一下|一下子|一眼|帮忙)", " ", candidate)
     candidate = re.sub(
         r"(?:分析|查看|看下|看一下|看看|查下|查一下|帮我看|帮我分析)?前\s*\d+\s*(?:个|条|款|件)?(?:商品|宝贝|数据|结果)?",
@@ -240,6 +301,8 @@ def resolve_request(
     page_size: int,
     price_min: float | None,
     price_max: float | None,
+    with_sku_override: bool = False,
+    sku_item_limit_override: int | None = None,
 ) -> MarketAnalysisRequest:
     keyword = extract_keyword(raw_query)
     sort = normalize_sort(sort_override) if sort_override else infer_sort(raw_query)
@@ -249,6 +312,18 @@ def resolve_request(
     resolved_price_max = price_max if price_max is not None else inferred_price_max
     item_limit = item_limit_override or infer_item_limit(raw_query)
     required_pages = max(1, math.ceil(item_limit / max(page_size, 1)))
+    with_sku = bool(with_sku_override) or infer_with_sku(raw_query)
+    if with_sku:
+        explicit_sku_limit = infer_sku_item_limit(raw_query)
+        if sku_item_limit_override:
+            sku_item_limit = sku_item_limit_override
+        elif explicit_sku_limit:
+            sku_item_limit = explicit_sku_limit
+        else:
+            # 默认：本次采到的商品全部补 SKU，但不超过安全上限
+            sku_item_limit = min(item_limit, SKU_DEFAULT_ITEM_LIMIT)
+    else:
+        sku_item_limit = 0
     return MarketAnalysisRequest(
         raw_query=raw_query,
         keyword=keyword.strip(),
@@ -259,4 +334,6 @@ def resolve_request(
         item_limit=item_limit,
         max_pages=max(max_pages or 0, required_pages),
         page_size=page_size,
+        with_sku=with_sku,
+        sku_item_limit=sku_item_limit,
     )

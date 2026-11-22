@@ -1,47 +1,38 @@
 #!/usr/bin/env node
 /**
- * 抖音·全域投放计划管理（douyin-plan-ops）
+ * 抖音·全域投放计划管理（douyin-plan-ops）v2.0
  *
- * 逆向自千川「全域投放」计划管理页（/uni-prom）
+ * ══════════════════════════════════════════════════════════════
+ * ★ 2026-11-12 重写：浏览器 → 纯 Node HTTP
+ * ══════════════════════════════════════════════════════════════
+ * 旧版问题（实测复现）：
+ *   · --mode list 走浏览器 safeEval 调接口，浏览器链路一失败就静默返回 []
+ *     → 明明有 1 条计划，却报「计划数：0」，且不报错
+ *   · 启停走「找 .ovui-switch 点击」，依赖 DOM 结构，页面一改版就废
+ *   · 每次要起 Chrome，15~20 秒
  *
- * 数据源（实测 2026-10-25，均可用）：
- *   POST /ad/api/pmc/v1/uni-promotion/ad/list-required   计划列表（含权限）
- *   POST /ad/api/pmc/v1/uni-promotion/ad/list-summary    计划汇总数
- *   POST /ad/api/pmc/v1/uni-promotion/ad/list-optional   计划附加模块
+ * 新版（实测）：
+ *   · 同一份 body 直接 HTTP → adInfos=1，正常返回
+ *   · 启停接口 batch_update_operation 纯 HTTP → code=0，flag=true
+ *   · 浏览器全关也能跑通，耗时 ~1 秒
  *
- * 能力：
- *   list        计划列表（名称/ID/状态/预算/ROI/商品/权限/投放设置）
- *   stop        暂停计划（L2，先预览后执行）
- *   start       开启计划（L2，先预览后执行）
+ * 数据源（全部实测）：
+ *   POST /ad/api/pmc/v1/uni-promotion/ad/list-required   计划列表
+ *   POST /ad/api/pmc/v1/batch_update_operation           计划启停
  *
- * 计划状态判定：
- *   adDeliveryType === 0 → 投放中
- *   adDeliveryType !== 0 → 已暂停/停投
- *   operation.optStatusOperation.editable → 是否允许启停
- *
- * 启停实现路线：
- *   千川启停接口有 verifyFp/a_bogus 签名，手工 fetch 一律 40002，
- *   唯一可靠路线是「真实浏览器 + 点击页面开关」。脚本会：
- *     1) 打开计划管理页，切到推商品 → 商品自选
- *     2) 定位计划行的 .ovui-switch（--checked = 投放中）
- *     3) 点击并等待请求完成，再回读开关状态验证
- *
- * 用法：
- *   node scripts/plan-ops.mjs --mode list
- *   node scripts/plan-ops.mjs --mode stop  --ad_id 1835712799161914
- *   node scripts/plan-ops.mjs --mode start --ad_id 1835712799161914
+ * 计划状态：adDeliveryType === 0 → 投放中；!== 0 → 已暂停
+ * 启停 optType：1 = 开启（Enable），2 = 暂停（Pause）
  */
-
 import { homedir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { execSync } from 'node:child_process'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const PLUGIN_ROOT = process.env.DSAGENT_PLUGIN_ROOT || join(HERE, '..', '..', '..')
 const PURL = (p) => pathToFileURL(p).href
+const ORIGIN = 'https://qianchuan.jinritemai.com'
 
-// ── 参数解析 ──────────────────────────────────────────────
+/* ── 参数 ─────────────────────────────────────────────────── */
 function parseArgs(argv) {
   const out = {}
   for (let i = 2; i < argv.length; i++) {
@@ -56,491 +47,318 @@ function parseArgs(argv) {
 }
 const ARGS = parseArgs(process.argv)
 
-const MODE = (ARGS.mode || 'list').trim()
-const ACCOUNT = (ARGS.account || '').trim()
-const AD_ID = (ARGS.ad_id || ARGS.adId || '').trim()
+const MODE = String(ARGS.mode || 'list').trim()
+const ACCOUNT = String(ARGS.account || '').trim()
+const AD_ID = String(ARGS.ad_id || ARGS.adId || '').trim()
 const LIMIT = Math.min(100, Math.max(1, parseInt(ARGS.limit || '20', 10) || 20))
-// mar_goal: 1=推商品（默认） 2=推直播间
 const MAR_GOAL = String(ARGS.mar_goal || ARGS.goal || '1').trim()
-const today = () => {
-  const d = new Date(Date.now() + 8 * 3600 * 1000)
-  return d.toISOString().slice(0, 10)
-}
-const START = (ARGS.start || today()).trim()
-const END = (ARGS.end || START).trim()
+const CONFIRM = String(ARGS.confirm) === 'true'
 
+const pad = (n) => String(n).padStart(2, '0')
+const fmtDate = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+const today = new Date()
+const START = String(ARGS.start || fmtDate(today)).trim()
+const END = String(ARGS.end || START).trim()
+
+/* ── 输出 ─────────────────────────────────────────────────── */
 function emit(payload) {
   process.stdout.write('__DSAGENT_RESULT__' + JSON.stringify(payload) + '\n')
 }
 function fail(kind, message, extra = {}) {
   emit({ ok: false, failureKind: kind, failure_kind: kind, message, text: message, ...extra })
-  process.exit(1)
+  process.exit(0)
 }
-const log = (...a) => console.error('[douyin-plan-ops]', ...a)
-const sleep = (ms) => new Promise(r => setTimeout(r, ms))
 
-// ── 账号与库 ──────────────────────────────────────────────
-let store, CredentialStore
-let profileDir, findChromePath, tryAcquireProfile, releaseProfile, clearProfileLocks, applyAccountEnv, envOf
+/* ── 凭证 ─────────────────────────────────────────────────── */
+let CK = ''
+let SHOP_KEY = ''
 try {
-  ;({ CredentialStore } = await import(PURL(join(PLUGIN_ROOT, 'lib', 'services', 'credential-store.js'))))
-  ;({ profileDir, findChromePath, tryAcquireProfile, releaseProfile, clearProfileLocks, applyAccountEnv, envOf } =
-    await import(PURL(join(PLUGIN_ROOT, 'lib', 'browser-login.js'))))
-  store = new CredentialStore(join(homedir(), '.dsh', 'dsagent-accounts.json'))
+  const { CredentialStore } = await import(PURL(join(PLUGIN_ROOT, 'lib', 'services', 'credential-store.js')))
+  const store = new CredentialStore(join(homedir(), '.dsh', 'dsagent-accounts.json'))
+  const accounts = store.listAccounts().filter((a) => a.platform === 'douyin_shop' && a.status !== 'invalid')
+  if (!accounts.length) {
+    fail('not_bound', '未找到抖音小店账号。请到「账号连接」页面添加「抖店」账号（platform=douyin_shop）。')
+  }
+  let account
+  if (ACCOUNT) {
+    account = accounts.find((a) => a.shop_key === ACCOUNT)
+    if (!account) {
+      fail('bad_input', `账号 shopKey 不存在：${ACCOUNT}。可用：${accounts.map((a) => a.shop_key).join(' / ')}`)
+    }
+  } else if (accounts.length === 1) {
+    account = accounts[0]
+  } else {
+    fail('need_account_choice',
+      `抖音平台有 ${accounts.length} 个可用账号，请指定 --account：\n`
+      + accounts.map((a, i) => `${i + 1}. ${a.shop_name || a.nickname || ''}（${a.shop_key}）`).join('\n'),
+      { candidates: accounts.map((a) => ({ shopKey: a.shop_key, shopName: a.shop_name || a.nickname || '' })) })
+  }
+  SHOP_KEY = account.shop_key
+  CK = Object.entries(account.cookies || {}).filter(([, v]) => v != null && v !== '').map(([k, v]) => `${k}=${v}`).join('; ')
 } catch (e) {
-  fail('api_error', `无法加载插件库（${PLUGIN_ROOT}）：${e.message}`)
+  fail('api_error', '读取凭证失败：' + String(e?.message || e).slice(0, 200))
 }
 
-const accounts = store.listAccounts().filter((a) => a.platform === 'douyin_shop' && a.status !== 'invalid')
-if (!accounts.length) {
-  fail('not_bound', '未找到抖音小店账号。请到「账号连接」页面添加「抖店」账号（platform=douyin_shop）。')
-}
-let account
-if (ACCOUNT) {
-  account = accounts.find((a) => a.shop_key === ACCOUNT)
-  if (!account) {
-    fail('api_error', `账号 shopKey 不存在：${ACCOUNT}。可用：${accounts.map((a) => a.shop_key).join(' / ')}`)
+/* ── HTTP ─────────────────────────────────────────────────── */
+async function req(method, path, body) {
+  const headers = {
+    accept: 'application/json, text/plain, */*',
+    origin: ORIGIN,
+    referer: ORIGIN + '/uni-prom',
+    'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36',
+    cookie: CK,
   }
-} else if (accounts.length === 1) {
-  account = accounts[0]
-} else {
-  fail('need_account_choice',
-    `抖音平台有 ${accounts.length} 个可用账号，请指定 --account：\n`
-    + accounts.map((a, i) => `${i + 1}. ${a.nickname}（${a.shop_key}）`).join('\n'),
-    { accounts: accounts.map((a) => ({ shop_key: a.shop_key, nickname: a.nickname })) })
-}
-
-const SHOP_KEY = account.shop_key
-const pat = SHOP_KEY.replace(/[^a-zA-Z0-9]/g, '')
-
-function killOrphanChrome() {
-  try {
-    const out = execSync(
-      `powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \\"Name='chrome.exe'\\" | Where-Object { $_.CommandLine -like '*${pat}*' } | Select-Object -ExpandProperty ProcessId"`,
-      { encoding: 'utf8' }
-    )
-    const pids = out.split(/\r?\n/).map(s => parseInt(s.trim(), 10)).filter(Boolean)
-    if (pids.length) {
-      execSync(
-        `powershell -NoProfile -Command "${pids.map(p => `Stop-Process -Id ${p} -Force -ErrorAction SilentlyContinue`).join('; ')}"`,
-        { stdio: 'ignore' }
-      )
-    }
-    return pids.length
-  } catch { return 0 }
-}
-// playwright 常抢同一个 profile，一并清
-function killPlaywright() {
-  try {
-    execSync(
-      `powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \\"Name='node.exe'\\" | Where-Object { $_.CommandLine -like '*playwright*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"`,
-      { stdio: 'ignore' }
-    )
-  } catch { /* ignore */ }
+  if (body !== undefined) headers['content-type'] = 'application/json'
+  const r = await fetch(ORIGIN + path, {
+    method, headers, redirect: 'manual',
+    body: body === undefined ? undefined : JSON.stringify(body),
+    signal: AbortSignal.timeout(30000),
+  })
+  const t = await r.text()
+  let j = null; try { j = JSON.parse(t) } catch { }
+  return {
+    status: r.status,
+    code: j?.code ?? j?.status_code,
+    msg: j?.msg || j?.message || '',
+    data: j?.data,
+    raw: t.slice(0, 400),
+  }
 }
 
-const dir = profileDir('douyin_shop', SHOP_KEY)
-if (!tryAcquireProfile(dir, 'douyin-plan-ops')) {
-  fail('api_error', '抖店/千川的浏览器环境正被其他任务占用，请稍后重试。')
+/* ── 账户 ID ──────────────────────────────────────────────── */
+let _avid = ''
+async function resolveAavid() {
+  if (_avid) return _avid
+  const r = await req('GET', '/ad/api/v1/account/account-info/get-customer-id')
+  if (r.code === 0 || r.code === '0') {
+    const d = r.data?.detail
+    const first = Array.isArray(d) ? d[0] : d
+    const id = first?.accountId || first?.account_id
+    if (id) { _avid = String(id); return _avid }
+  }
+  fail('api_error', '未能取到千川账户 ID（aavid）：' + (r.msg || ''), { code: r.code })
 }
 
-// 复用正式 profile（不能注入账号 cookies，会被判未登录）
-let browser = null
-try {
-  const puppeteer = await import(PURL(join(PLUGIN_ROOT, 'node_modules', 'puppeteer-core',
-    'lib', 'esm', 'puppeteer', 'puppeteer-core.js')))
-  const chromePath = findChromePath()
-  if (!chromePath) fail('api_error', '未找到 Chrome 或 Edge 浏览器')
-
-  killOrphanChrome(); killPlaywright()
-  let lastErr = null
-  for (let round = 0; round < 5 && !browser; round++) {
-    if (round > 0) { killOrphanChrome(); killPlaywright(); await sleep(6000) }
-    clearProfileLocks(dir)
-    try {
-      browser = await puppeteer.default.launch({
-        headless: false,
-        executablePath: chromePath,
-        userDataDir: dir,
-        defaultViewport: { width: 1600, height: 1400 },
-        args: ['--no-sandbox', '--disable-blink-features=AutomationControlled', '--window-size=1600,1400'],
-      })
-    } catch (e) { lastErr = e; log(`launch round ${round} fail`) }
-  }
-  if (!browser) throw lastErr || new Error('浏览器启动失败')
-
-  let page = (await browser.pages())[0] || await browser.newPage()
-  const env = envOf(account)
-  // ★ 不调用 applyAccountEnv：它会把视口压回 1440x900，
-  //   而计划行的状态开关在 y≈1050，超出视口就无法点击（实测踩坑）
-
-  const ensurePage = async () => {
-    try { if (browser.isConnected()) return page } catch { /* ignore */ }
-    log('browser disconnected, relaunching')
-    try { await browser.close() } catch {}
-    killOrphanChrome(); await sleep(5000); clearProfileLocks(dir)
-    for (let r = 0; r < 4; r++) {
-      try {
-        browser = await puppeteer.default.launch({
-          headless: false, executablePath: chromePath, userDataDir: dir,
-          defaultViewport: { width: 1600, height: 1400 },
-          args: ['--no-sandbox', '--disable-blink-features=AutomationControlled', '--window-size=1600,1400'],
-        })
-        page = await browser.newPage()
-        // ★ 不调用 applyAccountEnv：它会把视口压回 1440x900，
-  //   而计划行的状态开关在 y≈1050，超出视口就无法点击（实测踩坑）
-        return page
-      } catch (e) { log('relaunch fail', r); await sleep(4000) }
-    }
-    return null
-  }
-
-  const safeEval = async (fn, arg) => {
-    for (let i = 0; i < 3; i++) {
-      try { return await page.evaluate(fn, arg) } catch (e) {
-        log('eval rebuild:', String(e.message).split('\n')[0])
-        try { await page.close() } catch {}
-        page = (await ensurePage()) || page
-        if (!page) return null
-      }
-    }
-    return null
-  }
-  const safeGoto = async (url) => {
-    for (let i = 0; i < 3; i++) {
-      try { await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 50000 }); return true } catch (e) {
-        log('goto rebuild:', String(e.message).split('\n')[0])
-        try { await page.close() } catch {}
-        page = (await ensurePage()) || page
-        if (!page) return false
-      }
-    }
-    return false
-  }
-  const clickByText = async (t) => {
-    const box = await safeEval((txt) => {
-      const els = [...document.querySelectorAll('*')].filter(e => e.children.length === 0 && (e.textContent || '').trim() === txt)
-      for (const el of els) {
-        const r = el.getBoundingClientRect()
-        if (r.width >= 2 && r.height >= 2) return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }
-      }
-      return null
-    }, t)
-    if (box) { await page.mouse.click(box.x, box.y); return true }
-    return false
-  }
-
-  const PLAN_PAGE = 'https://qianchuan.jinritemai.com/uni-prom?aavid=1781536544329804&ct=1'
-  log('DIAG page before goto:', typeof page, page && page.url ? page.url().slice(0, 60) : 'no-url-method')
-  const gotoOk = await safeGoto(PLAN_PAGE)
-  log('DIAG goto result:', gotoOk)
-  await sleep(16000)
-  let curUrl = ''
-  try { curUrl = page.url() } catch (e) { log('DIAG url err:', e.message) }
-  log('landed:', (curUrl || '').slice(0, 110))
-
-  // 提取 aavid
-  const extractAavid = () => {
-    try {
-      let m = page.url().match(/aavid=(\d{6,})/)
-      if (m) return m[1]
-    } catch { /* ignore */ }
-    return null
-  }
-  let AVID = extractAavid()
-  if (!AVID) {
-    // 兜底：调接口取 accountId
-    const r = await safeEval(async () => {
-      try {
-        const res = await fetch('https://qianchuan.jinritemai.com/ad/api/v1/account/account-info/get-customer-id', { credentials: 'include' })
-        return await res.text()
-      } catch (e) { return '' }
-    })
-    AVID = (String(r || '').match(/"accountId"\s*:\s*"?(\d{6,})/) || [])[1] || null
-  }
-  if (!AVID) fail('api_error', '未能解析出千川账户 ID（aavid）')
-  log('aavid =', AVID)
-
-  // ── 计划列表接口（无需页面签名，可直调） ──────────────────
-  const fetchPlans = async () => {
-    const body = {
-      _origin_ajax_: 1,
-      UseNewChain: true,
-      Params: {
-        AdFilter: {
-          AdlabScene: 0,
-          DataTimeRange: { StartTime: START + ' 00:00:00', EndTime: END + ' 23:59:59' },
-          MarGoal: Number(MAR_GOAL),
-          SmartBidType: 0,
-          UniPromShopFilter: { UniPromShopView: 1 },
-        },
-        PageParams: { Page: 1, PageSize: LIMIT },
-        ListAdsModules: [36, 7, 53, 10],
-        OrderBy: { Field: 'stat_cost_for_roi2', Type: 2 },
-        Metrics: ['stat_cost_for_roi2'],
-        SophonxDataSetKey: 'overall_roi_promotion_list_for_product',
+/* ── 计划列表 ─────────────────────────────────────────────── */
+async function fetchPlans() {
+  const AVID = await resolveAavid()
+  const body = {
+    _origin_ajax_: 1,
+    UseNewChain: true,
+    Params: {
+      AdFilter: {
+        AdlabScene: 0,
+        DataTimeRange: { StartTime: START + ' 00:00:00', EndTime: END + ' 23:59:59' },
+        MarGoal: Number(MAR_GOAL),
+        SmartBidType: 0,
+        UniPromShopFilter: { UniPromShopView: 1 },
       },
-      aavid: AVID,
-    }
-    const raw = await safeEval(async (b) => {
-      try {
-        const res = await fetch('https://qianchuan.jinritemai.com/ad/api/pmc/v1/uni-promotion/ad/list-required', {
-          method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(b),
-        })
-        return await res.text()
-      } catch (e) { return 'ERR ' + e.message }
-    }, body)
-    try { return JSON.parse(raw) } catch { return null }
+      PageParams: { Page: 1, PageSize: LIMIT },
+      ListAdsModules: [36, 7, 53, 10],
+      OrderBy: { Field: 'stat_cost_for_roi2', Type: 2 },
+      Metrics: ['stat_cost_for_roi2'],
+      SophonxDataSetKey: 'overall_roi_promotion_list_for_product',
+    },
+    aavid: AVID,
   }
-
-  const parsePlan = (ad, statsMap) => {
-    const op = ad.operation || {}
-    const stats = (statsMap || {})[ad.id]?.metrics || {}
-    // 金额单位实测（2026-10-25）：budget="30000000" → 页面显示 300 元
-    //   换算系数 /100000（千分之一元），与 get-adv-balance 的 valid 同口径
-    const yuan = (v) => { const n = Number(v); return Number.isFinite(n) ? n / 100000 : null }
-    const ts2date = (t) => {
-      const n = Number(t)
-      return Number.isFinite(n) && n > 0 ? new Date(n * 1000).toISOString().slice(0, 19).replace('T', ' ') : null
-    }
-    return {
-      adId: ad.id,
-      name: ad.name,
-      status: ad.adDeliveryType === 0 ? '投放中' : '已暂停',
-      statusCode: ad.adDeliveryType,
-      statusName: ad.adDeliveryName,
-      marGoal: ad.marGoal,
-      marGoalName: ad.marGoal === 2 ? '推直播间' : '推商品',
-      budget: yuan(ad.budget),
-      budgetMode: ad.budgetMode,
-      roiGoal: ad.ecpRoi2Goal ?? null,
-      externalAction: ad.externalAction,
-      externalActionName: ad.externalActionName,
-      deepExternalAction: ad.deepExternalAction,
-      deepExternalActionName: ad.deepExternalActionName,
-      smartBidType: ad.smartBidType,
-      qcpxMode: ad.qcpxMode,
-      isMultiProduct: ad.isMultiProduct ?? null,
-      createTime: ts2date(ad.createTime),
-      modifyTime: ts2date(ad.modifyTime),
-      cost: stats.statCostForRoi2 ? Number(stats.statCostForRoi2.valueStr) : null,
-      // 权限
-      canOptStatus: op.optStatusOperation?.editable ?? null,
-      canEdit: op.editOperation?.editable ?? null,
-      canEditBudget: op.budgetEditOperation?.editable ?? null,
-      canEditRoi: op.roi2GoalOperation?.editable ?? null,
-      canCopy: op.copyOperation?.copyable ?? null,
-      canTransfer: op.transferOperation?.transferable ?? null,
-      optMsg: op.optStatusOperation?.msg || '',
-    }
+  const r = await req('POST', '/ad/api/pmc/v1/uni-promotion/ad/list-required', body)
+  if (r.code !== 0 && r.code !== '0') {
+    fail('api_error', '获取计划列表失败：' + (r.msg || r.raw), { code: r.code })
   }
+  const ads = r.data?.adInfos || []
+  const statsMap = r.data?.adStatsMap || {}
+  const goodsMap = r.data?.adGoodsMap || {}
+  return { aavid: AVID, ads, statsMap, goodsMap }
+}
 
-  const out = { ok: true, mode: MODE, shopKey: SHOP_KEY, aavid: AVID, items: [] }
-  const lines = []
+/* ── 计划解析 ─────────────────────────────────────────────── */
+// 金额单位：budget="30000000" → 页面显示 300 元，换算 /100000
+const yuan = (v) => { const n = Number(v); return Number.isFinite(n) ? n / 100000 : null }
+const ts2date = (t) => {
+  const n = Number(t)
+  return Number.isFinite(n) && n > 0 ? new Date(n * 1000).toISOString().slice(0, 19).replace('T', ' ') : null
+}
+const STATUS_NAME = { 0: '投放中', 1: '已暂停', 2: '已结束', 3: '审核中', 4: '预算不足', 5: '已暂停' }
 
-  // ═══════════ list ═══════════
+function parsePlan(ad, statsMap, goodsMap) {
+  const op = ad.operation || {}
+  const stats = (statsMap || {})[ad.id]?.metrics || {}
+  const goods = (goodsMap || {})[ad.id] || []
+  const statusCode = Number(ad.adDeliveryType)
+  return {
+    adId: String(ad.id),
+    name: ad.name,
+    status: ad.adDeliveryName || STATUS_NAME[statusCode] || (statusCode === 0 ? '投放中' : '已暂停'),
+    statusCode,
+    isRunning: statusCode === 0,
+    marGoal: ad.marGoal,
+    marGoalName: Number(ad.marGoal) === 2 ? '推直播间' : '推商品',
+    budget: yuan(ad.budget),
+    budgetMode: ad.budgetMode,
+    roiGoal: ad.ecpRoi2Goal ?? null,
+    externalAction: ad.externalAction,
+    externalActionName: ad.externalActionName,
+    deepExternalAction: ad.deepExternalAction,
+    deepExternalActionName: ad.deepExternalActionName,
+    smartBidType: ad.smartBidType,
+    qcpxMode: ad.qcpxMode,
+    isMultiProduct: ad.isMultiProduct ?? null,
+    productCount: goods.length,
+    productIds: goods.map((g) => String(g.id || g.productId || '')).filter(Boolean),
+    createTime: ts2date(ad.createTime),
+    modifyTime: ts2date(ad.modifyTime),
+    cost: stats.statCostForRoi2 ? Number(stats.statCostForRoi2.valueStr) : null,
+    canOptStatus: op.optStatusOperation?.editable ?? null,
+    canEdit: op.editOperation?.editable ?? null,
+    canEditBudget: op.budgetEditOperation?.editable ?? null,
+    canEditRoi: op.roi2GoalOperation?.editable ?? null,
+    canCopy: op.copyOperation?.copyable ?? null,
+    optMsg: op.optStatusOperation?.msg || '',
+  }
+}
+
+/* ── 计划启停 ─────────────────────────────────────────────── */
+async function setPlanStatus(adId, enable) {
+  // optType: 1=启用（Enable），2=暂停（Pause）
+  const body = { objects: [{ objectID: String(adId), type: 1 }], optType: enable ? 1 : 2 }
+  const r = await req('POST', '/ad/api/pmc/v1/batch_update_operation', body)
+  const okFlag = r.data?.results?.some((x) => x.flag === true) ?? false
+  return { ok: (r.code === 0 || r.code === '0') && okFlag, code: r.code, msg: r.msg, data: r.data, body }
+}
+
+/* ══════════════════════════════════════════════════════════
+ * 主流程
+ * ══════════════════════════════════════════════════════════ */
+try {
+  const out = { ok: true, mode: MODE, shopKey: SHOP_KEY }
+
+  /* ── list ───────────────────────────────────────────── */
   if (MODE === 'list') {
-    const res = await fetchPlans()
-    const ads = res?.data?.adInfos || []
-    const statsMap = res?.data?.adStatsMap || {}
-    const plans = ads.map(a => parsePlan(a, statsMap))
+    const { aavid, ads, statsMap, goodsMap } = await fetchPlans()
+    const plans = ads.map((a) => parsePlan(a, statsMap, goodsMap))
+    out.aavid = aavid
     out.plans = plans
     out.items = plans
     out.total = plans.length
 
+    const lines = []
     lines.push(`全域投放计划（${MAR_GOAL === '2' ? '推直播间' : '推商品'}｜${START} ~ ${END}）：`)
-    lines.push(`  账户 aavid：${AVID}`)
+    lines.push(`  账户 aavid：${aavid}`)
     lines.push(`  计划数：${plans.length}`)
     lines.push('')
     if (plans.length) {
       for (const p of plans) {
         lines.push(`  · ${p.name}`)
-        lines.push(`     ID：${p.adId}｜状态：${p.status}${p.statusName ? `（${p.statusName}）` : ''}`)
+        lines.push(`     ID：${p.adId}｜状态：${p.status}${p.isRunning ? '（在投）' : ''}`)
         lines.push(`     预算：${p.budget == null ? '—' : p.budget + ' 元/日'}`
           + `｜ROI目标：${p.roiGoal ?? '—'}`
           + `｜转化：${p.deepExternalActionName || p.externalActionName || '—'}`)
-        lines.push(`     消耗：${p.cost ?? '—'} 元`
-          + `｜创建：${p.createTime ?? '—'}`
-          + `｜修改：${p.modifyTime ?? '—'}`)
-        const perms = []
-        perms.push('启停 ' + (p.canOptStatus ? '✅' : '❌'))
-        perms.push('编辑 ' + (p.canEdit ? '✅' : '❌'))
-        perms.push('改预算 ' + (p.canEditBudget ? '✅' : '❌'))
-        perms.push('改ROI ' + (p.canEditRoi ? '✅' : '❌'))
-        lines.push('     权限：' + perms.join(' | '))
-        if (p.optMsg) lines.push(`     提示：${p.optMsg}`)
+        lines.push(`     消耗：${p.cost ?? '—'} 元｜商品数：${p.productCount}`
+          + `｜创建：${p.createTime ?? '—'}`)
+        lines.push(`     启停权限：${p.canOptStatus ? '✅' : '❌'}｜编辑：${p.canEdit ? '✅' : '❌'}`
+          + `｜改预算：${p.canEditBudget ? '✅' : '❌'}`)
       }
     } else {
       lines.push('  （无计划）')
-      lines.push('  若页面显示有计划但这里为空，可能是「乘方」体系的计划，')
-      lines.push('  或用 --mar_goal 2 切到推直播间看看。')
+      lines.push(`  若页面显示有计划但这里为空，可用 --mar_goal ${MAR_GOAL === '1' ? '2' : '1'} 切换到`
+        + `${MAR_GOAL === '1' ? '推直播间' : '推商品'}看看；`)
+      lines.push('  或放宽 --start / --end 时间范围。')
     }
     out.text = lines.join('\n')
     emit(out)
-  } else if (MODE === 'stop' || MODE === 'start') {
+  }
+
+  /* ── stop / start ───────────────────────────────────── */
+  else if (MODE === 'stop' || MODE === 'start') {
     if (!AD_ID) {
-      fail('api_error', MODE + ' 模式需要 --ad_id 参数。可先用 --mode list 查看计划 ID。',
+      fail('bad_input', `${MODE} 模式需要 --ad_id 参数。可先用 --mode list 查看计划 ID。`,
         { available: ['list', 'stop', 'start'] })
     }
 
-    // 1) 拿计划当前状态与权限
-    const res = await fetchPlans()
-    const ads = res?.data?.adInfos || []
-    const statsMap = res?.data?.adStatsMap || {}
-    const target = ads.find(a => String(a.id) === String(AD_ID))
+    const { aavid, ads, statsMap, goodsMap } = await fetchPlans()
+    const target = ads.find((a) => String(a.id) === String(AD_ID))
     if (!target) {
-      fail('api_error', '未找到计划 ' + AD_ID + '。当前列表共 ' + ads.length + ' 条：'
-        + ads.map(a => a.name + '(' + a.id + ')').join('、'),
-        {
-          requestedAdId: AD_ID,
-          available: ads.map(a => ({ id: a.id, name: a.name, status: a.adDeliveryName })),
-        })
-    }
-    const plan = parsePlan(target, statsMap)
-
-    if (!plan.canOptStatus) {
-      fail('permission_denied',
-        '计划「' + plan.name + '」不允许启停。平台提示：' + (plan.optMsg || '（无）'),
-        { plan })
+      fail('bad_input', `未找到计划 ${AD_ID}。当前列表共 ${ads.length} 条：`
+        + ads.map((a) => `${a.name}(${a.id})`).join('、'),
+        { requestedAdId: AD_ID, available: ads.map((a) => ({ id: String(a.id), name: a.name, status: a.adDeliveryName })) })
     }
 
-    const isRunning = plan.statusCode === 0
+    const plan = parsePlan(target, statsMap, goodsMap)
+    out.aavid = aavid
+    out.plan = plan
+    out.action = MODE
+
+    if (plan.canOptStatus === false) {
+      fail('permission_denied', `计划「${plan.name}」不允许启停。平台提示：${plan.optMsg || '（无）'}`, { plan })
+    }
+
     const wantRun = MODE === 'start'
-
-    if (isRunning === wantRun) {
+    if (plan.isRunning === wantRun) {
       out.noop = true
-      out.plan = plan
-      out.text = '计划「' + plan.name + '」（' + plan.adId + '）当前已是「' + plan.status + '」，无需' + (wantRun ? '开启' : '暂停') + '。'
+      out.text = `计划「${plan.name}」（${plan.adId}）当前已是「${plan.status}」，无需${wantRun ? '开启' : '暂停'}。`
       emit(out)
-    } else if (String(ARGS.confirm) !== 'true') {
-      // 2) L2 预览
+      process.exit(0)
+    }
+
+    if (!CONFIRM) {
       out.pending = true
-      out.plan = plan
-      out.action = MODE
+      out.preview = {
+        adId: plan.adId,
+        from: plan.status,
+        to: wantRun ? '投放中' : '已暂停',
+        request: { objects: [{ objectID: plan.adId, type: 1 }], optType: wantRun ? 1 : 2 },
+      }
       out.text = [
-        '【预览】' + (wantRun ? '开启' : '暂停') + '计划：',
-        '  计划名称：' + plan.name,
-        '  计划 ID  ：' + plan.adId,
-        '  当前状态：' + plan.status,
-        '  操作后   ：' + (wantRun ? '投放中' : '已暂停'),
-        '  每日预算：' + (plan.budget == null ? '—' : plan.budget + ' 元'),
-        '  ROI 目标 ：' + (plan.roiGoal ?? '—'),
-        '  今日消耗 ：' + (plan.cost ?? '—') + ' 元',
+        `【预览】${wantRun ? '开启' : '暂停'}计划：`,
+        `  计划名称：${plan.name}`,
+        `  计划 ID  ：${plan.adId}`,
+        `  当前状态：${plan.status}`,
+        `  操作后   ：${wantRun ? '投放中' : '已暂停'}`,
+        `  每日预算：${plan.budget == null ? '—' : plan.budget + ' 元'}`,
+        `  ROI 目标 ：${plan.roiGoal ?? '—'}`,
+        `  今日消耗 ：${plan.cost ?? '—'} 元`,
         '',
-        '  执行方式：真实浏览器点击计划行开关（千川启停接口有签名，只能走 UI）',
+        '  执行方式：POST /ad/api/pmc/v1/batch_update_operation（纯 HTTP，无浏览器）',
         '  确认执行请加 --confirm true',
       ].join('\n')
       emit(out)
-    } else {
-      // 3) 执行：UI 点击开关
-      log('执行 ' + MODE + '：' + plan.name + ' (' + plan.adId + ')')
-      await clickByText(MAR_GOAL === '2' ? '推直播间' : '推商品')
-      await sleep(14000)
-      if (MAR_GOAL !== '2') {
-        for (let i = 0; i < 4; i++) {
-          if (await clickByText('商品自选')) break
-          await sleep(5000)
-        }
-        await sleep(12000)
-      }
-
-      // 定位该计划的开关
-      const sw = await safeEval((adId) => {
-        const all = [...document.querySelectorAll('*')]
-        let anchor = null
-        for (const el of all) {
-          if (el.children.length) continue
-          if ((el.textContent || '').includes(adId)) { anchor = el; break }
-        }
-        if (!anchor) return null
-        let row = anchor
-        for (let i = 0; i < 12 && row; i++, row = row.parentElement) {
-          const t = row.innerText || ''
-          if (t.includes(adId) && t.includes('编辑')) break
-        }
-        const scope = row || document.body
-        const swEl = scope.querySelector('.ovui-switch')
-        if (!swEl) return null
-        const r = swEl.getBoundingClientRect()
-        return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2), checked: /checked/.test(swEl.className || '') }
-      }, AD_ID)
-
-      if (!sw) {
-        fail('api_error', '未能在页面定位到计划 ' + AD_ID + ' 的开关。可能该计划不在当前 tab，或页面未加载完。',
-          { plan, url: page.url() })
-      }
-      log('开关状态:', JSON.stringify(sw))
-      if (sw.checked !== isRunning) {
-        fail('api_error', '页面开关状态(' + sw.checked + ')与接口状态(' + isRunning + ')不一致，终止操作以防误判。',
-          { sw, plan })
-      }
-
-      // hover 校验：平台会在开关上弹「计划开启中，点击暂停」/「计划已暂停，点击开启」
-      await page.mouse.move(sw.x - 30, sw.y)
-      await sleep(600)
-      await page.mouse.move(sw.x, sw.y, { steps: 8 })
-      await sleep(2500)
-      const tip = await safeEval(() => {
-        const els = [...document.querySelectorAll('.ovui-popover, .oc-popover-text, [class*="popover"]')]
-        for (const el of els) {
-          const t = (el.innerText || '').trim()
-          if (/点击暂停|点击开启/.test(t)) return t.slice(0, 60)
-        }
-        return null
-      })
-      log('hover 提示:', tip)
-      if (!tip) log('（未取到 hover 提示，继续点击）')
-
-      await page.mouse.click(sw.x, sw.y)
-      await sleep(14000)
-
-      // 4) 回读验证
-      const after = await safeEval((adId) => {
-        const all = [...document.querySelectorAll('*')]
-        let anchor = null
-        for (const el of all) {
-          if (el.children.length) continue
-          if ((el.textContent || '').includes(adId)) { anchor = el; break }
-        }
-        if (!anchor) return null
-        let row = anchor
-        for (let i = 0; i < 12 && row; i++, row = row.parentElement) {
-          const t = row.innerText || ''
-          if (t.includes(adId) && t.includes('编辑')) break
-        }
-        const scope = row || document.body
-        const swEl = scope.querySelector('.ovui-switch')
-        return swEl ? { checked: /checked/.test(swEl.className || '') } : null
-      }, AD_ID)
-
-      const res2 = await fetchPlans()
-      const ad2 = (res2?.data?.adInfos || []).find(a => String(a.id) === String(AD_ID))
-      const nowRunning = ad2 ? ad2.adDeliveryType === 0 : null
-      const success = nowRunning === wantRun
-
-      out.done = true
-      out.success = success
-      out.plan = plan
-      out.after = {
-        switchChecked: after?.checked ?? null,
-        statusCode: ad2?.adDeliveryType ?? null,
-        statusName: ad2?.adDeliveryName ?? null,
-      }
-      out.text = success
-        ? '✅ 计划「' + plan.name + '」已' + (wantRun ? '开启' : '暂停') + '（当前状态：' + ad2.adDeliveryName + '）'
-        : '⚠️ 已执行点击，但状态未按预期变化。接口状态：' + (ad2?.adDeliveryName ?? '未知') + '，页面开关：' + after?.checked
-      emit(out)
+      process.exit(0)   // ★ L2 门禁：预览后必须退出，绝不能继续执行
     }
-  } else {
-    fail('api_error', `未知 mode：${MODE}。可用：list / stop / start`, { mode: MODE })
+
+    /* 执行 */
+    const r = await setPlanStatus(plan.adId, wantRun)
+    if (!r.ok) {
+      out.ok = false
+      out.failureKind = 'api_error'
+      out.failure_kind = 'api_error'
+      out.code = r.code
+      out.msg = r.msg
+      out.text = `${wantRun ? '开启' : '暂停'}计划失败：${r.msg || r.raw}（code=${r.code}）`
+      emit(out)
+      process.exit(0)
+    }
+
+    /* 回读验证 */
+    await new Promise((s) => setTimeout(s, 1200))
+    const after = await fetchPlans()
+    const afterAd = after.ads.find((a) => String(a.id) === String(plan.adId))
+    const afterPlan = afterAd ? parsePlan(afterAd, after.statsMap, after.goodsMap) : null
+
+    out.verified = afterPlan ? afterPlan.isRunning === wantRun : false
+    out.after = afterPlan ? { status: afterPlan.status, statusCode: afterPlan.statusCode, isRunning: afterPlan.isRunning } : null
+    out.text = [
+      `✅ ${wantRun ? '开启' : '暂停'}成功`,
+      `  计划：${plan.name}（${plan.adId}）`,
+      `  ${plan.status} → ${afterPlan?.status || (wantRun ? '投放中' : '已暂停')}`,
+      `  回读校验：${out.verified ? '通过 ✅' : '⚠️ 状态未如预期，请刷新后台确认'}`,
+    ].join('\n')
+    emit(out)
   }
-} catch (err) {
-  fail('api_error', `抖音计划管理异常：${err instanceof Error ? err.message : String(err)}`)
-} finally {
-  if (browser) { try { await browser.close() } catch { /* ignore */ } }
-  await sleep(2000)
-  killOrphanChrome(); killPlaywright()
-  clearProfileLocks(dir)
-  releaseProfile(dir)
+
+  /* ── 其他 ───────────────────────────────────────────── */
+  else {
+    fail('bad_input', `未知 mode：${MODE}。可用：list / stop / start`)
+  }
+} catch (e) {
+  fail('api_error', '计划管理异常：' + String(e?.message || e).slice(0, 300))
 }

@@ -17,6 +17,8 @@
 8. [踩坑记录](#八踩坑记录)
 9. [**类目 / 模板（纯 Node）**](#九类目--模板纯-node)
 10. [**账号 key 漂移**](#十账号-key-漂移pdd_mms-专属)
+11. [上架图片规格与预处理](#十八上架图片规格与预处理吸收自-imgpreppy)
+12. [规格区视觉识别](#十九规格区属性区视觉识别吸收自-analyze_spec_uipy)
 
 ---
 
@@ -364,7 +366,7 @@ request() 收到 43001
 | 操作 | 现状 |
 |---|---|
 | 推广域 6 个写接口 | **body 已抓到**（在 `promo.mjs`），Node 通道已通（混合签名），只差接业务参数 |
-| 商品上架 | 走 `pdd-publish-http`，图片规整 + 改包重放链路已通 |
+| 商品上架 | 走 `pdd-publish`，图片规整 + 改包重放链路已通 |
 | 商品上下架 / 改价 | 浏览器路径可用，Node 路径受 `mall` 接口族限制 |
 
 ---
@@ -508,9 +510,9 @@ await callApi('mms.mallTemplate', { catId: 8463 }, { account, shopKey })
 ### CLI
 
 ```bash
-node skills/pdd-publish-http/scripts/pdd-category.mjs search   --keyword "T恤"
-node skills/pdd-publish-http/scripts/pdd-category.mjs template --cat-id 8463 --save
-node skills/pdd-publish-http/scripts/pdd-category.mjs resolve  --keyword "保温杯" --save
+node skills/pdd-publish/scripts/pdd-category.mjs search   --keyword "T恤"
+node skills/pdd-publish/scripts/pdd-category.mjs template --cat-id 8463 --save
+node skills/pdd-publish/scripts/pdd-category.mjs resolve  --keyword "保温杯" --save
 ```
 
 ---
@@ -874,6 +876,95 @@ emit({ ok: true, items: list })          // ← 接口失败也走这里
 
 > 只验证「不误报」不够 —— 必须验证「真能抓到」。
 > 否则就是个永远 pass 的摆设。
+
+---
+
+## 十八、上架图片规格与预处理（吸收自 imgprep.py）
+
+> 来源：`pdd-publish/scripts/imgprep.py`（2026-11 删除，逻辑收进本文）。
+> 该脚本是纯 PIL 实现、零平台依赖，删文件不影响任何调用方（全仓库无引用）。
+
+### 平台硬规则（实测被驳回后确认）
+
+| 图类型 | 规则 |
+|---|---|
+| 详情图 | 宽 **480~1200px**，高 **≤1500px**，**逐张单图** |
+| 主图 | **1:1 正方形**，建议 ≥800×800 |
+| 规格预览图 | **1:1**，≥480×480 |
+| 单张大小 | ≤**3MB** |
+
+### 详情图处理顺序（固定，不跳步）
+
+```
+① 宽度统一到 750
+     - 超宽（>750）→ 等比压缩到 750
+     - 过窄（<750）→ 等比放大到 750
+② 再看高度：高 > 1500 → 切分（宽度始终 750，绝不缩窄）
+③ 高 ≤ 1500 → 直接用
+```
+
+**为什么不「压缩高度」**：`750×1800` 若按高度缩到 1500，宽度会跟着变成 625 ——
+竖版图被压窄、比例失真。平台要的是**宽度保持 750**，超高的唯一正确解法是切分。
+
+**切分用均分**：`n = ceil(高/1500)`，每段高 ≈ 高/n。
+均分后每段高度接近，既没有碎片，切点也固定不漂移，上下段拼回去内容完全连贯
+（切片总高 == 原图高，不重叠不丢失）。
+
+### 体积压缩策略
+
+按质量阶梯存，直到 ≤3MB：
+
+```
+95, 92, 90, 88, 85, 82, 78, 74, 70, 65, 60, 55, 50
+```
+
+全阶梯仍超限 → 降分辨率（每轮 ×0.85，`LANCZOS`），直到 `max(w,h) ≤ 480` 为止。
+JPEG 参数：`optimize=True, progressive=True`。
+
+### 调用形态（历史）
+
+```bash
+python imgprep.py --job job.json --report report.json
+# job.json:    {"main":["a.jpg"],"detail":["b.jpg"],"spec":["c.jpg"],"maxBytes":3145728}
+# report.json: {"main":[...],"detail":[...],"spec":[...],"actions":[{file,action,before,after}]}
+```
+
+> 若将来需要重新做图片规整，按上面规则用 `sharp`（Node）实现即可，
+> 不必恢复 Python 依赖。
+
+---
+
+## 十九、规格区/属性区视觉识别（吸收自 analyze_spec_ui.py）
+
+> 来源：`pdd-publish/scripts/analyze_spec_ui.py`（2026-11 删除，结论收进本文）。
+> 该脚本会 `sys.path.insert` 到工作区外的绝对路径并硬编码 key，不适合留在技能里。
+
+### 它解决什么问题
+
+上架时「规格维度」那块的 UI 形态不固定，同一位置可能是四种输入控件之一，
+盲点会点错。用视觉模型看截图来判断该用哪种交互策略：
+
+| 视觉判定 `dim_type` | 对应交互 `strategy` |
+|---|---|
+| `text-input` | `type-and-blur`（输入后失焦提交） |
+| `color-input` | `type-and-enter` |
+| `checkbox` | `click-checkbox` |
+| `dropdown` | `click-dropdown` |
+| `unknown` | 报错，不猜 |
+
+输出还带 `element_hints`（如「选择或输入主色」），用于二次确认。
+
+### 实测结论
+
+- 模型 `cn:glm-5v-turbo` 能正确读这类后台截图（温度 0.1）
+- 输入：截图 + 目标维度名 + 候选值列表
+- 输出：`{ok, dim_type, strategy, blur_target, element_hints}`
+
+### 现在的做法
+
+`pdd-publish` 已用 DOM 锚点 + `sku-panel-v2.mjs` 处理规格面板，
+不再依赖截图识别。**保留这条知识**：若将来 DOM 锚点在改版后失效，
+视觉识别是可行的第二方案（比盲试交互快得多）。
 
 ---
 

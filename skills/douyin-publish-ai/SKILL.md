@@ -30,7 +30,7 @@ metadata:
 | `config` | 只读 | AI 发品上传配置：支持文件类型、数量/体积上限、能否发品 |
 | `check` | 只读 | 发品资格检查：`can_create` + 平台提示横幅 |
 
-## 为什么不做 HTTP 改包（对标 pdd-publish-http）
+## 为什么不做 HTTP 改包（对标 pdd-publish）
 
 拼多多那套是「拦截 `goodsCommit` → 改包 → 带签名重放」。抖店**不适用**：
 

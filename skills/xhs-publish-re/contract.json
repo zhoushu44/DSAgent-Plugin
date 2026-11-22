@@ -3,7 +3,7 @@
   "id": "xhs-publish-re",
   "entry": {
     "form": "script",
-    "script": "scripts/publish.py"
+    "script": "scripts/publish.mjs"
   },
   "input": {
     "args": [
@@ -36,7 +36,7 @@
         "name": "timer"
       },
       {
-        "description": "dry-run：true 只填表不发布，用于链路自检；默认 false",
+        "description": "dry-run：true 只做签名/登录态/素材验证，不发布；默认 false",
         "name": "dry",
         "type": "boolean",
         "default": false
@@ -46,10 +46,10 @@
         "name": "confirm"
       },
       {
-        "description": "sign_service 端口（默认 8787）",
-        "name": "port",
-        "type": "integer",
-        "default": 8787
+        "description": "执行通道：auto=先 HTTP 主链路、失败可兜底时自动切页面（默认）；http=只用 HTTP 主链路；page=强制走页面兜底",
+        "name": "fallback",
+        "choices": ["auto", "http", "page"],
+        "default": "auto"
       },
       {
         "description": "账号 shopKey（可选）；该平台多账号且未绑定时需先向用户确认",

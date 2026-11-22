@@ -20,7 +20,7 @@ const PKG_BASE = [
  * 实测：自己发 fetch 必被 54001 拦（该域的 Anti-Content 与 mms 不同源，
  * 且 crawlerInfo 与页面会话强绑定）—— 故采用「hook 页面自己发的响应」模式：
  * 打开推广页 → 页面自己发数据请求 → 我们拦截响应 → 解析。
- * 这与 pdd-publish-http 的「页面会话 + 拦截」是同源思路。
+ * 这与 pdd-publish 的「页面会话 + 拦截」是同源思路。
  *
  * 能力：
  *   overview   推广总览（资金账户 + 日消耗 + 广告组 + 场景）

@@ -6,7 +6,7 @@
  * 本技能把第一级（AI 识别）跑通，产出**物料包**（推荐标题/类目/主图 URL），
  * 交给 douyin-publish-mqs 做真实提交（L2 门禁在那个技能）。
  *
- * 为什么不走 HTTP 改包（对标 pdd-publish-http）：
+ * 为什么不走 HTTP 改包（对标 pdd-publish）：
  *   抖店的会话是 publish_id 有状态链路，材料每次变更都要
  *   notify_material_change 上报，服务端推进度；标题/类目由 AI 从图片提取。
  *   绕过 DOM 会丢状态机，且要同时逆向 a_bogus + AI 协议，成本远高于收益。

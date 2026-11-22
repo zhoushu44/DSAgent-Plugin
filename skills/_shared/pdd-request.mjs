@@ -20,6 +20,9 @@
  *   - 签名放 header 还是 body
  *   - 先走 Node 还是直接浏览器
  *   - 失败是否降级
+ *   - ★ 2026-11-18：推广域 token 失效（54001/43001/40001）时**自动换 token** ——
+ *     阶梯（重签→换签名器→提新票→全换→滑块）+ 单飞 + 冷却 + 时间预算，
+ *     详见 pdd-token-refresh.mjs；诊断信息随返回值的 tokenRefresh 字段透出
  *
  * ══════════════════════════════════════════════════════════════════
  * 用法（skill 只改一行）
@@ -46,6 +49,11 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+
+// ★ 2026-11-18：基座「自动换 token」模块（纯策略 + 内存状态，无副作用）。
+//   静态引入而不是 lazy load：这样每次加载本模块都会顺带解析它，
+//   任何 pdd 技能跑一次就能发现它的语法错误，不会等到真出 54001 才暴露。
+import { refreshToken as refreshPddToken } from './pdd-token-refresh.mjs'
 
 const SELF_DIR = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'))
 const load = (f) => import(pathToFileURL(path.join(SELF_DIR, f)).href)
@@ -163,6 +171,8 @@ export async function request(pathname, body = {}, opts = {}) {
   let channel = 'browser'
   let nodeReason = ''
   let res = null
+  // ★ 2026-11-18：基座「自动换 token」的诊断信息（阶梯走了哪几级 / 为什么没成功）
+  let tokenRefreshInfo = null
 
   // ② 纯 Node 尝试
   if (!wantBrowser && hasAccount) {
@@ -174,31 +184,96 @@ export async function request(pathname, body = {}, opts = {}) {
         let ec = errCode(res.json)
         const risk = ec === 54001 || ec === 54003
 
-        // ★ 2026-11-09：**签名器自动切换**（推广域默认纯 Node）
-        //   纯 Node（jsdom）签名被服务端**明确拒签**（54001/54003）时，
-        //   说明服务端没执行这次请求（签名没过就没到业务层）→ 换混合签名器
-        //   （浏览器签名、请求仍走 Node）重试一次是安全的。
-        //   换成功就记住这个账号该用哪个签名器，后续请求直接命中，不再失败一次。
-        //   显式指定 promoSigner / 环境变量时**不自动切换**（尊重调用方）。
+        // ★ 2026-11-18：**基座级「自动换 token」**（新链路，见 pdd-token-refresh.mjs）
+        //
+        //   旧逻辑（2026-11-09）只做了一件事：54001/54003 时切签名器（jsdom↔hybrid）。三个缺口：
+        //     ① 不覆盖 54001 的「清旧 token → 提新票 → 重放」自愈语义
+        //     ② 没有**单飞锁** → 同账号并发失败时各开一次浏览器抢 Profile 锁，反而更容易超时
+        //     ③ 没有**冷却** → 刷新失败后下次立刻再试，累计行为分数上升、越打越久
+        //
+        //   新逻辑把「换 token」收敛成一条阶梯，由基座统一做**单飞 + 冷却 + 时间预算**，
+        //   每一级都用**真实请求**验证（不靠「签名生成成功」当成功）：
+        //     L1 重签 → L2 换签名器 → L3 提新票 → L4 全换 → L5 滑块闭环
+        //
+        //   ★ 只对**读**操作生效（写操作 noBrowserFallback 时整条阶梯跳过，避免重复执行）。
+        //   ★ 54003 **不再自动重试** —— 它是 security_blocked（重扫无效，只能等），
+        //     pdd-guard 明确要求 retryable=false；旧代码在这里重试是与闸门相矛盾的。
         const forcedSigner = !!(opts.promoSigner || process.env.PDD_PROMO_SIGNER)
-        if (!okNow && risk && !forcedSigner && domain === 'yingxiao') {
-          const altMode = signed.mode === 'jsdom' ? 'hybrid' : 'jsdom'
-          nodeReason = `纯 Node 签名被拒（ec=${ec}，签名器=${signed.mode}），换 ${altMode} 重试`
+        const TOKEN_EC = new Set([54001, 43001, 40001])
+        const tokenEc = errCode(res.json)
+        if (!okNow && domain === 'yingxiao' && TOKEN_EC.has(tokenEc) && !opts.__tokenRetried && !noFallback && opts.shopKey) {
+          let ft = null
           try {
-            const alt = await signFor(domain, { ...opts, promoSigner: altMode })
-            if (alt.sig || cfg.signPos === 'none') {
-              const res2 = await fetchNode(url, method, finalBody, cfg, alt.sig, { ...opts, signCookies: alt.cookies, signUa: alt.ua })
-              if (isSuccess(res2.json, domain)) {
-                res = res2
-                okNow = true
-                _signerChoice.set(opts.shopKey || opts.account?.shopKey, altMode)
-                persistSignerChoice()
-                nodeReason = `换 ${altMode} 后成功（已记住该账号用 ${altMode}）`
-              }
-            }
+            ft = await refreshPddToken(opts.shopKey, {
+              ec: tokenEc,
+              deadlineMs: opts.tokenBudgetMs ?? 35_000,
+              currentMode: signed.mode || 'jsdom',
+              modes: forcedSigner ? [signed.mode || 'jsdom'] : ['jsdom', 'hybrid'],
+              page: opts.page,
+              force: !!opts.tokenForceRefresh,
+              capabilities: {
+                // 用指定签名器重新签名；persist=true 时记住该账号用哪个签名器
+                sign: async (mode, o) => {
+                  const s = await signFor(domain, { ...opts, promoSigner: mode, __forceFresh: !!o?.force })
+                  if (s?.sig && o?.persist) {
+                    _signerChoice.set(opts.shopKey || opts.account?.shopKey, mode)
+                    persistSignerChoice()
+                  }
+                  return s
+                },
+                // 提新票：从 Profile / 常驻签名服务取活的 Cookie 并写回凭证库
+                renewCookies: async () => {
+                  const h = await healCookies(opts.shopKey)
+                  if (!h?.cookies) return null
+                  invalidateStoreCookieCache(opts.shopKey)
+                  if (opts.account && typeof opts.account === 'object') {
+                    opts.account.cookies = h.cookies
+                    if (h.ua) opts.account.userAgent = h.ua
+                  }
+                  return { cookies: h.cookies, ua: h.ua }
+                },
+                // 重置签名环境（jsdom 的 _ctx 是模块级单例）
+                resetEnv: async () => {
+                  const ps2 = await load('pdd-promo-signer-v2.mjs').catch(() => null)
+                  ps2?.resetPromoV2?.()
+                },
+                // 滑块闭环（只在 54001 且有 page 时才会被阶梯调用）
+                solveCaptcha: async () => {
+                  if (!opts.page) return null
+                  const cg = await load('pdd-captcha-gate.mjs').catch(() => null)
+                  return cg?.solve?.(opts.page, opts.shopKey) ?? null
+                },
+              },
+              // 用这枚新 token 实打一次 —— 只有真通了才算这一级成功
+              probe: async (token) => {
+                if (opts.guard?.beforeCall) {
+                  const pre = await opts.guard.beforeCall(url)
+                  if (!pre.allow) {
+                    return { ok: false, ec: 'blocked', blocked: true, hint: pre.reason || '闸门拦截（账号冷却/限流）' }
+                  }
+                }
+                const r2 = await fetchNode(url, method, finalBody, cfg, token.sig, { ...opts, signCookies: token.cookies, signUa: token.ua })
+                const ok2 = isSuccess(r2.json, domain)
+                return { ok: ok2, ec: errCode(r2.json), status: r2.status, res: r2 }
+              },
+            })
           } catch (e2) {
-            nodeReason += `；换签名器失败：${String(e2.message).slice(0, 40)}`
+            ft = { ok: false, skipped: 'exception', hint: '换 token 内部异常：' + String(e2?.message || e2).slice(0, 100) }
           }
+          tokenRefreshInfo = ft
+          const trail = (ft?.steps || []).map((s) => s.name).join('→')
+          if (ft?.ok && ft?.probe?.ok) {
+            res = ft.probe.res
+            okNow = true
+            nodeReason = `已自动换 token（${trail}）后重放成功`
+          } else if (ft?.ok) {
+            nodeReason = `已自动换 token（${trail}）但重放仍被拒`
+          } else {
+            nodeReason = `自动换 token 未成功：${ft?.hint || ft?.skipped || 'unknown'}`
+          }
+        } else if (!okNow && risk && domain === 'yingxiao' && ec === 54003) {
+          // ★ 54003：与 pdd-guard 对齐 —— 不自动重试，等风控自然解除
+          nodeReason = `54003 安全验证未通过（重扫无效，只能等），按闸门规则不自动重试`
         }
 
         if (okNow) {
@@ -272,7 +347,9 @@ export async function request(pathname, body = {}, opts = {}) {
         if (healed.ua) opts.account.userAgent = healed.ua
       }
       const acc2 = { ...(opts.account || {}), cookies: healed.cookies, userAgent: healed.ua || opts.account?.userAgent }
-      return request(pathname, body, { ...opts, account: acc2, __healed: true })
+      // ★ 2026-11-18：自愈重放不再走「自动换 token」阶梯（上面已跑过一遍），
+      //   避免同一次失败里阶梯被重复触发。
+      return request(pathname, body, { ...opts, account: acc2, __healed: true, __tokenRetried: true })
     }
   }
 
@@ -296,6 +373,9 @@ export async function request(pathname, body = {}, opts = {}) {
     ec,
     channel,
     nodeFallback: nodeReason,
+    // ★ 2026-11-18：基座「自动换 token」的诊断信息（阶梯/冷却/原因），
+    //   读接口失败时 skill 可直接把它透给用户看，不用再猜。
+    tokenRefresh: tokenRefreshInfo,
     status: res.status,
     failureKind,
     data: ok ? unwrap(res.json) : null,
@@ -446,8 +526,10 @@ async function signFor(domain, opts) {
     if (mode === 'hybrid') {
       // ★ 常驻签名服务优先：Chrome 由守护进程长期持有，skill 进程完全不碰浏览器
       //   （也不占 Profile 锁 → 不会再和 skill 自己的 puppeteer 打架）。
+      //   ★ 2026-11-18：__forceFresh 时跳过守护进程 —— 守护进程的 /sign 可能缓存旧签名，
+      //     「换 token」必须拿到**新**签名，所以强制走进程内 signHybrid（每次现生成）。
       const dm = await load('pdd-signer-daemon.mjs').catch(() => null)
-      if (dm && !opts.noDaemon) {
+      if (dm && !opts.noDaemon && !opts.__forceFresh) {
         let r = await dm.daemonSign(shopKey).catch(() => null)
         if (!r?.sig) {
           // 守护进程没起 → 拉起它（幂等），顺便预热该账号的浏览器
@@ -475,6 +557,10 @@ async function signFor(domain, opts) {
     const seed = opts.account?.localStorage || full.localStorage || {}
     const envProfile = opts.envProfile || full.promoEnv || null
     const ps2 = await load('pdd-promo-signer-v2.mjs')
+    // ★ 2026-11-18：基座「自动换 token」要求**强制换新签名**时无条件重置单例。
+    //   initPromoV2 的 _ctx 是模块级单例 —— 不 reset 的话里面还是**旧环境画像**，
+    //   签出来还是同一份，「换了 token 等于没换」。
+    if (opts.__forceFresh && typeof ps2.resetPromoV2 === 'function') ps2.resetPromoV2()
     // ★ 画像变了要重置缓存：initPromoV2 的 _ctx 是模块级单例，
     //   第一次初始化时没画像，后面再传也补不进去
     if (envProfile && typeof ps2.resetPromoV2 === 'function') {

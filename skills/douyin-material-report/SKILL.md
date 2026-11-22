@@ -1,7 +1,7 @@
 ---
 name: douyin-material-report
-description: 抖音千川素材分析报表。按素材维度拉取消耗、成交、结算、效率、视频质量（2s/3s/5s/10s播放率、完播率）等 47 项指标。对应千川后台「数据 → 全域数据 → 素材数据 → 素材分析」。支持视频/图片/图文/直播间画面/标题五类素材，推商品与推直播两个维度，自定义时间范围。只读，无平台副作用。需绑定「抖音小店」账号。
-version: 1.0
+description: "抖音·素材分析报表（只读）：按素材维度拉取消耗、成交、结算、退款、视频质量（2s/3s/5s/10s播放率、完播率、播放数、点赞、评论、涨粉、平均观看时长）等 35 项指标；素材来源清单（抖音号主页/本地上传/直播剪辑/AI成片等）。数据源：千川后台 qianchuan.jinritemai.com，DataSetKey=roi2_video_material_analysis。纯 Node 直连（千川只读免签），无平台副作用。触发：素材分析、素材报表、视频素材数据、素材跑量、素材诊断、2s播放率、3s播放率、完播率、千川素材、素材来源、douyin material report。排除：全域投放报表（用 douyin-uni-prom）、计划启停（用 douyin-plan-ops）、商品（douyin-goods）、订单（douyin-order）。需绑定「抖音小店」账号。"
+version: 2.0
 risk: L1
 platform: douyin_shop
 ---
@@ -15,125 +15,140 @@ platform: douyin_shop
 对应后台页面：`数据 → 全域数据 → 素材数据 → 素材分析`
 （路由 `/dataV3/roi2-material-analysis`）
 
+## ★ 2026-11-11 改造：纯 Node 直连
+
+| 模式 | 改造前 | 改造后 |
+|---|---|---|
+| `overview` | ~16~20s | **1.2s** |
+| `source` | ~16~20s | **0.8s** |
+| `report` | ~16~20s | **1.1s** |
+
+### ⚠️ 关键坑：素材报表的 Filters 只有 4 条，字段名与通投报表不同
+
+```
+素材报表（roi2_video_material_analysis）：
+  advertiser_id / marketing_goal / adlab_mode_fork / material_type          ← 4 条
+
+通投报表（overall_home_cost_total_prom）：
+  advertiser_id / ecp_app_id / query_self_data / adlab_mode_fork / adlab_scene_fork  ← 5 条
+```
+
+**照搬通投那套会返回「网络请求超时」** —— 那是 `ecp_app_id` + `query_self_data`
+与素材数据集冲突，**不是真超时**。已固化成基座 `materialReportBody()`。
+
+### ⚠️ 指标名不能猜
+
+原脚本 47 个指标里有一个是猜的：
+```
+video_play_over_rate_for_roi2   ← 不在数据集里
+服务端报：[check] 指标：video_play_over_rate_for_roi2不在数据集配置中
+```
+真实完播率字段是 **`video_play_finish_rate_for_roi2_v2`**。
+
+现在指标表全部来自 probe-19 抓到的**真实 100 指标**，取 35 个有效常用项。
+
 ## 触发词
 
-素材分析、素材报表、视频素材数据、素材跑量、素材诊断、2s播放率、3s播放率、完播率、千川素材、douyin material report
+素材分析、素材报表、视频素材数据、素材跑量、素材诊断、2s播放率、3s播放率、完播率、千川素材、素材来源、douyin material report
 
-## 排除
+## 能力
 
-- 投放总览/计划列表 → 用 `douyin-uni-prom`
-- 商品/订单/店铺经营 → 用 `douyin-goods` / `douyin-order` / `douyin-shop`
-- 抖音作品自然流量数据 → 用 `douyin-works`
-
-## 参数
-
-| 参数 | 说明 | 默认 |
+| 模式 | 类型 | 说明 |
 |---|---|---|
-| `--start` | 开始日期 `YYYY-MM-DD` | 今天 |
-| `--end` | 结束日期 `YYYY-MM-DD` | 同 start |
-| `--material_type` | 3=视频素材 / 1=直播间画面 / 2=图片 / 4=图文 / 5=标题 | 3 |
-| `--mar_goal` | 1=推商品 / 2=推直播间 | 1 |
-| `--offset` | 分页偏移 | 0 |
-| `--limit` | 条数上限（≤100） | 20 |
-| `--account` | 账号 shopKey | 单账号时自动 |
+| `overview` | 只读 | 素材来源数 + 报表汇总 + 核心指标（默认） |
+| `report` | 只读 | 素材分析报表（35 指标 + 11 维度） |
+| `source` | 只读 | 素材来源清单（18 视频源 / 5 图片源 / 3 轮播源） |
 
-## 返回字段
+## 输入
 
-### summary（汇总）
+| 参数 | 类型 | 必需 | 说明 |
+|---|---|---|---|
+| `--mode` | string | 否 | overview(默认) / report / source |
+| `--material_type` | number | 否 | `3`=视频素材(默认) / `1`=直播间画面 / `2`=图片 / `4`=图文 / `5`=标题 |
+| `--mar_goal` | number | 否 | `2`=推直播间(默认) / `1`=推商品 |
+| `--days` | number | 否 | 统计窗口天数，默认 7，上限 90 |
+| `--start` / `--end` | string | 否 | 显式日期 `YYYY-MM-DD`，优先于 `--days` |
+| `--advertiser-id` | string | 否 | 千川账户 ID；不传则自动从 `get-customer-id` 的 `accountId` 取 |
+| `--limit` | number | 否 | `source` 返回条数，默认 20 |
+| `--account` | string | 否 | 账号 shopKey |
 
-| 分组 | 字段 |
+## 输出
+
+| 字段 | 含义 |
 |---|---|
-| 消耗 | `cost` `overallCost` `basicCost` |
-| 成交 | `gmv` `orders` `costPerOrder` `roi` `couponAmount` `platformSubsidy` |
-| 结算 | `settleAmount` `refundRate` |
-| 效率 | `cpc`（点击单价） `ecpm`（千次展现费用） |
-| 视频质量 | `play2sRate` `play3sRate` `play5sRate` `play10sRate` `finishRate` `playCount` `avgWatchDuration` |
+| `advertiserId` | 千川账户 ID（`accountId`，不是 `customerId`） |
+| `source` / `sourceCount` | 素材来源清单与计数 |
+| `metricCount` | 可用指标数（实测 35） |
+| `totalRows` | 报表数据行数（0 = 该窗口无消耗） |
+| `keyMetrics` | 核心指标中文映射（消耗/GMV/ROI/播放率/完播率/互动） |
+| `allMetrics` | 全部指标原始值 |
+| `perf` | 各接口耗时（ms） |
+| `text` | 面向用户的中文文案 |
 
-### rows[]（素材明细）
+## 用法
 
-上方全部字段 + 素材属性：
-
-| 字段 | 说明 |
-|---|---|
-| `materialId` | 素材 ID |
-| `name` | 素材名称 |
-| `duration` | 时长（如 `00:21`） |
-| `createTime` | 创建时间 |
-| `source` | 来源（抖音号主页素材 / 本地上传 / 直播剪辑 / AIGC动态创意 等 18 种） |
-| `tags` `suggest` `suggestReason` | 标签与平台建议 |
-| `content` | 原始 JSON，内含 `video_id` / `video_url` / 封面 / 宽高 / 码率 |
-| `liveShowCount` `liveWatchCount` | 直播场景指标（视频素材为 null） |
-
-## 前置条件
-
-- 已绑定「抖音小店」账号（`platform=douyin_shop`），且该账号有千川后台权限
-- 本机已安装 Chrome 或 Edge
-- 浏览器 profile 未被其他任务占用（发布商品等操作会占用同一个 profile）
+```bash
+node {baseDir}/scripts/material-report.mjs --mode overview
+node {baseDir}/scripts/material-report.mjs --mode source
+node {baseDir}/scripts/material-report.mjs --mode report --days 30
+node {baseDir}/scripts/material-report.mjs --mode report --material_type 3 --mar_goal 1
+```
 
 ## 工作流
 
-### 1. 查视频素材报表（最常用）
+### W1：哪个视频素材跑得好
 
-```bash
-node skills/douyin-material-report/scripts/material-report.mjs \
-  --account douyin_shop_<shopKey> \
-  --start 2026-07-26 --end 2026-10-24
+```
+① material-report --mode report --days 30   → 按素材维度的 35 项指标
+② 看 keyMetrics：消耗 / GMV / ROI / 完播率 / 2s播放率
+③ 完播率低但消耗高 → 素材前 3 秒留不住人，建议换开头
+④ 结合 douyin-uni-prom --mode overview 看账户整体 ROI 是否达标
 ```
 
-时间范围**至少给 90 天**。素材报表只统计统计周期内有投放行为的素材，近 30 天经常是空的。
+### W2：素材从哪来
 
-### 2. 查其他素材类型
-
-```bash
---material_type 2   # 图片素材
---material_type 1   # 直播间画面
---material_type 4   # 图文素材
---material_type 5   # 标题素材
+```
+① material-report --mode source
+② 18 个视频来源里，看「抖音号主页素材 / 本地上传 / 直播剪辑」各占多少
+③ 「AI成片（source=160/161）」出现说明用了平台 AI 生成
 ```
 
-### 3. 切换推广目标
+## 错误处理
 
-```bash
---mar_goal 2   # 推直播间（默认 1 = 推商品）
-```
+| 场景 | failureKind | 引导动作 |
+|---|---|---|
+| 未绑定账号 | `not_bound` | 引导到「账号连接」添加抖音小店账号 |
+| 多账号未指定 | `need_account_choice` | 把候选给用户选，不要自己挑 |
+| 登录态失效 | `token_expired` | 引导重新登录 |
+| `code=3001`「filter必须存在」 | `bad_input` | 素材数据集要 4 条 Filters，用 `materialReportBody()` |
+| `code=3001`「XX不在数据集配置中」 | `bad_input` | **指标名猜错了**，从真实 100 指标里选 |
+| 返回「网络请求超时」 | `bad_input` | 多半是条件冲突（照搬了通投的 5 条 Filters） |
+| `totalRows=0` | — | 该窗口无消耗，属正常 |
 
-### 4. 空结果的排查顺序
+## 技术说明
 
-1. 放宽时间范围到 90 天
-2. 换 `--material_type`（1/2/4/5）试
-3. 用 `douyin-uni-prom --mode overview` 查账户消耗——如果消耗为 0，说明没投过，报表必然空
-4. 用 `douyin-uni-prom --mode perm` 确认账号未被限制
+### 取数方式
 
-### 5. 结果解读
+**纯 Node 直连**。千川只读接口免签（见 `_shared/DOUYIN-KNOWLEDGE.md`）。
 
-读 `summary` 看整体，读 `rows[]` 看单条素材。重点看三处：
+### 接口
 
-- **2s/3s 播放率**：开头吸引力。低于 30% 要重做封面和前 3 秒
-- **5s→10s 衰减**：中段留存。掉幅超过一半说明节奏或信息密度有问题
-- **1小时退款率**：商品与素材承诺是否一致，退款高说明货不对板
-
-## 使用建议
-
-**1. 时间范围要给足。** 素材报表只统计**参与过投放**的素材。近 30 天查不到，试着放宽到 90 天——实测某条素材的数据就落在 7-8 月。
-
-**2. 空结果先查余额。** 如果所有范围都是 0 条，大概率是账户无消耗（可用 `douyin-uni-prom --mode overview` 看余额与消耗）。起投门槛通常 300 元。
-
-**3. 播放率怎么读。**
-
-| 指标 | 健康参考 |
+| 用途 | 接口 |
 |---|---|
-| 2s/3s 播放率 | 越高越好，低于 30% 说明开头不吸引人 |
-| 5s→10s 衰减 | 掉幅超过一半，说明中段节奏或信息密度有问题 |
-| 完播率 | 短视频 15%+ 尚可，0% 需重做结构 |
+| 素材报表 | `POST /ad/api/data/v1/common/statQuery`（DataSetKey=`roi2_video_material_analysis`） |
+| 素材来源 | `GET /ad/api/data/v1/material/get_source_list_new` |
+| 账户 ID | `GET /ad/api/v1/account/account-info/get-customer-id`（取 `detail[].accountId`） |
 
-**4. 与自然流量对照。** 千川的 `play2sRate`（正向）和 `douyin-works` 的 `bounce_rate_2s`（2秒跳出率，负向）口径不同、流量来源不同（付费 vs 自然），可以并排看开头吸引力在两种流量下的差异。
+基座：`skills/_shared/douyin-registry.mjs` 的 `promo.materialReport` / `promo.materialSource`，
+构造器 `materialReportBody()`，指标表 `MATERIAL_REPORT_METRICS`，维度表 `MATERIAL_DIMENSIONS_FULL`。
 
-## 已知限制
+### 已知坑
 
-- **只读**。上传素材、启停计划等写操作未实现——平台侧账号为「仅观察」权限时会被拒。可用 `douyin-uni-prom --mode perm` 自查。
-- 报表**不含创建时间早于统计周期的历史素材**，只返回统计周期内有投放行为的素材。
-- `'-'` 与 `'0.00'` 已区分：前者无数据（返回 `null`），后者真的是 0。
-
-## 实现备注
-
-入口路由必须是 `/dataV3/roi2-material-analysis`，其他路由不放行 `roi2_video_material_analysis` 这个 DataSetKey。复用正式浏览器 profile（不能注入账号 cookies，否则会被判未登录）。详见脚本内注释。
+| 坑 | 现象 | 处置 |
+|---|---|---|
+| Filters 用错套 | 「网络请求超时」 | 素材 4 条 / 通投 5 条，别串 |
+| 指标名猜 | `[check] 指标：xxx不在数据集配置中` | 从真实 100 指标里选 |
+| `accountId` vs `customerId` | 填错 → 0 条 | 素材报表用 `accountId` |
+| `material_type` 传数组 | 「只能传入一个数字」 | 单值，不是数组 |
+| 本店当前无投放 | `totalRows=0`，指标全 `-` | 正常，不是故障 |
+| 原脚本硬编码 47 指标 | 含 1 个不存在的，会让整个请求失败 | 已换成 35 个真实有效的 |

@@ -15,6 +15,8 @@ class MarketAnalysisRequest:
     item_limit: int = 192
     max_pages: int = 4
     page_size: int = 48
+    with_sku: bool = False      # 是否需要 SKU 明细（走商品详情接口）
+    sku_item_limit: int = 48    # SKU 明细最多采集多少个商品
 
 
 @dataclass
@@ -71,6 +73,11 @@ class SkillOutput:
     json_path: str = ""
     report_path: str = ""
     analysis: dict[str, Any] = field(default_factory=dict)
+    with_sku: bool = False
+    sku_rows: list[dict[str, Any]] = field(default_factory=list)
+    sku_csv_path: str = ""
+    sku_summary: dict[str, Any] = field(default_factory=dict)
+    sku_errors: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

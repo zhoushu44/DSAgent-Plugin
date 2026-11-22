@@ -110,6 +110,59 @@ function asBool(v: unknown): boolean {
 const ok = (r: unknown) => (r && typeof r === 'object' ? r : { ok: false, failureKind: 'api_error', text: '平台返回空结果' })
 
 /**
+ * ★ 淘宝/天猫发布频率控制（基座 skills/_shared/taobao-publish-rate.mjs）
+ *
+ * 为什么在分发层拦截而不是在各平台实现里：
+ *   发布频控是**账号级**约束，而账号在 body 里统一给出；
+ *   放在分发层能保证「任何走发布技能路径的调用都受控」，
+ *   不会因为某个平台实现忘了加而漏掉。
+ *
+ * 只对淘宝系生效（其它平台已有各自的 guard / 频控）。
+ */
+const TAOBAO_PLATFORMS = new Set(['taobao', 'taobao-mqs', 'tmall-mqs', 'tmall'])
+
+type GuardMod = {
+  validateBeforePublish: (p: any, o?: any) => {
+    pass: boolean; level: string; errors: string[]; warnings: string[]; infos: string[]; summary: string
+  }
+}
+
+let _guardMod: GuardMod | null | undefined
+
+async function loadGuardMod(): Promise<GuardMod | null> {
+  if (_guardMod !== undefined) return _guardMod
+  try {
+    const url = new URL(`../skills/_shared/taobao-publish-guard.mjs`, import.meta.url).href
+    _guardMod = (await import(url)) as GuardMod
+  } catch {
+    _guardMod = null
+  }
+  return _guardMod
+}
+
+type RateMod = {
+  checkPublish: (k: string) => { allowed: boolean; reason?: string; waitMs: number }
+  consumePublish: (k: string) => { todayCount: number; windowCount: number }
+  markRateLimited: (k: string, d?: string) => { cooldownRemainMs: number }
+  isRateLimited: (t: string) => boolean
+  quotaSummary: (k: string) => Record<string, unknown>
+}
+
+let _rateMod: RateMod | null | undefined
+
+async function loadRateMod(): Promise<RateMod | null> {
+  if (_rateMod !== undefined) return _rateMod
+  try {
+    // 运行期动态加载 mjs 基座（避免把 .mjs 编进 tsc 产物）
+    const url = new URL(`../skills/_shared/taobao-publish-rate.mjs`, import.meta.url).href
+    _rateMod = (await import(url)) as RateMod
+  } catch {
+    _rateMod = null
+  }
+  return _rateMod
+}
+
+/**
  * 按 platform 分发到真实实现。
  *
  * ★ confirm 语义完全交给各平台实现：这里只做「字符串 true → 布尔 true」的归一，
@@ -135,7 +188,112 @@ export async function dispatchPlatformPublish(
     }
   }
 
+  // ★ 发布前合规校验（淘宝系）：预览阶段就报告，提交时 errors 硬拦
+  let guardReport: Record<string, unknown> | null = null
+  if (TAOBAO_PLATFORMS.has(platform)) {
+    const guard = await loadGuardMod()
+    if (guard) {
+      try {
+        const g = guard.validateBeforePublish(p, { category: asStr(p.category) })
+        guardReport = {
+          pass: g.pass, level: g.level, summary: g.summary,
+          errors: g.errors, warnings: g.warnings, infos: g.infos,
+        }
+        if (confirm && !g.pass) {
+          return {
+            ok: false,
+            failureKind: 'compliance_error',
+            text: `发布前合规校验未通过（${g.errors.length} 个硬错误，提交会被平台拒）：\n`
+              + g.errors.map((e, i) => `${i + 1}. ${e}`).join('\n')
+              + (g.warnings.length ? `\n\n另有 ${g.warnings.length} 条警告：\n` + g.warnings.map(w => `- ${w}`).join('\n') : ''),
+            compliance: guardReport,
+          }
+        }
+      } catch {
+        // 校验器异常不阻塞发布（但记下来）
+        guardReport = { pass: true, level: 'skipped', summary: '校验器异常，已跳过' }
+      }
+    }
+  }
+
+  // ★ 发布频率闸门：只拦「真正提交」（confirm=true），预览不消耗配额
+  let rateQuotaBefore: Record<string, unknown> | null = null
+  if (confirm && TAOBAO_PLATFORMS.has(platform) && account) {    const rate = await loadRateMod()
+    if (rate) {
+      const chk = rate.checkPublish(account)
+      if (!chk.allowed) {
+        return {
+          ok: false,
+          failureKind: 'rate_limit',
+          text: `发布频率受限：${chk.reason || '配额不足'}。`
+            + `这是**主动保护**（避免触发平台「批量铺货」判定），不是平台报错。`
+            + (chk.waitMs > 0 ? ` 建议等待 ${Math.ceil(chk.waitMs / 1000)} 秒后再试。` : ''),
+          waitMs: chk.waitMs,
+          quota: rate.quotaSummary(account),
+        }
+      }
+      rateQuotaBefore = rate.consumePublish(account)
+    }
+  }
+
   try {
+    const dispatched = await dispatchInner(handlers, platform, confirm, account, agentId, p)
+
+    // ★ 发布后识别「平台频控」，命中则记冷却并整体停止（L4 命中即停）
+    const isTb = TAOBAO_PLATFORMS.has(platform)
+    if (isTb && account) {
+      const rate = await loadRateMod()
+      if (rate) {
+        const text = typeof dispatched === 'string' ? dispatched : JSON.stringify(dispatched ?? {})
+        const failed = !(dispatched as any)?.ok
+        if (failed && rate.isRateLimited(text)) {
+          const r = rate.markRateLimited(account, text.slice(0, 200))
+          return {
+            ok: false,
+            failureKind: 'rate_limit',
+            text: `平台提示发布频繁，已记录冷却 ${Math.ceil(r.cooldownRemainMs / 1000)} 秒。`
+              + `本批后续发布应停止，不要重试（重试只会延长风控）。`,
+            cooldownRemainMs: r.cooldownRemainMs,
+            quota: rate.quotaSummary(account),
+            detail: text.slice(0, 300),
+          }
+        }
+        // 成功时回报剩余配额 + 合规报告，方便上层判断
+        if ((dispatched as any)?.ok) {
+          const extra: Record<string, unknown> = {}
+          if (rateQuotaBefore) extra.publishQuota = rate.quotaSummary(account)
+          if (guardReport) extra.compliance = guardReport
+          if (Object.keys(extra).length) return { ...(dispatched as any), ...extra }
+        }
+      }
+    }
+    return dispatched
+  } catch (err) {
+    const msg = `${platform} 发布异常：${err instanceof Error ? err.message : String(err)}`
+    if (TAOBAO_PLATFORMS.has(platform) && account) {
+      const rate = await loadRateMod()
+      if (rate && rate.isRateLimited(msg)) {
+        const r = rate.markRateLimited(account, msg)
+        return {
+          ok: false, failureKind: 'rate_limit', text: msg,
+          cooldownRemainMs: r.cooldownRemainMs, quota: rate.quotaSummary(account),
+        }
+      }
+    }
+    return { ok: false, failureKind: 'api_error', text: msg }
+  }
+}
+
+/** 原 switch 分发（把平台差异集中在这里） */
+async function dispatchInner(
+  handlers: PlatformPublishHandlers,
+  platform: string,
+  confirm: boolean,
+  account: string,
+  agentId: string,
+  p: Record<string, unknown>,
+): Promise<unknown> {
+  {
     switch (platform) {
       case 'zhihu':
         return ok(await handlers.zhihu({
@@ -350,12 +508,6 @@ export async function dispatchPlatformPublish(
           failureKind: 'api_error',
           text: `不支持的 platform：「${platform}」。可选：${PUBLISH_PLATFORMS.join(' / ')}`,
         }
-    }
-  } catch (err) {
-    return {
-      ok: false,
-      failureKind: 'api_error',
-      text: `${platform} 发布异常：${err instanceof Error ? err.message : String(err)}`,
     }
   }
 }

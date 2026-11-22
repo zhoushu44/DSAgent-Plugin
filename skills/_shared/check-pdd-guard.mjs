@@ -58,7 +58,7 @@ const EXEMPT = {
 
 /** 入口脚本候选（按优先级找第一个存在的） */
 const ENTRY_NAMES = [
-  'publish-v2.mjs', 'batch-publish.mjs',   // pdd-publish-http
+  'publish-v2.mjs', 'batch-publish.mjs',   // pdd-publish
   'promo.mjs', 'activity.mjs', 'chance.mjs',
   'video.mjs', 'shop.mjs', 'query.mjs', 'matrix.mjs',
   'crawl.mjs', 'index.mjs',

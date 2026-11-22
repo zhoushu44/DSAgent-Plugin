@@ -14,7 +14,11 @@
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "Bundler",
-    "lib": ["ES2022", "DOM"],
+    // ★ DOM.Iterable 必加：`[...document.querySelectorAll(...)]` 依赖 NodeList 的
+    //   [Symbol.iterator] 声明。只写 "DOM" 会让这类写法报 TS2488
+    //   （pdd-publish.ts 有 4 处，长期把 typecheck 卡在红）。
+    //   注意：这不是"放松类型"，而是补齐 DOM 类型定义的正确组合。
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "strict": true,
     "outDir": "lib",
     "declaration": true,

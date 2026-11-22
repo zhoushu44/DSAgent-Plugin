@@ -1,6 +1,6 @@
 ---
 name: pdd-chance
-description: "拼多多机会商品（蓝海商机）选品与发布：按标签筛选商机（当季新品/热门跟款/全网热销/首页流量/潜力商品/热门收藏）、商机详情、发布同款（L2 两步门禁），以及主列表/我的机会/收藏/跟款验证/任务/筛选项/类目树。数据源 /opportunity-goods/*。触发：机会商品、蓝海商机、按标签选品、平台推荐卖什么、潜力爆款、跟款、发布同款、pdd chance。排除：普通商品上架（pdd-publish-http）、商品查询（pdd-works）、店铺经营（pdd-shop）。需绑定「拼多多商家后台」账号。"
+description: "拼多多机会商品（蓝海商机）选品与发布：按标签筛选商机（当季新品/热门跟款/全网热销/首页流量/潜力商品/热门收藏）、商机详情、发布同款（L2 两步门禁），以及主列表/我的机会/收藏/跟款验证/任务/筛选项/类目树。数据源 /opportunity-goods/*。触发：机会商品、蓝海商机、按标签选品、平台推荐卖什么、潜力爆款、跟款、发布同款、pdd chance。排除：普通商品上架（pdd-publish）、商品查询（pdd-works）、店铺经营（pdd-shop）。需绑定「拼多多商家后台」账号。"
 metadata:
   builtin_skill_version: "1.0.0"
   dsagent:
@@ -125,33 +125,33 @@ metadata:
 
 ```bash
 # 机会商品主列表（默认 = 店铺主营类目，35 条/页）
-node scripts/chance.mjs --mode list
+node {baseDir}/scripts/chance.mjs --mode list
 
 # ★ 按一级类目跨类目查（如书籍类目 15543）
-node scripts/chance.mjs --mode list --cat-id 15543
+node {baseDir}/scripts/chance.mjs --mode list --cat-id 15543
 
 # 翻页 / 改每页条数
-node scripts/chance.mjs --mode list --page 2 --size 50
-node scripts/chance.mjs --mode list --cat-id 15543 --page 3
+node {baseDir}/scripts/chance.mjs --mode list --page 2 --size 50
+node {baseDir}/scripts/chance.mjs --mode list --cat-id 15543 --page 3
 
 # ★ 跟款后验证（my_list + follow_goods_cnt 一键判定）
-node scripts/chance.mjs --mode follow-check
+node {baseDir}/scripts/chance.mjs --mode follow-check
 
 # 我的机会商品 / 收藏
-node scripts/chance.mjs --mode mine
-node scripts/chance.mjs --mode collection
+node {baseDir}/scripts/chance.mjs --mode mine
+node {baseDir}/scripts/chance.mjs --mode collection
 
 # 任务进度
-node scripts/chance.mjs --mode mission
+node {baseDir}/scripts/chance.mjs --mode mission
 
 # 站内热搜/缺货词（选品金矿）
-node scripts/chance.mjs --mode filters
+node {baseDir}/scripts/chance.mjs --mode filters
 
 # 机会类目树（看哪些类目开了机会池）
-node scripts/chance.mjs --mode cates
+node {baseDir}/scripts/chance.mjs --mode cates
 
 # 多账号指定
-node scripts/chance.mjs --mode list --account pdd_mms_xxxx
+node {baseDir}/scripts/chance.mjs --mode list --account pdd_mms_xxxx
 ```
 
 ## ★ 按标签选商机（`--mode pick --labels`）
@@ -159,7 +159,7 @@ node scripts/chance.mjs --mode list --account pdd_mms_xxxx
 ### 第一步：先查自己有哪些标签
 
 ```bash
-node scripts/chance.mjs --mode labels
+node {baseDir}/scripts/chance.mjs --mode labels
 ```
 
 输出（实测两个店铺对比）：
@@ -202,19 +202,19 @@ node scripts/chance.mjs --mode labels
 
 ```bash
 # ✅ 单标签
-node scripts/chance.mjs --mode pick --labels home_page_new
+node {baseDir}/scripts/chance.mjs --mode pick --labels home_page_new
 
 # ✅ 多标签 = OR 并集（不是交集）
-node scripts/chance.mjs --mode pick --labels home_page_new,thousand_rec
+node {baseDir}/scripts/chance.mjs --mode pick --labels home_page_new,thousand_rec
 
 # ✅ 中文名也行（内置别名映射）
-node scripts/chance.mjs --mode pick --labels "当季新品,首页流量"
+node {baseDir}/scripts/chance.mjs --mode pick --labels "当季新品,首页流量"
 
 # ✅ 配合类目
-node scripts/chance.mjs --mode pick --labels home_page_new --cat-id 16548
+node {baseDir}/scripts/chance.mjs --mode pick --labels home_page_new --cat-id 16548
 
 # ✅ 看某标签下有多少条（size=1 只要总数）
-node scripts/chance.mjs --mode pick --labels home_page_new --size 1
+node {baseDir}/scripts/chance.mjs --mode pick --labels home_page_new --size 1
 
 # ❌ 不要传 low_price（低价跟款）—— 它只在 hide_labels 组，传了返回 0
 # ❌ 不要传字符串形式的 JSON —— 必须逗号分隔
@@ -255,7 +255,7 @@ node scripts/chance.mjs --mode pick --labels home_page_new --size 1
 ## ★ 商机详情（`--mode detail`）
 
 ```bash
-node scripts/chance.mjs --mode detail --chance-id 5c80862f9578b82516c7456c701d2c8c
+node {baseDir}/scripts/chance.mjs --mode detail --chance-id 5c80862f9578b82516c7456c701d2c8c
 ```
 
 输出：
@@ -279,12 +279,12 @@ node scripts/chance.mjs --mode detail --chance-id 5c80862f9578b82516c7456c701d2c
 
 ```bash
 # 第 1 步：预览（零写操作）
-node scripts/chance.mjs --mode publish \
+node {baseDir}/scripts/chance.mjs --mode publish \
   --chance-id <chance_id> \
   --product-file ./my-product.json
 
 # 第 2 步：确认后建草稿（★ L2 写操作）
-node scripts/chance.mjs --mode publish \
+node {baseDir}/scripts/chance.mjs --mode publish \
   --chance-id <chance_id> \
   --product-file ./my-product.json \
   --confirm true
@@ -310,7 +310,7 @@ node scripts/chance.mjs --mode publish \
 ① POST /opportunity-goods/chance-goods/quick_release { chance_id }
    → 返回 draft_id / goods_commit_id / is_home_page
 ② 跳 /goods/goods_add/index?type=add&from=chance&homePage=&id=<draft_id>
-③ 填表提交（交给 pdd-publish-http）
+③ 填表提交（交给 pdd-publish）
 ```
 
 ### ⚠️ 已知限制（必读）
@@ -341,7 +341,7 @@ node scripts/chance.mjs --mode publish \
 
 ```bash
 # 1. 选机会商品（看 labels / refer_price）
-node scripts/chance.mjs --mode list
+node {baseDir}/scripts/chance.mjs --mode list
 
 # 2. 后台 → 商品管理 → 机会商品 → 点该商品「发布同款」
 #    ★ 必须从这个入口进！直接走「发布新商品」提交体不带 chance_id，不算跟款
@@ -351,7 +351,7 @@ node scripts/chance.mjs --mode list
 #    定价 ≤ refer_price 可吃「低价跟款」搜索流量倾斜
 
 # 4. 提交发布后验证
-node scripts/chance.mjs --mode follow-check
+node {baseDir}/scripts/chance.mjs --mode follow-check
 ```
 
 **流量机制（labels 决定）**：
@@ -480,7 +480,7 @@ POST /opportunity-goods/chance-goods/oversea       {}
 
 - `pdd-shop` — 自己店铺商品数据（曝光/访客/转化 + PUA 解码）
 - `pdd-works` — 商品查询/上下架/删除
-- `pdd-publish-http` — 商品上架（看中机会商品后直接上架）
+- `pdd-publish` — 商品上架（看中机会商品后直接上架）
 
 
 

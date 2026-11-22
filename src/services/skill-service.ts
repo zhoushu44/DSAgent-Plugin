@@ -283,6 +283,7 @@ const SKILL_PLATFORM: Record<string, string> = {
   'xiaohongshu-comment': 'xhs',
   'xiaohongshu-im': 'xhs',
   'xiaohongshu-analytics': 'xhs',
+  'xhs-publish-re': 'xhs',
   // bilibili 平台（B站）
   'bilibili-crawl': 'bilibili',
   'bilibili-download': 'bilibili',
@@ -430,8 +431,124 @@ function toggleFrontmatter(raw: string, enabled: boolean): string {
 }
 
 const RESULT_PREFIX = '__DSAGENT_RESULT__'
-const IDLE_TIMEOUT = 60_000       // 60 秒 idle 超时
+/**
+ * ★ 2026-11-19：看门狗改成「软告警 + 硬超时」两层。
+ *
+ * 事故（拼多多推广技能，连续失败 30+ 次，每次都是「技能 60 秒无输出，按 idle 超时终止」）：
+ *   ① pdd-promo overview 正常就要 75~90 秒，中间是纯 Node 采集的大段静默 →
+ *      单层 60s idle 必然误杀；
+ *   ② 更致命的是 kill 用的是 **SIGKILL**，进程没有机会跑清理钩子 →
+ *      账号锁文件留在盘上 → 下次调用等 300s 锁、期间静默 → 又被杀 → 死循环。
+ *
+ * 因此：
+ *   · SOFT：到点只打一行告警（stderr，算心跳），不杀。可解释「慢」而不是「死」。
+ *   · HARD：真正的硬上限，到点才终止，且**先 SIGTERM 再 SIGKILL**，
+ *     让脚本的 exit / SIGTERM 钩子有机会释放锁、关浏览器、写回状态。
+ *   · 两个阈值都可用环境变量覆盖，便于个案排查。
+ */
+const IDLE_SOFT_TIMEOUT = Number(process.env.DSAGENT_SKILL_IDLE_SOFT_MS) || 60_000
+const IDLE_TIMEOUT = Number(process.env.DSAGENT_SKILL_IDLE_TIMEOUT_MS) || 180_000
 const MAX_OUTPUT = 64 * 1024
+
+/**
+ * 运行时读取阈值（不在模块顶层固化）。
+ * 顶层 const 会在 import 时求值一次，测试/单次覆盖环境变量就不生效了。
+ */
+function idleSoftTimeout(): number {
+  const v = Number(process.env.DSAGENT_SKILL_IDLE_SOFT_MS)
+  return Number.isFinite(v) && v > 0 ? v : IDLE_SOFT_TIMEOUT
+}
+function idleHardTimeout(): number {
+  const v = Number(process.env.DSAGENT_SKILL_IDLE_TIMEOUT_MS)
+  return Number.isFinite(v) && v > 0 ? v : IDLE_TIMEOUT
+}
+
+/**
+ * 优雅终止。
+ *
+ * ★★ Windows 实测结论（2026-11-19，必须记住）★★
+ *   Node 在 Windows 上**没有真正的信号投递**：`child.kill('SIGTERM')` 实际调用
+ *   TerminateProcess —— 等同强杀，子进程的 'SIGTERM' 处理器**不会执行**
+ *   （已用最小用例复现：脚本里的 process.on('SIGTERM') 从未触发）。
+ *   因此「先 SIGTERM 再 SIGKILL」在 Windows 上是自欺欺人。
+ *
+ * 真正跨平台可用的做法是**协议式退出**：
+ *   父进程先往子进程 stdin 写一行 `__DSAGENT_TERMINATE__`，
+ *   脚本侧（runtime 层）监听 stdin 读到该指令后自行收尾并 exit。
+ *   宽限期内没退，再 kill 兜底。
+ *
+ * 同时仍然尝试 SIGTERM —— 在 POSIX（Linux/macOS）上它是真的有效，
+ * 能覆盖非 Windows 的部署场景。
+ */
+export const TERMINATE_SENTINEL = '__DSAGENT_TERMINATE__'
+
+/**
+ * 优雅终止。
+ *
+ * ★★ Windows 实测结论（2026-11-19，务必保留）★★
+ *   ① Node 在 Windows 上没有真正的信号投递：`child.kill('SIGTERM')` 走 TerminateProcess，
+ *      等同强杀 —— 子进程的 'SIGTERM' 处理器**不会执行**（已用最小用例复现）。
+ *   ② 所以走协议式退出：父进程往子进程 stdin 写 `__DSAGENT_TERMINATE__`，脚本侧自行收尾。
+ *   ③ 但有竞态：**写完立刻杀/立刻退出**，管道里的数据会丢，脚本收不到。
+ *      → 因此这里是 async：写完先等 graceMs 让脚本自己退，超时才 kill。
+ *
+ * 返回 Promise 是必须的：调用方要 await，否则「等」形同虚设。
+ */
+export async function terminateGracefully(
+  proc: {
+    killed?: boolean
+    exitCode?: number | null
+    pid?: number
+    kill: (sig: NodeJS.Signals) => boolean
+    stdin?: { writable?: boolean; destroyed?: boolean; write: (s: string) => boolean; end?: () => void } | null
+    once?: (ev: string, fn: () => void) => unknown
+  },
+  graceMs = 5_000,
+): Promise<void> {
+  const alive = () => proc.exitCode === null || proc.exitCode === undefined
+
+  if (!alive()) return
+
+  // ① 协议式退出：唯一在 Windows 上也真能让脚本跑清理的路径
+  let sent = false
+  try {
+    if (proc.stdin?.writable && !proc.stdin.destroyed) {
+      proc.stdin.write(TERMINATE_SENTINEL + '\n')
+      sent = true
+    }
+  } catch { /* stdin 已关闭 */ }
+
+  // ② 仅 POSIX 发 SIGTERM。Windows 上发它 = 立刻强杀，会把 ① 直接作废。
+  if (process.platform !== 'win32') {
+    try { proc.kill('SIGTERM') } catch { /* 已退出 */ }
+  }
+
+  // ③ 等脚本自己退出（给它时间跑清理）。这是关键：以前 fire-and-forget 就 return，
+  //    父进程继续跑/退出，管道数据没送达就被丢弃。
+  if (sent || process.platform !== 'win32') {
+    await new Promise<void>((resolve) => {
+      let settled = false
+      const finish = () => { if (!settled) { settled = true; resolve() } }
+      try { proc.once?.('exit', finish) } catch { /* ignore */ }
+      const t = setTimeout(finish, graceMs)
+      if (typeof t.unref === 'function') t.unref()
+    })
+  }
+
+  // ④ 还在 → 强制终止
+  if (alive()) {
+    try { proc.kill('SIGKILL') } catch { /* 已退出 */ }
+    // 再给一点时间让 close 事件落地，避免调用方立刻读到半截 stdout
+    await new Promise<void>((resolve) => {
+      let settled = false
+      const finish = () => { if (!settled) { settled = true; resolve() } }
+      try { proc.once?.('exit', finish) } catch { /* ignore */ }
+      const t = setTimeout(finish, 1_000)
+      if (typeof t.unref === 'function') t.unref()
+    })
+  }
+}
+
 /** 缓存 TTL：过期后下次 list() 自动重扫 skills/，新技能目录无需重启即可见 */
 const CACHE_TTL = 60_000
 
@@ -692,8 +809,9 @@ export function createSkillService(skillRoot: string, opts?: { statsPath?: strin
         let stdout = ''
         let stderr = ''
         let lastBeat = Date.now()
+        let softWarned = false
         const started = Date.now()
-        const timeout = 300_000  // 5 分钟总超时
+        const timeout = Number(process.env.DSAGENT_SKILL_TOTAL_TIMEOUT_MS) || 300_000  // 5 分钟总超时
 
         proc.stdout?.on('data', (chunk: Buffer) => {
           stdout += chunk.toString('utf8')
@@ -711,30 +829,39 @@ export function createSkillService(skillRoot: string, opts?: { statsPath?: strin
           if (stderr.length > MAX_OUTPUT) stderr = stderr.slice(-MAX_OUTPUT)
         })
 
+        let terminating = false
+        /**
+         * 超时终止时记下「真正的原因」。
+         * ★ 不加这个会被 close 事件抢先结算：terminateGracefully 会等子进程退出，
+         *   子进程退出 → close 先到 → 用脚本清理时打的那行 stderr 当 message
+         *   （实测 message 变成了 "CLEANUP_RAN"，真实原因「超时」被吞掉）。
+         */
+        let timeoutMessage: string | null = null
         const idleCheck = setInterval(() => {
+          if (terminating) return
+          const soft = idleSoftTimeout()
+          const hard = idleHardTimeout()
           if (Date.now() - started > timeout) {
-            proc.kill('SIGKILL')
+            // ★ 2026-11-19：改为优雅终止（协议式 sentinel → 宽限 → 强制），
+            //   让脚本有机会释放账号锁/关浏览器，避免残留状态把后续调用全拖死。
+            terminating = true
+            timeoutMessage = `技能超时（${timeout / 1000} 秒）被终止`
             clearInterval(idleCheck)
-            resolve({
-              ok: false,
-              payload: null,
-              stdout: stdout.slice(-MAX_OUTPUT),
-              stderr,
-              exitCode: -1,
-              message: `技能超时（${timeout / 1000} 秒）被终止`,
-            })
+            void terminateGracefully(proc)
+            return
           }
-          if (Date.now() - lastBeat > IDLE_TIMEOUT) {
-            proc.kill('SIGKILL')
+          const idleFor = Date.now() - lastBeat
+          // 软阈值：只告警不杀。以前这里直接 SIGKILL，导致「正常但慢」的技能被误判为卡死。
+          if (idleFor > soft && !softWarned) {
+            softWarned = true
+            stderr += `[skill-watchdog] ${id} 已 ${Math.round(idleFor / 1000)}s 无输出，继续等待（硬上限 ${Math.round(hard / 1000)}s）…\n`
+          }
+          // 硬阈值：优雅终止（等它退完，让 close 事件带着超时原因结算）
+          if (idleFor > hard) {
+            terminating = true
+            timeoutMessage = `技能 ${Math.round(idleFor / 1000)} 秒无输出，按 idle 超时终止`
             clearInterval(idleCheck)
-            resolve({
-              ok: false,
-              payload: null,
-              stdout: stdout.slice(-MAX_OUTPUT),
-              stderr,
-              exitCode: -1,
-              message: `技能 ${Math.round((Date.now() - lastBeat) / 1000)} 秒无输出，按 idle 超时终止`,
-            })
+            void terminateGracefully(proc)
           }
         }, 1000)
 
@@ -777,7 +904,7 @@ export function createSkillService(skillRoot: string, opts?: { statsPath?: strin
             // ★ needConfirm=true = 「预览已就绪，等用户确认」，不是错误
             if (p.needConfirm === true) payloadOk = true
           }
-          const ok = code === 0 && payloadOk && !noResult
+          const ok = code === 0 && payloadOk && !noResult && !timeoutMessage
           // 失败原因可能写在 message / error / error_message / detail / reason 任一个字段，全部兜住
           let message = ''
           if (typeof payload === 'object' && payload !== null) {
@@ -786,6 +913,9 @@ export function createSkillService(skillRoot: string, opts?: { statsPath?: strin
               // ★ text 是技能脚本最常用的「结论/错误」字段；不兜底会把真实原因吞成「未知错误」
               ?? (typeof p.text === 'string' ? p.text.slice(0, 2000) : ''))
           }
+          // ★ 超时优先：被看门狗终止时，脚本清理日志（如 [terminate-guard] ...）会污染 message，
+          //   真实原因必须压过它。
+          if (timeoutMessage) message = timeoutMessage
           // 兜底：argparse 报错 / 未捕获异常只写 stderr，取最后一行含错误关键字的，退路取最后一行非空
           if (!message) {
             const lines = stderr.split('\n').map(l => l.trim()).filter(Boolean)

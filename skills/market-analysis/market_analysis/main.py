@@ -7,10 +7,11 @@ import re
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Sequence
+from typing import TYPE_CHECKING, Any, Sequence
 
 from .config import (
     BATCH_TIME_BUDGET_SEC,
+    SKU_TIME_BUDGET_SEC,
     artifacts_dir,
     DEFAULT_ITEM_LIMIT,
     EXIT_COOKIE_INVALID,
@@ -130,6 +131,17 @@ def parse_search_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--max_pages", type=int, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--price_min", type=float, default=None, help="最低价格")
     parser.add_argument("--price_max", type=float, default=None, help="最高价格")
+    parser.add_argument(
+        "--sku",
+        action="store_true",
+        help="同时采集每个商品的 SKU 明细（颜色/尺码/券前价/券后价/库存）",
+    )
+    parser.add_argument(
+        "--sku_limit",
+        type=int,
+        default=None,
+        help="SKU 明细最多采集多少个商品，默认 48",
+    )
     return parser.parse_args(list(argv))
 
 
@@ -162,6 +174,9 @@ def collect_keyword_data(
     price_max: float | None,
     output_dir: Path,
     shop_key: str,
+    sku_client: "TaobaoMarketAnalysisClient | None" = None,
+    with_sku: bool = False,
+    sku_item_limit: int | None = None,
 ) -> SkillOutput:
     from .analyzer import build_market_analysis
     from .csv_exporter import export_csv
@@ -176,6 +191,8 @@ def collect_keyword_data(
         page_size=page_size,
         price_min=price_min,
         price_max=price_max,
+        with_sku_override=with_sku,
+        sku_item_limit_override=sku_item_limit,
     )
 
     if not request.keyword:
@@ -245,6 +262,11 @@ def collect_keyword_data(
             sort_method=sort,
         )
 
+    sku_rows: list[dict[str, Any]] = []
+    sku_errors: list[dict[str, Any]] = []
+    sku_summary: dict[str, Any] = {}
+    sku_csv_path = ""
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     csv_name = f"淘宝市场分析_{sanitize_filename(request.keyword)}_{timestamp}.csv"
     csv_path = export_csv(products, output_dir / csv_name)
@@ -254,6 +276,22 @@ def collect_keyword_data(
         total_count=total_count,
         collected_pages=len(page_summaries),
     )
+
+    if request.with_sku and products:
+        from .sku_collector import collect_sku_details
+
+        try:
+            sku_rows, sku_errors, sku_summary, sku_csv_path = collect_sku_details(
+                products,
+                limit=request.sku_item_limit or len(products),
+                output_dir=output_dir,
+                keyword=sanitize_filename(request.keyword),
+                timestamp=timestamp,
+                account=shop_key,
+            )
+        except Exception as exc:  # SKU 阶段失败不影响商品级结果
+            logger.warning("SKU 明细采集失败: %s", exc)
+            sku_errors.append({"item_id": "", "error": f"sku_stage_failed: {exc}"[:300]})
 
     result = SkillOutput(
         status="success",
@@ -270,6 +308,8 @@ def collect_keyword_data(
             "max_pages": request.max_pages,
             "price_min": request.price_min,
             "price_max": request.price_max,
+            "with_sku": request.with_sku,
+            "sku_item_limit": request.sku_item_limit if request.with_sku else 0,
         },
         total_count=total_count,
         collected_pages=len(page_summaries),
@@ -278,6 +318,11 @@ def collect_keyword_data(
         products=[product.to_dict() for product in products],
         csv_path=csv_path,
         analysis=analysis,
+        with_sku=request.with_sku,
+        sku_rows=sku_rows[:3],
+        sku_csv_path=sku_csv_path,
+        sku_summary=sku_summary,
+        sku_errors=sku_errors,
     )
     report_name = f"淘宝市场分析报告_{sanitize_filename(request.keyword)}_{timestamp}.html"
     report_path = output_dir / report_name
@@ -297,8 +342,15 @@ def execute_queries(
     output_dir: Path,
 ) -> list[SkillOutput]:
     from .api_client import TaobaoMarketAnalysisClient
+    from .config import SKU_REQUEST_INTERVAL_SECONDS, SKU_REQUEST_JITTER_SECONDS
 
-    client = TaobaoMarketAnalysisClient(cna=str(binding.get("cna") or ""))
+    cna = str(binding.get("cna") or "")
+    client = TaobaoMarketAnalysisClient(cna=cna)
+    sku_client = TaobaoMarketAnalysisClient(
+        cna=cna,
+        interval_seconds=SKU_REQUEST_INTERVAL_SECONDS,
+        jitter_seconds=SKU_REQUEST_JITTER_SECONDS,
+    )
     shop_key = str(binding.get("shop_key") or "").strip()
     return [
         collect_keyword_data(
@@ -314,6 +366,9 @@ def execute_queries(
             price_max=args.price_max,
             output_dir=output_dir,
             shop_key=shop_key,
+            sku_client=sku_client,
+            with_sku=bool(getattr(args, "sku", False)),
+            sku_item_limit=getattr(args, "sku_limit", None),
         )
         for query in args.queries
     ]
@@ -355,6 +410,7 @@ def run_search(argv: Sequence[str]) -> int:
             JSON=first.json_path if first else "",
             CSV=first.csv_path if first else "",
             HTML=first.report_path if first else "",
+            SKU_CSV=first.sku_csv_path if first else "",
         )
         return EXIT_SUCCESS
     except SkillError as exc:

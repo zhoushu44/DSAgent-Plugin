@@ -8,9 +8,9 @@
   "input": {
     "args": [
       {
-        "name": "product-file",
-        "description": "基础商品 JSON 文件路径（必填）",
-        "flag": "--product-file"
+        "name": "product_file",
+        "flag": "--product-file",
+        "description": "基础商品 JSON 文件路径（必填）"
       },
       {
         "name": "variants",

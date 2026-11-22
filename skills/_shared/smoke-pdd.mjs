@@ -47,7 +47,7 @@ if (!ACCOUNT) {
 /** 每个 skill 的最轻只读调用 */
 const CASES = [
   // ── L2 写操作型：只跑「无 --confirm」的预览/校验分支（零写操作、不启浏览器）──
-  { skill: 'pdd-publish-http', script: 'publish-v2.mjs', args: ['--product-file', '__smoke_product__'], desc: '上架预检（无 confirm，零写）', l2: true, expectNeedConfirm: true },
+  { skill: 'pdd-publish', script: 'publish-v2.mjs', args: ['--product-file', '__smoke_product__'], desc: '上架预检（无 confirm，零写）', l2: true, expectNeedConfirm: true },
   { skill: 'pdd-link-matrix', script: 'matrix.mjs', args: ['--product-file', '__smoke_product__', '--variants', '__smoke_variants_json__'], desc: '矩阵预览（无 confirm，零写）', l2: true, expectNeedConfirm: true },
 
   { skill: 'pdd-works', script: 'query.mjs', args: ['--mode', 'list'], desc: '商品列表（只读）' },
@@ -109,7 +109,27 @@ function runOne(c) {
     })()
   }
   return new Promise((resolve) => {
-    const entry = path.join(SKILLS_DIR, c.skill, 'scripts', c.script)
+    /**
+     * ★ 2026-11-20 修：入口路径**以 contract.json 为准**，不再硬拼 `scripts/`。
+     *
+     *   事故：冒烟脚本写死 `path.join(dir,'scripts',c.script)` 且 CASES 里写的是
+     *   `publish-v2.mjs`，而 pdd-publish 早已重构为 16 步链路，
+     *   真实入口是 `steps/index.mjs`（见其 contract.json）。
+     *   → 冒烟长期报「脚本不存在」，让人误以为技能坏了。
+     *
+     *   现在：先读 contract.entry.script；读不到再回落到旧的 scripts/<name> 约定。
+     *   这样技能内部怎么调结构都不会再让冒烟误报。
+     */
+    const skillDir = path.join(SKILLS_DIR, c.skill)
+    let entry = ''
+    try {
+      const contract = JSON.parse(fs.readFileSync(path.join(skillDir, 'contract.json'), 'utf8'))
+      const s = contract?.entry?.script
+      if (s) entry = path.join(skillDir, s)
+    } catch { /* 没有 contract 就走回落 */ }
+    if (!entry || !fs.existsSync(entry)) {
+      entry = path.join(skillDir, 'scripts', c.script)
+    }
     if (!fs.existsSync(entry)) return resolve({ ...c, status: 'FAIL', detail: '脚本不存在: ' + entry })
 
     const realArgs = c.args.map(a =>

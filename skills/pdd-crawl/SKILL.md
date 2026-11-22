@@ -64,7 +64,7 @@ metadata:
 | 平台 ID | 是什么 | 用在哪 | 当前是否已绑定 |
 |---|---|---|---|
 | `pdd` | 拼多多 **H5 买家态**，Cookie 域 `.yangkeduo.com` | **本技能（pdd-crawl）** | 见下 |
-| `pdd_mms` | 拼多多 **商家后台态**，Cookie 域 `mms.pinduoduo.com` | `pdd-works` / `pdd-shop` / `pdd-promo` / `pdd-publish-http` | — |
+| `pdd_mms` | 拼多多 **商家后台态**，Cookie 域 `mms.pinduoduo.com` | `pdd-works` / `pdd-shop` / `pdd-promo` / `pdd-publish` | — |
 
 **调用本技能前必须确认**：
 

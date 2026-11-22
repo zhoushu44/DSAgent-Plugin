@@ -288,21 +288,66 @@ export async function createSession(shopKey, opts = {}) {
      *   只试 1 次缓存探测已删除，避免反复 evaluate 正在关闭的页面。
      */
     async genSig() {
-      // 现场生成：短等待（长等待会让风控把页面关掉）
-      let lastErr = null
-      for (let i = 0; i < 3; i++) {
-        if (page.isClosed()) return { err: 'page closed' }
-        try {
-          const r = await page.evaluate(() => window.__pddGenRiskSig())
-          if (r?.ok) return r
-          lastErr = r?.err || 'unknown'
-          if (lastErr === 'eDaA module not found') { await sleep(2500); continue }
-          return r
-        } catch (e) {
-          lastErr = String(e).slice(0, 120)
-          await sleep(1500)
+      /**
+       * ★★ 2026-11-19 重写：主路径不用 eDaA，改用 CDP 逆向 ★★
+       *
+       *   教训：原先硬编码从页面 webpack 模块 `eDaA` new 出签名器。
+       *   平台一旦改模块名/移除，整条链路直接死，而且报错极具误导性
+       *   （"eDaA module not found" 看起来像平台改版，实际常常只是页面没加载完
+       *    或干脆被踢到登录页）。
+       *
+       *   现在按顺序：
+       *     ① 先检查是不是被踢到登录页 —— 是就直接返回 login_required，
+       *        别再去试签名、也别报「eDaA not found」误导排查方向；
+       *     ② 试旧路径（eDaA 还在就最快，0 秒）；
+       *     ③ 旧路径不通 → CDP 从真实流量抓 anti-content（见 pdd-cdp-harvest.mjs）。
+       */
+      if (page.isClosed()) return { err: 'page closed' }
+
+      // ① 登录态检查（最容易被误判成"平台改版"的根因）
+      try {
+        const { isLoginPage } = await import(new URL('./pdd-cdp-harvest.mjs', import.meta.url).href)
+        if (await isLoginPage(page)) {
+          return {
+            err: 'login_required',
+            loginRequired: true,
+            hint: '当前 Profile 已掉登录（页面被重定向到 /login）。请到「账号连接」重新扫码登录后再试。',
+          }
         }
+      } catch { /* 检查失败不阻断 */ }
+
+      let lastErr = null
+
+      // ② 旧路径：eDaA 还在的话最快
+      try {
+        const r = await page.evaluate(() => window.__pddGenRiskSig())
+        if (r?.ok) return r
+        lastErr = r?.err || 'unknown'
+        if (lastErr !== 'eDaA module not found') return r
+      } catch (e) {
+        lastErr = String(e).slice(0, 120)
       }
+
+      // ③ CDP 兜底：不依赖任何模块名
+      try {
+        const { createSignHarvester } = await import(new URL('./pdd-cdp-harvest.mjs', import.meta.url).href)
+        const h = await createSignHarvester(page)
+        try {
+          const sig = await h.grab(12_000)
+          if (sig) {
+            return {
+              ok: true, sig, len: sig.length,
+              serverTime: Date.now(), hasTimeBaseline: true, via: 'cdp-harvest',
+            }
+          }
+        } finally {
+          h.dispose()
+        }
+        lastErr = `eDaA missing; cdp: no signature captured`
+      } catch (e) {
+        lastErr = `eDaA missing; cdp: ${String(e).slice(0, 80)}`
+      }
+
       return { err: lastErr }
     },
     async goto(url, waitMs = 12000) {
@@ -397,6 +442,175 @@ export async function createSession(shopKey, opts = {}) {
 }
 
 /**
+ * 通过 CDP 抓取页面真实请求头里的 anti-content。
+ *
+ * ★ 2026-11-19 新增，是本轮签名失效的**真正解法**。
+ *
+ * 背景：
+ *   拼多多已把 webpack 模块名从语义 ID（eDaA）改成 4 位哈希 ——
+ *   实测 goods_effect 页 1186 个模块全是 uR7H / +sIe / ARXd 这类随机串，
+ *   **没有 eDaA**。所以「手工重建 webpack require → new 签名器」彻底失效，
+ *   「多加几次重试」也没意义（模块永远不会再叫 eDaA）。
+ *
+ * 两条被证伪的思路（别再走）：
+ *   ① 页面内 hook XHR/fetch 抓 anti-content —— 抓不到。
+ *      因为签名头是在更底层注入的，不经过 JS 层的 setRequestHeader。
+ *   ② 手工 require 疑似模块（uR7H 等）—— 报
+ *      "Cannot read properties of undefined (reading 'call')"，
+ *      跨 chunk 依赖不在 __pddWpAll 里，模块图不完整。
+ *
+ * 有效解法：
+ *   CDP 的 Network.requestWillBeSent 拿到的是**浏览器实际发出的完整请求头**，
+ *   里面带着平台注入的合法 anti-content（实测 415~418 字符，与原签名长度一致）。
+ *   触发一次页面自身请求，抓下来直接用即可。
+ *
+ * @param {object} session createSession 返回的会话
+ * @returns {Promise<{ok:true,sig:string}|{ok:false,err:string}>}
+ */
+async function harvestAntiContentViaCdp(session) {
+  const page = session?.page
+  if (!page || page.isClosed()) return { ok: false, err: 'page closed' }
+  let cdp = null
+  try {
+    cdp = await page.target().createCDPSession()
+    await cdp.send('Network.enable')
+
+    /**
+     * ★ 关键：**先挂监听再触发请求**，且监听窗口要盖住「触发前后」。
+     *   反例（踩过）：先 await 触发请求、再去等事件 —— 页面请求很快就发完了，
+     *   等我们开始监听时它已经在路上或已结束，自然抓不到。
+     */
+    let resolved = false
+    const captured = await new Promise((resolve) => {
+      const timer = setTimeout(() => { if (!resolved) { resolved = true; resolve(null) } }, 18_000)
+      cdp.on('Network.requestWillBeSent', (e) => {
+        if (resolved) return
+        const h = e?.request?.headers || {}
+        for (const k of Object.keys(h)) {
+          if (/^anti-content$/i.test(k)) {
+            const v = String(h[k])
+            if (v.length > 200) {
+              resolved = true
+              clearTimeout(timer)
+              resolve(v)
+              return
+            }
+          }
+        }
+      })
+
+      /**
+       * 触发页面自身请求。★ 必须复用页面已有的请求路径，不要凭空造 URL：
+       *   实测凭空造的 /mms-gateway/mall/query/mall_info 可能被页面路由拦掉，
+       *   根本不发出去，于是 CDP 什么也看不到。
+       *   改用「页面自己也在用的那些接口」+ 稍微多打几个，命中率高得多。
+       */
+      page.evaluate(() => {
+        const urls = [
+          '/newjersy/api/mms/popup',
+          '/newjersy/api/mms/overlayCard/list',
+          '/cambridge/api/duoduoChicken/queryFagList',
+          '/mms-gateway/mall/query/mall_info',
+        ]
+        for (const u of urls) {
+          try {
+            fetch(u, {
+              method: 'POST', credentials: 'include',
+              headers: { 'content-type': 'application/json' }, body: '{}',
+            }).catch(() => {})
+          } catch { /* ignore */ }
+        }
+      }).catch(() => {})
+
+      // 8 秒后若仍未命中，再补一轮页面自身请求（不 reload，避免丢失页面上下文）
+      setTimeout(() => {
+        if (resolved) return
+        page.evaluate(() => {
+          const urls = [
+            '/newjersy/api/mms/popup',
+            '/cambridge/api/duoduoChicken/queryFagList',
+          ]
+          for (const u of urls) {
+            try {
+              fetch(u, {
+                method: 'POST', credentials: 'include',
+                headers: { 'content-type': 'application/json' }, body: '{}',
+              }).catch(() => {})
+            } catch { /* ignore */ }
+          }
+        }).catch(() => {})
+      }, 8_000)
+    })
+
+    if (captured) return { ok: true, sig: captured }
+    return { ok: false, err: 'no anti-content captured via CDP' }
+  } catch (e) {
+    return { ok: false, err: String(e).slice(0, 100) }
+  } finally {
+    try { await cdp?.detach() } catch { /* ignore */ }
+  }
+}
+
+/**
+ * 让页面自己发一条同域请求，捕获平台自动注入的 anti-content（JS 层 hook，备用）。
+ *
+ * ⚠️ 实践结论：**基本抓不到**（签名头在更底层注入，不经过 JS setRequestHeader）。
+ * 保留仅作极少数环境下的兜底，主路径请用 harvestAntiContentViaCdp。
+ *
+ * @param {import('puppeteer-core').Page} page
+ * @returns {Promise<{ok:true,sig:string}|{ok:false,err:string}>}
+ */
+async function harvestPageAntiContent(page) {
+  try {
+    const r = await page.evaluate(async () => {
+      let captured = null
+      const OX = XMLHttpRequest.prototype.open
+      const OH = XMLHttpRequest.prototype.setRequestHeader
+      XMLHttpRequest.prototype.open = function (m, u) { this.__u = u; return OX.apply(this, arguments) }
+      XMLHttpRequest.prototype.setRequestHeader = function (k, v) {
+        if (/^anti-content$/i.test(k)) captured = String(v)
+        return OH.apply(this, arguments)
+      }
+      const OF = window.fetch
+      window.fetch = function (input, init) {
+        try {
+          const h = init && init.headers
+          if (h) {
+            const get = (n) => (typeof h.get === 'function' ? h.get(n) : (h[n] ?? h[n.toLowerCase()]))
+            const v = get('anti-content') || get('Anti-Content')
+            if (v) captured = String(v)
+          }
+        } catch { /* ignore */ }
+        return OF.apply(this, arguments)
+      }
+
+      try {
+        await fetch('https://mms.pinduoduo.com/mms-gateway/mall/query/mall_info', {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'content-type': 'application/json' },
+          body: '{}',
+        })
+      } catch { /* 业务结果不重要 */ }
+
+      for (let i = 0; i < 25 && !captured; i++) {
+        await new Promise(r2 => setTimeout(r2, 150))
+      }
+
+      XMLHttpRequest.prototype.open = OX
+      XMLHttpRequest.prototype.setRequestHeader = OH
+      window.fetch = OF
+
+      return captured ? { ok: true, sig: captured } : { ok: false, err: 'no anti-content captured' }
+    })
+    if (r?.ok && r.sig) return { ok: true, sig: r.sig }
+    return { ok: false, err: r?.err || 'harvest failed' }
+  } catch (e) {
+    return { ok: false, err: String(e).slice(0, 100) }
+  }
+}
+
+/**
  * 统一请求
  *
  * @param {object} o
@@ -411,8 +625,7 @@ export async function createSession(shopKey, opts = {}) {
  * @param {boolean} [o.skipThrottle] 内部用
  * @param {number} [o.maxRetry]  默认 2
  */
-export async function call(o) {
-  const {
+export async function call(o) {  const {
     shopKey, url, body = {}, method = 'POST', referer,
     session, cookies: cookiesOverride,
     maxRetry = 2,
@@ -485,6 +698,15 @@ export async function call(o) {
     } else {
       const r = await session.genSig()
       if (!r?.ok) {
+        // ★ 2026-11-19：登录态失效不要伪装成签名错误 —— 两者处置完全不同。
+        if (r?.loginRequired) {
+          return {
+            ok: false,
+            kind: 'login_required',
+            hint: r.hint || '当前 Profile 已掉登录，请重新扫码登录',
+            tier,
+          }
+        }
         return { ok: false, kind: 'signature_error', hint: `真签名失败: ${r?.err}`, tier }
       }
       anti = r.sig

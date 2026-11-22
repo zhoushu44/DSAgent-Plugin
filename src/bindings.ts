@@ -36,6 +36,7 @@ export const BINDING_RULES: Array<[string, string]> = [
   ['xiaohongshu-crawl', 'xhs'],
   ['xiaohongshu-publish', 'xhs'],
   ['xiaohongshu-analytics', 'xhs'],
+  ['xhs-publish-re', 'xhs'],
   // xianyu 平台（闲鱼）
   ['xianyu-crawl', 'xianyu'],
   ['xianyu-publish', 'xianyu'],

@@ -1,35 +1,36 @@
 #!/usr/bin/env node
 /**
- * 抖音小店·活动报名（douyin-activity）—— 只读
+ * 抖音小店·营销活动查询（douyin-activity）—— 只读
  *
- * 数据源：抖店后台营销活动子应用 fxg.jinritemai.com。
- * 采用「打开页面 → hook 页面自己发的响应」取数（与 pdd-activity 同思路）。
+ * ══════════════════════════════════════════════════════════════════
+ * 2026-11-11 改造 + 重新定位
+ * ══════════════════════════════════════════════════════════════════
+ * 【改造前】goto 页面 hook 响应，但 4 个接口全是 TODO 占位 → 永远返回"接口待回填"
+ * 【改造后】纯 Node，真实可用接口
  *
- * 能力：
- *   overview   活动总览（类型数 + 可报名活动数 + 推荐活动）
- *   list       可报名活动列表（活动ID/名称/类型/时间/报名截止）
- *   types      活动类型清单（含关键词说明）
- *   records    报名记录列表（活动ID/商品/状态）
+ * ★ 重要重新定位（实测发现）：
+ *   本账号 get_activity_gray = { enable: false, membership: false, msg: "无该配置" }
+ *   → 该店铺**没有【平台活动报名】权限**（抖音大促/秒杀等官方活动）
+ *   → 但有【自建营销工具】权限，共 24 个（单品直降/优惠券/满减/赠品/裂变…）
  *
- * 规划中（本版不实现）：enroll / quit（L2 写操作）。
- * contract 已预留 --confirm 参数位，写模式落地时按两步走门禁接入。
+ *   所以本技能从「平台活动报名」改为「营销活动 & 工具」：
+ *     tools     营销工具清单（24 个，含入口 URL / 描述 / 场景）
+ *     overview  营销总览（权限 + 工具数 + 满减活动数 + 推广数据）
+ *     list      满减/多件优惠活动列表
+ *     data      营销推广数据
+ *     perm      活动报名权限自检
  *
- * 用法：node scripts/activity.mjs --mode overview
+ *   如果将来这个账号拿到平台活动权限（enable=true），再补报名类接口。
  *
- * ⚠️ 当前为桩实现：APIS 常量里的接口 path 尚未回填，
- *    未取到数据时明确返回 api_error，绝不伪造成功。
+ * 报名（enroll）/ 取消（quit）仍是 L2 写操作，**未实现**且明确拒绝。
  */
-
-import { homedir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const PLUGIN_ROOT = process.env.DSAGENT_PLUGIN_ROOT || join(HERE, '..', '..', '..')
-// Windows 下绝对路径必须转 file:// URL 才能被 ESM loader 接受
 const PURL = (p) => pathToFileURL(p).href
 
-// ── 参数解析 ──────────────────────────────────────────────
 function parseArgs(argv) {
   const out = {}
   for (let i = 2; i < argv.length; i++) {
@@ -43,14 +44,12 @@ function parseArgs(argv) {
   return out
 }
 const ARGS = parseArgs(process.argv)
-const truthy = (v) => String(v ?? '').trim().toLowerCase() === 'true'
 
 const MODE = (ARGS.mode || 'overview').trim()
 const LIMIT = Math.min(100, Math.max(1, parseInt(ARGS.limit || '20', 10) || 20))
-const CONFIRM = truthy(ARGS.confirm)
 const ACCOUNT = (ARGS.account || '').trim()
+const ACTIVITY_STATUS = ARGS.status !== undefined ? parseInt(ARGS.status, 10) : 0
 
-// 必须是**单行** JSON：宿主按行读取 __DSAGENT_RESULT__ 协议
 function emit(payload) {
   process.stdout.write('__DSAGENT_RESULT__' + JSON.stringify(payload) + '\n')
 }
@@ -59,240 +58,179 @@ function fail(kind, message, extra = {}) {
   process.exit(1)
 }
 const log = (msg) => console.error('[douyin-activity] ' + msg)
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
-// 规划中的写模式：本版不实现，遇到直接明确返回
-const WRITE_MODES = ['enroll', 'quit']
+const { loadAccount } = await import(PURL(join(PLUGIN_ROOT, 'skills', '_shared', 'douyin-request.mjs')))
+const { withDouyinGuard } = await import(PURL(join(PLUGIN_ROOT, 'skills', '_shared', 'douyin-guard.mjs')))
+
+const accRes = await loadAccount('douyin_shop', ACCOUNT)
+if (!accRes.ok) {
+  if (accRes.errorKind === 'need_account_choice') {
+    fail('need_account_choice', accRes.message, {
+      accounts: accRes.accounts.map((a) => ({ shop_key: a.shop_key, nickname: a.nickname })),
+    })
+  }
+  if (accRes.errorKind === 'not_bound') {
+    fail('not_bound', '未找到抖音小店账号。请到「账号连接」页面添加「抖店」账号（platform=douyin_shop）。')
+  }
+  fail('api_error', accRes.message)
+}
+const account = accRes.account
+
+const WRITE_MODES = ['enroll', 'quit', 'signup']
 if (WRITE_MODES.includes(MODE)) {
   fail('api_error',
-    `${MODE} 是 L2 写操作，本版未实现（规划中）。当前只支持：overview / list / types / records。`
-    + `--confirm 参数位已在 contract 预留，写模式落地后按两步走门禁接入。`,
-    { mode: MODE, planned: true })
+    `mode=${MODE} 是 L2 写操作，本版未实现（需 --confirm 门禁 + 真实提交链路）。`
+    + `另：本账号 get_activity_gray.enable=false，无平台活动报名权限。`,
+    { mode: MODE, available: ['overview', 'tools', 'list', 'data', 'perm'] })
+}
+if (!['overview', 'tools', 'list', 'data', 'perm'].includes(MODE)) {
+  fail('api_error', `未知 mode：${MODE}。可用：overview / tools / list / data / perm`, { mode: MODE })
 }
 
-// ── 账号选择 ──────────────────────────────────────────────
-let store, CredentialStore
-let profileDir, findChromePath, tryAcquireProfile, releaseProfile, clearProfileLocks
-try {
-  ;({ CredentialStore } = await import(PURL(join(PLUGIN_ROOT, 'lib', 'services', 'credential-store.js'))))
-  ;({ profileDir, findChromePath, tryAcquireProfile, releaseProfile, clearProfileLocks } =
-    await import(PURL(join(PLUGIN_ROOT, 'lib', 'browser-login.js'))))
-  store = new CredentialStore(join(homedir(), '.dsh', 'dsagent-accounts.json'))
-} catch (e) {
-  fail('api_error', `无法加载插件库（${PLUGIN_ROOT}）：${e.message}`)
-}
+// ══════════════════════════════════════════════════════════════
+// 取数
+// ══════════════════════════════════════════════════════════════
+const R = { gray: null, tools: null, list: null, data: null }
 
-// 抖店后台用独立平台键 douyin_shop（与内容平台 douyin 两套独立登录态）
-const accounts = store.listAccounts().filter((a) => a.platform === 'douyin_shop' && a.status !== 'invalid')
-if (!accounts.length) {
-  fail('not_bound', '未找到抖音小店账号。请到「账号连接」页面添加「抖店」账号（platform=douyin_shop，需有抖店商家权限）。')
-}
-let account
-if (ACCOUNT) {
-  account = accounts.find((a) => a.shop_key === ACCOUNT)
-  if (!account) {
-    fail('api_error', `账号 shopKey 不存在：${ACCOUNT}。可用：${accounts.map((a) => a.shop_key).join(' / ')}`)
-  }
-} else if (accounts.length === 1) {
-  account = accounts[0]
-} else {
-  fail('need_account_choice',
-    `抖音平台有 ${accounts.length} 个可用账号，请指定 --account：\n`
-    + accounts.map((a, i) => `${i + 1}. ${a.nickname}（${a.shop_key}）`).join('\n'),
-    { accounts: accounts.map((a) => ({ shop_key: a.shop_key, nickname: a.nickname })) })
-}
+await withDouyinGuard('douyin-activity', account.shop_key, async (g) => {
+  const calls = []
+  if (MODE === 'overview' || MODE === 'perm') calls.push(['gray', 'marketing.activityGray', {}])
+  if (MODE === 'overview' || MODE === 'tools') calls.push(['tools', 'marketing.tools', {}])
+  if (MODE === 'overview' || MODE === 'list') calls.push(['list', 'marketing.fullDiscount', { activity_status: ACTIVITY_STATUS, page: 1, pageSize: LIMIT }])
+  if (MODE === 'overview' || MODE === 'data') calls.push(['data', 'marketing.promoData', { source_type: 1, date_type: 7, from_platform: 1, appid: 1 }])
 
-const dir = profileDir('douyin_shop', account.shop_key)
-if (!tryAcquireProfile(dir, 'douyin-activity')) {
-  fail('api_error', '抖店的浏览器环境正被其他任务占用，请稍后重试。')
-}
-clearProfileLocks(dir)
-
-let browser = null
-try {
-  const puppeteer = await import(PURL(join(PLUGIN_ROOT, 'node_modules', 'puppeteer-core',
-    'lib', 'esm', 'puppeteer', 'puppeteer-core.js')))
-  const chromePath = findChromePath()
-  if (!chromePath) fail('api_error', '未找到 Chrome 或 Edge 浏览器')
-
-  browser = await puppeteer.default.launch({
-    headless: false,
-    executablePath: chromePath,
-    userDataDir: dir,
-    defaultViewport: { width: 1400, height: 900 },
-    args: ['--no-sandbox', '--disable-blink-features=AutomationControlled', '--window-size=1400,900'],
-  })
-  const page = (await browser.pages())[0] || await browser.newPage()
-
-  // 抖店后台域 + 抖音主域双域注入（与 _douyin_probe 一致）
-  const cookieList = Object.entries(account.cookies || {})
-    .filter(([, v]) => v !== '' && v != null)
-    .flatMap(([name, value]) => [
-      { name, value: String(value), domain: '.jinritemai.com', path: '/' },
-      { name, value: String(value), domain: '.douyin.com', path: '/' },
-    ])
-  if (cookieList.length) await page.setCookie(...cookieList)
-
-  const cdp = await page.target().createCDPSession()
-  await cdp.send('Network.enable')
-
-  // ── APIS：接口 path 片段 → key ───────────────────────────
-  // TODO(待探测回填)：跑 node skills/_douyin_probe/probe.mjs，从 probe-out/hits-*.json
-  //   里按响应内容定位下列用途的真实接口，把 'TODO:...' 换成 path 片段。
-  //   含 'TODO' 的条目不参与匹配（见 ACTIVE_APIS），回填后自动生效。
-  const APIS = [
-    ['actOverview',  'TODO:活动总览接口 path 片段'],
-    ['actList',      'TODO:可报名活动列表接口 path 片段'],
-    ['actTypes',     'TODO:活动类型清单接口 path 片段'],
-    ['actRecords',   'TODO:报名记录接口 path 片段'],
-  ]
-  const ACTIVE_APIS = APIS.filter(([, frag]) => frag && !String(frag).startsWith('TODO'))
-
-  // 落 globalThis.__HITS：{key, url, status, data}
-  globalThis.__HITS = globalThis.__HITS || []
-  const byApi = {}
-
-  cdp.on('Network.responseReceived', async (e) => {
-    try {
-      if (e.response.status !== 200) return
-      const u = e.response.url
-      if (!/jinritemai\.com|douyin\.com/.test(u)) return
-      if (!/json|text|plain/.test(e.response.mimeType || '')) return
-      const hit = ACTIVE_APIS.find(([, frag]) => u.includes(frag))
-      if (!hit) return
-      const b = await cdp.send('Network.getResponseBody', { requestId: e.requestId })
-      const body = b.body || ''
-      let j = null
-      try { j = JSON.parse(body) } catch { /* 非 JSON，跳过 */ }
-      if (!j) return
-      const rec = { key: hit[0], url: u.slice(0, 300), status: e.response.status, data: j }
-      globalThis.__HITS.push(rec)
-      const okCode = j.st === 0 || j.code === 0 || j.code === '0' || j.success === true
-      if (okCode) byApi[hit[0]] = j.data ?? j
-    } catch { /* 单条失败不阻断 */ }
-  })
-
-  // 打开抖店后台活动页，让页面自己发数据请求
-  // TODO(待探测回填)：按真实页面路由调整（如 /ffa/marketing/activity）
-  const PAGES = [
-    'https://fxg.jinritemai.com/ffa/marketing/activity',
-    'https://fxg.jinritemai.com/ffa/marketing/activity/records',
-  ]
-  for (const u of PAGES) {
-    try {
-      log('open ' + u)
-      await page.goto(u, { waitUntil: 'domcontentloaded', timeout: 45000 })
-      await sleep(12000)
-      if (/\/login|passport/i.test(page.url())) {
-        fail('token_expired', '抖店后台登录态已失效，请到「账号连接」页面对该账号重新登录后重试。')
-      }
-    } catch (e) {
-      log('goto fail: ' + (e?.message || e))
+  for (const [key, api, params] of calls) {
+    const r = await g.call(api, params, { account })
+    R[key] = r
+    if (!r.ok) {
+      fail(r.errorKind === 'session' ? 'token_expired' : 'api_error',
+        `接口 ${api} 失败（${r.errorKind}）：${r.msg || r.message || ''}`
+        + (r.hint ? `\n提示：${r.hint}` : ''),
+        { api, st: r.st, code: r.code })
     }
   }
+})
 
-  // ── 桩守卫：接口未回填或未取到数据 → 明确失败，不假成功 ──
-  const hitCount = globalThis.__HITS.length
-  if (!ACTIVE_APIS.length) {
-    fail('api_error', '接口待回填：先跑探测脚本（node skills/_douyin_probe/probe.mjs），'
-      + '把真实接口 path 填进 scripts/activity.mjs 的 APIS 常量。',
-      { mode: MODE, stub: true, pages: PAGES, hits: hitCount })
-  }
-  if (!hitCount) {
-    fail('api_error', '接口待回填：已打开活动页面但未拦截到任何目标接口响应。'
-      + '请先跑探测脚本确认页面是否登录、接口 path 是否变化。',
-      { mode: MODE, stub: true, pages: PAGES, hits: 0, activeApis: ACTIVE_APIS.map(([k, f]) => `${k}=${f}`) })
-  }
+// ══════════════════════════════════════════════════════════════
+// 解析
+// ══════════════════════════════════════════════════════════════
+const gray = R.gray?.data || null
+const toolsData = R.tools?.data || null
+const listData = R.list?.data || null
+const promoData = R.data?.data || null
 
-  // ── 解析 ────────────────────────────────────────────────
-  // TODO(待探测回填)：以下字段映射需按真实响应结构调整
-  const aOverview = byApi.actOverview || null
-  const aList = byApi.actList?.list || byApi.actList?.activities || byApi.actList?.items || []
-  const aTypes = byApi.actTypes?.list || byApi.actTypes?.types || byApi.actTypes?.items || []
-  const aRecords = byApi.actRecords?.list || byApi.actRecords?.records || byApi.actRecords?.items || []
+const toolCards = (toolsData?.tool_cards || []).map((c) => ({
+  name: c.strategy_name,
+  desc: c.strategy_desc,
+  toolId: c.strategy_tool,
+  listUrl: c.activity_list_url,
+  jumpUrl: c.jump_url,
+  tags: c.tool_tags || [],
+  scenes: c.applicable_scene || [],
+  noPermission: c.no_permission_verify === true,
+}))
+const toolCates = (toolsData?.tool_cates || []).map((c) => ({ label: c.label, count: (c.strategy_tools || []).length }))
 
-  const typeItems = aTypes.slice(0, LIMIT).map((t) => ({
-    // TODO(待探测回填)：按真实字段名调整
-    id: t.type_id ?? t.id ?? null,
-    name: t.name ?? t.type_name ?? '',
-    keywords: t.keywords ?? t.description ?? null,
-  }))
+const out = { ok: true, mode: MODE, shopKey: account.shop_key }
+const lines = []
+out.perf = Object.fromEntries(Object.entries(R).filter(([, v]) => v).map(([k, v]) => [k + 'Ms', v.ms]))
 
-  const actItems = aList.slice(0, LIMIT).map((a) => ({
-    // TODO(待探测回填)：按真实字段名调整
-    id: a.activity_id ?? a.id ?? null,
-    name: a.name ?? a.activity_name ?? '',
-    type: a.type ?? a.type_name ?? null,
-    startTime: a.start_time ?? null,
-    endTime: a.end_time ?? null,
-    deadline: a.enroll_deadline ?? a.deadline ?? null,
-  }))
+// 权限（贯穿所有模式都告知）
+const hasPlatformActivity = gray?.enable === true || gray?.membership === true
+out.activityPermission = {
+  enable: gray?.enable ?? null,
+  membership: gray?.membership ?? null,
+  note: hasPlatformActivity
+    ? '有平台活动报名权限'
+    : '无平台活动报名权限（get_activity_gray.enable=false）；可用的是自建营销工具',
+}
 
-  const recItems = aRecords.slice(0, LIMIT).map((r) => ({
-    // TODO(待探测回填)：按真实字段名调整
-    activityId: r.activity_id ?? null,
-    activityName: r.activity_name ?? null,
-    goodsId: r.product_id ?? r.goods_id ?? null,
-    status: r.status ?? r.audit_status ?? null,
-  }))
+if (MODE === 'perm') {
+  out.gray = gray
+  lines.push('活动报名权限自检：')
+  lines.push(`  enable=${gray?.enable ?? '—'}  membership=${gray?.membership ?? '—'}`)
+  lines.push(`  ${out.activityPermission.note}`)
+  out.text = lines.join('\n')
+}
 
-  const out = { ok: true, mode: MODE, shopKey: account.shop_key, items: [] }
-  const lines = []
-
-  if (MODE === 'overview') {
-    out.activityTypes = typeItems
-    out.activities = actItems
-    out.recommended = aOverview?.recommended ?? aOverview?.recommend_activities ?? null
-    lines.push('活动总览：')
-    lines.push(`  活动类型数：${typeItems.length || (aOverview?.type_count ?? '—')}`)
-    lines.push(`  可报名活动数：${actItems.length || (aOverview?.activity_count ?? '—')}`)
-    if (Array.isArray(out.recommended) && out.recommended.length) {
-      lines.push('  推荐活动：')
-      out.recommended.slice(0, 5).forEach((r) => lines.push(`    · ${r.name ?? r.title ?? JSON.stringify(r).slice(0, 60)}`))
+if (MODE === 'overview' || MODE === 'tools') {
+  out.tools = toolCards
+  out.toolCates = toolCates
+  out.toolCount = toolCards.length
+  if (MODE === 'tools') {
+    lines.push(`营销工具（${toolCards.length} 个）：`)
+    for (const t of toolCards) {
+      lines.push(`  · ${t.name}${t.tags.length ? `（${t.tags.join('/')}）` : ''}`)
+      if (t.desc) lines.push(`      ${t.desc}`)
+      if (t.listUrl) lines.push(`      入口：${t.listUrl}`)
     }
-    out.text = lines.join('\n') || '活动总览：暂无数据'
+    if (!hasPlatformActivity) {
+      lines.push('')
+      lines.push('注：本账号无「平台活动报名」权限（大促/秒杀等官方活动），以上为自建营销工具。')
+    }
+    out.text = lines.join('\n')
   }
+}
 
+if (MODE === 'overview' || MODE === 'list') {
+  out.total = listData?.total ?? 0
+  out.page = listData?.page ?? null
+  out.size = listData?.size ?? null
+  out.activityStatus = ACTIVITY_STATUS
+  // 满减活动列表本体（接口返回里除 total/page/size 外的字段）
+  const listItems = listData?.activity_list || listData?.list || listData?.items || []
+  out.activities = Array.isArray(listItems) ? listItems.slice(0, LIMIT) : []
   if (MODE === 'list') {
-    out.activities = actItems
-    out.items = actItems
-    out.text = actItems.length
-      ? `可报名活动（${actItems.length} 个）：\n` + actItems.map((a, i) =>
-          `  ${i + 1}. [${a.id}] ${String(a.name).slice(0, 30)}`
-          + `\n     类型=${a.type ?? '—'} 时间=${a.startTime ?? '—'} ~ ${a.endTime ?? '—'} 报名截止=${a.deadline ?? '—'}`
-        ).join('\n')
-      : '可报名活动：暂无数据'
+    lines.push(`满减/多件优惠活动（status=${ACTIVITY_STATUS}，共 ${out.total} 个）：`)
+    if (out.activities.length) {
+      out.activities.forEach((a, i) => {
+        lines.push(`  ${i + 1}. [${a.activity_id ?? a.id ?? '—'}] ${a.activity_name ?? a.name ?? a.title ?? '—'}`)
+        if (a.start_time || a.end_time) lines.push(`     时间：${a.start_time ?? '—'} ~ ${a.end_time ?? '—'}`)
+      })
+    } else {
+      lines.push('  暂无活动（该状态下列表为空）')
+    }
+    out.text = lines.join('\n')
   }
-
-  if (MODE === 'types') {
-    out.activityTypes = typeItems
-    out.items = typeItems
-    out.text = typeItems.length
-      ? `活动类型（${typeItems.length} 种）：\n` + typeItems.map((t, i) =>
-          `  ${i + 1}. [${t.id}] ${String(t.name).slice(0, 30)}${t.keywords ? ` — ${String(t.keywords).slice(0, 40)}` : ''}`
-        ).join('\n')
-      : '活动类型：暂无数据'
-  }
-
-  if (MODE === 'records') {
-    out.records = recItems
-    out.items = recItems
-    out.text = recItems.length
-      ? `报名记录（${recItems.length} 条）：\n` + recItems.map((r, i) =>
-          `  ${i + 1}. [${r.activityId}] ${String(r.activityName ?? '').slice(0, 30)}`
-          + `\n     商品=${r.goodsId ?? '—'} 状态=${r.status ?? '—'}`
-        ).join('\n')
-      : '报名记录：暂无数据'
-  }
-
-  if (!['overview', 'list', 'types', 'records'].includes(MODE)) {
-    fail('api_error', `未知 mode：${MODE}。可用：overview / list / types / records`, { mode: MODE })
-  }
-
-  emit(out)
-} catch (err) {
-  fail('api_error', `抖音活动查询异常：${err instanceof Error ? err.message : String(err)}`)
-} finally {
-  if (browser) { try { await browser.close() } catch { /* ignore */ } }
-  releaseProfile(dir)
 }
+
+if (MODE === 'overview' || MODE === 'data') {
+  out.promoData = promoData
+  if (MODE === 'data') {
+    lines.push('营销推广数据（近 7 天）：')
+    const stats = promoData?.stats_data || {}
+    if (Object.keys(stats).length) {
+      for (const [k, v] of Object.entries(stats).slice(0, 20)) {
+        const val = (v && typeof v === 'object') ? JSON.stringify(v).slice(0, 60) : v
+        lines.push(`  ${k}：${val}`)
+      }
+    } else {
+      lines.push('  暂无数据')
+    }
+    out.text = lines.join('\n')
+  }
+}
+
+if (MODE === 'overview') {
+  lines.length = 0
+  lines.push('营销活动总览：')
+  lines.push(`  平台活动报名权限：${hasPlatformActivity ? '有' : '无'}`)
+  lines.push(`  自建营销工具：${toolCards.length} 个`)
+  lines.push(`  满减/多件优惠活动：${out.total ?? 0} 个`)
+  if (toolCards.length) {
+    const names = toolCards.slice(0, 8).map((t) => t.name).join('、')
+    lines.push(`  常用工具：${names}${toolCards.length > 8 ? ' 等' : ''}`)
+  }
+  if (promoData?.stats_data) {
+    const keys = Object.keys(promoData.stats_data)
+    if (keys.length) lines.push(`  推广数据字段：${keys.slice(0, 6).join('、')}`)
+  }
+  if (!hasPlatformActivity) {
+    lines.push('')
+    lines.push('提示：该店铺无平台活动报名权限，营销动作走「自建营销工具」（单品直降/优惠券/满减等）。')
+  }
+  out.text = lines.join('\n')
+}
+
+emit(out)
+process.exit(0)

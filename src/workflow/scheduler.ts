@@ -11,11 +11,10 @@
  *   4. lastRunAt / nextRunAt 写回模板 YAML，进程重启可恢复
  */
 
-import { readdir, readFile, writeFile } from 'node:fs/promises'
-import { existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { readFile, writeFile } from 'node:fs/promises'
 import { parse, stringify } from 'yaml'
 import type { WorkflowSchedule } from './types.ts'
+import { listWorkflowFiles } from './layout.js'
 
 /** 轮询间隔（毫秒） */
 const TICK_MS = 60_000
@@ -50,9 +49,8 @@ export function createWorkflowScheduler(deps: {
   const fired = new Set<string>()
 
   async function listTemplateFiles(): Promise<string[]> {
-    if (!existsSync(workflowDir)) return []
-    const files = await readdir(workflowDir)
-    return files.filter((f) => /\.ya?ml$/i.test(f)).map((f) => join(workflowDir, f))
+    // 两种布局并存：文件夹 <name>/workflow.yaml + 单层 <name>.yaml（见 layout.ts）
+    return listWorkflowFiles(workflowDir).map((r) => r.file)
   }
 
   async function readRaw(file: string): Promise<Record<string, any> | null> {

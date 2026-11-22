@@ -33,8 +33,26 @@ export type WorkflowFailureStrategy = 'continue' | 'abort'
 export interface WorkflowStep {
   /** 步骤名称，如「找款式」 */
   name: string
-  /** 技能 id（skill-service 的技能标识） */
-  skill: string
+  /**
+   * 技能 id（skill-service 的技能标识）。
+   *
+   * 与 `script` 二选一：
+   *   · `skill:` 调已注册技能（走 contract / args）
+   *   · `script:` 调本工作流文件夹内的私有脚本（不需要注册成技能）
+   */
+  skill?: string
+  /**
+   * 工作流私有脚本，相对路径（相对于该工作流所在目录）。
+   *
+   * 例：`scripts/run.py`、`scripts/build.mjs`
+   *
+   * 约定：
+   *   · 只能落在工作流目录内（禁止 ../ 越界）
+   *   · 按扩展名选解释器：.mjs/.cjs/.js → node；.py → python
+   *   · 脚本自己负责输出 `__DSAGENT_RESULT__` 单行 JSON
+   *   · 与 `skill` 互斥；两者都给时以 `script` 为准
+   */
+  script?: string
   /** 参数绑定：值为 `{{var}}` 引用或固定常量 */
   args?: Record<string, string>
   /** 输出变量名（自动注册到变量面板的「步骤输出」分组） */

@@ -31,29 +31,43 @@ metadata:
 
 **视频不再是推广对象，而是投放素材**（抖音号视频 / 本地上传 / 直播剪辑）。
 
-## ★ 取数方式：必须 hook 页面自己的响应
+## ★ 取数方式：纯 Node 直连（2026-11-11 改造）
 
-千川接口带 **verifyFp / fp 签名参数**，手工 `fetch` 会撞
-「路径权限校验失败」(`status_code 40002`)。
+> ### ⚠️ 本节推翻旧结论
+>
+> ~~「千川接口带 verifyFp/fp 签名，手工 fetch 会撞 40002，必须 hook 页面」~~
+>
+> **这个结论是错的。** 实测同一接口三种方式：
+> ```
+> 带 a_bogus+verifyFp+fp+msToken  → code=0  789B  ✅
+> 剥净签名                        → code=0  789B  ✅
+> 完全手工零参数                  → code=0  789B  ✅
+> ```
+> 旧文档说的「40002」实际是 **`code=2` 业务参数缺失**，不是签名问题。
+>
+> **现在走纯 Node**：`overview` 16~20s → **1.9s**，`balance` → **584ms**。
+> 依据见 `_shared/DOUYIN-KNOWLEDGE.md` 与 `_douyin_node_probe/REPORT.md`。
 
-**所以必须「打开页面 → hook 页面自己发的响应」**，不能主动 fetch。
+**唯一真缺口：POST 接口的 body 必须带业务参数。**
+
+| 接口 | body 要求 |
+|---|---|
+| `list-summary` | `{DiscardTotalNum, AdFilter:{MarGoal,AdlabMode,CustomFilterType,UniPromShopFilter,StartTime,EndTime}, Metrics:[]}`；空 `{}` → `code=2` |
+| `statQuery` | `{StartTime,EndTime,ComparisonParams,DataSetKey,Dimensions,Metrics,Filters}` |
+| `getAnalysisReport` | `{}` 即可 |
 
 ## 用法
 
 ```bash
-node scripts/uni-prom.mjs --mode overview                          # 投放总览
-node scripts/uni-prom.mjs --mode report --start 2026-10-01 --end 2026-10-24
-node scripts/uni-prom.mjs --mode report --dimensions stat_time_day,marketing_goal
-node scripts/uni-prom.mjs --mode plans                             # 计划列表
-node scripts/uni-prom.mjs --mode materials                         # 素材来源
-node scripts/uni-prom.mjs --mode awemes                            # 已授权抖音号
-node scripts/uni-prom.mjs --mode perm                              # 写权限自检
-node scripts/uni-prom.mjs --mode material-report                   # 素材分析报表
-node scripts/uni-prom.mjs --mode material-report --material_type 3 --limit 20
+node scripts/uni-prom.mjs --mode overview                 # 投放总览（余额+账户+计划数+分析）
+node scripts/uni-prom.mjs --mode balance                  # 余额明细（按 advBalanceType 分组）
+node scripts/uni-prom.mjs --mode perm                     # 权限自检
+node scripts/uni-prom.mjs --mode plans                    # 计划列表汇总
+node scripts/uni-prom.mjs --mode report --start 2026-11-01 --end 2026-11-12
+node scripts/uni-prom.mjs --mode analysis                 # 经营分析报告
 
-# ── 利润与涨价建议（只读，纯本地计算，不开浏览器、零平台副作用）──
+# ── 利润与涨价建议（只读，纯本地计算，零平台副作用）──
 node scripts/uni-prom.mjs --mode margin --price 39.9 --cost 33
-node scripts/uni-prom.mjs --mode margin --price 39.9 --cost 33 --net-roi 2.8
 ```
 
 ### `margin` 模式：什么时候用、怎么算
@@ -138,26 +152,26 @@ node scripts/uni-prom.mjs --mode margin --price 39.9 --cost 33 --net-roi 2.8
 
 | mode | 产出 |
 |---|---|
-| `overview` | 投放总览：余额 + 账户 + 今日/昨日核心指标 |
-| `report` | 报表：消耗/GMV/订单/ROI，按维度汇总，支持自定义日期 |
-| `plans` | 计划列表与汇总 |
-| `materials` | 素材列表（抖音号视频，即「视频推广」的素材面） |
-| `awemes` | 已授权抖音号列表 |
-| `perm` | 写权限自检（能否上传/启停/新建） |
-| `material-report` | 素材分析报表（数据-全域数据-素材数据-视频素材） |
-| `margin` | ★ 利润率 → 涨价安全垫（纯本地计算，不开浏览器、零副作用，三平台同口径） |
+| `overview` | 投放总览：余额 + 账户 + 权限 + 计划数 + 分析报告 |
+| `balance` | 广告余额明细（按 `advBalanceType` 分组，单位分→元） |
+| `perm` | 权限自检（`createAuthEnable` / `uniPromVisible` / 白名单） |
+| `plans` | 计划列表汇总（`totalNum` + `totalMetrics`） |
+| `report` | 报表查询（`statQuery`，DataSetKey/Dimensions/Metrics） |
+| `analysis` | 经营分析报告（`report_text`） |
+| `margin` | ★ 利润率 → 涨价安全垫（纯本地计算，零副作用，三平台同口径） |
 
-## 已知踩坑（2026-10-24 实测）
+## 已知踩坑
 
 ```
-★ 必须复用正式 profile 目录，不能用独立临时目录
-★ 不要 setCookie 注入账号 cookies
-★ 不带 aavid：账号的 account_id 是本地 hash（如 7592d93b...），
-  不是千川广告主 ID
-★ 入口 URL 实测见脚本头部
-★ CDP 必须在 goto 之后挂：SPA 会重定向 /uni-prom → /home，
-  goto 前挂的 session 会失效
-⚠️ 金额单位见脚本注释（已实测确认）
+★ 不能用 method==='POST' 判读写：千川只读查询全是 POST。
+  按 POST 判写 → 每次白等 3s → overview 从 1.9s 拖到 7s。
+★ list-summary 空 body 报 code=2（业务参数），不是签名问题。
+★ 权限用 /account/user/get-whitelist（19.4KB，稳定）；
+  /uni_prom/get_uni_prom_config 会偶发 status_code=2「获取全域推广计划配置报错」。
+★ 金额单位是「分」，显示前 /100。
+★ aavid 不是必需（不带也能查计划列表）。
+★ 旧笔记「必须复用正式 profile / 不要 setCookie」是 DOM 路线时代的约束，
+  纯 Node 后已不适用；但 cookie 合并仍须「只补缺失、不覆盖」。
 ```
 
 ## 写操作未实现（平台权限，非技术问题）
@@ -167,7 +181,7 @@ node scripts/uni-prom.mjs --mode margin --price 39.9 --cost 33 --net-roi 2.8
 （createAuthEnable=false），点击会弹「没有操作权限」。
 
 这与接口可用性无关，是平台侧账号权限。
-用 --mode perm 自查权限状态。
+用 --mode perm 自查权限状态（实测本账号：可创建计划 = false）。
 ```
 
 ## 风控

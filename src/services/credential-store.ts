@@ -570,9 +570,54 @@ export function toCookieStr(jar: Record<string, string>): string {
     .join('; ')
 }
 
+/**
+ * ★★ 2026-11-20 修：pdd_mms 的 account_id 改用**稳定的 mallId**，不再用轮换的 PASS_ID ★★
+ *
+ *   事故：用户每重新扫码登录一次，「空空商行」就会变成一条**新账号记录**
+ *   （shop_key 从 9ad0ce… → eed11c… → 934c4b…），旧记录静默消失。
+ *   后果：
+ *     · 模型拿着旧 shopKey 调用技能 → 「账号不存在」
+ *     · 用户以为「登录了却取不到数」，反复重扫，越扫越乱
+ *     · 账号连接页看着像每次都换了一家店
+ *
+ *   根因：ACCOUNT_ID_FROM.pdd_mms = 'PASS_ID'，而 PASS_ID **每次登录都会轮换**。
+ *   （本文件原注释已经预告了这个坑：「重新登录若轮换 PASS_ID，会新建一条账号记录」，
+ *     但当时没实现稳定 ID 的提取。）
+ *
+ *   解法：PASS_ID 的载荷里本来就有稳定身份。
+ *     实测格式：`1-<88位票据>_<mallId>_<userId>`
+ *       例：`1-qbMmyikU96f...IA_800050996_96237682`
+ *                                        ↑ mallId  ↑ userId
+ *     mallId（店铺 ID）**永久不变**，正是商家真正的身份；userId 绑人，换店会变。
+ *     优先取 mallId（店铺级），退化取 userId（人级），都取不到再回落旧逻辑。
+ *
+ *   这与 kuaishou 用 `did`、1688 用 `unb` 是同一个思路：**用稳定标识，不用会话票据**。
+ */
+function derivePddMmsAccountId(jar: Record<string, string>): string {
+  const candidates = [
+    String(jar['PASS_ID'] || ''),
+    String(jar['windows_app_shop_token_23'] || ''),
+  ].filter(Boolean)
+
+  for (const raw of candidates) {
+    // 格式：<ticket>_<mallId>_<userId>；取尾部两段数字
+    const m = raw.match(/_(\d{5,})_(\d{3,})$/)
+    if (m) {
+      const mallId = m[1]
+      if (SHOP_KEY_RE.test(`pdd_mms_${mallId}`)) return mallId
+    }
+  }
+  return ''
+}
+
 /** 从关键 Cookie 推出 account_id（即 shop_key 的后半段）。 */
 export function deriveAccountId(platform: string, jar: Record<string, string>): string {
   const credPlatform = credentialPlatform(platform)
+  // ★ pdd_mms 特判：优先用从 PASS_ID 载荷里解出的稳定 mallId（见上方 derivePddMmsAccountId）
+  if (credPlatform === 'pdd_mms') {
+    const stable = derivePddMmsAccountId(jar)
+    if (stable) return stable
+  }
   // 优先用真实用户 ID Cookie（如 B站 DedeUserID），避免截断长会话票据
   const uidSource = ACCOUNT_ID_UID[credPlatform] ?? ''
   if (uidSource && jar[uidSource]) {

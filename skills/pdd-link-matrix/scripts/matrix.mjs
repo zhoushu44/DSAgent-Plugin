@@ -17,7 +17,7 @@ const PKG_BASE = [
  *
  * 场景：一个款铺 N 条链接 / 主图分裂 / 批量主图 + 详情页
  *
- * 做法：同一个 product，换 title + 主图，多次调 pdd-publish-http。
+ * 做法：同一个 product，换 title + 主图，多次调 pdd-publish。
  *       spec-pool 自动从全店采集，保证 spec_id 一致。
  *
  * 风控（2026-10-24 补）：

@@ -16,6 +16,10 @@
         "description": "goods 模式返回条数上限，默认 20，上限 100"
       },
       {
+        "name": "date",
+        "description": "goods 模式统计日期 YYYY-MM-DD（可选，默认昨天）。★ 生意参谋当天不出数 —— 查当天会返回空列表并被误判成「没有数据」，要拿昨天的数就显式传昨天的日期"
+      },
+      {
         "name": "account",
         "description": "账号 shopKey（可选）；该平台多账号且未绑定时需先向用户确认",
         "flag": "--account"

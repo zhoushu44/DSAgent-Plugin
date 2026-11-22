@@ -28,6 +28,8 @@ try {
 } catch { /* 读不到就退化成「不兜底」 */ }
 
 const SEED_DIR = path.join(os.homedir(), '.dsh', 'pdd-risk-seeds')
+/** 插件根（供其它模块兜底解析依赖用，不受 cwd 影响） */
+const ROOT_FOR_SEED = PLUGIN_ROOT
 
 function seedPath(shopKey) {
   return path.join(SEED_DIR, `${String(shopKey).replace(/[^\w.-]/g, '_')}.json`)
@@ -169,21 +171,87 @@ export async function exportSeedFromBrowser(opts) {
     chromePath = 'C:/Program Files/Google/Chrome/Application/chrome.exe',
     pageUrl = 'https://mms.pinduoduo.com/goods/goods_list',
   } = opts
-  const PLUGIN_ROOT = opts.pluginRoot || process.cwd()
+  // ★ 2026-11-19：默认值必须用模块自身定位出的 PLUGIN_ROOT，不能用 process.cwd()。
+  //   技能脚本由 skill-service 以 cwd=技能目录 启动（如 skills/pdd-promo），
+  //   此时 cwd 下既没有 node_modules/puppeteer-core 也没有 skills/_shared，
+  //   于是动态 import 直接抛 "Cannot find module" → 种子永远刷不出来 →
+  //   纯 Node 通道降级、只能开浏览器，慢一大截。
+  const PLUGIN_ROOT = opts.pluginRoot || ROOT_FOR_SEED
 
   const { pathToFileURL } = await import('node:url')
   const puppeteer = (await import(pathToFileURL(path.join(PLUGIN_ROOT, 'node_modules/puppeteer-core/lib/esm/puppeteer/puppeteer-core.js')).href)).default
   const { clearProfileLocks } = await import(pathToFileURL(path.join(PLUGIN_ROOT, 'skills/_shared/pdd-launch.mjs')).href)
 
-  clearProfileLocks(profileDir)
-  const browser = await puppeteer.launch({
-    executablePath: chromePath,
-    userDataDir: profileDir,
-    headless: true,
-    defaultViewport: null,
-    args: ['--no-first-run', '--no-default-browser-check'],
-  })
+  /**
+   * ★★ 2026-11-19 关键修复：种子导出**绝不能复用取数会话的 Profile** ★★
+   *
+   *   事故链（pdd-shop goods 从 17:23 能跑变成 17:40 后全失败）：
+   *     ① 种子被删 → 每次 openTask 都判定「种子缺失」→ 触发 ensureSeed
+   *     ② ensureSeed → exportSeedFromBrowser 用**同一个 user-data-dir** 起 headless Chrome
+   *     ③ 紧接着 createSession 也用同一个 Profile 起浏览器
+   *     ④ 两个 Chrome 抢一个 Profile：后起的页面加载不完整
+   *        （实测模块数 687 vs 正常 1186）→ eDaA 不存在 → 签名失败
+   *     改成本后台异步后，仍然出现 detached Frame —— 说明后台也一样在抢。
+   *
+   *   正确做法：种子导出用**独立的临时 Profile 副本**，与取数会话物理隔离。
+   *   代价：多一次 Profile 拷贝（几百 MB，几秒），但只在种子缺失时发生一次。
+   *   收益：取数会话永远拿到干净、完整的 Profile。
+   */
+  const srcProfile = profileDir
+  if (!srcProfile) {
+    return { ok: false, reason: 'seed-export: 缺少 profileDir，跳过（不冒险污染主会话）', localStorage: 0, sessionStorage: 0 }
+  }
+
+  let workProfile = srcProfile
+  let tempDir = null
   try {
+    const fs = await import('node:fs')
+    const os = await import('node:os')
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pdd-seed-'))
+    workProfile = path.join(tempDir, 'profile')
+    // 只拷贝登录必需的文件，避免整目录几 GB 的 Cache 拖慢
+    fs.mkdirSync(workProfile, { recursive: true })
+    const keep = ['Local State', 'Preferences', 'Cookies', 'Login Data', 'Web Data', 'Network']
+    for (const name of keep) {
+      const src = path.join(srcProfile, name)
+      if (!fs.existsSync(src)) continue
+      try {
+        const dst = path.join(workProfile, name)
+        const st = fs.statSync(src)
+        if (st.isDirectory()) fs.cpSync(src, dst, { recursive: true })
+        else fs.copyFileSync(src, dst)
+      } catch { /* 单个文件失败不影响其它 */ }
+    }
+    // Default/ 子目录里的 Cookies / Local Storage 也要
+    const defSrc = path.join(srcProfile, 'Default')
+    if (fs.existsSync(defSrc)) {
+      const defDst = path.join(workProfile, 'Default')
+      fs.mkdirSync(defDst, { recursive: true })
+      for (const name of ['Cookies', 'Login Data', 'Web Data', 'Local Storage', 'Session Storage', 'Network']) {
+        const src = path.join(defSrc, name)
+        if (!fs.existsSync(src)) continue
+        try {
+          const dst = path.join(defDst, name)
+          const st = fs.statSync(src)
+          if (st.isDirectory()) fs.cpSync(src, dst, { recursive: true })
+          else fs.copyFileSync(src, dst)
+        } catch { /* ignore */ }
+      }
+    }
+  } catch (e) {
+    return { ok: false, reason: `seed-export: 复制 Profile 失败（${String(e.message).slice(0, 60)}），已跳过以免污染主会话`, localStorage: 0, sessionStorage: 0 }
+  }
+
+  clearProfileLocks(workProfile)
+  let browser = null
+  try {
+    browser = await puppeteer.launch({
+      executablePath: chromePath,
+      userDataDir: workProfile,
+      headless: true,
+      defaultViewport: null,
+      args: ['--no-first-run', '--no-default-browser-check'],
+    })
     const page = (await browser.pages())[0] || await browser.newPage()
     await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 45000 })
     await new Promise(s => setTimeout(s, 8000))
@@ -196,7 +264,14 @@ export async function exportSeedFromBrowser(opts) {
     writeSeed(shopKey, dump)
     return { ok: true, localStorage: Object.keys(dump.localStorage).length, sessionStorage: Object.keys(dump.sessionStorage).length }
   } finally {
-    try { await browser.close() } catch { }
+    try { await browser?.close() } catch { }
+    // 清理临时 Profile 副本（失败不影响结果）
+    try {
+      if (tempDir) {
+        const fs = await import('node:fs')
+        fs.rmSync(tempDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 })
+      }
+    } catch { /* ignore */ }
   }
 }
 

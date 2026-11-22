@@ -834,9 +834,9 @@ async function selectCategory(page: any, keyword: string, categoryPath?: string)
   const state = await page.evaluate(() => {
     const hasTitle = !!document.querySelector('input[placeholder*="商品标题组成"], input[data-tracking-click-viewid="title_input_area"]')
     const hasNext = [...document.querySelectorAll('button, a, div, span')]
-      .some(e => /下一步|完善商品信息/.test((e.innerText || e.textContent || '').trim()))
+      .some(e => /下一步|完善商品信息/.test(((e as HTMLElement).innerText || e.textContent || '').trim()))
     const hasConfirm = [...document.querySelectorAll('button, a, div, span')]
-      .some(e => /确认发布该类商品/.test((e.innerText || e.textContent || '').trim()))
+      .some(e => /确认发布该类商品/.test(((e as HTMLElement).innerText || e.textContent || '').trim()))
     return { hasTitle, hasNext, hasConfirm }
   }).catch(() => ({ hasTitle: false, hasNext: false, hasConfirm: false }))
 
@@ -856,7 +856,7 @@ async function selectCategory(page: any, keyword: string, categoryPath?: string)
       diag('无搜索框，退化为点「确认发布该类商品」')
       const pos = await page.evaluate(() => {
         const btns = [...document.querySelectorAll('button, a, div, span')]
-          .map(e => { const r = e.getBoundingClientRect(); return { tx: (e.innerText || e.textContent || '').trim(), x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2), w: Math.round(r.width) } })
+          .map(e => { const r = e.getBoundingClientRect(); return { tx: ((e as HTMLElement).innerText || e.textContent || '').trim(), x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2), w: Math.round(r.width) } })
           .filter(o => /确认发布该类商品/.test(o.tx) && o.w > 30)
         return btns[btns.length - 1] || null
       }).catch(() => null)
@@ -904,7 +904,7 @@ async function selectCategory(page: any, keyword: string, categoryPath?: string)
       await sleep(1500)
       const cpos = await page.evaluate(() => {
         const btns = [...document.querySelectorAll('button, a, div, span')]
-          .map(e => { const r = e.getBoundingClientRect(); return { tx: (e.innerText || e.textContent || '').trim(), x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2), w: Math.round(r.width) } })
+          .map(e => { const r = e.getBoundingClientRect(); return { tx: ((e as HTMLElement).innerText || e.textContent || '').trim(), x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2), w: Math.round(r.width) } })
           .filter(o => /确认发布该类商品/.test(o.tx) && o.w > 30)
         return btns[btns.length - 1] || null
       }).catch(() => null)

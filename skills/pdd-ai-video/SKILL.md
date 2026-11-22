@@ -1,6 +1,6 @@
 ---
 name: pdd-ai-video
-description: "拼多多·AI 素材工具图生视频（aid 域）：本地图批量上传到图片空间 → 生成 AI 短视频 → 下载。全链路纯 HTTP，零浏览器常驻、零 anti-content。支持两阶段流水线（先全传再统一生成）、断点续跑、额度预检、并发控制。触发：拼多多AI视频、图生视频、AI商品视频、aid图生视频、批量生成商品视频、pdd ai video。排除：多多视频上传（用 pdd-video）、商品上架（用 pdd-publish-http）、图片空间管理（用 pdd-works）。需绑定「拼多多商家后台」账号。"
+description: "拼多多·AI 素材工具图生视频（aid 域）：本地图批量上传到图片空间 → 生成 AI 短视频 → 下载。全链路纯 HTTP，零浏览器常驻、零 anti-content。支持两阶段流水线（先全传再统一生成）、断点续跑、额度预检、并发控制。触发：拼多多AI视频、图生视频、AI商品视频、aid图生视频、批量生成商品视频、pdd ai video。排除：多多视频上传（用 pdd-video）、商品上架（用 pdd-publish）、图片空间管理（用 pdd-works）。需绑定「拼多多商家后台」账号。"
 metadata:
   builtin_skill_version: "1.0.0"
   dsagent:
@@ -45,7 +45,7 @@ metadata:
 **阶段 1 — 全部上传，拿 manifest**
 
 ```bash
-node scripts/gen-video.mjs --mode upload --dir "D:/imgs"
+node {baseDir}/scripts/gen-video.mjs --mode upload --dir "D:/imgs"
 ```
 
 - 逐张预检（尺寸/比例/大小/格式），不合格直接剔除，**不浪费生成额度**
@@ -55,7 +55,7 @@ node scripts/gen-video.mjs --mode upload --dir "D:/imgs"
 **阶段 2 — 统一生成**
 
 ```bash
-node scripts/gen-video.mjs --mode gen --manifest "<manifest路径>" --limit 20
+node {baseDir}/scripts/gen-video.mjs --mode gen --manifest "<manifest路径>" --limit 20
 ```
 
 - 从 manifest 读 URL，**不再碰本地文件、不再重复上传**
@@ -66,13 +66,13 @@ node scripts/gen-video.mjs --mode gen --manifest "<manifest路径>" --limit 20
 **一条龙**（内部仍是两阶段）：
 
 ```bash
-node scripts/gen-video.mjs --mode run --dir "D:/imgs" --limit 20
+node {baseDir}/scripts/gen-video.mjs --mode run --dir "D:/imgs" --limit 20
 ```
 
 ### W2：单张 / 少量
 
 ```bash
-node scripts/gen-video.mjs --mode run --file "D:/a.png,D:/b.png"
+node {baseDir}/scripts/gen-video.mjs --mode run --file "D:/a.png,D:/b.png"
 ```
 
 ### ★ W2.5：生成 + 自动发布到多多视频（一体化）
@@ -80,7 +80,7 @@ node scripts/gen-video.mjs --mode run --file "D:/a.png,D:/b.png"
 默认**只生成**；加 `--publish` 才会发。发布必须带商品。
 
 ```bash
-node scripts/gen-video.mjs --mode gen \
+node {baseDir}/scripts/gen-video.mjs --mode gen \
   --manifest ".../manifest-xxx.json" --limit 10 \
   --publish --goods-id 930630868294 \
   --video-title "纸杯带货" \
@@ -125,14 +125,14 @@ goodsList: [{ goodsId: "930630868294", specialType: 2 }]
 ### W3：已有图片 URL，直接生成
 
 ```bash
-node scripts/gen-video.mjs --mode gen --file "https://img.pddpic.com/xxx.png"
+node {baseDir}/scripts/gen-video.mjs --mode gen --file "https://img.pddpic.com/xxx.png"
 ```
 
 ### W4：查询
 
 ```bash
-node scripts/gen-video.mjs --mode quota     # 今日剩余额度
-node scripts/gen-video.mjs --mode status    # 当前任务状态
+node {baseDir}/scripts/gen-video.mjs --mode quota     # 今日剩余额度
+node {baseDir}/scripts/gen-video.mjs --mode status    # 当前任务状态
 ```
 
 ---
@@ -151,7 +151,7 @@ node scripts/gen-video.mjs --mode status    # 当前任务状态
 手动刷新（一般不用，脚本会自己判断）：
 
 ```bash
-node scripts/gen-video.mjs --mode refresh-token
+node {baseDir}/scripts/gen-video.mjs --mode refresh-token
 ```
 
 ---
@@ -245,14 +245,14 @@ fd.append("forbid_override", "false")
 
 ```bash
 # 1. 上传（预检 + 上传，约 15s）
-node scripts/gen-video.mjs --mode upload --dir "D:/my-images"
+node {baseDir}/scripts/gen-video.mjs --mode upload --dir "D:/my-images"
 
 # 输出：
 #   图片上传完成：成功 20 / 共 20
 #   manifest: .../manifest-1793930231350.json
 
 # 2. 生成（并发 2，约 12 分钟）
-node scripts/gen-video.mjs --mode gen \
+node {baseDir}/scripts/gen-video.mjs --mode gen \
   --manifest ".../manifest-1793930231350.json" --limit 20
 
 # 输出：
@@ -262,7 +262,7 @@ node scripts/gen-video.mjs --mode gen \
 ## 示例：生成 + 自动发布（10 条实测）
 
 ```bash
-node scripts/gen-video.mjs --mode run \
+node {baseDir}/scripts/gen-video.mjs --mode run \
   --dir "D:/my-images" --limit 10 \
   --publish --goods-id 930630868294 \
   --video-title "纸杯带货" \

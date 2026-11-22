@@ -11,6 +11,19 @@ MTOP_API = "mtop.relationrecommend.wirelessrecommend.recommend"
 MTOP_API_VERSION = "2.0"
 MTOP_BASE_URL = "https://h5api.m.taobao.com"
 
+# ── SKU 明细（商品详情接口）────────────────────────────
+# 同一接口在 h5api.m.taobao.com 会被平台风控硬拒（FAIL_SYS_USER_VALIDATE /
+# RGV587_ERROR），换到 h5api.m.tmall.com 稳定 SUCCESS，返回结构与 taobao 域一致。
+SKU_DETAIL_API = "mtop.taobao.pcdetail.data.get"
+SKU_DETAIL_API_VERSION = "1.0"
+SKU_DETAIL_BASE_URL = "https://h5api.m.tmall.com"
+SKU_DETAIL_REFERER = "https://detail.tmall.com/item.htm?id={item_id}"
+SKU_DETAIL_EXTRA_PARAMS = {"detail_v": "3.3.2", "timeout": "20000"}
+SKU_REQUEST_INTERVAL_SECONDS = 2.5
+SKU_REQUEST_JITTER_SECONDS = 1.5
+SKU_TIME_BUDGET_SEC = 900
+SKU_DEFAULT_ITEM_LIMIT = 48
+
 SEARCH_PAGE_SIZE = 48
 DEFAULT_MAX_PAGES = 4
 DEFAULT_ITEM_LIMIT = SEARCH_PAGE_SIZE * DEFAULT_MAX_PAGES

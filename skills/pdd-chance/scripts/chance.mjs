@@ -610,7 +610,7 @@ const PRICE_LABEL_NAMES = { 0: '品质档', 1: '主流档', 2: '引流档' }
      *      → 返回 draft_id / goods_commit_id / is_home_page
      *      ★ 这一步就已经在平台侧创建草稿了（写操作）
      *   ② 跳 /goods/goods_add/index?type=add&from=chance&homePage=&id=<draft_id>
-     *   ③ 填表提交（交给 pdd-publish-http）
+     *   ③ 填表提交（交给 pdd-publish）
      *
      * 门禁设计：
      *   不带 --confirm → 只做「选品校验 + 物料预览」，**不调 quick_release**
@@ -696,7 +696,7 @@ const PRICE_LABEL_NAMES = { 0: '品质档', 1: '主流档', 2: '引流档' }
             + `  draft_id：${draftId}\n`
             + `  是否首页候选：${isHomePage}\n`
             + `  填表入口：${entryUrl}\n\n`
-            + `★ 下一步：用 pdd-publish-http 填入商品信息并提交\n`
+            + `★ 下一步：用 pdd-publish 填入商品信息并提交\n`
             + `★ 若放弃该草稿，须到「草稿箱」手动删除，否则会留下脏数据。`
           : `quick_release 返回成功但未拿到 draft_id，原始返回：${JSON.stringify(qr).slice(0, 300)}`,
       })

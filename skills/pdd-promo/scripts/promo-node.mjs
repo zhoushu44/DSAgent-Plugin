@@ -79,7 +79,7 @@ export async function collectPromoViaNode(opts = {}) {
         byApi[name.replace(/^promo\./, '')] = r.data
         return r.data
       }
-      errors.push({ name, ec: r.ec, kind: r.failureKind, hint: r.hint })
+      errors.push({ name, ec: r.ec, kind: r.failureKind, hint: r.hint, tokenRefresh: r.tokenRefresh || null })
       return null
     } catch (e) {
       errors.push({ name, ec: 'exception', kind: 'skill_error', hint: String(e.message).slice(0, 120) })

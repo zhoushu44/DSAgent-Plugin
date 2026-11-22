@@ -1,6 +1,6 @@
 ---
 name: pdd-activity
-description: "拼多多活动报名（营销活动）：查活动总览（54 种活动类型/大类分组/推荐活动/快速报名）、活动列表、活动类型清单、禁止报名原因、活动商品统计；报名（L2）。数据源：营销活动子应用 /act/* + /leekmms/* + /lakemms/*。读操作全部 HTTP 无副作用。触发：拼多多活动、营销活动、活动报名、大促报名、百亿补贴报名、限时秒杀报名、活动列表、pdd activity。排除：拼多多商品上架（用 pdd-publish-http）、商品查询（用 pdd-works）、推广数据（用 pdd-promo）、店铺经营（用 pdd-shop）。需绑定「拼多多商家后台」账号。"
+description: "拼多多活动报名（营销活动）：查活动总览（54 种活动类型/大类分组/推荐活动/快速报名）、活动列表、活动类型清单、禁止报名原因、活动商品统计；报名（L2）。数据源：营销活动子应用 /act/* + /leekmms/* + /lakemms/*。读操作全部 HTTP 无副作用。触发：拼多多活动、营销活动、活动报名、大促报名、百亿补贴报名、限时秒杀报名、活动列表、pdd activity。排除：拼多多商品上架（用 pdd-publish）、商品查询（用 pdd-works）、推广数据（用 pdd-promo）、店铺经营（用 pdd-shop）。需绑定「拼多多商家后台」账号。"
 metadata:
   builtin_skill_version: "1.3"
   dsagent:

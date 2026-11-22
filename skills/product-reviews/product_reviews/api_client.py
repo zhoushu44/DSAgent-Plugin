@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from typing import Any
 
 from ._runtime import (
@@ -97,6 +98,27 @@ class TaobaoRateListClient:
             "foldFlag": "0",
         }
         data_str = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+        # ★ 优先走淘宝基座（纯 Node 自签，不受网关大响应超时影响）
+        from .base_bridge import base_available, call_via_base
+        if base_available():
+            try:
+                return call_via_base("rate.list", {
+                    "itemId": str(item_id),
+                    "auctionNumId": str(item_id),
+                    "pageNo": page_no,
+                    "pageSize": page_size,
+                    "orderType": order_type or "searchImpr",
+                    "searchImpr": "-8",
+                    "showTrueCount": False,
+                    "expression": "",
+                    "skuVids": "",
+                    "rateSrc": "pc_rate_list",
+                    "rateType": "",
+                    "foldFlag": "0",
+                })
+            except Exception as exc:                # noqa: BLE001 — 基座失败回退网关
+                print(f"[product-reviews] 基座失败，回退网关: {exc}", file=sys.stderr)
+
         headers = _browser_headers(
             referer=f"https://detail.tmall.com/item.htm?id={item_id}",
             origin="https://detail.tmall.com",
@@ -135,6 +157,13 @@ class TaobaoDetailClient:
     ) -> dict[str, Any]:
         data = {"id": str(item_id)}
         data_str = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+        # ★ 优先走淘宝基座（详情接口 ~300KB，网关转发必超时）
+        from .base_bridge import base_available, call_via_base
+        if base_available():
+            try:
+                return call_via_base("item.detail", {"id": str(item_id)})
+            except Exception as exc:                # noqa: BLE001 — 基座失败回退网关
+                print(f"[product-reviews] 详情基座失败，回退网关: {exc}", file=sys.stderr)
         # Referer/Origin 必须与 DETAIL_BASE_URL 同域（tmall），跨域会被 MTOP 判风控
         referer = DETAIL_REFERER.format(item_id=item_id)
         headers = _browser_headers(

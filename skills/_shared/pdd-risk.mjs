@@ -478,32 +478,73 @@ const LOCK_STALE_MS = 10 * 60 * 1000     // 10 分钟无心跳视为僵尸
 
 const lockPath = (shopKey) => path.join(LOCK_DIR, `${shopKey.replace(/[^\w-]/g, '_')}.lock`)
 
+/**
+ * ★ 2026-11-19：判断持锁进程是否还活着。
+ *
+ * 背景（真实事故）：技能进程被看门狗 SIGKILL 后，exit 钩子不会执行，
+ * releaseAccountLock 永远调不到 → 锁文件留在盘上。下一次调用读到锁，
+ * 因为「未超 10 分钟」于是开始等（pdd-promo 传的是 300 秒），期间零输出，
+ * 又被 60 秒 idle 看门狗杀掉 → 又留下新锁。形成**永久死循环**，
+ * 表面症状就是「技能 60 秒无输出，按 idle 超时终止」，且怎么重试都不好。
+ *
+ * 修法：锁上记的 pid 若已不存在（或已不是同一个进程），立即判定为僵尸，
+ * 不用等满 LOCK_STALE_MS。注意必须用「pid 存活」而不是「时间」做主判据 ——
+ * 只看时间会在长任务真实运行时被别的进程误抢，两个进程同时打一个号。
+ */
+function isPidAlive(pid) {
+  if (!pid || pid === process.pid) return pid === process.pid
+  try {
+    process.kill(pid, 0)          // 只探测，不发信号
+    return true
+  } catch (e) {
+    // EPERM = 进程存在但无权限（Windows 上常见），仍算活着
+    return e?.code === 'EPERM'
+  }
+}
+
 /** 尝试获取账号锁。@returns { ok, holder?, waitedMs? } */
 export async function tryAcquireAccountLock(shopKey, label = '', waitMs = 0) {
   const p = lockPath(shopKey)
   const start = Date.now()
+  let announced = false
   for (;;) {
     try {
       fs.mkdirSync(LOCK_DIR, { recursive: true })
       // O_EXCL 语义：已存在则抛错
       fs.writeFileSync(p, JSON.stringify({ pid: process.pid, at: Date.now(), label }), { flag: 'wx' })
+      if (start) {
+        const waited = Date.now() - start
+        if (waited > 1000) console.warn(`[pdd-risk] 账号锁已获取（等待 ${(waited / 1000).toFixed(1)}s）`)
+      }
       return { ok: true }
     } catch {
-      // 锁已存在 → 看是否僵尸
-      try {
-        const st = JSON.parse(fs.readFileSync(p, 'utf8'))
-        if (Date.now() - st.at > LOCK_STALE_MS) {
-          console.warn(`[pdd-risk] 账号锁僵尸（${st.pid} @ ${new Date(st.at).toISOString()}），强夺`)
-          fs.unlinkSync(p)
-          continue   // 立刻重试
-        }
-      } catch { /* 锁文件损坏，强夺 */ fs.unlinkSync(p); continue }
+      // 锁已存在 → 判定是否僵尸（pid 死了 / 超时无心跳 / 文件损坏）
+      let st = null
+      try { st = JSON.parse(fs.readFileSync(p, 'utf8')) } catch { st = null }
 
-      // 等待
+      if (!st) {
+        console.warn('[pdd-risk] 账号锁文件损坏，清理后重试')
+        try { fs.unlinkSync(p) } catch { /* 别人先清了 */ }
+        continue
+      }
+
+      const dead = !isPidAlive(st.pid)
+      const stale = Date.now() - (st.at || 0) > LOCK_STALE_MS
+      if (dead || stale) {
+        console.warn(`[pdd-risk] 账号锁僵尸（pid=${st.pid} ${dead ? '进程已退出' : '心跳超时'}`
+          + ` @ ${new Date(st.at || 0).toISOString()}），强夺`)
+        try { fs.unlinkSync(p) } catch { /* 别人先清了 */ }
+        continue   // 立刻重试
+      }
+
+      // 等待：必须周期性打日志，否则外层看门狗会以「无输出」杀掉进程
       if (Date.now() - start >= waitMs) {
-        let holder = ''
-        try { holder = JSON.parse(fs.readFileSync(p, 'utf8')).label || '' } catch { /* ignore */ }
-        return { ok: false, holder }
+        return { ok: false, holder: st.label || '' }
+      }
+      if (!announced) {
+        announced = true
+        console.warn(`[pdd-risk] 账号被「${st.label || '其他任务'}」(pid=${st.pid}) 占用，`
+          + `最多等待 ${Math.round(waitMs / 1000)}s…`)
       }
       await new Promise(r => setTimeout(r, 2000))
     }

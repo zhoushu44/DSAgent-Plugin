@@ -556,7 +556,7 @@ const wantCsv = process.argv.includes('--csv')
     const poolCandidates = [
       path.join(process.cwd(), 'artifacts', 'pdd-re', 'spec-pool.json'),
       path.join(process.cwd(), 'spec-pool.json'),
-      path.join(PLUGIN_ROOT, 'skills', 'pdd-publish-http', 'assets', 'spec-pool.json'),
+      path.join(PLUGIN_ROOT, 'skills', 'pdd-publish', 'assets', 'spec-pool.json'),
     ]
     for (const c of poolCandidates) {
       if (fs.existsSync(c)) {

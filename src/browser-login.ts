@@ -671,11 +671,33 @@ function isOffLoginPage(loginUrl: string, currentUrl: string): boolean {
  */
 async function fetchPddMallName(page: any): Promise<string> {
   try {
-    // 登录刚结束时页面可能还在扫码页/登录页，Anti-Content 签名器未初始化。
-    // 先导航到商品列表页（必然发带 Anti-Content 的请求，签名器一定会初始化），
-    // 等签名器就绪再抓。
+    /**
+     * ★★ 2026-11-19 修：这里曾经把登录页文案当成店铺名写进账号库 ★★
+     *
+     *   事故：用户重新登录后，账号列表里的店铺名从「空空商行」变成了「还没有店铺」，
+     *   而「还没有店铺」其实是登录页上「还没有店铺？ 0元开店」这行**宣传文案**。
+     *
+     *   两个原因叠加：
+     *     ① 导航判断写的是 `!/mms\.pinduoduo\.com/.test(page.url())`，
+     *        而登录页 URL 恰好是 mms.pinduoduo.com/login/?redirectUrl=... —— 匹配得上，
+     *        于是**不会**导航到商品页，直接在登录页上做 DOM 提取；
+     *     ② DOM 正则 `([^\n\s]{2,20}(?:...|店铺))` 里 "店铺" 命中了「还没有店铺」，
+     *        过滤条件只排除了「商家后台|拼多多」，拦不住它。
+     *
+     *   后果不只是显示难看：display_label 被写坏后，所有「按店铺名匹配账号」的逻辑
+     *   （pdd-shop 的 --shop-name、账号连接页、发布技能）全部对不上号。
+     *
+     *   修法（三层）：
+     *     A. 只要当前在登录页就强制导航到商品列表页，导航不动就**直接放弃**返回 ''
+     *        —— 宁可名字留空（保留原值），也绝不从登录页抓文案；
+     *     B. 正则加负向断言排除「还没有/暂无/没有」这类前缀；
+     *     C. 过滤词表补充「0元开店 / 扫码登录 / 登录 / 免费开店」等文案特征。
+     */
+    const isOnLoginPage = (u: string) => /\/login\b|redirectUrl=/i.test(u || '')
     try {
-      if (!/mms\.pinduoduo\.com/.test(page.url() || '')) {
+      const cur = page.url() || ''
+      // ★ 与之前的关键差异：登录页也要导航（原判断只看域，导致停在登录页）
+      if (isOnLoginPage(cur) || !/mms\.pinduoduo\.com/.test(cur)) {
         await page.goto('https://mms.pinduoduo.com/goods/goods_list', { waitUntil: 'domcontentloaded', timeout: 20000 })
       }
       await new Promise(r => setTimeout(r, 3000))
@@ -683,13 +705,22 @@ async function fetchPddMallName(page: any): Promise<string> {
       // 导航失败也继续试（可能已经在 mms 域内）
     }
 
+    // ★ 导航后仍停在登录页 → 说明登录态没真正建立，直接放弃，不猜名字
+    if (isOnLoginPage(page.url() || '')) {
+      console.warn('[dsagent-login] 抓店铺名时页面仍在登录页，放弃抓取（保留原 display_label）')
+      return ''
+    }
+
     // ① DOM 提取（最稳）
     const domName = await page.evaluate(() => {
       const t = document.body?.innerText || ''
-      const m = t.match(/([^\n\s]{2,20}(?:旗舰店|专营店|专卖店|企业店|百货店|工厂店|仓库|商行|店铺))/)
+      // 排除「还没有店铺 / 暂无店铺 / 没有店铺」这类引导文案
+      const m = t.match(/(?<![还没有暂无])([^\n\s]{2,20}(?:旗舰店|专营店|专卖店|企业店|百货店|工厂店|仓库|商行|店铺))/)
       return m ? m[1].trim() : ''
     }).catch(() => '')
-    if (domName && !/商家后台|拼多多/.test(domName)) return domName
+    if (domName && !/商家后台|拼多多|还没有|暂无|没有店铺|0元开店|扫码登录|免费开店|立即入驻/.test(domName)) {
+      return domName
+    }
 
     // ② 接口兜底（XHR 走签名器）
     const apiName = await page.evaluate(() => new Promise<string>((resolve) => {
@@ -1166,7 +1197,18 @@ export async function doBrowserLogin(
       if (platform === 'pdd_mms' && activeBrowser?.page) {
         try {
           const mallName = await fetchPddMallName(activeBrowser.page)
-          if (mallName) {
+          /**
+           * ★ 2026-11-19：写入前加一道**内容闸门**。
+           *   历史事故：登录页文案「还没有店铺」被当成店铺名写进 display_label，
+           *   把原本正确的「空空商行」覆盖掉了，导致后续按店铺名匹配全断。
+           *   原则：**宁可不写，也不能写错** —— 抓到的名字不像店铺名就丢弃，保留原值。
+           */
+          const looksLikeStoreName = !!mallName
+            && mallName.length >= 2
+            && mallName.length <= 30
+            && !/还没有|暂无|没有店铺|0元开店|扫码登录|登录|注册|免费开店|立即入驻|商家后台|拼多多|帮助中心|客服/.test(mallName)
+
+          if (looksLikeStoreName) {
             await store.save(platform, jar, {
               replaceShopKey,
               displayLabel: mallName,
@@ -1175,7 +1217,7 @@ export async function doBrowserLogin(
             console.log(`[dsagent-login] PDD 店铺名已写入 display_label: ${mallName}`)
             saved.display_label = mallName
           } else {
-            console.warn('[dsagent-login] PDD 店铺名抓取为空（接口可能变更），display_label 保持原值')
+            console.warn(`[dsagent-login] PDD 店铺名抓取无效（${mallName || '空'}），display_label 保持原值 ${saved.display_label}`)
           }
         } catch (e) {
           console.warn(`[dsagent-login] 抓 PDD 店铺名失败（不影响登录）: ${(e as Error).message}`)
