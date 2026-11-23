@@ -988,3 +988,16 @@ python imgprep.py --job job.json --report report.json
 视频域：独立权限
 
 **三个域三种强度，按敏感度分级。**
+
+## 40032：live 域票据轮换（2026-11-22 新增）
+
+/mms/amco/prePublish/query 等直播/视频域接口返回 **40032** = **凭证库的 L_PASS_ID 已过期**（浏览器 Profile 里的 live 票被 SSO 轮换，落库快照没跟上），不是频控。
+
+**实验证据**：同一接口，凭证库 Cookie → 40032；浏览器当前 Cookie **无签名直发** → success:true。该接口不强制签名，只认有效 live 票。
+
+**处置**：
+1. 代码层已修：pdd-video 的 shouldFallback 对 live 域 40032 触发浏览器兜底（页面上下文用新鲜票据，自愈）
+2. 注意区分：mms 域 40002 = 真频控不兜底；live 域 40032 = 票过期可自愈
+3. 首次遇到未记录错误码时，先做「页面内 fetch vs Node 同接口」对照实验再下结论
+
+**多店注意**：每家店的 shopKey（mallId 派生）独立，live 票按店独立轮换。换店扫码后对应技能首次调用可能触发一次浏览器兜底预热，属正常。

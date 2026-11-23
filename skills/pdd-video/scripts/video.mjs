@@ -349,13 +349,20 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
    *   哪些错误值得兜底：40001/43001（票据不在 Node 侧）、54001/54003（签名被拒）、
    *   HTTP 429/430（网关限流，浏览器有时能过）、以及 node 通道异常。
    *   ★ 40002/100001 是接口级持久频控，**不兜底**（重试只会延长封禁）。
+   *   ★ 2026-11-22 补：40032（live 域）实证是「凭证库 L_PASS_ID 过期」——
+   *      浏览器 Profile 里的 live 票已被 SSO 轮换，凭证库快照没跟上。
+   *      实验：凭证库 Cookie → 40032；浏览器当前 Cookie（无签名）→ success:true。
+   *      live 域的浏览器兜底用的是页面上下文（新鲜票据），所以 40032 **必须兜底**，
+   *      且仅限 live 域（mms 域的 40002 语义不变）。
    */
   const FALLBACK_EC = new Set([40001, 43001, 54001, 54003])
-  const shouldFallback = (r) => {
+  const shouldFallback = (r, url = '', domain = '') => {
     if (!r) return true                                   // Node 抛异常
     if (r.status === 0) return true                       // 通道层失败（no_channel / 网络）
     if (r.status === 429 || r.status === 430) return true // 网关限流
     const ec = r.raw?.errorCode ?? r.raw?.error_code
+    // live 域 40032 = live 票过期（浏览器兜底可自愈）；其余域维持原判
+    if (ec === 40032 && (domain === 'live' || /live\.pinduoduo/.test(String(url)))) return true
     return FALLBACK_EC.has(ec)
   }
   let __request = null
@@ -383,7 +390,7 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
     } catch (e) {
       r = { ok: false, status: 0, raw: null, ec: 'node_throw', hint: String(e?.message).slice(0, 120) }
     }
-    if (r.ok || !shouldFallback(r)) return r
+    if (r.ok || !shouldFallback(r, p, baseOpts.domain)) return r
 
     // ③ 兜底：拉浏览器重试一次
     const why = r.ec ?? r.status ?? 'unknown'
