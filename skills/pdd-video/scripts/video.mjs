@@ -529,50 +529,14 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
         await closeBrowser(); emit(out); await halt(2)
       }
 
-      // 取 vid：查队列（多重试，上传后服务端要时间落库）
+      // ★ 2026-11-23 重构：绑商品/声明/发布必须在上传完成瞬间（面板存活窗口 ~10-20s）内完成，
+      //   队列 vid 查询挪到发布之后（发布成败用 publish 接口响应判定，不依赖 vid 落库）。
+      //   旧顺序（先 24s 轮询 vid 再发布）实测把面板窗口耗光 → 绑定/声明/发布全部落空。
       let vid = ''
       let item = null
-      // ★ 2026-11-23：发布面板在上传成功后 ~10-20s 会被页面自动收起，
-      //   原 6×4s=24s 的轮询会把发布窗口耗光 → 视频永远停在"已上传未发布"。
-      //   修复：用户要求发布（--publish）时，第 1 次查空就立即中断轮询去点面板。
-      const wantPublishEarly = has('publish') && argOf('publish') !== 'false'
-      for (let attempt = 0; attempt < 6; attempt++) {
-        await sleep(4000)
-        const list = await getQueue()
-        console.error(`[pdd-video] 队列查询第 ${attempt + 1} 次：${list.length} 个`)
-        if (list.length) {
-          // 取标题匹配的（避免拿到上一个残留）
-          item = list.find(v => String(v.title || '').includes(path.basename(file).slice(0, 20))) || list[0]
-          vid = item.vid
-          break
-        }
-        if (attempt === 0 && wantPublishEarly) {
-          console.error('[pdd-video] 队列空但要求发布 → 跳过轮询，立即走面板发布（面板随时会被收起）')
-          break
-        }
-      }
-      out.ok = !!vid
-      out.upload = { vid, via: 'dom-inject', size: fs.statSync(file).size, title: item?.title || title, coverUrl: item?.coverUrl || '' }
-      out.text = out.ok
-        ? [
-            '✅ 多多视频上传成功（DOM 注入，页面走完整 10 步）',
-            `  vid: ${vid}`,
-            `  标题: ${item?.title || title}`,
-            `  大小: ${(fs.statSync(file).size / 1024 / 1024).toFixed(2)}MB`,
-            item?.coverUrl ? `  封面: ${item.coverUrl.slice(0, 80)}` : '',
-            '',
-            '视频已在待发布队列（--mode list 可查）。',
-          ].filter(Boolean).join('\n')
-        : '⚠️ 页面显示上传成功，但队列没查到 vid'
-
-      // 可选：直接发布
-      // ★ 2026-11-23 修正：vid 查不到 ≠ 发布失败 —— 新类目/新账号的转码落库有延迟，
-      //   但「内容声明 + 一键发布」面板就在当前页面上。只要面板还在 + 用户带 --publish，
-      //   就应该直接点发布（之前 vid 为空直接跳过 → 浏览器一关视频丢失，实测踩坑）
-      const panelStillUp = panelUp   // ★ 用上传完成瞬间捕获的状态，不做二次检测（面板会消失）
       const wantPublish = has('publish') && argOf('publish') !== 'false'
-      console.error(`[pdd-video][gate] out.ok=${out.ok} panelUp=${panelUp} panelStillUp=${panelStillUp} wantPublish=${wantPublish} hasPublish=${has('publish')}`)
-      if ((out.ok || panelStillUp) && wantPublish) {
+      console.error(`[pdd-video][gate] panelUp=${panelUp} wantPublish=${wantPublish} hasPublish=${has('publish')}`)
+      if (panelUp && wantPublish) {
         const L = ['', '▶ 执行发布（CDP 点击，绕过 anti-content 强校验）...']
 
         // ══════════════════════════════════════════════════════════════
@@ -649,13 +613,13 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
               const c = [...document.querySelectorAll('*')].filter((e) => (e.innerText || '').trim() === '添加商品' && e.children.length <= 3)
               if (c.length) c[c.length - 1].click()
             })
-            await sleep2(5000)
+            await sleep2(1500)
             // 切到「商品ID」tab
             await ev(() => {
               const t = [...document.querySelectorAll('*')].filter((e) => (e.innerText || '').trim() === '商品ID' && e.children.length <= 2)
               if (t.length) t[0].click()
             })
-            await sleep2(2000)
+            await sleep2(800)
             // 填商品ID
             await ev((g) => {
               const ins = [...document.querySelectorAll('input')].filter((i) => i.offsetParent && !i.readOnly)
@@ -666,25 +630,25 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
                 t.dispatchEvent(new Event('change', { bubbles: true }))
               }
             }, goodsId)
-            await sleep2(1800)
+            await sleep2(800)
             // 查询
             await ev(() => {
               const b = [...document.querySelectorAll('button,span,div')].filter((e) => /^(查询|搜索)$/.test((e.innerText || '').trim()) && !e.children.length)
               if (b.length) b[0].click()
             })
-            await sleep2(4000)
+            await sleep2(800)
             // 勾选
             await ev(() => {
               const r = [...document.querySelectorAll('input[type=radio]')].filter((x) => x.offsetParent)
               if (r.length) r[0].click()
             })
-            await sleep2(1200)
+            await sleep2(600)
             // 下一步
             await ev(() => {
               const b = [...document.querySelectorAll('button,span,div')].filter((e) => (e.innerText || '').trim() === '下一步' && !e.children.length)
               if (b.length) b[0].click()
             })
-            await sleep2(5000)
+            await sleep2(1500)
             // 验证绑定
             const q2 = await api('/mms/amco/prePublish/query', { pageSize: 20, pageNum: 1 }).catch(() => null)
             const l2 = q2?.json?.result?.result?.list || q2?.json?.result?.list || []
@@ -819,6 +783,7 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
           out.feedIds = pubResp?.result?.feedIds || []
 
           if (pubResp?.success) {
+            out.ok = true   // ★ 发布成败以 publish 接口响应为准，不再依赖 vid 落库
             L.push(`✅ 发布成功！feedId: ${out.feedIds.join(',')}`)
             L.push('   视频已提交审核，通过后对外展示。')
             try { await api('/mms/amco/prePublish/delete', { urlList: [], vidList: [vid] }) } catch { /* ignore */ }
@@ -833,9 +798,25 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
           out.failureKind = 'exception'
         }
         out.text += '\n' + L.join('\n')
-      } else if (out.ok) {
+      } else if (panelUp && !wantPublish) {
         out.text += '\n\n提示：加 --publish true 可上传后直接发布。'
+      } else if (!panelUp) {
+        out.text += '\n\n⚠️ 发布面板已收起（上传后 ~10-20s），本次无法自动发布——视频需在多多视频后台手动发布，或重跑本次流程。'
       }
+
+      // 队列 vid 查询（发布后落库，仅用于报告与清理；成败判定不依赖它）
+      for (let attempt = 0; attempt < 3; attempt++) {
+        await sleep(4000)
+        const list = await getQueue().catch(() => [])
+        console.error(`[pdd-video] 队列查询第 ${attempt + 1} 次：${list.length} 个`)
+        if (list.length) {
+          item = list.find(v => String(v.title || '').includes(path.basename(file).slice(0, 20))) || list[0]
+          vid = item.vid
+          break
+        }
+      }
+      out.upload = { vid, via: 'dom-inject', size: fs.statSync(file).size, title: item?.title || title, coverUrl: item?.coverUrl || '' }
+      if (vid) out.text += `\n  vid: ${vid}（已入待发布队列）`
       if (!out.ok) process.exitCode = 2
     }
 
