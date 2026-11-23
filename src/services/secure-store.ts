@@ -131,10 +131,30 @@ interface KeyFile {
 
 let _modeCache: StorageMode | null = null
 
+/**
+ * ★ 2026-11-22：browser 安全的 env 读取。
+ *
+ *   credential-store 会被 src/client.ts 的传递依赖带进**浏览器 bundle**
+ *   （lib/client.js，账号连接页要用），而浏览器半区没有 `process` 全局 ——
+ *   直接读 process.env 会在页面挂载时抛 "process is not defined"
+ *   （smoke-client 实测：bundle 载入、ModuleLoader 注册完成后挂掉）。
+ *
+ *   这里退化为空串：浏览器半区拿不到环境变量本来就符合预期，
+ *   getStorageMode() 会退回 auto，行为不变；host 半区不受影响。
+ */
+function safeEnv(key: string): string {
+  try {
+    if (typeof process === 'undefined' || !process.env) return ''
+    return String(process.env[key] ?? '')
+  } catch {
+    return ''
+  }
+}
+
 /** 当前存储模式。环境变量非法值时退回 auto（不因配置笔误拒绝启动）。 */
 export function getStorageMode(): StorageMode {
   if (_modeCache) return _modeCache
-  const raw = (process.env[MODE_ENV] ?? 'auto').trim().toLowerCase()
+  const raw = safeEnv(MODE_ENV).trim().toLowerCase()
   _modeCache = raw === 'safe' || raw === 'plaintext' ? raw : 'auto'
   return _modeCache
 }
@@ -146,7 +166,7 @@ export function resetStorageModeCache(): void {
 
 /** 密钥文件路径：与凭证文件同目录，避免跨目录权限问题 */
 export function keyFilePathFor(storePath: string): string {
-  const override = (process.env[KEYFILE_ENV] ?? '').trim()
+  const override = safeEnv(KEYFILE_ENV).trim()
   if (override) return override
   return path.join(path.dirname(storePath), 'dsagent-accounts.key')
 }
@@ -247,7 +267,7 @@ function verifyToken(key: Buffer): string {
 
 /** 显式主密钥（环境变量）——存在即绕过机器标识派生 */
 function explicitMasterKey(): Buffer | null {
-  const raw = (process.env[MASTERKEY_ENV] ?? '').trim()
+  const raw = safeEnv(MASTERKEY_ENV).trim()
   if (!raw) return null
   try {
     const buf = /^[0-9a-fA-F]{64}$/.test(raw) ? Buffer.from(raw, 'hex') : Buffer.from(raw, 'base64')

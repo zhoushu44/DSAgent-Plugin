@@ -446,21 +446,32 @@ const RESULT_PREFIX = '__DSAGENT_RESULT__'
  *     让脚本的 exit / SIGTERM 钩子有机会释放锁、关浏览器、写回状态。
  *   · 两个阈值都可用环境变量覆盖，便于个案排查。
  */
-const IDLE_SOFT_TIMEOUT = Number(process.env.DSAGENT_SKILL_IDLE_SOFT_MS) || 60_000
-const IDLE_TIMEOUT = Number(process.env.DSAGENT_SKILL_IDLE_TIMEOUT_MS) || 180_000
+const IDLE_SOFT_TIMEOUT = 60_000
+const IDLE_TIMEOUT = 180_000
 const MAX_OUTPUT = 64 * 1024
 
 /**
- * 运行时读取阈值（不在模块顶层固化）。
- * 顶层 const 会在 import 时求值一次，测试/单次覆盖环境变量就不生效了。
+ * 运行时读取阈值（★ 不在模块顶层读 process.env）。
+ *
+ *   本文件会被 src/client.ts 的传递依赖带进**浏览器 bundle**（技能市场 UI），
+ *   浏览器半区没有 `process` 全局 —— 顶层 `Number(process.env.X)` 会在
+ *   factory 初始化时抛 "process is not defined"，GUI 插件当场挂掉
+ *   （2026-11-22 smoke 实测踩坑：bundle 载入、注册完成，factory 阶段炸）。
+ *
+ *   所以：常量保持纯字面量，env 覆盖只在运行时函数里读（host 半区才调用 run()），
+ *   且带 typeof 防御。
  */
 function idleSoftTimeout(): number {
-  const v = Number(process.env.DSAGENT_SKILL_IDLE_SOFT_MS)
-  return Number.isFinite(v) && v > 0 ? v : IDLE_SOFT_TIMEOUT
+  try {
+    const v = Number(typeof process !== 'undefined' ? process.env?.DSAGENT_SKILL_IDLE_SOFT_MS : undefined)
+    return Number.isFinite(v) && v > 0 ? v : IDLE_SOFT_TIMEOUT
+  } catch { return IDLE_SOFT_TIMEOUT }
 }
 function idleHardTimeout(): number {
-  const v = Number(process.env.DSAGENT_SKILL_IDLE_TIMEOUT_MS)
-  return Number.isFinite(v) && v > 0 ? v : IDLE_TIMEOUT
+  try {
+    const v = Number(typeof process !== 'undefined' ? process.env?.DSAGENT_SKILL_IDLE_TIMEOUT_MS : undefined)
+    return Number.isFinite(v) && v > 0 ? v : IDLE_TIMEOUT
+  } catch { return IDLE_TIMEOUT }
 }
 
 /**
