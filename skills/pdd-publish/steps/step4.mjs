@@ -408,6 +408,19 @@ export async function step4_clickNext(page, opts = {}) {
     return out.slice(0, 6)
   }).catch(() => [])
 
+  // ★ 失败诊断：转储弹窗/遮罩/按钮，定位新类目卡点（2026-11-23 橘子/生鲜）
+  if (!ready) {
+    const diag = await page.evaluate(() => {
+      const txt = (el) => (el.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 80)
+      const dialogs = [...document.querySelectorAll('[class*="modal"],[class*="dialog"],[class*="popup"],[class*="drawer"],[role="dialog"]')]
+        .filter(el => el.offsetParent !== null && txt(el)).map(el => `[${el.tagName}.${(el.className || '').toString().slice(0, 40)}] ${txt(el)}`).slice(0, 6)
+      const btns = [...document.querySelectorAll('button, a, [class*="btn"]')]
+        .filter(el => el.offsetParent !== null && /下一步|确认|同意|资质|承诺|协议|继续/.test(el.innerText || '')).map(el => `[${el.tagName}] ${txt(el)}`).slice(0, 10)
+      return { url: location.href.slice(0, 100), dialogs, btns, bodyTail: (document.body?.innerText || '').replace(/\s+/g, ' ').slice(-260) }
+    }).catch(e => ({ diagErr: String(e.message).slice(0, 80) }))
+    console.error(`[s4-diag] ${JSON.stringify(diag)}`)
+  }
+
   return {
     ok: ready,
     step2Ready: ready,

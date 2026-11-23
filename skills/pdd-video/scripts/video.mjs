@@ -499,20 +499,29 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
       console.error(`[pdd-video] 上传前面板状态: ${hadPanelBefore ? '已有面板（可能是上次残留）' : '无面板'}`)
 
       let uploaded = false
-      for (let k = 0; k < 60; k++) {
+      let panelUp = false   // ★ 上传完成瞬间捕获的「一键发布面板」状态（面板 ~10s 后会被页面收起）
+      // ★ 2026-11-23 重大修正：发布面板（内容声明+一键发布）是上传页的【静态表单】，
+      //   页面加载完就存在 —— 旧逻辑看到面板就立即判"上传完成"（实测 3s），
+      //   导致 0.6MB 视频还在上传中浏览器就被关闭，上传中途被杀 → 队列永远查不到 vid。
+      //   真完成信号：出现「上传成功/上传完成」提示，或「上传中/xx%」出现后消失。
+      //   都没有时 30s 兜底放行（小文件秒传场景可能不显示进度）。
+      let sawProgress = false
+      for (let k = 0; k < 40; k++) {
         await sleep(3000)
         const txt = await ev(() => document.body?.innerText || '') || ''
-        // 面板出现 + 页面文本长度明显增长（说明真的在加载新内容）
-        const hasPanel = /内容声明/.test(txt) && /一键发布/.test(txt)
-        const grew = txt.length > beforeTxt.length + 100
-        // 或出现「上传中」进度
-        const uploading = /上传中|上传进度|\d+%/.test(txt)
-        if (hasPanel && (grew || !hadPanelBefore)) {
+        const prog = /上传中|上传进度|\d+%/.test(txt)
+        if (prog) sawProgress = true
+        const doneTip = /上传成功|上传完成|发布成功/.test(txt)
+        if (doneTip || (sawProgress && !prog) || (!sawProgress && k >= 9)) {
+          // ★ 诊断 + 立即捕获面板状态（面板可见窗口只有 ~10s，gate 时再查已消失）
+          const pageState = await ev(() => ({ url: location.href.slice(0, 110), title: document.title.slice(0, 40), panel: /一键发布/.test(document.body?.innerText || ''), body: (document.body?.innerText || '').replace(/\s+/g, ' ').slice(0, 400) })).catch(e => ({ err: String(e.message).slice(0, 60) }))
+          panelUp = pageState.panel === true
+          console.error(`[pdd-video][页面诊断] ${JSON.stringify(pageState)}`)
           uploaded = true
-          console.error(`[pdd-video] 上传完成（${(k + 1) * 3}s，len ${beforeTxt.length}→${txt.length}）`)
+          console.error(`[pdd-video] 上传等待结束（${(k + 1) * 3}s）sawProgress=${sawProgress} doneTip=${doneTip} len=${txt.length}`)
           break
         }
-        if (k % 5 === 0) console.error(`[pdd-video] 等待上传… ${(k + 1) * 3}s len=${txt.length} 面板=${hasPanel} 进度=${uploading}`)
+        if (k % 4 === 0) console.error(`[pdd-video] 等待上传… ${(k + 1) * 3}s len=${txt.length} 进度=${prog}`)
       }
       if (!uploaded) {
         out.ok = false; out.failureKind = 'api_error'
@@ -523,6 +532,10 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
       // 取 vid：查队列（多重试，上传后服务端要时间落库）
       let vid = ''
       let item = null
+      // ★ 2026-11-23：发布面板在上传成功后 ~10-20s 会被页面自动收起，
+      //   原 6×4s=24s 的轮询会把发布窗口耗光 → 视频永远停在"已上传未发布"。
+      //   修复：用户要求发布（--publish）时，第 1 次查空就立即中断轮询去点面板。
+      const wantPublishEarly = has('publish') && argOf('publish') !== 'false'
       for (let attempt = 0; attempt < 6; attempt++) {
         await sleep(4000)
         const list = await getQueue()
@@ -531,6 +544,10 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
           // 取标题匹配的（避免拿到上一个残留）
           item = list.find(v => String(v.title || '').includes(path.basename(file).slice(0, 20))) || list[0]
           vid = item.vid
+          break
+        }
+        if (attempt === 0 && wantPublishEarly) {
+          console.error('[pdd-video] 队列空但要求发布 → 跳过轮询，立即走面板发布（面板随时会被收起）')
           break
         }
       }
@@ -549,7 +566,13 @@ const limit = Math.min(100, Math.max(1, parseInt(argOf('limit') || '20', 10) || 
         : '⚠️ 页面显示上传成功，但队列没查到 vid'
 
       // 可选：直接发布
-      if (out.ok && has('publish') && argOf('publish') !== 'false') {
+      // ★ 2026-11-23 修正：vid 查不到 ≠ 发布失败 —— 新类目/新账号的转码落库有延迟，
+      //   但「内容声明 + 一键发布」面板就在当前页面上。只要面板还在 + 用户带 --publish，
+      //   就应该直接点发布（之前 vid 为空直接跳过 → 浏览器一关视频丢失，实测踩坑）
+      const panelStillUp = panelUp   // ★ 用上传完成瞬间捕获的状态，不做二次检测（面板会消失）
+      const wantPublish = has('publish') && argOf('publish') !== 'false'
+      console.error(`[pdd-video][gate] out.ok=${out.ok} panelUp=${panelUp} panelStillUp=${panelStillUp} wantPublish=${wantPublish} hasPublish=${has('publish')}`)
+      if ((out.ok || panelStillUp) && wantPublish) {
         const L = ['', '▶ 执行发布（CDP 点击，绕过 anti-content 强校验）...']
 
         // ══════════════════════════════════════════════════════════════

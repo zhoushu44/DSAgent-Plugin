@@ -12,6 +12,16 @@
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 
 async function clickAddDimensionBtn(page, log) {
+  // ★ 2026-11-23 新增：部分类目（如 刀柄/22896）页面**预渲染**了空的「规格类型1/2」输入框，
+  //   不需要也不存在「添加规格类型」按钮 —— 检测到即直接复用，跳过点按钮
+  const preRendered = await page.evaluate(() => {
+    const inp = document.querySelector('input[placeholder="规格类型1"]')
+    return !!inp
+  }).catch(() => false)
+  if (preRendered) {
+    log('   ① 检测到预渲染的规格类型输入框 → 直接复用（跳过点按钮）')
+    return { ok: true, via: 'pre-rendered', text: '规格类型1(已存在)' }
+  }
   const r = await page.evaluate(() => {
     const norm = s => String(s || '').replace(/\s+/g, '')
     // ★ 按钮文字可能是「添加规格类型(0/2)」「添加规格类型(1/2)」等，用包含匹配
@@ -31,12 +41,29 @@ async function clickAddDimensionBtn(page, log) {
       b = [...document.querySelectorAll('a, span, div')].find(match)
       via = 'fallback'
     }
-    if (!b) return { ok: false, reason: '找不到「添加规格类型」按钮' }
+    if (!b) {
+      // ★ 失败诊断：转储 #spec 区与全部可见按钮（2026-11-23 刀柄/22896）
+      const diag = {
+        hasSpec: false, specHead: '', btns: [], inputs: [],
+      }
+      try {
+        const txt = (el) => (el.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 30)
+        const specEl = document.querySelector('#spec') || document.querySelector('[id*="spec" i]')
+        diag.hasSpec = !!specEl
+        diag.specHead = specEl ? (specEl.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 200) : ''
+        diag.btns = [...document.querySelectorAll('button, [class*="btn"]')]
+          .filter(el => el.offsetParent !== null && (el.innerText || '').trim())
+          .map(el => `[${el.tagName}] ${txt(el)}`).slice(0, 25)
+        diag.inputs = [...document.querySelectorAll('input')].filter(el => el.offsetParent !== null && (el.placeholder || '').trim()).map(el => 'ph=' + el.placeholder).slice(0, 10)
+      } catch {}
+      return { ok: false, reason: '找不到「添加规格类型」按钮', diag }
+    }
     b.scrollIntoView({ block: 'center' })
     b.click()
     return { ok: true, via, text: (b.innerText || '').replace(/\s+/g, '') }
   }).catch(e => ({ ok: false, reason: String(e.message).slice(0, 100) }))
   log(`   ① 点添加规格类型 → ${JSON.stringify(r)}`)
+  if (r?.diag) console.error('[spec-diag] ' + JSON.stringify(r.diag))
   return r
 }
 

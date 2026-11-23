@@ -282,6 +282,13 @@ try {
   let moved = false
   for (let k = 0; k < 5 && !moved; k++) {
     await pick(/goods\/category/)
+    // ★ 2026-11-23：生鲜类目会弹《食品经营承诺函》，必须先点「同意」否则下一步永不跳转
+    await p.evaluate(() => {
+      const btn = [...document.querySelectorAll('button')]
+        .find(e => e.offsetParent !== null && /^\s*同意\s*$/.test(e.innerText || ''))
+      if (btn) { btn.scrollIntoView({ block: 'center' }); btn.click() }
+      return true
+    }).catch(() => {})
     const ok = await p.evaluate(() => {
       const el = document.getElementById('bottomSubmitBtnId')
       if (!el || el.disabled) return false
@@ -294,7 +301,19 @@ try {
       await sleep(250)
     }
   }
-  if (!moved) throw new Error('点了下一步但没进第2步')
+  if (!moved) {
+    // ★ 失败诊断：转储弹窗/按钮（2026-11-23 橘子/生鲜类目）
+    const diag = await p.evaluate(() => {
+      const txt = (el) => (el.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 80)
+      const dialogs = [...document.querySelectorAll('[class*="modal"],[class*="dialog"],[class*="popup"],[class*="drawer"],[role="dialog"]')]
+        .filter(el => el.offsetParent !== null && txt(el)).map(el => `[${(el.className || '').toString().slice(0, 40)}] ${txt(el)}`).slice(0, 6)
+      const btns = [...document.querySelectorAll('button, [class*="btn"]')]
+        .filter(el => el.offsetParent !== null && /下一步|确认|同意|资质|承诺|协议|继续|马上|立即/.test(el.innerText || '')).map(el => `[${el.tagName}] ${txt(el)}`).slice(0, 10)
+      return { url: location.href.slice(0, 90), dialogs, btns, bodyTail: (document.body?.innerText || '').replace(/\s+/g, ' ').slice(-300) }
+    }).catch(e => ({ diagErr: String(e.message).slice(0, 80) }))
+    console.error('[s4-diag] ' + JSON.stringify(diag))
+    throw new Error('点了下一步但没进第2步')
+  }
   steps.push({ step: 4, ok: true })
   log('4 ✅')
 

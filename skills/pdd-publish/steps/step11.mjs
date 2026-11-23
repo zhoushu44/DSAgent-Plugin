@@ -176,7 +176,20 @@ async function pickDimensionName(page, dimName, isFirst) {
       // 兜底：点「添加规格类型」按钮
       const clicked = await B.clickButton(page, { text: '添加规格类型', anyTag: true })
         .catch(() => ({ ok: false }))
-      if (!clicked?.ok) return { ok: false, error: opened.reason }
+      if (!clicked?.ok) {
+        // ★ 失败诊断：转储规格区/按钮候选（2026-11-23 刀柄/22896 新类目）
+        const diag = await page.evaluate(() => {
+          const txt = (el) => (el.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 60)
+          const specSection = document.querySelector('#stand_spec')
+          const cands = [...document.querySelectorAll('button, [class*="btn"], [class*="add"], [class*="Add"]')]
+            .filter(el => el.offsetParent !== null && /规格|添加|新增|自定义|颜色|尺寸/.test(el.innerText || ''))
+            .map(el => `[${el.tagName}.${(el.className || '').toString().slice(0, 40)}] ${txt(el)}`).slice(0, 12)
+          const inputs = [...document.querySelectorAll('input')].filter(el => /规格|初始|类型/.test(el.placeholder || '')).map(el => `placeholder=${el.placeholder}`).slice(0, 6)
+          return { hasStandSpec: !!specSection, standSpecHead: specSection ? txt(specSection).slice(0, 120) : '', cands, inputs }
+        }).catch(e => ({ diagErr: String(e.message).slice(0, 80) }))
+        console.error(`[s11-diag] ${JSON.stringify(diag)}`)
+        return { ok: false, error: opened.reason }
+      }
     }
   } else {
     // 第 2 维：点「添加规格类型」
