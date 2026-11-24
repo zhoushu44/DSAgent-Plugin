@@ -13,35 +13,58 @@
 
 ## 1. 安装方式
 
-DSAgent 支持两种部署方式：
+本仓库**本身就是插件**（不是某个大仓库的子目录）。换电脑时按下面的「快速开始」走一遍即可，两种运行形态任选其一：
 
-### 方式一：DSH Web（开发/调试）
+### 方式一：DSH Web（本仓库的完整形态，推荐开发/自用）
 
-适用于开发调试或本地快速体验。见下文「前置条件」与「挂载与启动」。
+把整个仓库 clone / 复制到新电脑 → 装依赖 → 构建 → 用 `cordis.yml` 挂到 DSH Web。见下文 §2「快速开始」。
 
-### 方式二：DSH Desktop（生产/日常使用）
+### 方式二：DSH Desktop（插件市场一键安装）
 
-**推荐**：DSH Desktop v0.10.0+ 已内置插件市场，支持一键安装。
+DSH Desktop v0.10.0+ 已内置插件市场：
 
-1. 下载 DSH Desktop：访问官方发布页下载 Windows 安装包
-2. 安装并启动 DSH Desktop
-3. 打开插件市场（侧边栏 🔌 图标），搜索 `dsagent-plugin`
-4. 点击「安装」→ 等待完成 → **重启 DSH Desktop**
-5. 重启后侧边栏出现 🔌 图标，即安装成功
+1. 下载并启动 DSH Desktop
+2. 打开插件市场（侧边栏 🔌 图标），搜索 `dsagent-plugin`
+3. 点「安装」→ **重启 DSH Desktop** → 侧边栏出现 🔌 即成功
 
-> **注意**：市场安装后，DSAgent 的 `skills/` 目录会自动创建在插件数据目录内，无需手动创建。
+> 市场安装后 `skills/` 自动创建在插件数据目录内，无需手动配置路径。
+> 注意：市场版与本仓库版**不要同时启用**（技能目录隔离配置会互相覆盖）。
 
----
+## 1.1 快速开始（新电脑，5 步）
+
+```bash
+# 1. 拿到代码（clone 或整个目录拷贝）
+git clone <本仓库地址> DSAgent-Plugin
+cd DSAgent-Plugin
+
+# 2. 装依赖（Node.js ^22.19 或 >=24，pnpm）
+npm install          # 或 pnpm install
+
+# 3. 构建（类型检查 + tsc + 客户端 bundle + 冒烟，约 1~2 分钟）
+npm run build
+
+# 4. 改 cordis.yml 里的 3 处绝对路径（见 §3「换机器必改 3 处」）
+
+# 5. 在 deepseek-agent 仓库根目录挂载启动
+pnpm dsh web --patch <本仓库绝对路径>/cordis.yml
+```
+
+启动后打开 DSH Web（默认 `http://127.0.0.1:3080`），侧边栏出现 **🔌** 图标即挂载成功。然后：
+
+1. 点 🔌 → **账号连接** → 添加你各平台的账号（扫码 / 导入 Cookie）
+2. 在对话里直接说人话用技能，例如「采集抖音上『降噪耳机』的热门视频」
+
+> **账号不会跟着仓库走**：所有登录态存在新电脑本地的 `storePath`（默认 `~/.dsh/dsagent-accounts.json`），拷贝仓库不会带走 Cookie，需要在新电脑重新登录；同理旧电脑的登录态也依然有效，互不影响。
 
 ## 2. 前置条件（仅 Web 方式需要）
 
 | 项 | 要求 | 说明 |
 |---|---|---|
 | Node.js | `^22.19` 或 `>=24` | 与 DSH 引擎要求一致 |
-| pnpm | 任意较新版本 | 仓库使用 pnpm workspaces |
+| npm / pnpm | 较新版本均可 | 本仓库 `npm run build` 直接可用 |
 | Python | 3.10+ | 技能脚本运行时 |
 | Chrome / Edge | 本机已安装 | 登录与发布走 `puppeteer-core`，复用本机浏览器，不内置 Chromium |
-| `DEEPSEEK_API_KEY` | 必填 | 模型调用；写在仓库根 `.env` |
+| `DEEPSEEK_API_KEY` | 必填 | 模型调用；写在 deepseek-agent 仓库根 `.env` |
 
 ---
 
@@ -50,7 +73,13 @@ DSAgent 支持两种部署方式：
 在 **deepseek-agent 仓库根目录**执行：
 
 ```bash
-pnpm dsh web --patch ./plugins/dsagent-plugin/cordis.yml
+pnpm dsh web --patch <DSAgent-Plugin 的绝对路径>/cordis.yml
+```
+
+例如 Windows 上：
+
+```bash
+pnpm dsh web --patch "E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/cordis.yml"
 ```
 
 启动后打开 DSH Web（默认 `http://127.0.0.1:3080`），左侧边栏出现 **🔌** 图标即挂载成功。
@@ -75,10 +104,10 @@ Harness 要求 `name` 必须是**绝对路径**，且本项目**不支持** YAML
 ```yaml
 - insert:
     - id: dsagent-plugin
-      name: '<绝对路径>/plugins/dsagent-plugin/src/index.ts'
+      name: '<DSAgent-Plugin 绝对路径>/src/index.ts'
       disabled: false
       config:
-        skillRoot: '<绝对路径>/skills'
+        skillRoot: '<DSAgent-Plugin 绝对路径>/skills'
         storePath: 'C:/Users/<你>/.dsh/dsagent-accounts.json'
         guideOnUnbound: true
 
@@ -88,9 +117,11 @@ Harness 要求 `name` 必须是**绝对路径**，且本项目**不支持** YAML
       config:
         includeDefaultRoots: false
         customSkillDirs:
-          - '<绝对路径>/skills'
+          - '<DSAgent-Plugin 绝对路径>/skills'
         watch: true
 ```
+
+> 换路径后记得**重启 DSH Web** 才生效。另外 `storePath` 指向的是本地凭证库（Cookie），换机器后所有账号需重新登录（见 §1.1）。
 
 > **Desktop 用户无需手动配置**：市场安装会自动处理所有路径配置。
 
@@ -597,11 +628,15 @@ steps:
 
 ## 10. 目录结构
 
+本仓库根目录即插件根目录：
+
 ```
-plugins/dsagent-plugin/
+DSAgent-Plugin/                   # 仓库根 = 插件根
 ├── cordis.yml                    # 挂载清单（绝对路径 + 技能目录隔离）
 ├── package.json
 ├── tsconfig.json
+├── skills/                       # 36+ 技能（每个子目录一个 SKILL.md）
+├── publish-config/               # 各平台发布页锚点配置
 └── src/
     ├── index.ts                  # host 半区：apply() 入口 + 服务创建 + 工具接线 + 前置校验 + 定时巡检
     ├── client.ts                 # browser 半区：侧边栏按钮 + 面板（两页签）
@@ -665,9 +700,9 @@ skills/.dsagent/runtime/
 ## 11. 自检
 
 ```bash
-cd plugins/dsagent-plugin
-npm run build        # tsc + node dev/build-client.mjs
-npm run typecheck    # tsc --noEmit
+cd DSAgent-Plugin
+npm run build        # 完整构建（含 typecheck + 冒烟）
+npm run typecheck    # 仅类型检查
 ```
 
 技能治理与知识库的验证套件（共 246 个用例）：
