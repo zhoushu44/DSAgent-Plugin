@@ -142,15 +142,39 @@ export function validateProduct(product, tpl = null, opts = {}) {
       else if (!Number.isFinite(Number(stock)) || Number(stock) < 0) errors.push(`skus[${i}].stock 非法: ${stock}`)
       o.stock = stock === undefined || stock === null || stock === '' ? undefined : Number(stock)
 
-      // 单买价
-      const price = o.price ?? o.singlePrice ?? topPrice
+      // 单买价 / 拼单价
+      // ★ 2026-11-24 用户指定默认规则：单买价 = 拼单价 + 1
+      //   缺一方时自动补齐（拼单价缺 → 单买价-1；单买价缺 → 拼单价+1），
+      //   替换旧的 topPrice 回落——那个会造成「拼单价回落 topPrice 倒挂」假报错（实测踩坑）
+      let price = o.price ?? o.singlePrice
+      let multi = o.multiPrice ?? o.groupPrice
+      if ((price === undefined || price === null || price === '') &&
+          (multi === undefined || multi === null || multi === '')) {
+        price = topPrice   // 双缺 → 顶层价格兜底
+        // ★ 双缺时顶层 price 的语义转为单买价，参考价改由默认规则（单买价+1）生成，
+        //   否则 参考价=单买价 必被平台「参考价应大于最大单买价」拦下
+        if (price !== undefined && price !== null && price !== '') {
+          delete p.price
+          warnings.push(`skus[${i}] 单买/拼单价双缺 → 单买价=${price}（顶层），拼单价=${price - 1}，参考价自动=单买价+1`)
+        }
+      }
+      if (price === undefined || price === null || price === '') {
+        if (Number.isFinite(Number(multi)) && Number(multi) > 0) {
+          price = Number(multi) + 1        // ★ 默认规则：单买价 = 拼单价 + 1
+          warnings.push(`skus[${i}] 未传单买价，按默认规则 = 拼单价+1 = ${price}`)
+        }
+      }
+      if (multi === undefined || multi === null || multi === '') {
+        if (Number.isFinite(Number(price)) && Number(price) > 1) {
+          multi = Number(price) - 1        // 对称默认：拼单价 = 单买价 - 1
+          warnings.push(`skus[${i}] 未传拼单价，按默认规则 = 单买价-1 = ${multi}`)
+        }
+      }
       if (price === undefined || price === null || price === '') errors.push(`skus[${i}].price（单买价）缺失`)
       else if (!Number.isFinite(Number(price)) || Number(price) <= 0) errors.push(`skus[${i}].price 非法: ${price}`)
       o.price = price === undefined || price === null || price === '' ? undefined : Number(price)
 
-      // 拼单价
-      const multi = o.multiPrice ?? o.groupPrice ?? topPrice
-      if (multi === undefined || multi === null || multi === '') warnings.push(`skus[${i}].multiPrice（拼单价）缺失，将用单买价`)
+      if (multi === undefined || multi === null || multi === '') errors.push(`skus[${i}].multiPrice（拼单价）缺失`)
       else if (!Number.isFinite(Number(multi)) || Number(multi) <= 0) errors.push(`skus[${i}].multiPrice 非法: ${multi}`)
       o.multiPrice = multi === undefined || multi === null || multi === '' ? undefined : Number(multi)
 
