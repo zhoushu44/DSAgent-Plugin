@@ -396,11 +396,14 @@ try {
   if (!r12.ok) throw new Error('价格库存失败: ' + (r12.errors || []).join(','))
 
   // ── 13 参考价 ──
-  if (product.price) {
+  // ★ 2026-11-24 用户指定默认规则：未填参考价时自动 = 最大单买价 + 1
+  //   （product-schema 未传 price 时会删字段并提示 step13 自动算，
+  //     但旧代码只在有 price 时才调 step13 → 自动算永不触发 → 平台拦截。实测修复）
+  {
     const m13 = await loadStep('step13.mjs')
-    const r13 = await m13.default(p, { value: product.price })
-    steps.push({ step: 13, ok: !!r13.ok })
-    log('13', r13.ok ? '✅ ' + r13.value : '⚠')
+    const r13 = await m13.default(p, product.price ? { value: product.price } : {})
+    steps.push({ step: 13, ok: !!r13.ok, autoCalc: !!r13.autoCalc })
+    log('13', r13.ok ? (r13.autoCalc ? `✅ 自动=最大单买价+1=${r13.value}` : '✅ ' + r13.value) : '⚠ ' + (r13.errors || []).join(','))
   }
 
   // ── 14 折扣 ──

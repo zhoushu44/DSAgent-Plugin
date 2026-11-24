@@ -131,7 +131,8 @@ export async function step13_fillMarketPrice(page, opts = {}) {
   const after = await readMarketPrice(page)
   result.value = after.value
 
-  if (String(after.value) !== String(val)) {
+  // ★ 2026-11-24：数值比较（页面会把 20.90 规范化成 20.9，字符串比对误报回读不一致）
+  if (Number(after.value) !== Number(val)) {
     result.errors.push(`回读不一致：期望 ${val}，实际 ${after.value}`)
     return result
   }
