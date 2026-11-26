@@ -287,63 +287,93 @@ export async function step12b_fillSkuThumbs(page, opts = {}) {
 
     const slots = await readThumbState()
 
+    // ★ 2026-11-26 提速（吸收 v2.1 旧引擎的上传优化）：
+    //   旧实现逐行 `await sleep(200)` + uploadFile + 每行独立轮询 → 实测 ≈1s/行，30 行 29.4s。
+    //   新实现：一次给所有行打 data-pdd-ri → 批量取 handle → 每批并发 CONC 行上传 →
+    //   批内一次读全表状态轮询（不再每行一次 evaluate）。失败/缺入口的行仍走原来的补画串行重试。
+    const CONC = Math.max(1, Number(opts.uploadConcurrency || 4))
+
+    const need = []
     for (let i = 0; i < slots.length; i++) {
       const file = opts.thumbs[i] || opts.thumbs[0]
       if (!file) continue
+      if (slots[i]?.hasThumb) { result.thumbs.push({ i, ok: true, already: true }); continue }
+      need.push({ i, file })
+    }
 
-      // 已有图 → 跳过
-      if (slots[i]?.hasThumb) {
-        result.thumbs.push({ i, ok: true, already: true })
-        continue
+    const runBatch = async () => {
+      // 打行号（顺带把上一次的标记清掉，避免表格重渲染后串行号）
+      await page.evaluate(() => {
+        const tb = document.querySelector('#sku')
+        if (!tb) return
+        ;[...tb.querySelectorAll('input[type="file"][data-pdd-ri]')].forEach(x => x.removeAttribute('data-pdd-ri'))
+        ;[...tb.querySelectorAll('tbody tr')].forEach((tr, ri) => {
+          const inp = tr.querySelector('input[type="file"]')
+          if (inp) inp.setAttribute('data-pdd-ri', String(ri))
+        })
+      }).catch(() => { })
+
+      const handles = await page.$$('#sku tbody tr input[type="file"][data-pdd-ri]')
+      const byRow = new Map()
+      for (const h of handles) {
+        const ri = Number(await h.evaluate(e => e.getAttribute('data-pdd-ri')).catch(() => NaN))
+        if (Number.isFinite(ri)) byRow.set(ri, h)
       }
 
-      // 拿该行的 file input（★ 不再滚动到该行：实测一滚表格就重渲染收缩回 18 行）
-      const el = await page.evaluateHandle((ri) => {
-        const tb = document.querySelector('#sku')
-        if (!tb) return null
-        const tr = [...tb.querySelectorAll('tbody tr')][ri]
-        if (!tr) return null
-        return tr.querySelector('input[type="file"]') || null
-      }, i).then(h => h.asElement()).catch(() => null)
+      for (let b = 0; b < need.length; b += CONC) {
+        const batch = need.slice(b, b + CONC)
+        const sent = []
+        await Promise.all(batch.map(async (item) => {
+          const el = byRow.get(item.i)
+          if (!el) { result.thumbs.push({ i: item.i, ok: false, reason: '无 file input' }); return }
+          try { await el.uploadFile(item.file); sent.push(item.i) }
+          catch (e) { result.thumbs.push({ i: item.i, ok: false, reason: String(e.message).slice(0, 60) }) }
+        }))
+        if (!sent.length) continue
 
-      if (!el) {
-        // 行不在了（表格收缩）→ 补画后再试一次
-        const again = await ensureAllSkuRowsRendered(page, opts)
-        if (again.ok) {
-          const el2 = await page.evaluateHandle((ri) => {
+        // 批内轮询：一次读整表，等这批全部出现缩略图（最多 8 秒）
+        const left = new Set(sent)
+        const t0 = Date.now()
+        while (left.size && Date.now() - t0 < 8000) {
+          await sleep(400)
+          const st = await readThumbState()
+          for (const i of [...left]) {
+            if (st[i]?.hasThumb) { left.delete(i); result.thumbs.push({ i, ok: true }) }
+          }
+        }
+        for (const i of left) result.thumbs.push({ i, ok: false, reason: '上传后未出现缩略图' })
+      }
+    }
+
+    await runBatch()
+
+    // 兜底：没入口 / 没出图的行 → 补画一次表格，再串行重试（保持原来的安全行为）
+    const retryRows = result.thumbs.filter(t => !t.ok).map(t => ({ i: t.i, file: opts.thumbs[t.i] || opts.thumbs[0] }))
+      .filter(x => x.file)
+    if (retryRows.length) {
+      const again = await ensureAllSkuRowsRendered(page, opts)
+      if (again.ok) {
+        // 去掉待重试行的失败记录，重试成功就补回来
+        result.thumbs = result.thumbs.filter(t => !retryRows.some(r => r.i === t.i))
+        for (const { i, file } of retryRows) {
+          const el = await page.evaluateHandle((ri) => {
             const tb = document.querySelector('#sku')
             const tr = tb ? [...tb.querySelectorAll('tbody tr')][ri] : null
             return tr ? (tr.querySelector('input[type="file"]') || null) : null
           }, i).then(h => h.asElement()).catch(() => null)
-          if (el2) {
-            try { await sleep(200); await el2.uploadFile(file) } catch (e) { result.thumbs.push({ i, ok: false, reason: String(e.message).slice(0, 60) }); continue }
-          } else {
-            result.thumbs.push({ i, ok: false, reason: '补画后该行仍没有上传入口' })
-            continue
+          if (!el) { result.thumbs.push({ i, ok: false, reason: '补画后该行仍没有上传入口' }); continue }
+          try { await el.uploadFile(file) } catch (e) { result.thumbs.push({ i, ok: false, reason: String(e.message).slice(0, 60) }); continue }
+          let ok = false
+          for (let w = 0; w < 16; w++) {
+            await sleep(500)
+            const st = await readThumbState()
+            if (st[i]?.hasThumb) { ok = true; break }
           }
-        } else {
-          result.thumbs.push({ i, ok: false, reason: '无 file input' })
-          continue
-        }
-      } else {
-        try {
-          await sleep(200)
-          await el.uploadFile(file)
-        } catch (e) {
-          result.thumbs.push({ i, ok: false, reason: String(e.message).slice(0, 80) })
-          continue
+          result.thumbs.push({ i, ok, ...(ok ? {} : { reason: '上传后未出现缩略图' }) })
         }
       }
-
-      // 等缩略图出现（最多 8 秒，16 × 500ms）
-      let ok = false
-      for (let w = 0; w < 16; w++) {
-        await sleep(500)
-        const st = await readThumbState()
-        if (st[i]?.hasThumb) { ok = true; break }
-      }
-      result.thumbs.push({ i, ok, ...(ok ? {} : { reason: '上传后未出现缩略图' }) })
     }
+    result.thumbs.sort((a, b2) => a.i - b2.i)
   }
 
   // ★ 2026-11-26：判定改严——必须读到行、且每行都有图才算成功（实测出现过「0 行报成功」）

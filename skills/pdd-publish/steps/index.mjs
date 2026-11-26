@@ -240,6 +240,8 @@ try {
   const imgs = product.images || []
   if (!imgs.length) throw new Error('product.images 为空')
   await refetch(/goods\/category/)
+  // ★ 2026-11-26 实测：这里不能省。改成 300ms 后，轮播图上传口还没挂好，文件被丢掉 →
+  //   计数一直为 0 → 白等满 18 秒轮询（主图 6.8s 变 19.7s）。保留 2s 反而更快。
   await sleep(2000)
   await p.waitForSelector('section[class*="goodsCarousel_uploadImgEnter"] input[type="file"]', { timeout: 30000 }).catch(() => { })
   let imgOk = false
@@ -463,12 +465,19 @@ try {
   const m16 = await loadStep('step16.mjs')
   if (hasFlag('stop-before-submit') || process.env.PDD_STOP_BEFORE_SUBMIT === '1') {
     log('=== 16 提交（已跳过：--stop-before-submit）===')
-    const chk = await m16.checkRequiredBeforeSubmit(p).catch(e => ({ ok: false, error: String(e.message) }))
+    const readChk = () => m16.checkRequiredBeforeSubmit(p).catch(e => ({ ok: false, error: String(e.message) }))
+    let chk = await readChk()
+    // ★ 2026-11-26：只有「真的读不到」（error 非空）才重试；ok=false 也可能只是有必填项没填
+    if (chk?.error) { await sleep(900); chk = await readChk() }
     if (chk?.ok) {
-      log(`16 必填校验 ✅ ${chk.total} 项，必填 ${chk.required} 项，缺 ${chk.missing?.length ?? 0} 项`)
-      if (chk.missing?.length) log('   缺:', chk.missing.map(m => m.label).join('、'))
+      log(`16 必填校验 ✅ ${chk.total} 项，必填 ${chk.required} 项，缺 0 项`)
+    } else if (chk?.missing?.length) {
+      // ★ 2026-11-26 修文案：以前这种情况也打「读取失败」，把真正缺失的项藏起来了
+      log(`16 必填校验 ⚠ 缺 ${chk.missing.length} 项（共 ${chk.total} 项，必填 ${chk.required} 项）`)
+      log('   缺:', chk.missing.map(m => m.label).join('、'))
+      if (chk.panelError) log('   页面错误面板:', String(chk.panelError.text || '').slice(0, 160))
     } else {
-      log('16 必填校验 ⚠ ' + (chk?.error || '读取失败'))
+      log('16 必填校验 ⚠ 读取失败: ' + (chk?.error || '未知'))
     }
     const url = p.url()
     console.log('\n' + '='.repeat(56))
