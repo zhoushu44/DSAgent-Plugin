@@ -521,66 +521,12 @@ const wantCsv = process.argv.includes('--csv')
       text: `商品 ${goodsId} 提交体快照：${Object.keys(res).length} 字段 | ${(res.skus || []).length} SKU | ${(res.gallery || []).length} 图 | ${(res.goods_properties || []).length} 属性\n类目：${(res.cats || []).filter(Boolean).join('>')}\n已存 artifacts/pdd-works/commit-${goodsId}.json`,
     })
   } else if (mode === 'edit') {
-    // ── 编辑商品（复用发布引擎，入口改为编辑页）──
-    // 链路：读现有提交体（on_shop/detail）→ 合并用户改动 → 编辑页 hijack 改包 → commit/submit
-    if (!goodsId) { emit({ ok: false, failureKind: 'api_error', text: 'edit 模式必须带 --goods-id' }); await browser?.close(); process.exit(2) }
-    const productFile = argOf('product-file')
-    const productStr = argOf('product')
-    if (!productFile && !productStr) {
-      emit({ ok: false, failureKind: 'api_error', text: 'edit 模式必须带 --product-file 或 --product（要改成的商品数据）' })
-      await browser?.close(); process.exit(2)
-    }
-    // 读商品数据
-    let prodRaw = ''
-    try { prodRaw = productFile ? fs.readFileSync(productFile, 'utf8') : productStr } catch (e) {
-      emit({ ok: false, failureKind: 'api_error', text: `读取商品文件失败：${e.message}` }); await browser?.close(); process.exit(2)
-    }
-    // 读现有提交体（合并基准）
-    const cur = await call('https://mms.pinduoduo.com/glide/v2/mms/query/commit/on_shop/detail', { goods_id: Number(goodsId) })
-    const curRes = cur?.result || {}
-    fs.mkdirSync(path.join(process.cwd(), 'artifacts', 'pdd-works'), { recursive: true })
-    fs.writeFileSync(path.join(process.cwd(), 'artifacts', 'pdd-works', `edit-before-${goodsId}.json`), JSON.stringify(cur, null, 2), 'utf8')
-    if (!Object.keys(curRes).length) {
-      emit({ ok: false, failureKind: 'api_error', text: `读不到商品 ${goodsId} 的提交体（可能已下架/删除/接口频控）` })
-      await browser?.close(); process.exit(2)
-    }
-    await browser?.close()
-
-    // 调发布引擎（hijack 模式），入口传 goodsId 走编辑页
-    const { pddPublish2 } = await import(`file:///${PLUGIN_ROOT}/lib/pdd-publish2.js`)
-    const { CredentialStore } = await import(`file:///${PLUGIN_ROOT}/lib/services/credential-store.js`)
-    const store = new CredentialStore(path.join(homedir(), '.dsh', 'dsagent-accounts.json'))
-    const extra = { product: prodRaw, confirm: true, mode2: true, editGoodsId: goodsId }
-    if (account) extra.account = account
-    // 规格池注入（复用发布的能力）
-    const poolCandidates = [
-      path.join(process.cwd(), 'artifacts', 'pdd-re', 'spec-pool.json'),
-      path.join(process.cwd(), 'spec-pool.json'),
-      path.join(PLUGIN_ROOT, 'skills', 'pdd-publish', 'assets', 'spec-pool.json'),
-    ]
-    for (const c of poolCandidates) {
-      if (fs.existsSync(c)) {
-        try {
-          const pool = JSON.parse(fs.readFileSync(c, 'utf8'))
-          const specIds = {}
-          for (const vals of Object.values(pool.pool || {})) {
-            for (const [v, rec] of Object.entries(vals)) specIds[v] = { spec_id: rec.spec_id, parent_id: rec.parent_spec_id }
-          }
-          extra.specIds = specIds
-          break
-        } catch { /* 下一个 */ }
-      }
-    }
-    const result = await pddPublish2(store, extra)
+    // 编辑商品原先走旧发布引擎的 hijack 模式（lib/pdd-publish2.js），该引擎已移除，此模式停用。
     emit({
-      ok: !!result?.ok,
-      failureKind: result?.failureKind,
-      mode: 'edit', goodsId, shopKey: result?.shopKey,
-      before: { fields: Object.keys(curRes).length, skus: (curRes.skus || []).length, gallery: (curRes.gallery || []).length, properties: (curRes.goods_properties || []).length },
-      finalUrl: result?.finalUrl,
-      text: result?.text || (result?.ok ? '编辑成功' : '编辑失败（无详细信息）'),
+      ok: false, failureKind: 'skill_error', mode: 'edit', goodsId,
+      text: 'edit 模式已停用：它依赖的旧发布引擎已移除。请用 pdd-publish 技能上架，或在商家后台手动编辑。',
     })
-    process.exit(result?.ok ? 0 : 1)
+    process.exit(2)
   } else if (mode === 'spec-pool') {
     const r = await call(LIST_URL, listBody)
     const goods = r?.result?.goods_list || []

@@ -28,7 +28,6 @@
  *   taobao       images + title (+ 一堆类目/图片空间开关)
  *   taobao-mqs   product(JSON)
  *   jd/douyin_shop/1688-mqs  product(JSON)
- *   pdd2         product(JSON)
  *
  * 所以统一的是**传输层与确认门禁**，payload 原样透传给各平台实现。
  *
@@ -54,7 +53,6 @@ export const PUBLISH_PLATFORMS = [
   'jd',
   'douyin-shop',
   '1688',
-  'pdd2',
 ] as const
 
 export type PublishPlatform = typeof PUBLISH_PLATFORMS[number]
@@ -74,7 +72,6 @@ export interface PlatformPublishHandlers {
   mqs: (channel: 'jd' | 'douyin_shop' | '1688', opts: any) => Promise<unknown>
   /** 淘宝/天猫的「统一商品数据」形态（对应 dsagent_taobao_publish_mqs） */
   taobaoMqs: (opts: any) => Promise<unknown>
-  pdd2: (opts: any) => Promise<unknown>
 }
 
 /** images / imagePaths 这类字段：既接受 JSON 数组字符串，也接受英文逗号分隔 */
@@ -480,25 +477,6 @@ async function dispatchInner(
           account,
           diagDom: asBool(p.diagDom),
           agentId,
-        }))
-      }
-
-      case 'pdd2': {
-        const product = p.product != null
-          ? (typeof p.product === 'string' ? p.product : JSON.stringify(p.product))
-          : ''
-        // deliveryTime 在 PddPublish2Options 里是 number（1=当日/2=24h/3=48h），
-        // 传字符串会被原样赋给 opts.deliveryTime，导致类型与下游判断错位 → 这里显式转数字。
-        const rawDelivery = asStr(p.deliveryTime).trim()
-        const deliveryNum = rawDelivery ? Number(rawDelivery) : NaN
-        return ok(await handlers.pdd2({
-          product,
-          confirm,
-          account,
-          agentId,
-          mode2: asBool(p.mode2),
-          costTemplate: asStr(p.costTemplate),
-          deliveryTime: Number.isFinite(deliveryNum) ? deliveryNum : undefined,
         }))
       }
 

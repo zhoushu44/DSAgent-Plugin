@@ -11,7 +11,7 @@ description: |
      · 双参考：素材包第1张锁款式配色 + 第2张锁模特脸部发型
      · 详情布局贴参考：竖排大字标题+副题、模特居中、左下细节小图、底部英文卖点
      · 8 线程并发，约 90 秒
-  ③ pdd-publish-http --product-file 上架（1688 真实 SKU + 属性别名映射 + 价格×2）
+  ③ pdd-publish --product-file 上架（1688 真实 SKU + 属性别名映射 + 价格×2）
 
   ⚠ 生图模型：网关实际模型名是 gpt-image-2.5-1k / -2k / -4k，
     默认的 gpt-image-2.5 会报 model_not_found。
@@ -78,7 +78,7 @@ steps:
       category: "{{category}}"
     output: gen
   - name: 上架拼多多
-    skill: pdd-publish-http
+    skill: pdd-publish
     args:
       product_file: E:/360MoveData/Users/Administrator/Desktop/童装/artifacts/pajama/out/wf/{{loop.index}}/ai/product.json
       confirm: "true"

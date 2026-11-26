@@ -11,7 +11,7 @@
  *      让老数据零改造即可喂进新工具。
  *
  * 本模块**只做**「解析 / 归一化 / 校验」，不含任何平台细节；
- * 平台映射（→ 各平台发布选项）放在各平台自己的模块里（如 pdd-publish2.ts 的 toPddOptions）。
+ * 平台映射（→ 各平台发布选项）放在各平台自己的模块里。
  */
 
 /** 一个规格值（如「奶油黄」），可选带该值的预览图（拼多多 SKU 预览图按规格值上传） */
@@ -326,4 +326,17 @@ export function expandSpecMatrix(specs: ProductSpecDimension[]): string[][] {
     rows = next
   }
   return rows
+}
+
+/**
+ * 「商品属性自动选值」的宿主模型句柄 —— mqs 引擎（淘宝 / 天猫 / 京东 / 抖店 / 1688）用它把
+ * 「从给定选项里挑一个」交给本会话正在用的对话模型；路由（provider/model）由调用方从当前会话
+ * 请求头解析后随句柄一起传进来（见 tool-runtime.agentModelRouteOf）。任一字段缺失则不传，
+ * 属性区只走缓存兜底。
+ */
+export interface AttrModelHandle {
+  /** 宿主 LLM 服务的 stream（`ctx.llm.stream`） */
+  stream: (options: any) => AsyncIterable<any>
+  provider: string
+  model: string
 }

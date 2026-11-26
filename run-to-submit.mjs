@@ -1,7 +1,7 @@
 /**
  * run-to-submit.mjs — 跑到「提交前」停下，等用户手动点提交
  *
- * 用法：node run-to-submit.mjs <商品JSON>
+ * 用法：node run-to-submit.mjs <商品JSON> [shopKey]      （shopKey 缺省 = 空空商行 pdd_mms_800050996）
  * ★ 不关闭浏览器
  */
 import fs from 'node:fs'
@@ -12,7 +12,7 @@ const P = 'E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin'
 const { default: puppeteer } = await import(pathToFileURL(P + '/node_modules/puppeteer-core/lib/cjs/puppeteer/puppeteer-core.js').href)
 const { CredentialStore } = await import(pathToFileURL(P + '/lib/services/credential-store.js').href)
 const { launchStealth } = await import(pathToFileURL(P + '/skills/_shared/pdd-launch.mjs').href)
-const STEPS = P + '/skills/pdd-publish-http/steps'
+const STEPS = P + '/skills/pdd-publish/steps'
 const load = f => import(pathToFileURL(path.join(STEPS, f)).href)
 
 const args = process.argv.slice(2)
@@ -21,8 +21,14 @@ if (!pf) { console.log('用法：node run-to-submit.mjs <商品JSON>'); process.
 
 const s = new CredentialStore(path.join(os.homedir(), '.dsh', 'dsagent-accounts.json'))
 const all = s.listAccounts().filter(x => x.platform === 'pdd_mms')
-const ckOf = x => { const v = x.cookies; if (!v) return 0; if (typeof v === 'object') return Object.keys(v).length; if (typeof v === 'string') return v.split(';').filter(Boolean).length; return 0 }
-const acc = all.filter(x => ckOf(x) > 0 && x.status === 'valid')[0] || all.filter(x => ckOf(x) > 0)[0]
+// 店铺固定为空空商行，不再自动挑选（自动挑会在别的账号状态正常时选到别的店）。
+// 要用别的店：第 2 个参数传 shopKey，或设环境变量 PDD_SHOP。
+const SHOP = args[1] || process.env.PDD_SHOP || 'pdd_mms_800050996'
+const acc = all.find(x => x.shop_key === SHOP)
+if (!acc) {
+  console.log(`找不到账号 ${SHOP}（已连接的拼多多商家账号：${all.map(x => x.shop_key).join(', ') || '无'}）`)
+  process.exit(1)
+}
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 const t0 = Date.now()
 const log = (...a) => console.log(`[+${((Date.now() - t0) / 1000).toFixed(1)}s]`, ...a)

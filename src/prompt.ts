@@ -152,7 +152,6 @@ export function buildSystemPromptText(catalog: SkillCatalogEntry[]): string {
     '  · pdd-activity 营销活动。mode=overview / list / detail / enroll / cancel / progress / recommend。',
     '  · pdd-crawl  比价采集。mode=feed / search / goods。',
     '  · pdd-publish  商品上架（L2 写，HTTP 逆向链路，两步预览）。',
-    '  · pdd-link-matrix  一款多链接批量铺（L2 写，风控即停，两步预览）。',
     '  ★ 连贯原则：任何「读数据」类调用结束后，主动给出下一步建议（而不是等用户问）。典型链条：',
     '    pdd-chance 选品 → pdd-publish 上架 → pdd-video upload 拍视频',
     '    → pdd-video data / detail 看视频表现 → pdd-shop goods 看商品转化',

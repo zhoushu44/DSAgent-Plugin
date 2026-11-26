@@ -26,7 +26,6 @@ import { pddCrawl } from './pdd-crawl.js'
 import { xianyuPublish } from './xianyu-publish.js'
 import { xianyuAnalytics } from './xianyu-analytics.js'
 import { taobaoPublish, type TaobaoSkuInput } from './taobao-publish.js'
-import { pddPublish2 } from './pdd-publish2.js'
 import { mqsPublish, type MqsChannel } from './mqs-publish.js'
 import { parseProduct, validateProduct } from './services/product-schema.js'
 import { defineTool, renderToolOutput, agentIdOf, agentModelRouteOf } from './tool-runtime.js'
@@ -519,65 +518,10 @@ export function buildPublishTools(deps: PublishToolsDeps): import('@deepseek-ai/
       },
     }),
 
-    /* ─── 拼多多商家后台 发布工具（统一商品数据格式；L2：真实副作用，必须用户确认后才执行） ─── */
-
-    defineTool({
-      name: 'dsagent_pdd_publish2',
-      description: '发布商品到拼多多商家后台（基于**统一商品数据格式**；L2 风险，有真实副作用）。'
-        + '入参只有一个统一的 product（JSON），'
-        + '规格用「维度数组」表达（如 颜色 / 尺码，最多 2 维），SKU 用「维度名 → 规格值」组合表达，'
-        + '天然支持**颜色 × 尺码 二维矩阵**；商品属性可显式指定 name→value（比让模型猜更可控）。'
-        + '执行链路：puppeteer 驱动 mms.pinduoduo.com 商家后台（商品列表 →「发布新商品」→'
-        + '类目选择页 →「确认发布该类商品」→ 表单页填字段 →「提交并上架」）。'
-        + '★ 必须两步调用：先不带 confirm 调用拿到「发布预览」给用户看，用户明确同意后再带 confirm=true 调用才会真正提交。'
-        + '★ 发货与售后（非预售+当日发货）、运费模板（如指定）会自动填；品牌和商品资质不会自动填，需用户在弹出窗口内人工补全。'
-        + '★ 拼多多商家后台与拼多多买家账号（dsagent_pdd_crawl 用的那套）是**两套完全独立的登录态**，'
-        + '需在账号连接页单独绑定「拼多多商家后台」。',
-      parameters: {
-        product: { type: 'string', required: true, description: '统一商品数据（必填），JSON 字符串。结构：{ title(必填,≤60字), images(必填,本地绝对路径数组,1~10张,单张≤3MB), detailImages?(详情图,≤50张), category?(类目关键词/路径,不传则从标题推断), price?(参考价,元), stock?(默认库存), itemNo?(货号), specs?(规格维度数组:[{name:"颜色",values:[{value:"奶油黄",image?:"C:/img/1.jpg"}]},{name:"尺码",values:[{value:"110cm"}]}],最多2维,每维值≤20,预览图仅第1维可带), skus?(SKU行数组:[{specs:{颜色:"奶油黄",尺码:"110cm"},price:"34",stock:"999"}],每行需覆盖全部维度), attributes?([{name:"主面料成分",value:"棉"}]), account?(指定账号) }。' },
-        confirm: { type: 'boolean', description: '是否已获用户确认。省略或 false 时只返回发布预览，不产生任何写操作；用户同意后传 true 才真正发布' },
-        account: { type: 'string', description: '要使用的账号 shopKey（可选）。该平台有多个可用账号时，先按返回的候选向用户确认，再把选定的 shopKey 填到这里' },
-        mode2: { type: 'boolean', description: '觅千手式「请求劫持改包」模式（可选，默认 false）。true 时**跳过 UI 逐行填价格表/SKU**，改为：页面照常填主图/标题/详情图/规格，点「提交并上架」时在浏览器层拦下原生 goodsCommit 请求，只替换 sku 价格/库存/货号、图片、运费字段，再用页面身份（带 Anti-Content 签名）重放。优点：不受 30 行 SKU 表格渲染/滚动限制，价格一次改完；缺点：依赖平台内部接口与签名模块，改版会失效。' },
-        costTemplate: { type: 'string', description: '运费模板名（可选）。模式2 下由 buildGoodsDetailFromProduct 解析为模板 ID；模式1 下走 UI 搜索模板名' },
-        deliveryTime: { type: 'string', description: '发货时间（可选，字符串数字）：1=当日发货、2=24小时发货、3=48小时发货；默认 1' },
-      },
-      output: { schema: { type: 'json' }, render: renderToolOutput },
-      async execute(args, exec) {
-        try {
-          // 商品属性自动选值走「本会话正在用的聊天模型」：从会话请求头解析 provider/model，
-          // 与宿主 LLM 服务一起组装成句柄；任一缺失则不传，属性区只走缓存兜底。
-          const route = agentModelRouteOf(exec)
-          const llm = getLlm?.()
-          const attrModel = route && llm
-            ? { stream: (o: any) => llm.stream(o), provider: route.provider, model: route.model }
-            : undefined
-          const result = await pddPublish2(store, {
-            product: (args as any).product,
-            confirm: args.confirm === true,
-            account: args.account ? String(args.account).trim() : '',
-            agentId: agentIdOf(exec),
-            attrModel,
-            mode2: (args as any).mode2 === true,
-            costTemplate: args.costTemplate ? String(args.costTemplate).trim() : undefined,
-            deliveryTime: args.deliveryTime != null && String(args.deliveryTime).trim() !== ''
-              ? Number(args.deliveryTime)
-              : undefined,
-          })
-          return result as any
-        } catch (err) {
-          return {
-            ok: false,
-            failureKind: 'api_error',
-            text: `拼多多发布（上架2）异常：${err instanceof Error ? err.message : String(err)}`,
-          } as any
-        }
-      },
-    }),
-
     /* ═══ mqs 同引擎三平台（京东 / 抖店 / 1688）════════════════════════
      * 觅千手 v5.61 里这三个平台与淘宝/天猫共用 goods_manager 引擎，只是换锚点集。
      * 这里用 `mqsPublish` 一份实现 + 三份 publish-config/*.json 暴露成三个工具，
-     * 参数表与 dsagent_pdd_publish2 同构（统一商品数据 product + confirm 门禁）。
+     * 参数表同构（统一商品数据 product + confirm 门禁）。
      * ═════════════════════════════════════════════════════════════════ */
     defineTool({
       name: 'dsagent_jd_publish_mqs',

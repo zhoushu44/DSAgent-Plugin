@@ -28,7 +28,7 @@
  */
 import { CredentialStore, resolveAccountForRequest, type StoredAccount } from './services/credential-store.js'
 import { applyStealth } from './stealth-inject.js'
-import { type AttrModelHandle } from './pdd-publish.js'
+import { type AttrModelHandle } from './services/product-schema.js'
 import { loadPublishConfig, anchorSpec, configString, configTimeout, type PublishConfig } from './services/publish-config-loader.js'
 import { clearProfileLocks, findChromePath, profileDir, profileOwner, releaseProfile, tryAcquireProfile, registerProfilePort, registeredPortFor, verifyPortOwnership, sleep, UI_STEP_DELAY_MS } from './browser-login.js'
 import { schemaFingerprint } from './services/attr-cache.js'

@@ -48,7 +48,6 @@ if (!ACCOUNT) {
 const CASES = [
   // ── L2 写操作型：只跑「无 --confirm」的预览/校验分支（零写操作、不启浏览器）──
   { skill: 'pdd-publish', script: 'publish-v2.mjs', args: ['--product-file', '__smoke_product__'], desc: '上架预检（无 confirm，零写）', l2: true, expectNeedConfirm: true },
-  { skill: 'pdd-link-matrix', script: 'matrix.mjs', args: ['--product-file', '__smoke_product__', '--variants', '__smoke_variants_json__'], desc: '矩阵预览（无 confirm，零写）', l2: true, expectNeedConfirm: true },
 
   { skill: 'pdd-works', script: 'query.mjs', args: ['--mode', 'list'], desc: '商品列表（只读）' },
   { skill: 'pdd-shop', script: 'shop.mjs', args: ['--mode', 'overview'], desc: '店铺总览（只读）' },

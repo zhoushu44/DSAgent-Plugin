@@ -51,8 +51,6 @@ const CASES = [
   // ── pdd-publish（类目查询，纯 Node 部分）──
   ['pdd-publish', 'scripts/pdd-category.mjs', ['template', '--cat-id', '8463']],
   ['pdd-publish', 'scripts/pdd-category.mjs', ['search', '--keyword', 'T恤']],
-  // ── pdd-link-matrix（参数校验，不实际发请求）──
-  ['pdd-link-matrix', 'scripts/matrix.mjs', ['--help']],
 ]
 
 function clearLocks() {

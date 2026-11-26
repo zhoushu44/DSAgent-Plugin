@@ -39,7 +39,7 @@ import {
   clearProfileLocks, findChromePath, profileDir, profileOwner, registerProfilePort,
   releaseProfile, sleep, tryAcquireProfile, verifyPortOwnership, UI_STEP_DELAY_MS,
 } from './browser-login.js'
-import type { AttrModelHandle } from './pdd-publish.js'
+import type { AttrModelHandle } from './services/product-schema.js'
 
 /* ══════════════════════════════════════════════════════════════════
  * 渠道表（唯一的「平台知识」入口：账号平台 + Cookie 域 + Profile 占用者）

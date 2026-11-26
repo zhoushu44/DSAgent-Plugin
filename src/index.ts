@@ -44,7 +44,6 @@ import { xiaohongshuPublish } from './xiaohongshu-publish.js'
 import { xianyuPublish } from './xianyu-publish.js'
 import { taobaoPublish } from './taobao-publish.js'
 import { mqsPublish } from './mqs-publish.js'
-import { pddPublish2 } from './pdd-publish2.js'
 import { dispatchPlatformPublish, type PlatformPublishHandlers } from './platform-publish.js'
 import { buildSkillTools } from './tools-skill.js'
 import { buildWikiTools } from './tools-wiki.js'
@@ -396,7 +395,6 @@ export function apply(ctx: Context, cfg: Config = config) {
         taobao: (o) => taobaoPublish(store, o),
         mqs: (channel, o) => mqsPublish(store, channel, o),
         taobaoMqs: (o) => taobaoPublish(store, o),
-        pdd2: (o) => pddPublish2(store, o),
       }
       return dispatchPlatformPublish(handlers, body)
     },
