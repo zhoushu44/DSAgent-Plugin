@@ -70,7 +70,25 @@ log('3 标题:', prod.title)
 
 await p.waitForSelector('#selectedCateId, [data-tracking-viewid="choose_cate"], #bottomSubmitBtnId', { timeout: 25000 }).catch(() => { })
 const m4 = await load('step4.mjs')
-await m4.ensureCategory(p, { catId: prod.catId, log: x => log('  ' + x) })
+// ★ 2026-11-26：类目结果必须检查。以前不检查，缺模板时会带着残留类目一路填到提交前。
+const cat = await m4.ensureCategory(p, { catId: prod.catId, log: x => log('  ' + x) })
+if (!cat.ok) {
+  log('4 类目 ❌ ' + (cat.error || '未知原因'))
+  console.log('\n' + '='.repeat(56))
+  console.log('  🛑 类目没弄对，已停止：什么都没填，更不会提交')
+  console.log('='.repeat(56))
+  console.log('  原因:', cat.error || '未知原因')
+  console.log('  页面当前类目:', cat.shown || '(读不到)')
+  console.log('  目标 catId:', prod.catId)
+  console.log('')
+  console.log('  怎么解决：给这个类目拉一份模板')
+  console.log(`    node skills/pdd-publish/scripts/pdd-category.mjs template --catId ${prod.catId} --save`)
+  console.log(`  再把 skills/pdd-publish/templates/<模板ID>__<名字>/template.json`)
+  console.log(`  复制到 artifacts/pdd-templates/<名字>-${prod.catId}/template.json`)
+  console.log('')
+  console.log('★ 浏览器不关')
+  process.exit(1)
+}
 let moved = false
 for (let k = 0; k < 6 && !moved; k++) {
   const ok = await p.evaluate(() => { const el = document.getElementById('bottomSubmitBtnId'); if (!el || el.disabled) return false; el.scrollIntoView({ block: 'center' }); el.click(); return true }).catch(() => false)
@@ -96,9 +114,23 @@ const r11 = await m11.step11_fillSpecs(p, { specs: prod.specs, catId: prod.catId
 log('11 规格', r11.ok ? '✅' : '❌ ' + (r11.error || ''))
 
 const m12 = await load('step12.mjs')
-const thumbs = (prod.skus || []).map((s, i) => s.thumb || (prod.images || [])[i % (prod.images || []).length])
-const r12 = await m12.default(p, { rows: prod.skus.map(x => ({ quantity: x.stock, multiPrice: x.multiPrice, price: x.price, skuSn: x.itemNo })), thumbs, verify: true })
-log('12 价格', r12.ok ? '✅ ' + r12.filled + ' 行' : '❌ ' + (r12.errors || []).join(','))
+const { fillSkuByExcel } = await load('helpers/sku-excel.mjs')
+// ★ 2026-11-26：价格/库存/规格编码改走页面官方「Excel批量编辑规格」（导出→改→导入→确认编辑）。
+//   原因：价格表一次只在页面里画 ~18 行，任何滚动/聚焦都会让它重渲染收缩，
+//   逐格填 30 行必然丢值（实测 11/30 行回读不一致）。Excel 这条路 30 行一次全对。
+const r12x = await fillSkuByExcel(p, { skus: prod.skus, log: x => log('  ' + x) })
+log('12 价格', r12x.ok ? `✅ ${r12x.filled} 行（Excel 批量导入，回读 ${r12x.verify?.checked ?? 0}/${r12x.verify?.checked ?? 0} 一致）` : '❌ ' + (r12x.error || '') + (r12x.verify?.mismatch?.length ? ` 不一致样例: ${JSON.stringify(r12x.verify.mismatch.slice(0, 3))}` : ''))
+
+// 预览图：每行用「对应颜色的那张主图」
+const colorDim = (prod.specs || []).find(s => /颜色/.test(s.name))?.name
+const colorOrder = (prod.specs || []).find(s => /颜色/.test(s.name))?.values?.map(v => (typeof v === 'string' ? v : v?.value)) || []
+const thumbs = (prod.skus || []).map(s => {
+  const ci = Math.max(0, colorOrder.indexOf(s?.specs?.[colorDim]))
+  return s.thumb || (prod.images || [])[ci] || (prod.images || [])[0]
+})
+const r12b = r12x.ok ? await m12.step12b_fillSkuThumbs(p, { thumbs, log: x => log('  ' + x) }) : { ok: false, thumbs: [], errors: ['价格未填成功，跳过'] }
+const okThumbs = (r12b.thumbs || []).filter(t => t.ok).length
+log('12b 预览图', r12b.ok ? `✅ ${okThumbs} 行` : `❌ ${okThumbs}/${thumbs.length} 行 ` + (r12b.errors || []).concat((r12b.thumbs || []).filter(t => !t.ok).map(t => `第${t.i + 1}行:${t.reason}`)).join(', '))
 
 const m13 = await load('step13.mjs'); await m13.default(p).catch(() => { })
 log('13 ✅')

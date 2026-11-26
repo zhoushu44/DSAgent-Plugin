@@ -9,6 +9,7 @@
  */
 
 const sleep = ms => new Promise(r => setTimeout(r, ms))
+import { ensureAllSkuRowsRendered } from './helpers/sku-window.mjs'
 
 /** 仅本文件内用：把表头映射成语义列号 */
 function colsOf(heads) {
@@ -118,11 +119,22 @@ export async function step12_fillSkuPrices(page, opts = {}) {
   const result = { ok: false, before: 0, after: 0, filled: 0, errors: [] }
   if (!rows.length) { result.errors.push('rows 为空'); return result }
 
-  const before = await readSkuTable(page)
+  let before = await readSkuTable(page)
   if (!before.found) { result.errors.push('找不到 #sku 价格库存表: ' + (before.error || '')); return result }
   result.before = before.rowCount
   if (before.rowCount === 0) { result.errors.push('表格没有 SKU 行（需先完成步骤 11）'); return result }
-  if (rows.length > before.rowCount) { result.errors.push(`传了 ${rows.length} 行，页面只有 ${before.rowCount} 行`); return result }
+  if (rows.length > before.rowCount) {
+    // ★ 2026-11-26：页面一次只画前 18 行（30 行的款实测停在 18）→ 先让它补画到全部行再对位填写
+    //   补画不出来就不填：按「页面上第几行」硬填会把后面的价格填到别的规格上
+    const r = await ensureAllSkuRowsRendered(page)
+    result.rendered = r
+    if (r.ok) { before = await readSkuTable(page); result.before = before.rowCount }
+  }
+  if (rows.length > before.rowCount) {
+    const t = result.rendered?.total || before.rowCount
+    result.errors.push(`传了 ${rows.length} 行，页面只画出 ${before.rowCount}/${t} 行，补画失败，未填写`)
+    return result
+  }
 
   // ★ 2026-11-16 重写：每个值单独一次 evaluate，写前重新查询 DOM
   //   原因：React 重渲染后同一次 evaluate 里的 DOM 引用会失效 → 值丢失
@@ -195,17 +207,60 @@ export async function step12_fillSkuPrices(page, opts = {}) {
   result.write = writeRes
   if (!writeRes?.ok) { result.errors.push(writeRes?.reason || '写入失败'); return result }
 
-  // ══ SKU 预览图 ══
-  // ★ 2026-11-16 重写（回归 c18a0ff 的极简版做法）
-  //   判据关键：上传成功后 input[type="file"] 会【消失】，只留 background-image 缩略图
-  //   所以不能「有没有 file input」当完成判据，要看「格子里有没有真实背景图 / http img」
+  await sleep(1500)
+
+  if (opts.verify !== false) {
+    const after = await readSkuTable(page)
+    result.after = after.rowCount
+    let mismatch = 0
+    const bad = []
+    for (let i = 0; i < Math.min(rows.length, after.rows.length); i++) {
+      const want = rows[i], got = after.rows[i]
+      const diff = []
+      if (want.quantity !== undefined && String(want.quantity) !== String(got.quantity)) diff.push(`库存 ${want.quantity}≠${got.quantity}`)
+      if (want.multiPrice !== undefined && String(want.multiPrice) !== String(got.multiPrice)) diff.push(`拼单价 ${want.multiPrice}≠${got.multiPrice}`)
+      if (want.price !== undefined && String(want.price) !== String(got.price)) diff.push(`单买价 ${want.price}≠${got.price}`)
+      if (diff.length) { mismatch++; bad.push({ row: i, spec: got.spec, diff }) }
+      else result.filled++
+    }
+    // ★ 2026-11-16：回读不一致改为「警告」不阻断
+    //   原因：不同类目 SKU 表的 rowspan/colspan/表头结构差异极大，
+    //        回读算法难以 100% 覆盖；而写入本身是成功的（页面可见）。
+    //   真实校验交给 step16 提交前的必填 + 平台校验。
+    if (mismatch > 0) {
+      result.warnings = result.warnings || []
+      result.warnings.push(`${mismatch}/${rows.length} 行回读不一致（仅警告，不阻断）: ` + JSON.stringify(bad).slice(0, 300))
+      result.filled = rows.length - mismatch
+    }
+  } else {
+    result.filled = rows.length
+  }
+
+  // 只有「写入操作本身失败」才算错误
+  result.ok = result.errors.length === 0
+  return result
+}
+
+
+/**
+ * step12b — SKU 预览图（与价格分开的一步）
+ * @param {object} opts
+ * @param {string[]} [opts.thumbs] 每行 SKU 预览图（下标对应价格表的行）
+ * ★ 2026-11-26：从 step12_fillSkuPrices 里原样拆出，上传逻辑未改。
+ *   页面一次只画前 18 行时，先补画到全部行，否则后面的行没有图可传。
+ */
+export async function step12b_fillSkuThumbs(page, opts = {}) {
+  const result = { ok: false, thumbs: [], errors: [] }
+  const drawn = await ensureAllSkuRowsRendered(page, opts)
+  if (!drawn.ok) { result.errors.push(`SKU 表只画出 ${drawn.rendered}/${drawn.total} 行，未上传预览图`); return result }
+
   if (opts.thumbs?.length) {
     result.thumbs = []
 
     // 读所有行的预览图状态
     const readThumbState = () => page.evaluate(() => {
-      const tb = [...document.querySelectorAll('table')].find(t => /拼单价/.test(t.innerText || ''))
-        || document.querySelector('#sku')
+      // ★ 2026-11-26：表头和表体是两张分开的表，按「含拼单价」找只会找到表头（0 行）→ 统一从 #sku 取
+      const tb = document.querySelector('#sku')
       if (!tb) return []
       return [...tb.querySelectorAll('tbody tr')].map((tr, ri) => {
         const tds = [...tr.querySelectorAll('td')]
@@ -242,28 +297,42 @@ export async function step12_fillSkuPrices(page, opts = {}) {
         continue
       }
 
-      // 拿该行的 file input
+      // 拿该行的 file input（★ 不再滚动到该行：实测一滚表格就重渲染收缩回 18 行）
       const el = await page.evaluateHandle((ri) => {
-        const tb = [...document.querySelectorAll('table')].find(t => /拼单价/.test(t.innerText || ''))
-          || document.querySelector('#sku')
+        const tb = document.querySelector('#sku')
         if (!tb) return null
         const tr = [...tb.querySelectorAll('tbody tr')][ri]
         if (!tr) return null
-        tr.scrollIntoView({ block: 'center' })
         return tr.querySelector('input[type="file"]') || null
       }, i).then(h => h.asElement()).catch(() => null)
 
       if (!el) {
-        result.thumbs.push({ i, ok: false, reason: '无 file input' })
-        continue
-      }
-
-      try {
-        await sleep(200)
-        await el.uploadFile(file)
-      } catch (e) {
-        result.thumbs.push({ i, ok: false, reason: String(e.message).slice(0, 80) })
-        continue
+        // 行不在了（表格收缩）→ 补画后再试一次
+        const again = await ensureAllSkuRowsRendered(page, opts)
+        if (again.ok) {
+          const el2 = await page.evaluateHandle((ri) => {
+            const tb = document.querySelector('#sku')
+            const tr = tb ? [...tb.querySelectorAll('tbody tr')][ri] : null
+            return tr ? (tr.querySelector('input[type="file"]') || null) : null
+          }, i).then(h => h.asElement()).catch(() => null)
+          if (el2) {
+            try { await sleep(200); await el2.uploadFile(file) } catch (e) { result.thumbs.push({ i, ok: false, reason: String(e.message).slice(0, 60) }); continue }
+          } else {
+            result.thumbs.push({ i, ok: false, reason: '补画后该行仍没有上传入口' })
+            continue
+          }
+        } else {
+          result.thumbs.push({ i, ok: false, reason: '无 file input' })
+          continue
+        }
+      } else {
+        try {
+          await sleep(200)
+          await el.uploadFile(file)
+        } catch (e) {
+          result.thumbs.push({ i, ok: false, reason: String(e.message).slice(0, 80) })
+          continue
+        }
       }
 
       // 等缩略图出现（最多 8 秒，16 × 500ms）
@@ -277,39 +346,12 @@ export async function step12_fillSkuPrices(page, opts = {}) {
     }
   }
 
-  await sleep(1500)
-
-  if (opts.verify !== false) {
-    const after = await readSkuTable(page)
-    result.after = after.rowCount
-    let mismatch = 0
-    const bad = []
-    for (let i = 0; i < Math.min(rows.length, after.rows.length); i++) {
-      const want = rows[i], got = after.rows[i]
-      const diff = []
-      if (want.quantity !== undefined && String(want.quantity) !== String(got.quantity)) diff.push(`库存 ${want.quantity}≠${got.quantity}`)
-      if (want.multiPrice !== undefined && String(want.multiPrice) !== String(got.multiPrice)) diff.push(`拼单价 ${want.multiPrice}≠${got.multiPrice}`)
-      if (want.price !== undefined && String(want.price) !== String(got.price)) diff.push(`单买价 ${want.price}≠${got.price}`)
-      if (diff.length) { mismatch++; bad.push({ row: i, spec: got.spec, diff }) }
-      else result.filled++
-    }
-    // ★ 2026-11-16：回读不一致改为「警告」不阻断
-    //   原因：不同类目 SKU 表的 rowspan/colspan/表头结构差异极大，
-    //        回读算法难以 100% 覆盖；而写入本身是成功的（页面可见）。
-    //   真实校验交给 step16 提交前的必填 + 平台校验。
-    if (mismatch > 0) {
-      result.warnings = result.warnings || []
-      result.warnings.push(`${mismatch}/${rows.length} 行回读不一致（仅警告，不阻断）: ` + JSON.stringify(bad).slice(0, 300))
-      result.filled = rows.length - mismatch
-    }
-  } else {
-    result.filled = rows.length
-  }
-
-  // 只有「写入操作本身失败」才算错误
-  result.ok = result.errors.length === 0
+  // ★ 2026-11-26：判定改严——必须读到行、且每行都有图才算成功（实测出现过「0 行报成功」）
+  if (opts.thumbs?.length && !result.thumbs.length) result.errors.push('没有读到任何一行，预览图未上传')
+  const failed = result.thumbs.filter(t => !t.ok)
+  if (failed.length) result.errors.push(`${failed.length} 行预览图失败: ` + failed.map(t => `第${t.i + 1}行 ${t.reason}`).join('，'))
+  result.ok = result.errors.length === 0 && result.thumbs.length > 0
   return result
 }
 
 export default step12_fillSkuPrices
-

@@ -289,7 +289,12 @@ async function manualPick(page, tpl, log, force = false) {
 export async function ensureCategory(page, opts = {}) {
   const log = opts.log || console.log
   const tpl = loadTpl(opts.catId || opts.categoryName)
-  if (!tpl) return { ok: false, error: '找不到类目模板' }
+  if (!tpl) {
+    // ★ 2026-11-26：这里以前静默返回失败，上层不检查返回值就会带着页面上残留的类目继续填，
+    //   一路填到提交前都不报错（T2 第一次实测就是这样发到了错误的「套装」类目）。
+    log(`类目检查: ❌ 找不到类目模板（catId=${opts.catId || opts.categoryName || '未指定'}）`)
+    return { ok: false, error: `找不到类目模板：catId=${opts.catId || opts.categoryName || '未指定'}` }
+  }
 
   // ★ forceManual：跳过"已默认选中"判断，强制走手动选类目
   if (opts.forceManual) {

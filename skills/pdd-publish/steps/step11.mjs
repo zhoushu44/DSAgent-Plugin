@@ -63,6 +63,7 @@ import { fillByGroup } from './helpers/fill-by-group.mjs'
 import { fillSizeTable as fillSizeTableGeneric } from './helpers/size-table-fill.mjs'
 import { stopSizeChart, hasStopButton } from './helpers/stop-sizechart.mjs'
 import { fillCustomSpec } from './helpers/fill-custom-spec2.mjs'
+import { ensureAllSkuRowsRendered, countSkuRowsAll } from './helpers/sku-window.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const PLUGIN = path.resolve(__dirname, '..', '..', '..')
@@ -923,6 +924,16 @@ export async function step11_fillSpecs(page, opts = {}) {
     actual = await countSkuRows(page)
     if (actual >= expected) break
     await new Promise(r => setTimeout(r, 200))
+  }
+  if (actual < expected) {
+    const total = await countSkuRowsAll(page)
+    log(`   页面里的总行数：${total}，画出来：${actual}`)
+    // ★ 2026-11-26：页面一次只画前 18 行时，DOM 里永远数不够（30 行的款实测停在 18）
+    //   → 让页面把剩下的行补画出来再数（≤18 行的款不会进这里）
+    //   总行数只是参考：表格刚生成时读到的会偏大（实测 30 行读到 32），不能拿它当门槛
+    const r = await ensureAllSkuRowsRendered(page, { log })
+    log(`   补画：${r.rendered}/${r.total} 行 ${r.ok ? '✅' : '❌ ' + (r.reason || '')}`)
+    if (r.ok) actual = await countSkuRows(page)
   }
   log(`   行数校验：期望 ${expected}，实际 ${actual}`)
 

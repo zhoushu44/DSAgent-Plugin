@@ -388,6 +388,13 @@ try {
   const r12 = await m12.default(p, { rows, thumbs, verify: true })
   steps.push({ step: 12, ok: !!r12.ok, filled: r12.filled })
   log('12', r12.ok ? `✅ ${r12.filled} 行` : '❌ ' + (r12.errors || []).join(','))
+  // ★ 2026-11-26：SKU 预览图从价格步骤拆出，价格填完后紧接着传（每行用对应颜色的图）
+  {
+    const r12b = await m12.step12b_fillSkuThumbs(p, { thumbs, log: x => log('  ' + x) })
+    const okN = (r12b.thumbs || []).filter(t => t.ok).length
+    steps.push({ step: '12b', ok: !!r12b.ok, filled: okN })
+    log('12b 预览图', r12b.ok ? `✅ ${okN} 行` : '❌ ' + (r12b.errors || []).concat((r12b.thumbs || []).filter(t => !t.ok).map(t => `第${t.i + 1}行 ${t.reason}`)).join(','))
+  }
   if (r12.write?.done) {
     log('   写入明细:', JSON.stringify(r12.write.done.map(d => ({ i: d.i, ok: d.ok, acts: d.acts?.map(a => a[0] + ':' + a[1]).join(' ') }))))
     log('   列号:', JSON.stringify(r12.write.cols))

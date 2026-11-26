@@ -1,0 +1,2536 @@
+{
+ "templateId": 63525,
+ "category": {
+  "name": "套装",
+  "catId": 15068,
+  "cats": [
+   {
+    "cat_id": 15068,
+    "cat_name": "套装"
+   }
+  ]
+ },
+ "attributes": [
+  {
+   "templatePid": 671050,
+   "label": "品牌",
+   "refPid": 5,
+   "moduleId": 92007,
+   "required": false,
+   "mode": "single",
+   "unit": "",
+   "topTip": "",
+   "bottomTip": "",
+   "options": [
+    {
+     "vid": 4643510,
+     "value": "无品牌/无注册商标"
+    },
+    {
+     "vid": 5604412,
+     "value": "其他"
+    },
+    {
+     "vid": 10856,
+     "value": "LEE"
+    },
+    {
+     "vid": 927,
+     "value": "GIORGIO ARMANI/阿玛尼"
+    },
+    {
+     "vid": 125,
+     "value": "Hush Puppies/暇步士"
+    },
+    {
+     "vid": 11463,
+     "value": "Ralph Lauren/拉夫劳伦"
+    },
+    {
+     "vid": 11685,
+     "value": "GU"
+    },
+    {
+     "vid": 11704,
+     "value": "PRADA/普拉达"
+    },
+    {
+     "vid": 12880,
+     "value": "Nautica/诺帝卡"
+    },
+    {
+     "vid": 14194,
+     "value": "FENDI/芬迪"
+    },
+    {
+     "vid": 14219,
+     "value": "ZARA/飒拉"
+    },
+    {
+     "vid": 142,
+     "value": "Dickies"
+    },
+    {
+     "vid": 143,
+     "value": "BURBERRY/博柏利"
+    },
+    {
+     "vid": 15093,
+     "value": "BALENCIAGA/巴黎世家"
+    },
+    {
+     "vid": 16572,
+     "value": "Lacoste/拉科斯特"
+    },
+    {
+     "vid": 16582,
+     "value": "HAZZYS/哈吉斯"
+    },
+    {
+     "vid": 17510,
+     "value": "Teenie Weenie"
+    },
+    {
+     "vid": 17959,
+     "value": "Old Navy"
+    },
+    {
+     "vid": 172684,
+     "value": "Paw in Paw/宝英宝"
+    },
+    {
+     "vid": 180175,
+     "value": "Mikihouse Hot Biscuits"
+    },
+    {
+     "vid": 190955,
+     "value": "Petit main"
+    },
+    {
+     "vid": 190957,
+     "value": "Petitbateau"
+    },
+    {
+     "vid": 191154,
+     "value": "Ourq"
+    },
+    {
+     "vid": 192071,
+     "value": "Mikihouse Double_B"
+    },
+    {
+     "vid": 193867,
+     "value": "THE CHILDREN'S PLACE/绮童堡"
+    },
+    {
+     "vid": 200389,
+     "value": "Carter's/凯得史"
+    },
+    {
+     "vid": 210760,
+     "value": "Disney baby"
+    },
+    {
+     "vid": 24707,
+     "value": "SENSHUKAI/千趣会"
+    },
+    {
+     "vid": 1977,
+     "value": "FISHER-PRICE/费雪"
+    },
+    {
+     "vid": 2020,
+     "value": "Fila/斐乐"
+    },
+    {
+     "vid": 217,
+     "value": "Decathlon/迪卡侬"
+    },
+    {
+     "vid": 27747,
+     "value": "JORDAN"
+    },
+    {
+     "vid": 279176,
+     "value": "Tommy Hilfiger"
+    },
+    {
+     "vid": 280397,
+     "value": "Schiesserkinder"
+    },
+    {
+     "vid": 30911,
+     "value": "Mikihouse"
+    },
+    {
+     "vid": 31912,
+     "value": "Massimo dutti"
+    },
+    {
+     "vid": 31977,
+     "value": "E·Land/衣恋"
+    },
+    {
+     "vid": 34331,
+     "value": "BEANPOLE"
+    },
+    {
+     "vid": 331341,
+     "value": "MLB"
+    },
+    {
+     "vid": 308,
+     "value": "adidas/阿迪达斯"
+    },
+    {
+     "vid": 312,
+     "value": "NIKE/耐克"
+    },
+    {
+     "vid": 315,
+     "value": "Puma/彪马"
+    },
+    {
+     "vid": 40073,
+     "value": "GUNZE/郡是"
+    },
+    {
+     "vid": 41771,
+     "value": "TWINKIDS/特元骑子"
+    },
+    {
+     "vid": 51752,
+     "value": "Agabang/阿卡邦"
+    },
+    {
+     "vid": 5105,
+     "value": "Mothercare/好妈妈"
+    },
+    {
+     "vid": 64792,
+     "value": "ELLE BABY"
+    },
+    {
+     "vid": 8554,
+     "value": "MUJI/无印良品"
+    },
+    {
+     "vid": 8815,
+     "value": "Skechers/斯凯奇"
+    }
+   ],
+   "optionCount": 49
+  },
+  {
+   "templatePid": 671051,
+   "label": "面料俗称",
+   "refPid": 7,
+   "moduleId": 92007,
+   "required": false,
+   "mode": "single",
+   "unit": "",
+   "topTip": "",
+   "bottomTip": "",
+   "options": [
+    {
+     "vid": 10348,
+     "value": "棉"
+    },
+    {
+     "vid": 10352,
+     "value": "牛仔布"
+    },
+    {
+     "vid": 10356,
+     "value": "蕾丝"
+    },
+    {
+     "vid": 10357,
+     "value": "雪纺"
+    },
+    {
+     "vid": 10358,
+     "value": "莫代尔"
+    },
+    {
+     "vid": 10363,
+     "value": "灯芯绒"
+    },
+    {
+     "vid": 10364,
+     "value": "法兰绒"
+    },
+    {
+     "vid": 10365,
+     "value": "金丝绒"
+    },
+    {
+     "vid": 10369,
+     "value": "毛呢"
+    },
+    {
+     "vid": 10371,
+     "value": "羊毛"
+    },
+    {
+     "vid": 10386,
+     "value": "化纤"
+    },
+    {
+     "vid": 10387,
+     "value": "其它"
+    },
+    {
+     "vid": 12980,
+     "value": "丝绸"
+    },
+    {
+     "vid": 13226,
+     "value": "棉麻"
+    },
+    {
+     "vid": 13227,
+     "value": "亚麻"
+    },
+    {
+     "vid": 13229,
+     "value": "棉涤"
+    },
+    {
+     "vid": 13474,
+     "value": "冰丝"
+    },
+    {
+     "vid": 13616,
+     "value": "锦纶"
+    },
+    {
+     "vid": 15122,
+     "value": "绒布"
+    },
+    {
+     "vid": 16197,
+     "value": "针织布"
+    },
+    {
+     "vid": 16213,
+     "value": "粘胶纤维"
+    },
+    {
+     "vid": 91014,
+     "value": "皮革"
+    },
+    {
+     "vid": 792146,
+     "value": "韩国绒"
+    },
+    {
+     "vid": 807646,
+     "value": "棉绸"
+    },
+    {
+     "vid": 952852,
+     "value": "德绒"
+    },
+    {
+     "vid": 1222590,
+     "value": "奥戴尔"
+    },
+    {
+     "vid": 16209,
+     "value": "珠地网眼"
+    },
+    {
+     "vid": 13473,
+     "value": "涤纶"
+    }
+   ],
+   "optionCount": 28
+  },
+  {
+   "templatePid": 671054,
+   "label": "适用性别",
+   "refPid": 32,
+   "moduleId": 92007,
+   "required": false,
+   "mode": "single",
+   "unit": "",
+   "topTip": "",
+   "bottomTip": "",
+   "options": [
+    {
+     "vid": 13059,
+     "value": "通用"
+    },
+    {
+     "vid": 13286,
+     "value": "男"
+    },
+    {
+     "vid": 13287,
+     "value": "女"
+    }
+   ],
+   "optionCount": 3
+  },
+  {
+   "templatePid": 671055,
+   "label": "流行元素",
+   "refPid": 13,
+   "moduleId": 92007,
+   "required": false,
+   "mode": "single",
+   "unit": "",
+   "topTip": "",
+   "bottomTip": "",
+   "options": [
+    {
+     "vid": 10508,
+     "value": "蝴蝶结"
+    },
+    {
+     "vid": 10510,
+     "value": "铆钉"
+    },
+    {
+     "vid": 10511,
+     "value": "植绒"
+    },
+    {
+     "vid": 10513,
+     "value": "荷叶边"
+    },
+    {
+     "vid": 10514,
+     "value": "镂空"
+    },
+    {
+     "vid": 10515,
+     "value": "抽褶"
+    },
+    {
+     "vid": 10516,
+     "value": "肩章"
+    },
+    {
+     "vid": 10517,
+     "value": "亮丝"
+    },
+    {
+     "vid": 10518,
+     "value": "镶钻"
+    },
+    {
+     "vid": 10520,
+     "value": "露背"
+    },
+    {
+     "vid": 10524,
+     "value": "绣花"
+    },
+    {
+     "vid": 10525,
+     "value": "链条"
+    },
+    {
+     "vid": 10526,
+     "value": "褶皱"
+    },
+    {
+     "vid": 10527,
+     "value": "木耳"
+    },
+    {
+     "vid": 10531,
+     "value": "系带"
+    },
+    {
+     "vid": 10532,
+     "value": "螺纹"
+    },
+    {
+     "vid": 10534,
+     "value": "立体装饰"
+    },
+    {
+     "vid": 10535,
+     "value": "不对称"
+    },
+    {
+     "vid": 10537,
+     "value": "扎染"
+    },
+    {
+     "vid": 10538,
+     "value": "钉珠"
+    },
+    {
+     "vid": 10539,
+     "value": "波浪"
+    },
+    {
+     "vid": 10540,
+     "value": "做旧"
+    },
+    {
+     "vid": 10541,
+     "value": "亮片"
+    },
+    {
+     "vid": 10542,
+     "value": "背带"
+    },
+    {
+     "vid": 10543,
+     "value": "纽扣"
+    },
+    {
+     "vid": 10544,
+     "value": "纱网"
+    },
+    {
+     "vid": 10545,
+     "value": "拉链"
+    },
+    {
+     "vid": 10550,
+     "value": "明线装饰"
+    },
+    {
+     "vid": 10552,
+     "value": "拼接"
+    },
+    {
+     "vid": 10553,
+     "value": "印花"
+    },
+    {
+     "vid": 10554,
+     "value": "3D"
+    },
+    {
+     "vid": 10555,
+     "value": "蕾丝"
+    },
+    {
+     "vid": 10556,
+     "value": "贴布"
+    },
+    {
+     "vid": 13214,
+     "value": "纯色"
+    },
+    {
+     "vid": 13213,
+     "value": "撞色"
+    }
+   ],
+   "optionCount": 35
+  },
+  {
+   "templatePid": 671056,
+   "label": "件数",
+   "refPid": 27,
+   "moduleId": 92007,
+   "required": false,
+   "mode": "single",
+   "unit": "",
+   "topTip": "",
+   "bottomTip": "",
+   "options": [
+    {
+     "vid": 13039,
+     "value": "其它"
+    },
+    {
+     "vid": 13089,
+     "value": "两件套"
+    },
+    {
+     "vid": 13090,
+     "value": "三件套"
+    },
+    {
+     "vid": 30807,
+     "value": "四件套"
+    },
+    {
+     "vid": 30808,
+     "value": "五件套"
+    }
+   ],
+   "optionCount": 5
+  },
+  {
+   "templatePid": 671057,
+   "label": "袖长",
+   "refPid": 10,
+   "moduleId": 92007,
+   "required": false,
+   "mode": "single",
+   "unit": "",
+   "topTip": "",
+   "bottomTip": "",
+   "options": [
+    {
+     "vid": 10457,
+     "value": "长袖"
+    },
+    {
+     "vid": 10458,
+     "value": "九分袖"
+    },
+    {
+     "vid": 10459,
+     "value": "七分袖"
+    },
+    {
+     "vid": 10460,
+     "value": "五分袖/中袖"
+    },
+    {
+     "vid": 10461,
+     "value": "短袖"
+    },
+    {
+     "vid": 10462,
+     "value": "无袖"
+    }
+   ],
+   "optionCount": 6
+  },
+  {
+   "templatePid": 671058,
+   "label": "下装长",
+   "refPid": 11,
+   "moduleId": 92007,
+   "required": false,
+   "mode": "single",
+   "unit": "",
+   "topTip": "",
+   "bottomTip": "",
+   "options": [
+    {
+     "vid": 10476,
+     "value": "短款"
+    },
+    {
+     "vid": 790517,
+     "value": "五分"
+    },
+    {
+     "vid": 790518,
+     "value": "七分"
+    },
+    {
+     "vid": 790519,
+     "value": "九分"
+    },
+    {
+     "vid": 10479,
+     "value": "长款"
+    }
+   ],
+   "optionCount": 5
+  },
+  {
+   "templatePid": 671059,
+   "label": "安全等级",
+   "refPid": 292,
+   "moduleId": 92007,
+   "required": false,
+   "mode": "single",
+   "unit": "",
+   "topTip": "",
+   "bottomTip": "",
+   "options": [
+    {
+     "vid": 982916,
+     "value": "A类"
+    },
+    {
+     "vid": 982917,
+     "value": "B类"
+    },
+    {
+     "vid": 982918,
+     "value": "C类"
+    },
+    {
+     "vid": 80589,
+     "value": "其它"
+    }
+   ],
+   "optionCount": 4
+  },
+  {
+   "templatePid": 671060,
+   "label": "厚薄",
+   "refPid": 44,
+   "moduleId": 92007,
+   "required": false,
+   "mode": "single",
+   "unit": "",
+   "topTip": "",
+   "bottomTip": "",
+   "options": [
+    {
+     "vid": 13380,
+     "value": "常规"
+    },
+    {
+     "vid": 13378,
+     "value": "薄款"
+    },
+    {
+     "vid": 13379,
+     "value": "加厚"
+    }
+   ],
+   "optionCount": 3
+  },
+  {
+   "templatePid": 671061,
+   "label": "适用季节",
+   "refPid": 176,
+   "moduleId": 92007,
+   "required": false,
+   "mode": "single",
+   "unit": "",
+   "topTip": "",
+   "bottomTip": "",
+   "options": [
+    {
+     "vid": 514963,
+     "value": "春秋"
+    },
+    {
+     "vid": 514964,
+     "value": "夏季"
+    },
+    {
+     "vid": 514965,
+     "value": "冬季"
+    },
+    {
+     "vid": 514966,
+     "value": "不限季节"
+    }
+   ],
+   "optionCount": 4
+  },
+  {
+   "templatePid": 671062,
+   "label": "图案",
+   "refPid": 205,
+   "moduleId": 92007,
+   "required": false,
+   "mode": "single",
+   "unit": "",
+   "topTip": "",
+   "bottomTip": "",
+   "options": [
+    {
+     "vid": 56749,
+     "value": "条纹"
+    },
+    {
+     "vid": 56750,
+     "value": "格子"
+    },
+    {
+     "vid": 56751,
+     "value": "圆点"
+    },
+    {
+     "vid": 56752,
+     "value": "卡通动漫"
+    },
+    {
+     "vid": 56753,
+     "value": "碎花"
+    },
+    {
+     "vid": 56754,
+     "value": "纯色"
+    },
+    {
+     "vid": 56755,
+     "value": "豹纹"
+    },
+    {
+     "vid": 91143,
+     "value": "拼色"
+    },
+    {
+     "vid": 514943,
+     "value": "字母"
+    },
+    {
+     "vid": 790579,
+     "value": "数字"
+    },
+    {
+     "vid": 790578,
+     "value": "渐变"
+    },
+    {
+     "vid": 98690,
+     "value": "水果"
+    }
+   ],
+   "optionCount": 12
+  },
+  {
+   "templatePid": 671063,
+   "label": "风格",
+   "refPid": 12,
+   "moduleId": 92007,
+   "required": false,
+   "mode": "single",
+   "unit": "",
+   "topTip": "",
+   "bottomTip": "",
+   "options": [
+    {
+     "vid": 10491,
+     "value": "休闲"
+    },
+    {
+     "vid": 12894,
+     "value": "学院"
+    },
+    {
+     "vid": 10503,
+     "value": "英伦"
+    },
+    {
+     "vid": 13049,
+     "value": "公主风"
+    },
+    {
+     "vid": 10502,
+     "value": "欧美"
+    },
+    {
+     "vid": 10490,
+     "value": "韩版"
+    },
+    {
+     "vid": 10501,
+     "value": "日系"
+    },
+    {
+     "vid": 55378,
+     "value": "小清新"
+    },
+    {
+     "vid": 12899,
+     "value": "嘻哈"
+    },
+    {
+     "vid": 10504,
+     "value": "文艺"
+    },
+    {
+     "vid": 10495,
+     "value": "简约"
+    },
+    {
+     "vid": 96314,
+     "value": "中国风"
+    },
+    {
+     "vid": 13389,
+     "value": "卡通"
+    },
+    {
+     "vid": 12892,
+     "value": "运动"
+    },
+    {
+     "vid": 10506,
+     "value": "民族风"
+    },
+    {
+     "vid": 10496,
+     "value": "淑女"
+    },
+    {
+     "vid": 833595,
+     "value": "新中式"
+    }
+   ],
+   "optionCount": 17
+  },
+  {
+   "templatePid": 671064,
+   "label": "衣门襟",
+   "refPid": 26,
+   "moduleId": 92007,
+   "required": false,
+   "mode": "single",
+   "unit": "",
+   "topTip": "",
+   "bottomTip": "",
+   "options": [
+    {
+     "vid": 13067,
+     "value": "拉链"
+    },
+    {
+     "vid": 13071,
+     "value": "套头"
+    },
+    {
+     "vid": 13084,
+     "value": "双排扣"
+    },
+    {
+     "vid": 13085,
+     "value": "单排扣"
+    },
+    {
+     "vid": 14273,
+     "value": "一粒扣"
+    },
+    {
+     "vid": 14274,
+     "value": "暗扣"
+    },
+    {
+     "vid": 91145,
+     "value": "魔术贴"
+    },
+    {
+     "vid": 91146,
+     "value": "羊角扣"
+    },
+    {
+     "vid": 13072,
+     "value": "系带"
+    }
+   ],
+   "optionCount": 9
+  },
+  {
+   "templatePid": 671065,
+   "label": "商品货号",
+   "refPid": 6,
+   "moduleId": 92007,
+   "required": false,
+   "mode": "single",
+   "unit": "",
+   "topTip": "",
+   "bottomTip": "",
+   "options": [],
+   "optionCount": 0
+  },
+  {
+   "templatePid": 671066,
+   "label": "适用年龄段",
+   "refPid": 264,
+   "moduleId": 92007,
+   "required": false,
+   "mode": "single",
+   "unit": "",
+   "topTip": "",
+   "bottomTip": "",
+   "options": [
+    {
+     "vid": 113805,
+     "value": "14岁以上"
+    },
+    {
+     "vid": 510783,
+     "value": "3岁（含）—6岁（不含）"
+    },
+    {
+     "vid": 949340,
+     "value": "6岁（含）—8岁（不含）"
+    },
+    {
+     "vid": 949425,
+     "value": "8岁（含）—14岁（不含）"
+    },
+    {
+     "vid": 949437,
+     "value": "0—3岁（不含）"
+    }
+   ],
+   "optionCount": 5
+  },
+  {
+   "templatePid": 671067,
+   "label": "是否带帽",
+   "refPid": 376,
+   "moduleId": 92007,
+   "required": false,
+   "mode": "single",
+   "unit": "",
+   "topTip": "",
+   "bottomTip": "",
+   "options": [
+    {
+     "vid": 88523,
+     "value": "带帽"
+    },
+    {
+     "vid": 88524,
+     "value": "不带帽"
+    }
+   ],
+   "optionCount": 2
+  },
+  {
+   "templatePid": 671068,
+   "label": "上市时节",
+   "refPid": 587,
+   "moduleId": 92007,
+   "required": false,
+   "mode": "single",
+   "unit": "",
+   "topTip": "",
+   "bottomTip": "",
+   "options": [
+    {
+     "vid": 765085,
+     "value": "2020年春季"
+    },
+    {
+     "vid": 765384,
+     "value": "2020年夏季"
+    },
+    {
+     "vid": 919971,
+     "value": "2020年秋季"
+    },
+    {
+     "vid": 949218,
+     "value": "2020年冬季"
+    },
+    {
+     "vid": 1076257,
+     "value": "2021年春季"
+    },
+    {
+     "vid": 1158084,
+     "value": "2021年夏季"
+    },
+    {
+     "vid": 1278396,
+     "value": "2021年秋季"
+    },
+    {
+     "vid": 1345171,
+     "value": "2021年冬季"
+    },
+    {
+     "vid": 1429529,
+     "value": "2022年春季"
+    },
+    {
+     "vid": 1429530,
+     "value": "2022年夏季"
+    },
+    {
+     "vid": 1429531,
+     "value": "2022年秋季"
+    },
+    {
+     "vid": 1429532,
+     "value": "2022年冬季"
+    },
+    {
+     "vid": 1777928,
+     "value": "2023年春季"
+    },
+    {
+     "vid": 1777929,
+     "value": "2023年夏季"
+    },
+    {
+     "vid": 1865889,
+     "value": "2023年秋季"
+    },
+    {
+     "vid": 1865890,
+     "value": "2023年冬季"
+    },
+    {
+     "vid": 1935864,
+     "value": "2024年春季"
+    },
+    {
+     "vid": 1935865,
+     "value": "2024年夏季"
+    },
+    {
+     "vid": 2062233,
+     "value": "2024年秋季"
+    },
+    {
+     "vid": 2062234,
+     "value": "2024年冬季"
+    },
+    {
+     "vid": 2236200,
+     "value": "2025年春季"
+    },
+    {
+     "vid": 2236201,
+     "value": "2025年夏季"
+    },
+    {
+     "vid": 2236202,
+     "value": "2025年秋季"
+    },
+    {
+     "vid": 2236203,
+     "value": "2025年冬季"
+    },
+    {
+     "vid": 5433145,
+     "value": "2026年春季"
+    },
+    {
+     "vid": 5433146,
+     "value": "2026年夏季"
+    },
+    {
+     "vid": 5433147,
+     "value": "2026年秋季"
+    },
+    {
+     "vid": 5433148,
+     "value": "2026年冬季"
+    }
+   ],
+   "optionCount": 28
+  },
+  {
+   "templatePid": 671069,
+   "label": "组合形式",
+   "refPid": 27,
+   "moduleId": 92007,
+   "required": false,
+   "mode": "single",
+   "unit": "",
+   "topTip": "",
+   "bottomTip": "",
+   "options": [
+    {
+     "vid": 1903223,
+     "value": "长袖+裤子"
+    },
+    {
+     "vid": 1903224,
+     "value": "短袖+裤子"
+    },
+    {
+     "vid": 1903225,
+     "value": "外套+裤子"
+    },
+    {
+     "vid": 1903226,
+     "value": "背心/无袖+裤子"
+    },
+    {
+     "vid": 1903227,
+     "value": "长袖+裙子"
+    },
+    {
+     "vid": 1903228,
+     "value": "短袖+裙子"
+    },
+    {
+     "vid": 1903229,
+     "value": "背心/无袖+裙子"
+    },
+    {
+     "vid": 1903230,
+     "value": "短袖+背带裤"
+    },
+    {
+     "vid": 1903231,
+     "value": "长袖+背带裤"
+    },
+    {
+     "vid": 1903232,
+     "value": "短袖+背带裙"
+    },
+    {
+     "vid": 1903233,
+     "value": "长袖+背带裙"
+    },
+    {
+     "vid": 1903234,
+     "value": "背心/无袖+背带裙"
+    },
+    {
+     "vid": 1903235,
+     "value": "马甲+裤子+衬衫"
+    },
+    {
+     "vid": 1903236,
+     "value": "毛开衫/外套+裙子"
+    },
+    {
+     "vid": 1903237,
+     "value": "外套+背心+裤子"
+    },
+    {
+     "vid": 1903238,
+     "value": "裙子+打底裤"
+    },
+    {
+     "vid": 1903239,
+     "value": "外套+T恤+裤子"
+    },
+    {
+     "vid": 2084287,
+     "value": "衬衫+马面裙"
+    },
+    {
+     "vid": 2084288,
+     "value": "衬衫+马甲+马面裙"
+    }
+   ],
+   "optionCount": 19
+  },
+  {
+   "templatePid": 671070,
+   "label": "是否加绒",
+   "refPid": 41,
+   "moduleId": 92007,
+   "required": false,
+   "mode": "single",
+   "unit": "",
+   "topTip": "",
+   "bottomTip": "",
+   "options": [
+    {
+     "vid": 13322,
+     "value": "加绒"
+    },
+    {
+     "vid": 13323,
+     "value": "不加绒"
+    }
+   ],
+   "optionCount": 2
+  },
+  {
+   "templatePid": 671428,
+   "label": "材质成分",
+   "refPid": 16,
+   "moduleId": 92007,
+   "required": true,
+   "mode": "single",
+   "unit": "",
+   "topTip": "",
+   "bottomTip": "",
+   "options": [
+    {
+     "vid": 10571,
+     "value": "棉"
+    },
+    {
+     "vid": 10572,
+     "value": "麻"
+    },
+    {
+     "vid": 10573,
+     "value": "蚕丝"
+    },
+    {
+     "vid": 10574,
+     "value": "羊毛"
+    },
+    {
+     "vid": 10580,
+     "value": "羊绒"
+    },
+    {
+     "vid": 10629,
+     "value": "其它"
+    },
+    {
+     "vid": 12796,
+     "value": "亚麻"
+    },
+    {
+     "vid": 12961,
+     "value": "氨纶"
+    },
+    {
+     "vid": 12962,
+     "value": "涤纶（聚酯纤维）"
+    },
+    {
+     "vid": 12964,
+     "value": "粘胶纤维"
+    },
+    {
+     "vid": 12965,
+     "value": "莫代尔纤维"
+    },
+    {
+     "vid": 12966,
+     "value": "醋酯纤维"
+    },
+    {
+     "vid": 12967,
+     "value": "锦纶"
+    },
+    {
+     "vid": 12968,
+     "value": "竹浆纤维"
+    },
+    {
+     "vid": 12973,
+     "value": "天丝（莱赛尔纤维）"
+    },
+    {
+     "vid": 13483,
+     "value": "竹纤维"
+    },
+    {
+     "vid": 14081,
+     "value": "腈纶"
+    },
+    {
+     "vid": 14090,
+     "value": "竹炭纤维"
+    },
+    {
+     "vid": 17181,
+     "value": "尼龙"
+    },
+    {
+     "vid": 18292,
+     "value": "铜氨纤维"
+    },
+    {
+     "vid": 18364,
+     "value": "棉麻混纺"
+    },
+    {
+     "vid": 18365,
+     "value": "棉涤混纺"
+    },
+    {
+     "vid": 28555,
+     "value": "聚丙烯纤维"
+    },
+    {
+     "vid": 91009,
+     "value": "氯纶（聚氯乙烯纤维）"
+    },
+    {
+     "vid": 91010,
+     "value": "维纶"
+    },
+    {
+     "vid": 921123,
+     "value": "羊驼绒"
+    }
+   ],
+   "optionCount": 26
+  }
+ ],
+ "specs": {
+  "isSpec": true,
+  "mode": "mixed",
+  "maxDims": 2,
+  "customDimsLimit": 1,
+  "singleSpecValueNum": 100,
+  "dimensions": [
+   {
+    "name": "颜色分类",
+    "id": 671071,
+    "refPid": 232,
+    "specId": 8640,
+    "controlType": 3,
+    "valueType": 0,
+    "unit": "",
+    "precision": 0,
+    "minValue": null,
+    "maxValue": 64,
+    "inputMaxNum": 100,
+    "canNote": true,
+    "uploadPic": true,
+    "isAllValue": true,
+    "chooseMaxNum": 2147483647,
+    "valueCanSort": true,
+    "required": false,
+    "presetValues": [
+     {
+      "vid": 59500,
+      "value": "白色",
+      "specId": 54780,
+      "group": "白色系",
+      "extra": "(255,255,255,1)"
+     },
+     {
+      "vid": 59501,
+      "value": "米白色",
+      "specId": 12762277,
+      "group": "白色系",
+      "extra": "(238,222,176,1)"
+     },
+     {
+      "vid": 59502,
+      "value": "深灰色",
+      "specId": 12762278,
+      "group": "灰色系",
+      "extra": "(102,102,102,1)"
+     },
+     {
+      "vid": 59503,
+      "value": "浅灰色",
+      "specId": 155165,
+      "group": "灰色系",
+      "extra": "(228,228,228,1)"
+     },
+     {
+      "vid": 59504,
+      "value": "奶奶灰",
+      "specId": 83183614,
+      "group": "灰色系",
+      "extra": "(234,234,234,1)"
+     },
+     {
+      "vid": 59505,
+      "value": "灰色",
+      "specId": 119253,
+      "group": "灰色系",
+      "extra": "(128,128,128,1)"
+     },
+     {
+      "vid": 60460,
+      "value": "乳白色",
+      "specId": 63964849,
+      "group": "白色系",
+      "extra": "(255,251,240,1)"
+     },
+     {
+      "vid": 60461,
+      "value": "象牙白",
+      "specId": 63091474,
+      "group": "白色系",
+      "extra": "(255,255,240,1)"
+     },
+     {
+      "vid": 60462,
+      "value": "银色",
+      "specId": 63079585,
+      "group": "灰色系",
+      "extra": "(192,192,192,1)"
+     },
+     {
+      "vid": 60463,
+      "value": "铅色",
+      "specId": 89583982,
+      "group": "灰色系",
+      "extra": "(114,119,123,1)"
+     },
+     {
+      "vid": 60464,
+      "value": "石板灰",
+      "specId": 93488873,
+      "group": "灰色系",
+      "extra": "(112,128,144,1)"
+     },
+     {
+      "vid": 60465,
+      "value": "黑色",
+      "specId": 49751,
+      "group": "黑色系",
+      "extra": "(0,0,0,1)"
+     },
+     {
+      "vid": 60466,
+      "value": "桔红色",
+      "specId": 60366840,
+      "group": "红色系",
+      "extra": "(255,117,0,1)"
+     },
+     {
+      "vid": 60467,
+      "value": "玫红色",
+      "specId": 49753,
+      "group": "红色系",
+      "extra": "(223,27,118,1)"
+     },
+     {
+      "vid": 60468,
+      "value": "粉红色",
+      "specId": 130167,
+      "group": "红色系",
+      "extra": "(255,182,193,1)"
+     },
+     {
+      "vid": 60469,
+      "value": "桃色",
+      "specId": 30740770457,
+      "group": "红色系",
+      "extra": "(245,143,152,1)"
+     },
+     {
+      "vid": 60470,
+      "value": "蔷薇色",
+      "specId": 89783276,
+      "group": "红色系",
+      "extra": "(240,91,114,1)"
+     },
+     {
+      "vid": 60471,
+      "value": "深粉红",
+      "specId": 88212173,
+      "group": "红色系",
+      "extra": "(255,20,147,1)"
+     },
+     {
+      "vid": 60472,
+      "value": "胭脂色",
+      "specId": 78990926,
+      "group": "红色系",
+      "extra": "(179,66,74,1)"
+     },
+     {
+      "vid": 60473,
+      "value": "红色",
+      "specId": 24503179197,
+      "group": "红色系",
+      "extra": "(255,0,0,1)"
+     },
+     {
+      "vid": 60474,
+      "value": "藕色",
+      "specId": 62303212,
+      "group": "红色系",
+      "extra": "(238,208,216,1)"
+     },
+     {
+      "vid": 60475,
+      "value": "西瓜红",
+      "specId": 62513835,
+      "group": "红色系",
+      "extra": "(240,86,84,1)"
+     },
+     {
+      "vid": 60476,
+      "value": "酒红色",
+      "specId": 107533,
+      "group": "红色系",
+      "extra": "(153,0,0,1)"
+     },
+     {
+      "vid": 60477,
+      "value": "猩红色",
+      "specId": 102952331,
+      "group": "红色系",
+      "extra": "(220,20,60,1)"
+     },
+     {
+      "vid": 60478,
+      "value": "亮粉色",
+      "specId": 74856455,
+      "group": "红色系",
+      "extra": "(255,105,180,1)"
+     },
+     {
+      "vid": 60479,
+      "value": "洋红色",
+      "specId": 74374321,
+      "group": "红色系",
+      "extra": "(255,0,255,1)"
+     },
+     {
+      "vid": 60480,
+      "value": "珊瑚色",
+      "specId": 75292353,
+      "group": "红色系",
+      "extra": "(255,127,80,1)"
+     },
+     {
+      "vid": 60481,
+      "value": "橙红色",
+      "specId": 73830150,
+      "group": "红色系",
+      "extra": "(255,69,0,1)"
+     },
+     {
+      "vid": 60482,
+      "value": "砖红色",
+      "specId": 73542843,
+      "group": "红色系",
+      "extra": "(178,34,34,1)"
+     },
+     {
+      "vid": 60483,
+      "value": "深红色",
+      "specId": 62517177,
+      "group": "红色系",
+      "extra": "(139,0,0,1)"
+     },
+     {
+      "vid": 60484,
+      "value": "卡其色",
+      "specId": 123384,
+      "group": "黄色系",
+      "extra": "(195,176,145,1)"
+     },
+     {
+      "vid": 60485,
+      "value": "姜黄色",
+      "specId": 62302540,
+      "group": "黄色系",
+      "extra": "(255,199,115,1)"
+     },
+     {
+      "vid": 60486,
+      "value": "明黄色",
+      "specId": 64709513,
+      "group": "黄色系",
+      "extra": "(255,255,1,1)"
+     },
+     {
+      "vid": 60487,
+      "value": "杏色",
+      "specId": 62301142,
+      "group": "黄色系",
+      "extra": "(247,238,214,1)"
+     },
+     {
+      "vid": 60488,
+      "value": "柠檬黄",
+      "specId": 63795577,
+      "group": "黄色系",
+      "extra": "(255,236,67,1)"
+     },
+     {
+      "vid": 60489,
+      "value": "桔色",
+      "specId": 62483034,
+      "group": "黄色系",
+      "extra": "(255,165,0,1)"
+     },
+     {
+      "vid": 60490,
+      "value": "荧光黄",
+      "specId": 72918868,
+      "group": "黄色系",
+      "extra": "(234,255,86,1)"
+     },
+     {
+      "vid": 60491,
+      "value": "金色",
+      "specId": 63913938,
+      "group": "黄色系",
+      "extra": "(255,215,0,1)"
+     },
+     {
+      "vid": 60492,
+      "value": "香槟色",
+      "specId": 63908066,
+      "group": "黄色系",
+      "extra": "(247,247,209,1)"
+     },
+     {
+      "vid": 60493,
+      "value": "黄色",
+      "specId": 49755,
+      "group": "黄色系",
+      "extra": "(255,255,0,1)"
+     },
+     {
+      "vid": 60494,
+      "value": "浅黄色",
+      "specId": 62302544,
+      "group": "黄色系",
+      "extra": "(255,255,224,1)"
+     },
+     {
+      "vid": 60495,
+      "value": "小麦色",
+      "specId": 73857922,
+      "group": "黄色系",
+      "extra": "(245,222,179,1)"
+     },
+     {
+      "vid": 60496,
+      "value": "橙色",
+      "specId": 130166,
+      "group": "黄色系",
+      "extra": "(255,165,0,1)"
+     },
+     {
+      "vid": 60497,
+      "value": "土黄色",
+      "specId": 29132906610,
+      "group": "黄色系",
+      "extra": "(237,189,101,1)"
+     },
+     {
+      "vid": 60498,
+      "value": "向日葵色",
+      "specId": 111007722,
+      "group": "黄色系",
+      "extra": "(255,194,14,1)"
+     },
+     {
+      "vid": 60499,
+      "value": "肤色",
+      "specId": 64563265,
+      "group": "黄色系",
+      "extra": "(254,220,189,1)"
+     },
+     {
+      "vid": 60500,
+      "value": "军绿色",
+      "specId": 62508450,
+      "group": "绿色系",
+      "extra": "(93,118,42,1)"
+     },
+     {
+      "vid": 60501,
+      "value": "墨绿色",
+      "specId": 62302549,
+      "group": "绿色系",
+      "extra": "(0,100,0,1)"
+     },
+     {
+      "vid": 60502,
+      "value": "浅绿色",
+      "specId": 123383,
+      "group": "绿色系",
+      "extra": "(144,238,144,1)"
+     },
+     {
+      "vid": 60503,
+      "value": "绿色",
+      "specId": 69264,
+      "group": "绿色系",
+      "extra": "(0,128,0,1)"
+     },
+     {
+      "vid": 60504,
+      "value": "翠绿色",
+      "specId": 72907717,
+      "group": "绿色系",
+      "extra": "(10,163,68,1)"
+     },
+     {
+      "vid": 60506,
+      "value": "荧光绿",
+      "specId": 147527,
+      "group": "绿色系",
+      "extra": "(35,250,7,1)"
+     },
+     {
+      "vid": 60507,
+      "value": "绿黄色",
+      "specId": 76030479,
+      "group": "绿色系",
+      "extra": "(173,255,47,1)"
+     },
+     {
+      "vid": 60508,
+      "value": "草绿色",
+      "specId": 130165,
+      "group": "绿色系",
+      "extra": "(124,252,0,1)"
+     },
+     {
+      "vid": 60509,
+      "value": "黄绿色",
+      "specId": 22707317249,
+      "group": "绿色系",
+      "extra": "(154,205,50,1)"
+     },
+     {
+      "vid": 60510,
+      "value": "碧绿",
+      "specId": 79646691,
+      "group": "绿色系",
+      "extra": "(127,255,212,1)"
+     },
+     {
+      "vid": 60511,
+      "value": "绿宝石",
+      "specId": 81987219,
+      "group": "绿色系",
+      "extra": "(64,224,208,1)"
+     },
+     {
+      "vid": 60512,
+      "value": "海洋绿",
+      "specId": 76068549,
+      "group": "绿色系",
+      "extra": "(46,139,87,1)"
+     },
+     {
+      "vid": 60513,
+      "value": "橄榄色",
+      "specId": 74220645,
+      "group": "绿色系",
+      "extra": "(128,128,0,1)"
+     },
+     {
+      "vid": 60514,
+      "value": "橄榄绿",
+      "specId": 71521218,
+      "group": "绿色系",
+      "extra": "(78,96,20,1)"
+     },
+     {
+      "vid": 60515,
+      "value": "抹茶色",
+      "specId": 74571197,
+      "group": "绿色系",
+      "extra": "(183,186,107,1)"
+     },
+     {
+      "vid": 60516,
+      "value": "天蓝色",
+      "specId": 49750,
+      "group": "蓝色系",
+      "extra": "(68,206,246,1)"
+     },
+     {
+      "vid": 60517,
+      "value": "孔雀蓝",
+      "specId": 62302554,
+      "group": "蓝色系",
+      "extra": "(0,164,197,1)"
+     },
+     {
+      "vid": 60518,
+      "value": "宝蓝色",
+      "specId": 107534,
+      "group": "蓝色系",
+      "extra": "(65,105,225,1)"
+     },
+     {
+      "vid": 60519,
+      "value": "浅蓝色",
+      "specId": 147596,
+      "group": "蓝色系",
+      "extra": "(210,240,244,1)"
+     },
+     {
+      "vid": 60520,
+      "value": "蓝色",
+      "specId": 54779,
+      "group": "蓝色系",
+      "extra": "(0,0,255,1)"
+     },
+     {
+      "vid": 60521,
+      "value": "湖蓝色",
+      "specId": 31758390484,
+      "group": "蓝色系",
+      "extra": "(48,223,243,1)"
+     },
+     {
+      "vid": 60522,
+      "value": "亮钢蓝",
+      "specId": 227501671,
+      "group": "蓝色系",
+      "extra": "(176,196,222,1)"
+     },
+     {
+      "vid": 60523,
+      "value": "道奇蓝",
+      "specId": 87688330,
+      "group": "蓝色系",
+      "extra": "(30,144,255,1)"
+     },
+     {
+      "vid": 60525,
+      "value": "深天蓝",
+      "specId": 74911361,
+      "group": "蓝色系",
+      "extra": "(0,191,255,1)"
+     },
+     {
+      "vid": 60526,
+      "value": "军服蓝",
+      "specId": 1211571855,
+      "group": "蓝色系",
+      "extra": "(95,158,160,1)"
+     },
+     {
+      "vid": 60527,
+      "value": "蔚蓝色",
+      "specId": 74763076,
+      "group": "蓝色系",
+      "extra": "(240,255,255,1)"
+     },
+     {
+      "vid": 60528,
+      "value": "淡青色",
+      "specId": 79817938,
+      "group": "蓝色系",
+      "extra": "(224,255,255,1)"
+     },
+     {
+      "vid": 60529,
+      "value": "青色",
+      "specId": 130176,
+      "group": "蓝色系",
+      "extra": "(0,255,255,1)"
+     },
+     {
+      "vid": 60530,
+      "value": "暗青色",
+      "specId": 276917889,
+      "group": "蓝色系",
+      "extra": "(0,139,139,1)"
+     },
+     {
+      "vid": 60531,
+      "value": "藏青色",
+      "specId": 123399,
+      "group": "蓝色系",
+      "extra": "(46,78,126,1)"
+     },
+     {
+      "vid": 60532,
+      "value": "粉蓝色",
+      "specId": 64585632,
+      "group": "蓝色系",
+      "extra": "(176,224,230,1)"
+     },
+     {
+      "vid": 60534,
+      "value": "浅紫色",
+      "specId": 49754,
+      "group": "紫色系",
+      "extra": "(237,224,230,1)"
+     },
+     {
+      "vid": 60535,
+      "value": "深紫色",
+      "specId": 62513261,
+      "group": "紫色系",
+      "extra": "(67,6,83,1)"
+     },
+     {
+      "vid": 60536,
+      "value": "紫红色",
+      "specId": 62517120,
+      "group": "紫色系",
+      "extra": "(139,0,98,1)"
+     },
+     {
+      "vid": 60537,
+      "value": "紫罗兰",
+      "specId": 22707318009,
+      "group": "紫色系",
+      "extra": "(238,130,238,1)"
+     },
+     {
+      "vid": 60538,
+      "value": "暗紫罗兰",
+      "specId": 122298673,
+      "group": "紫色系",
+      "extra": "(148,0,211,1)"
+     },
+     {
+      "vid": 60539,
+      "value": "紫色",
+      "specId": 130179,
+      "group": "紫色系",
+      "extra": "(128,0,128,1)"
+     },
+     {
+      "vid": 60540,
+      "value": "深洋红色",
+      "specId": 1211571859,
+      "group": "紫色系",
+      "extra": "(139,0,139,1)"
+     },
+     {
+      "vid": 60541,
+      "value": "紫兰色",
+      "specId": 77560707,
+      "group": "紫色系",
+      "extra": "(75,0,130,1)"
+     },
+     {
+      "vid": 60543,
+      "value": "咖啡色",
+      "specId": 62302863,
+      "group": "棕色系",
+      "extra": "(96,57,18,1)"
+     },
+     {
+      "vid": 60544,
+      "value": "巧克力色",
+      "specId": 63079598,
+      "group": "棕色系",
+      "extra": "(210,105,30,1)"
+     },
+     {
+      "vid": 60545,
+      "value": "栗色",
+      "specId": 64592407,
+      "group": "棕色系",
+      "extra": "(128,0,0,1)"
+     },
+     {
+      "vid": 60546,
+      "value": "深卡其布色",
+      "specId": 62589717,
+      "group": "棕色系",
+      "extra": "(189,183,107,1)"
+     },
+     {
+      "vid": 60547,
+      "value": "浅棕色",
+      "specId": 66860170,
+      "group": "棕色系",
+      "extra": "(179,92,68,1)"
+     },
+     {
+      "vid": 60548,
+      "value": "深棕色",
+      "specId": 66860163,
+      "group": "棕色系",
+      "extra": "(124,75,0,1)"
+     },
+     {
+      "vid": 60549,
+      "value": "褐色",
+      "specId": 72099128,
+      "group": "棕色系",
+      "extra": "(133,91,0,1)"
+     },
+     {
+      "vid": 60550,
+      "value": "棕褐色",
+      "specId": 66858271,
+      "group": "棕色系",
+      "extra": "(219,147,112,1)"
+     },
+     {
+      "vid": 60551,
+      "value": "驼色",
+      "specId": 62302623,
+      "group": "棕色系",
+      "extra": "(168,132,98,1)"
+     },
+     {
+      "vid": 60552,
+      "value": "橄榄棕色",
+      "specId": 1211571861,
+      "group": "棕色系",
+      "extra": "(111,79,40,1)"
+     },
+     {
+      "vid": 60553,
+      "value": "红褐色",
+      "specId": 61701873,
+      "group": "棕色系",
+      "extra": "(89,35,33,1)"
+     },
+     {
+      "vid": 60554,
+      "value": "茶色",
+      "specId": 73901958,
+      "group": "棕色系",
+      "extra": "(210,180,140,1)"
+     },
+     {
+      "vid": 60555,
+      "value": "亚麻色",
+      "specId": 73555594,
+      "group": "棕色系",
+      "extra": "(182,153,104,1)"
+     },
+     {
+      "vid": 60556,
+      "value": "黄土赭色",
+      "specId": 1211571862,
+      "group": "棕色系",
+      "extra": "(160,82,45,1)"
+     },
+     {
+      "vid": 60557,
+      "value": "琥珀色",
+      "specId": 73890504,
+      "group": "棕色系",
+      "extra": "(183,111,64,1)"
+     },
+     {
+      "vid": 60558,
+      "value": "小豆色",
+      "specId": 1211571865,
+      "group": "棕色系",
+      "extra": "(143,75,74,1)"
+     },
+     {
+      "vid": 60559,
+      "value": "焦糖色",
+      "specId": 72599301,
+      "group": "棕色系",
+      "extra": "(176,119,72,1)"
+     },
+     {
+      "vid": 60560,
+      "value": "肉桂色",
+      "specId": 75624207,
+      "group": "棕色系",
+      "extra": "(218,118,91,1)"
+     },
+     {
+      "vid": 60561,
+      "value": "玫瑰棕色",
+      "specId": 146680947,
+      "group": "棕色系",
+      "extra": "(188,143,143,1)"
+     },
+     {
+      "vid": 60562,
+      "value": "玫瑰金",
+      "specId": 63875795,
+      "group": "棕色系",
+      "extra": "(202,133,106,1)"
+     },
+     {
+      "vid": 60563,
+      "value": "古铜色",
+      "specId": 29132896837,
+      "group": "棕色系",
+      "extra": "(184,115,51,1)"
+     },
+     {
+      "vid": 60564,
+      "value": "透明",
+      "specId": 64114056,
+      "group": "透明系",
+      "extra": "(0,0,0,0)"
+     },
+     {
+      "vid": 60645,
+      "value": "薰衣草淡紫",
+      "specId": 172866273,
+      "group": "紫色系",
+      "extra": "(230,230,250,1)"
+     },
+     {
+      "vid": 74833,
+      "value": "孔雀绿",
+      "specId": 73568117,
+      "group": "绿色系",
+      "extra": "(24,116,131,1)"
+     },
+     {
+      "vid": 74834,
+      "value": "花色",
+      "specId": 147713,
+      "group": "花色系",
+      "extra": "(255,255,255,0)"
+     },
+     {
+      "vid": 841266,
+      "value": "银灰色",
+      "specId": 63875782,
+      "group": "灰色系",
+      "extra": "(192,192,192,1)"
+     },
+     {
+      "vid": 877086,
+      "value": "深空灰",
+      "specId": 75294429,
+      "group": "灰色系",
+      "extra": "(169,169,169,1)"
+     },
+     {
+      "vid": 1018850,
+      "value": "石墨色",
+      "specId": 71425989,
+      "group": "灰色系",
+      "extra": "(105,103,100,1)"
+     },
+     {
+      "vid": 1018852,
+      "value": "海蓝色",
+      "specId": 62470911,
+      "group": "蓝色系",
+      "extra": "(76,104,116,1)"
+     },
+     {
+      "vid": 1778713,
+      "value": "原野绿",
+      "specId": 84387985,
+      "group": "绿色系",
+      "extra": "(147,171,165,1)"
+     }
+    ],
+    "presetCount": 115,
+    "type": "checkbox",
+    "allowCustom": true,
+    "maxCustomValues": 100,
+    "tip": "选择标准颜色可增加搜索/导购机会，标准颜色还可填写颜色备注信息（偏深、偏亮等）！"
+   },
+   {
+    "name": "参考分类",
+    "id": 671072,
+    "refPid": 251,
+    "specId": 1445193069,
+    "controlType": 3,
+    "valueType": 0,
+    "unit": "",
+    "precision": 0,
+    "minValue": null,
+    "maxValue": 64,
+    "inputMaxNum": 100,
+    "canNote": true,
+    "uploadPic": false,
+    "isAllValue": false,
+    "chooseMaxNum": 2147483647,
+    "valueCanSort": false,
+    "required": false,
+    "presetValues": [
+     {
+      "vid": 73588,
+      "value": "48",
+      "specId": 1445164817,
+      "group": "身高"
+     },
+     {
+      "vid": 73589,
+      "value": "52",
+      "specId": 1445170579,
+      "group": "身高"
+     },
+     {
+      "vid": 73590,
+      "value": "59",
+      "specId": 1445193070,
+      "group": "身高"
+     },
+     {
+      "vid": 73591,
+      "value": "66",
+      "specId": 1445159924,
+      "group": "身高"
+     },
+     {
+      "vid": 73592,
+      "value": "73",
+      "specId": 1445176333,
+      "group": "身高"
+     },
+     {
+      "vid": 73593,
+      "value": "75",
+      "specId": 1445169671,
+      "group": "身高"
+     },
+     {
+      "vid": 73594,
+      "value": "80",
+      "specId": 1445175322,
+      "group": "身高"
+     },
+     {
+      "vid": 73595,
+      "value": "85",
+      "specId": 1445161943,
+      "group": "身高"
+     },
+     {
+      "vid": 73596,
+      "value": "90",
+      "specId": 1445166768,
+      "group": "身高"
+     },
+     {
+      "vid": 73597,
+      "value": "95",
+      "specId": 1445195001,
+      "group": "身高"
+     },
+     {
+      "vid": 73598,
+      "value": "100",
+      "specId": 1445174379,
+      "group": "身高"
+     },
+     {
+      "vid": 73599,
+      "value": "105",
+      "specId": 1445195002,
+      "group": "身高"
+     },
+     {
+      "vid": 73600,
+      "value": "110",
+      "specId": 1445179317,
+      "group": "身高"
+     },
+     {
+      "vid": 73601,
+      "value": "115",
+      "specId": 1445186201,
+      "group": "身高"
+     },
+     {
+      "vid": 73602,
+      "value": "120",
+      "specId": 1445167724,
+      "group": "身高"
+     },
+     {
+      "vid": 73603,
+      "value": "125",
+      "specId": 1445184271,
+      "group": "身高"
+     },
+     {
+      "vid": 73604,
+      "value": "130",
+      "specId": 1445193071,
+      "group": "身高"
+     },
+     {
+      "vid": 73605,
+      "value": "135",
+      "specId": 1445160964,
+      "group": "身高"
+     },
+     {
+      "vid": 73606,
+      "value": "140",
+      "specId": 1445161944,
+      "group": "身高"
+     },
+     {
+      "vid": 73607,
+      "value": "145",
+      "specId": 1445179318,
+      "group": "身高"
+     },
+     {
+      "vid": 73608,
+      "value": "150",
+      "specId": 1445169673,
+      "group": "身高"
+     },
+     {
+      "vid": 73609,
+      "value": "155",
+      "specId": 1445172542,
+      "group": "身高"
+     },
+     {
+      "vid": 73610,
+      "value": "160",
+      "specId": 1445186202,
+      "group": "身高"
+     },
+     {
+      "vid": 73611,
+      "value": "165",
+      "specId": 1445175323,
+      "group": "身高"
+     },
+     {
+      "vid": 73612,
+      "value": "170",
+      "specId": 1445160966,
+      "group": "身高"
+     },
+     {
+      "vid": 73613,
+      "value": "175",
+      "specId": 1445192060,
+      "group": "身高"
+     },
+     {
+      "vid": 73614,
+      "value": "1#",
+      "specId": 1445173453,
+      "group": "国际标准"
+     },
+     {
+      "vid": 73615,
+      "value": "2#",
+      "specId": 1445191097,
+      "group": "国际标准"
+     },
+     {
+      "vid": 73616,
+      "value": "3#",
+      "specId": 1445188159,
+      "group": "国际标准"
+     },
+     {
+      "vid": 73617,
+      "value": "4#",
+      "specId": 1445168733,
+      "group": "国际标准"
+     },
+     {
+      "vid": 73618,
+      "value": "5#",
+      "specId": 1445173454,
+      "group": "国际标准"
+     },
+     {
+      "vid": 73619,
+      "value": "6#",
+      "specId": 1445187158,
+      "group": "国际标准"
+     },
+     {
+      "vid": 73620,
+      "value": "7#",
+      "specId": 1445188160,
+      "group": "国际标准"
+     },
+     {
+      "vid": 73621,
+      "value": "8#",
+      "specId": 1445190091,
+      "group": "国际标准"
+     },
+     {
+      "vid": 73622,
+      "value": "9#",
+      "specId": 1445184274,
+      "group": "国际标准"
+     },
+     {
+      "vid": 73623,
+      "value": "10#",
+      "specId": 1445169674,
+      "group": "国际标准"
+     },
+     {
+      "vid": 73624,
+      "value": "11#",
+      "specId": 1445194012,
+      "group": "国际标准"
+     },
+     {
+      "vid": 73625,
+      "value": "12#",
+      "specId": 1445155996,
+      "group": "国际标准"
+     },
+     {
+      "vid": 73626,
+      "value": "13#",
+      "specId": 1445171560,
+      "group": "国际标准"
+     },
+     {
+      "vid": 73627,
+      "value": "14#",
+      "specId": 1445162915,
+      "group": "国际标准"
+     },
+     {
+      "vid": 73628,
+      "value": "15#",
+      "specId": 1445182278,
+      "group": "国际标准"
+     },
+     {
+      "vid": 73629,
+      "value": "16#",
+      "specId": 1445162916,
+      "group": "国际标准"
+     },
+     {
+      "vid": 73630,
+      "value": "17#",
+      "specId": 1445166769,
+      "group": "国际标准"
+     },
+     {
+      "vid": 73631,
+      "value": "18#",
+      "specId": 1445171561,
+      "group": "国际标准"
+     },
+     {
+      "vid": 73632,
+      "value": "19#",
+      "specId": 1445164819,
+      "group": "国际标准"
+     },
+     {
+      "vid": 73633,
+      "value": "20#",
+      "specId": 1445163805,
+      "group": "国际标准"
+     },
+     {
+      "vid": 73634,
+      "value": "21#",
+      "specId": 1445168734,
+      "group": "国际标准"
+     },
+     {
+      "vid": 73635,
+      "value": "22#",
+      "specId": 1445186203,
+      "group": "国际标准"
+     },
+     {
+      "vid": 73636,
+      "value": "23#",
+      "specId": 1445195003,
+      "group": "国际标准"
+     },
+     {
+      "vid": 73637,
+      "value": "24#",
+      "specId": 1445180314,
+      "group": "国际标准"
+     },
+     {
+      "vid": 73638,
+      "value": "25#",
+      "specId": 1445159926,
+      "group": "国际标准"
+     },
+     {
+      "vid": 73639,
+      "value": "26#",
+      "specId": 1445179319,
+      "group": "国际标准"
+     },
+     {
+      "vid": 73640,
+      "value": "27#",
+      "specId": 1445163806,
+      "group": "国际标准"
+     },
+     {
+      "vid": 73641,
+      "value": "28#",
+      "specId": 1445185278,
+      "group": "国际标准"
+     }
+    ],
+    "presetCount": 54,
+    "type": "size-table",
+    "allowCustom": true,
+    "maxCustomValues": 100,
+    "tip": "选择标准尺码可增加搜索/导购机会，标准尺码还可填写尺码备注信息（偏大、偏小等）！"
+   }
+  ]
+ },
+ "limits": {
+  "maxSku": 900,
+  "chooseAllQualifySpec": false
+ }
+}
