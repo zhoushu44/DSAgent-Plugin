@@ -83,7 +83,9 @@ const ORIGINAL = [
   'dsagent_browser_login', 'dsagent_browser_close', 'dsagent_risk_verify',
   'dsagent_save_cookie', 'dsagent_chat_with_context',
   'dsagent_douyin_publish', 'dsagent_zhihu_publish', 'dsagent_xiaohongshu_publish',
-  'dsagent_xianyu_publish', 'dsagent_taobao_publish', 'dsagent_pdd_publish2',
+  // dsagent_pdd_publish2 已于 20f1fe5 随旧发布引擎一起移除（拼多多改走 pdd-publish 技能），
+  // 不再把它当回归项，否则这条检查永远失败。
+  'dsagent_xianyu_publish', 'dsagent_taobao_publish',
   'dsagent_bilibili_download', 'dsagent_pdd_crawl', 'dsagent_xianyu_analytics',
 ]
 const missingOriginal = ORIGINAL.filter(n => !names.includes(n))
