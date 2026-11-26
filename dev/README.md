@@ -7,6 +7,10 @@
 > `dump-*` / `test-*` 等）与运行时产物目录（`dev/.ui-shots/`、`dev/patrol-evidence/`）。
 > 现在还留在这里的，只有**构建链**、**自检套件**、**测试**和**仍在用的辅助**。
 > 需要重新探 DOM 时另写脚本，别往这里堆。
+>
+> ★ 删之前已把仍有效的平台机制结论汇总到
+> [`docs/knowledge/平台逆向与发布机制.md`](../docs/knowledge/平台逆向与发布机制.md)；
+> 找原始脚本：`git show dcd5e15^:dev/<文件名>`。
 
 ## 构建链（`npm run build` 会调用）
 
