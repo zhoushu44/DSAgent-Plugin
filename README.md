@@ -733,12 +733,16 @@ node dev/workflow-real-create-run.mjs  # 真实技能创建+运行工作流（ta
 > 完整版（数据格式、三条硬规矩）在 [`skills/pdd-publish/docs/00-上架固定流程.md`](skills/pdd-publish/docs/00-上架固定流程.md)。
 > 本章只讲**流程每一段会报什么错、遇到了怎么处理**。
 
-### 13.1 两个入口
+### 13.1 入口（实现只有一套）
 
 | 入口 | 用途 | 会不会提交 |
 |---|---|---|
-| `skills/pdd-publish/steps/index.mjs` | 正式技能入口（`contract.json` 指向它） | 带 `--confirm true` 才提交 |
-| `run-to-submit.mjs`（插件根） | 自己上架用：填完停在提交前，自己在页面上点「提交并上架」 | **永远不提交** |
+| `skills/pdd-publish/steps/index.mjs` | **唯一实现**（`contract.json` 指向它） | 带 `--confirm true` 才提交；`--stop-before-submit` 填完停下 |
+| `run-to-submit.mjs`（插件根） | 自己上架用的**薄壳**：固定店铺 + 转调上面那条（`--confirm true --stop-before-submit`），自身无填表逻辑 | **永远不提交** |
+
+> 2026-11-26 收敛：`run-to-submit.mjs` 原来自己 load step4/6/6b/11/12/13 拼一遍，是第二套编排，
+> 会和技能入口漂移（改一处忘另一处）。现改为薄壳，插件根也不再摆 `run-and-wait-success.mjs` /
+> `test-10cats.mjs`（这两个会真提交，已移进 `dev/`）。
 
 ```bash
 # 预览：只校验数据、不开浏览器、零写操作
@@ -785,7 +789,7 @@ node run-to-submit.mjs <商品.json>
 ### 13.4 仍存在的风险（未修）
 
 1. 类目手动选择耗时不稳定（实测 24s ~ 181s），超时会失败
-2. `run-to-submit.mjs` 有个卡住分支的 `setInterval` 未清
+2. 卡住分支的 `setInterval` 未清（在 `steps/index.mjs` 的等待分支里）
 3. 每跑一次会留一个 node 进程（浏览器要保持打开）
 4. 14 / 15 步失败只记 ⚠，不阻断，需要自己看日志
 5. Excel 通路依赖内置 Python + openpyxl 的绝对路径，换机器需确认
