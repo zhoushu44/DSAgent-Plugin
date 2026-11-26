@@ -835,3 +835,6 @@ node run-to-submit.mjs <商品.json>
 这个修改第一次跑就抓出一个真问题：T1 测试数据顶层 `price: 35` 小于最大单买价 42，
 平台报「参考价应大于商品最大单买价」。**数据里不要写顶层 price**，让 step13 自动取「最大单买价 + 1」。
 修正版见 `artifacts/pdd-test/T1-product.v3.json`（去掉顶层 price，参考价自动 43）。
+
+> 完整测试报告（环境、方法、四类目 × 两轮矩阵、分步耗时、三轮改动归因、未覆盖范围）：
+> [`docs/pdd-publish-性能测试报告-2026-11-26.md`](docs/pdd-publish-性能测试报告-2026-11-26.md)
