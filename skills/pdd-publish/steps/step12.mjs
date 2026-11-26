@@ -207,12 +207,9 @@ export async function step12_fillSkuPrices(page, opts = {}) {
   result.write = writeRes
   if (!writeRes?.ok) { result.errors.push(writeRes?.reason || '写入失败'); return result }
 
-  await sleep(1500)
-
-  if (opts.verify !== false) {
-    const after = await readSkuTable(page)
-    result.after = after.rowCount
-    let mismatch = 0
+  // ★ 2026-11-26：原来固定 sleep(1500) 后一次性回读，页面还没刷新完就误报「回读不一致」。
+  //   改成轮询：对得上立即返回（正常 400ms 内），最多等 5s。
+  const diffRows = (after) => {
     const bad = []
     for (let i = 0; i < Math.min(rows.length, after.rows.length); i++) {
       const want = rows[i], got = after.rows[i]
@@ -220,19 +217,31 @@ export async function step12_fillSkuPrices(page, opts = {}) {
       if (want.quantity !== undefined && String(want.quantity) !== String(got.quantity)) diff.push(`库存 ${want.quantity}≠${got.quantity}`)
       if (want.multiPrice !== undefined && String(want.multiPrice) !== String(got.multiPrice)) diff.push(`拼单价 ${want.multiPrice}≠${got.multiPrice}`)
       if (want.price !== undefined && String(want.price) !== String(got.price)) diff.push(`单买价 ${want.price}≠${got.price}`)
-      if (diff.length) { mismatch++; bad.push({ row: i, spec: got.spec, diff }) }
-      else result.filled++
+      if (diff.length) bad.push({ row: i, spec: got.spec, diff })
     }
-    // ★ 2026-11-16：回读不一致改为「警告」不阻断
-    //   原因：不同类目 SKU 表的 rowspan/colspan/表头结构差异极大，
-    //        回读算法难以 100% 覆盖；而写入本身是成功的（页面可见）。
-    //   真实校验交给 step16 提交前的必填 + 平台校验。
+    return bad
+  }
+
+  if (opts.verify !== false) {
+    let after = await readSkuTable(page)
+    let bad = diffRows(after)
+    const tv = Date.now()
+    while (bad.length && Date.now() - tv < 5000) {
+      await sleep(300)
+      const again = await readSkuTable(page)
+      if (again.rows.length >= after.rows.length) { after = again; bad = diffRows(after) }
+    }
+    result.after = after.rowCount
+    const mismatch = bad.length
     if (mismatch > 0) {
       result.warnings = result.warnings || []
       result.warnings.push(`${mismatch}/${rows.length} 行回读不一致（仅警告，不阻断）: ` + JSON.stringify(bad).slice(0, 300))
       result.filled = rows.length - mismatch
+    } else {
+      result.filled = rows.length
     }
   } else {
+    result.after = undefined
     result.filled = rows.length
   }
 

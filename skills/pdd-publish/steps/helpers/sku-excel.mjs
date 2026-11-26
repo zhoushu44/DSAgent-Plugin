@@ -108,16 +108,21 @@ async function openDialog(page) {
       .filter(e => norm(e.innerText) === 'Excel批量编辑规格' && e.getBoundingClientRect().width > 0)
     btn[0]?.click()
   }).catch(() => { })
-  await sleep(2000)
-  return page.evaluate(() => {
-    const norm = s => String(s ?? '').replace(/\s+/g, ' ').trim()
-    return [...document.querySelectorAll('button')].some(b => /导出当前规格数据/.test(norm(b.innerText)))
-  }).catch(() => false)
+  // ★ 2026-11-26 提速：固定 sleep(2000) → 250ms 轮询，弹窗一出来就继续
+  for (let i = 0; i < 24; i++) {
+    const ready = await page.evaluate(() => {
+      const norm = s => String(s ?? '').replace(/\s+/g, ' ').trim()
+      return [...document.querySelectorAll('button')].some(b => /导出当前规格数据/.test(norm(b.innerText)))
+    }).catch(() => false)
+    if (ready) return true
+    await sleep(250)
+  }
+  return false
 }
 
 async function closeDialog(page) {
   await page.keyboard.press('Escape').catch(() => { })
-  await sleep(800)
+  await sleep(400)
   // 有些弹窗 Escape 关不掉，再点右上角关闭
   await page.evaluate(() => {
     const norm = s => String(s ?? '').replace(/\s+/g, ' ').trim()
@@ -125,7 +130,7 @@ async function closeDialog(page) {
     const x = dlg?.querySelector('[class*="close"], [aria-label*="关闭"]')
     if (x) x.click()
   }).catch(() => { })
-  await sleep(500)
+  await sleep(200)
 }
 
 /** 点导出，等文件落盘 */
@@ -142,8 +147,8 @@ async function exportFile(page, dir) {
     return true
   }).catch(() => false)
   if (!clicked) return { ok: false, error: '找不到「导出当前规格数据」按钮' }
-  for (let i = 0; i < 30; i++) {
-    await sleep(1000)
+  for (let i = 0; i < 120; i++) {
+    await sleep(250)
     const f = fs.readdirSync(dir).find(x => /\.(xlsx|xls)$/i.test(x) && !x.endsWith('.crdownload'))
     if (f && fs.statSync(path.join(dir, f)).size > 1000) return { ok: true, file: path.join(dir, f) }
   }
@@ -174,8 +179,8 @@ async function importFile(page, file, log = () => { }) {
   }).catch(() => false)
 
   let confirmed = false
-  for (let i = 0; i < 25; i++) {
-    await sleep(1000)
+  for (let i = 0; i < 60; i++) {
+    await sleep(250)
     const st = await page.evaluate(() => {
       const norm = s => String(s ?? '').replace(/\s+/g, ' ').trim()
       const dlg = [...document.querySelectorAll('[class*="modal"], [role="dialog"]')]
@@ -189,8 +194,8 @@ async function importFile(page, file, log = () => { }) {
   if (!confirmed) return { ok: false, error: '没等到「确认编辑项」弹窗（文件可能没被接受）' }
   log(`   已点「确认编辑」`)
 
-  for (let i = 0; i < 25; i++) {
-    await sleep(1000)
+  for (let i = 0; i < 60; i++) {
+    await sleep(250)
     const st = await page.evaluate(() => {
       const norm = s => String(s ?? '').replace(/\s+/g, ' ').trim()
       const t = norm(document.body.innerText)
@@ -251,7 +256,7 @@ export async function fillSkuByExcel(page, opts = {}) {
   if (!im.ok) { await closeDialog(page); return { ok: false, error: im.error } }
   log('   已导入修改后的规格文件')
   await closeDialog(page)
-  await sleep(1500)
+  await sleep(400)   // ★ 2026-11-26：下面 openDialog 本身就是轮询，这里不用干等 1.5s
 
   // 回读校验：再导出一次，逐行比对
   let verify = { checked: 0, mismatch: [] }

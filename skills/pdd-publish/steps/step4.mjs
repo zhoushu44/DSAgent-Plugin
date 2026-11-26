@@ -257,24 +257,37 @@ async function manualPick(page, tpl, log, force = false) {
   if (!conf) return { ok: false, error: '第4步：找不到「确认」按钮' }
   log('  第4步 已点确认')
 
-  // ★ 2026-11-16 优化：等「类目文字真的出现」而不是等按钮消失
-  //   旧写法等按钮不可见，6 秒超时就跳过 → 页面其实还在处理 → 点下一步必卡
-  //   新写法等 selectedCateId 里出现目标类目名（最多等 20 秒）
-  // 目标类目名：优先用传进来的 tpl（manualPick 的参数），没有就用空
+  // ★ 2026-11-26 提速：原来这里只等「selectedCateId 里出现目标类目名」，
+  //   实测在 15021/家居服套装 这类目上那个容器一直不更新 → 每次白等满 20 秒超时
+  //   （日志：已点确认 → 20.3s 后才 ✅）。默认值改回 20s 前先实测：
+  //   现在三条件任一成立就返回（最多 6s）：① 类目文字刷出目标名 ② 选类目面板已关闭
+  //   ③ 出现「修改分类」且带目标 cat_id。残余竞态交给下面「下一步」的 5 次重试吸收。
   const wantName = String(
     tpl?.category?.name
     || tpl?.category?.fullName?.split('>').pop()
     || ''
   ).trim()
-  await page.waitForFunction((want) => {
-    const el = document.getElementById('selectedCateId')
-    if (!el) return false
-    const t = (el.innerText || '').replace(/\s+/g, '')
-    if (!t) return false
-    // 有目标类目名就返回 true；没给名字则只要非空就算
-    return want ? t.includes(want) : t.length > 0
-  }, { timeout: 20000 }, wantName).catch(() => { })
-  await sleep(300)
+  const tWait = Date.now()
+  while (Date.now() - tWait < 6000) {
+    const st = await page.evaluate((want) => {
+      const el = document.getElementById('selectedCateId')
+      const txt = el ? (el.innerText || '').replace(/\s+/g, '') : ''
+      const btn = document.querySelector('button[data-tracking-click-viewid="cate_confirm"]')
+      const panelGone = !btn || btn.offsetParent === null
+      const card = [...document.querySelectorAll('[data-tracking-viewid="choose_cate"], [data-tracking-click-viewid="choose_cate"]')]
+        .map(e => e.getAttribute('data-tracking-params') || '').join(' ')
+      return {
+        text: txt, panelGone,
+        textOk: want ? txt.includes(want) : txt.length > 0,
+        cardOk: !!card,
+      }
+    }, wantName).catch(() => ({}))
+    if (st.textOk) { log('  第4步 类目文字已刷新'); break }
+    if (st.panelGone) { log('  第4步 选类目面板已关闭'); break }
+    if (st.cardOk) { log('  第4步 类目卡片已更新'); break }
+    await sleep(250)
+  }
+  await sleep(200)
 
   // ★ 第4步确认按钮的 cat_id 已等于目标，即视为选类目成功。
   //   不再回读页面类目文字做二次校验（页面文字刷新有延迟，会误判为「仍不一致」）。
