@@ -74,12 +74,17 @@ metadata:
 |------|------|------|
 | `overview` | 只读 | 商品总览：在售/未在售计数 + 前 N 条明细（默认） |
 | `list` | 只读 | 商品列表：goods_id/标题/类目/SKU数/价格带/在售状态 |
+| `status` / `tabs` | 只读 | **发布状态核对**：在售中 / 已下架 / 已售罄 三个 tab 分别计数；带 `--goods-id` 定位商品落在哪个 tab。三个都没有 = 审核中 / 审核驳回 / 没发出去 |
 | `detail` / `sku` | 只读 | 单商品 SKU 全量：spec/spec_id/拼单价/单买价/库存/预览图 |
 | `commit` | 只读 | 单商品提交体快照（`on_shop/detail`，170 字段），三层复用的数据源 |
 | `spec-pool` | 只读 | 全店规格池采集：遍历商品拉 SKU，抽 规格值→spec_id |
 | `offsale` | **L2 写** | 下架商品（接口直调，100% 可靠，实测生效） |
 | `onsale` | **L2 写** | 上架商品（接口直调；平台可能要求审核） |
 | `delete` | **L2 写** | 彻底删除（接口返回 success 但受服务端会话绑定，可能不落库；稳妥路径：先 offsale 再页面删） |
+
+> ⚠ `overview` / `list` 走 `glide/v2/mms/addProperties/goodsList` 快通道（带价格/库存/在售），
+> 但那个接口是「待补属性」视角，实测**会漏刚发布的商品**（同一时刻 在售 32 / 已下架 21，glide 只回 24）。
+> 上架后核对「到底上上去没、现在什么状态」请用 `--mode status`（页面里重放 `display/mall/goodsList`，口径与后台 tab 一致）。
 
 ## 前置条件
 

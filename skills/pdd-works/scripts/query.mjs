@@ -384,14 +384,20 @@ const wantCsv = process.argv.includes('--csv')
      *   新方案：glide/goodsList（稳定 289ms）+ 并发 skuInfo 补价格
      *   实测：180 个商品 5.6 秒拿全（含价格/库存/在售/SKU数/销量）
      */
-    const { listGoodsFull } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-goods-full.mjs')).href)
+    const { listGoodsFull, listGoodsByTabViaPage, captureGoodsListBaseline, GOODS_TABS } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-goods-full.mjs')).href)
     let full
     try {
+      // ★ 2026-11-26 实测结论：
+      //   枚举改用「页面重放的 在售+已下架 tab」虽然能看到新发布商品（在售 32 / 已下架 21），
+      //   但页面已被导航到 goods_list 后，后面 50 个 skuInfo 补价格全部被限流
+      //   （overview 变成 在售0/未在售50、SKU=0、耗时 80s）。
+      //   所以 overview/list 保持 glide 快通道（有价格/库存/在售），
+      //   「数量对不对、新商品在哪个状态」改用 mode=status（tab 口径，见下）。
       full = await listGoodsFull(
         (p, b, o) => request(p, b, { page, account: ACC || undefined, shopKey: SHOP, guard, ...o }),
         ACC || { cookies: {}, localStorage: {} },
         SHOP,
-        { max: limit > 0 ? Math.max(limit, 50) : 0, concurrency: 5, useCache: true }
+        { max: limit > 0 ? Math.max(limit, 50) : 0, concurrency: 5, useCache: false }
       )
     } catch (e) {
       emit({ ok: false, failureKind: 'api_error', text: `商品列表获取失败：${String(e.message).slice(0, 120)}` })
@@ -437,6 +443,42 @@ const wantCsv = process.argv.includes('--csv')
       const csv = ['goods_id,title,cat,sku_count,price_range,stock,sold,is_onsale', ...rows.map(r => [r.goods_id, `"${r.title.replace(/"/g, '""')}"`, `"${r.cat}"`, r.sku_count, `"${r.price_range}"`, r.stock, r.sold, r.is_onsale].join(','))].join('\n')
       fs.writeFileSync(path.join(dir, `pdd-goods-${mode}-${Date.now()}.csv`), csv, 'utf8')
     }
+  } else if (mode === 'status' || mode === 'tabs') {
+    // ★ 2026-11-26 新增：查「发布状态」闭环。
+    //   把「在售中 / 已下架 / 已售罄」三个 tab 分别数一遍；带 --goods-id 时定位该商品落在哪个 tab。
+    //   三个 tab 都找不到 = 还在审核中 / 被驳回 / 没发布成功 —— 这正是上架后要确认的那一步。
+    const { listGoodsByTabViaPage, captureGoodsListBaseline, GOODS_TABS } = await import(pathToFileURL(path.join(PLUGIN_ROOT, '/skills/_shared/pdd-goods-full.mjs')).href)
+    const counts = {}
+    const errs = []
+    let hit = null
+    let base = null
+    try { base = await captureGoodsListBaseline(page) } catch (e) { errs.push(`基线抓取失败: ${String(e.message).slice(0, 70)}`) }
+    for (const t of Object.keys(GOODS_TABS)) {
+      if (!base) break
+      try {
+        const r = await listGoodsByTabViaPage(page, { tab: t, baseline: base })
+        counts[r.label] = r.total
+        if (goodsId && !hit) {
+          const g = r.list.find(x => String(x.id) === String(goodsId))
+          if (g) hit = { tab: r.label, id: String(g.id), title: g.title || '' }
+        }
+      } catch (e) {
+        errs.push(`${GOODS_TABS[t].label}: ${String(e.message).slice(0, 70)}`)
+      }
+    }
+    const lines = [`拼多多发布状态：${Object.entries(counts).map(([k, v]) => `${k} ${v}`).join(' / ') || '（全部查询失败）'}`]
+    if (goodsId) {
+      lines.push(hit
+        ? `商品 ${goodsId}：✅ ${hit.tab}｜${(hit.title || '').slice(0, 40)}`
+        : `商品 ${goodsId}：❌ 三个 tab 都没找到 —— 可能在「审核中 / 审核驳回」，或尚未发布完成`)
+    }
+    if (errs.length) lines.push('部分 tab 查询失败：' + errs.join('；'))
+    emit({
+      ok: true, mode: 'status', shopKey: SHOP,
+      goodsId: goodsId ? String(goodsId) : null,
+      counts, hit, errors: errs,
+      text: lines.join('\n'),
+    })
   } else if (mode === 'detail' || mode === 'sku') {
     if (!goodsId) { emit({ ok: false, failureKind: 'api_error', text: 'detail/sku 模式必须带 --goods-id' }); await browser?.close(); process.exit(2) }
     const r = await call('https://mms.pinduoduo.com/vodka/v2/mms/query/sku/info', { goodsId: Number(goodsId) })

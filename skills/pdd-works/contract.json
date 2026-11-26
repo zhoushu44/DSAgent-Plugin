@@ -9,11 +9,11 @@
     "args": [
       {
         "name": "mode",
-        "description": "overview=商品总览(默认)；list=商品列表；detail/sku=单商品SKU全量；commit=单商品提交体快照(170字段)；spec-pool=全店规格池采集；offsale/onsale/delete=下架/上架/删除(L2写操作，需--confirm)"
+        "description": "overview=商品总览(默认)；list=商品列表；status/tabs=发布状态核对(在售中/已下架/已售罄 三个tab分别计数；带--goods-id 定位商品落在哪个tab，三个都没有=审核中或驳回)；detail/sku=单商品SKU全量；commit=单商品提交体快照(170字段)；spec-pool=全店规格池采集；offsale/onsale/delete=下架/上架/删除(L2写操作，需--confirm)"
       },
       {
         "name": "goods_id",
-        "description": "商品 ID（detail / sku / commit / offsale / onsale / delete 模式必填）",
+        "description": "商品 ID（detail / sku / commit / offsale / onsale / delete 模式必填；status 模式填了就是查该商品的发布状态）",
         "flag": "--goods-id"
       },
       {
