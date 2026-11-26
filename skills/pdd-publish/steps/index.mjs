@@ -88,10 +88,20 @@ product = V.normalized
 if (V.warnings.length) log('校验警告:', V.warnings.slice(0, 5).join('; '))
 
 if (!confirm) {
+  // 预览里的类目名：优先用模板里的类目路径（以前这里读的是还没加载的变量，永远显示“未识别”）
+  let catLabel = product.category || ''
+  if (!catLabel && catId) {
+    try {
+      const { loadTemplate } = await loadTpl()
+      const t = loadTemplate(catId)
+      catLabel = t?.category?.fullName || t?.category?.name || ''
+    } catch { }
+  }
+  if (!catLabel) catLabel = catId ? `catId=${catId}（没有类目模板）` : '（未填 catId）'
   const lines = [
     '【拼多多上架预览 · 基座版】',
     `标题：${product.title || '（未填）'}`,
-    `类目：${tpl?.category?.fullName || product.category || '（未识别）'}`,
+    `类目：${catLabel}`,
     `主图：${(product.images || []).length} 张`,
     `详情图：${(product.detailImages || []).length} 张`,
     `规格维度：${(product.specs || []).map(s => `${s.name}(${s.values.length})`).join(' / ') || '无'}`,
@@ -374,6 +384,10 @@ try {
   } else { steps.push({ step: 11, ok: true, skip: true }); log('11 跳过（无规格）') }
 
   // ── 12 价格库存 ──
+  // ★ 2026-11-26 固定走页面官方「Excel批量编辑规格」（导出→改→导入→确认编辑→回读校验）：
+  //   价格表是虚拟列表，一次只画 ~18 行，任何滚动/聚焦都会让它重渲染收缩，
+  //   逐格填 30 行必然丢值（实测 11/30 行回读不一致）。Excel 方式实测 30/16/12/4 行全对。
+  //   只有 Excel 方式整个失败时才退回逐格填（≤18 行的款也能用）。
   log('=== 12 价格库存 ===')
   const skus = product.skus || []
   if (!skus.length) throw new Error('product.skus 为空')
@@ -383,24 +397,40 @@ try {
     price: s.price ?? s.multiPrice ?? 0,
     skuSn: s.itemNo || s.skuSn || '',
   }))
-  const thumbs = skus.map((s, i) => s.thumb || (product.images || [])[i % (product.images || []).length])
+  // 每行预览图 = 该 SKU 颜色对应的那张主图（颜色在规格里排第几，就用第几张）
+  const cDim = specs.find(x => /颜色/.test(x.name))?.name
+  const cOrder = (specs.find(x => /颜色/.test(x.name))?.values || []).map(v => (typeof v === 'string' ? v : v?.value))
+  const thumbs = skus.map(s => {
+    const ci = Math.max(0, cOrder.indexOf(s?.specs?.[cDim]))
+    return s.thumb || (product.images || [])[ci] || (product.images || [])[0]
+  })
   const m12 = await loadStep('step12.mjs')
-  const r12 = await m12.default(p, { rows, thumbs, verify: true })
-  steps.push({ step: 12, ok: !!r12.ok, filled: r12.filled })
-  log('12', r12.ok ? `✅ ${r12.filled} 行` : '❌ ' + (r12.errors || []).join(','))
-  // ★ 2026-11-26：SKU 预览图从价格步骤拆出，价格填完后紧接着传（每行用对应颜色的图）
+  const { fillSkuByExcel } = await import(pathToFileURL(path.join(__dirname, 'helpers', 'sku-excel.mjs')).href)
+
+  let r12 = await fillSkuByExcel(p, { skus, log: x => log('  ' + x) })
+  let r12via = 'Excel批量导入'
+  if (!r12.ok) {
+    log('   Excel 方式失败（' + (r12.error || '') + '）→ 退回逐格填')
+    const fb = await m12.default(p, { rows, verify: true, log: x => log('  ' + x) })
+    r12via = '逐格填'
+    r12 = { ok: fb.ok, filled: fb.filled, errors: fb.errors || [], warnings: fb.warnings }
+    if (fb.write?.done) {
+      log('   写入明细:', JSON.stringify(fb.write.done.map(d => ({ i: d.i, ok: d.ok, acts: d.acts?.map(a => a[0] + ':' + a[1]).join(' ') }))))
+    }
+    if (fb.warnings?.length) log('   警告:', fb.warnings.join('; '))
+  }
+  steps.push({ step: 12, ok: !!r12.ok, filled: r12.filled, via: r12via })
+  log('12', r12.ok ? `✅ ${r12.filled} 行（${r12via}${r12.verify?.checked ? '，回读 ' + r12.verify.checked + ' 行一致' : ''}）` : '❌ ' + (r12.errors || []).join(','))
+  if (!r12.ok) throw new Error('价格库存失败: ' + (r12.errors || []).join(','))
+
+  // ── 12b SKU 预览图（与价格分开的一步）──
   {
     const r12b = await m12.step12b_fillSkuThumbs(p, { thumbs, log: x => log('  ' + x) })
     const okN = (r12b.thumbs || []).filter(t => t.ok).length
     steps.push({ step: '12b', ok: !!r12b.ok, filled: okN })
-    log('12b 预览图', r12b.ok ? `✅ ${okN} 行` : '❌ ' + (r12b.errors || []).concat((r12b.thumbs || []).filter(t => !t.ok).map(t => `第${t.i + 1}行 ${t.reason}`)).join(','))
+    log('12b 预览图', r12b.ok ? `✅ ${okN} 行` : `❌ ${okN}/${thumbs.length} 行 ` + (r12b.errors || []).concat((r12b.thumbs || []).filter(t => !t.ok).map(t => `第${t.i + 1}行 ${t.reason}`)).join(','))
+    if (!r12b.ok) throw new Error('SKU 预览图失败: ' + (r12b.errors || []).join(','))
   }
-  if (r12.write?.done) {
-    log('   写入明细:', JSON.stringify(r12.write.done.map(d => ({ i: d.i, ok: d.ok, acts: d.acts?.map(a => a[0] + ':' + a[1]).join(' ') }))))
-    log('   列号:', JSON.stringify(r12.write.cols))
-  }
-  if (r12.warnings?.length) log('   警告:', r12.warnings.join('; '))
-  if (!r12.ok) throw new Error('价格库存失败: ' + (r12.errors || []).join(','))
 
   // ── 13 参考价 ──
   // ★ 2026-11-24 用户指定默认规则：未填参考价时自动 = 最大单买价 + 1
@@ -428,21 +458,54 @@ try {
   log('15', r15.ok ? '✅ ' + r15.selected : '⚠')
 
   // ── 16 提交（内置必填校验） ──
-  log('=== 16 提交 ===')
+  // ★ 2026-11-26：加「填完不提交」档（--stop-before-submit），用来实测正式入口而不发品。
+  //   默认行为完全不变：不带这个参数时，--confirm true 照样提交。
   const m16 = await loadStep('step16.mjs')
-  const r16 = await m16.default(p, { timeoutMs: 180000 })
-  steps.push({ step: 16, ok: !!r16.ok, goodsId: r16.goodsId, required: r16.required ? { total: r16.required.total, required: r16.required.required, missing: r16.required.missing } : null })
-  log('16', r16.ok ? `✅ goodsId=${r16.goodsId}` : '❌ ' + r16.error)
+  if (hasFlag('stop-before-submit') || process.env.PDD_STOP_BEFORE_SUBMIT === '1') {
+    log('=== 16 提交（已跳过：--stop-before-submit）===')
+    const chk = await m16.checkRequiredBeforeSubmit(p).catch(e => ({ ok: false, error: String(e.message) }))
+    if (chk?.ok) {
+      log(`16 必填校验 ✅ ${chk.total} 项，必填 ${chk.required} 项，缺 ${chk.missing?.length ?? 0} 项`)
+      if (chk.missing?.length) log('   缺:', chk.missing.map(m => m.label).join('、'))
+    } else {
+      log('16 必填校验 ⚠ ' + (chk?.error || '读取失败'))
+    }
+    const url = p.url()
+    console.log('\n' + '='.repeat(56))
+    console.log('  ★★ 已填完，停在提交前（没有提交）★★')
+    console.log('='.repeat(56))
+    console.log('  标题:', product.title)
+    console.log('  规格:', (product.specs || []).map(s => s.name + '×' + s.values.length).join(' × '))
+    console.log('  SKU:', (product.skus || []).length, '行')
+    console.log('  页面:', url.slice(0, 120))
+    console.log('')
+    console.log('  带 --confirm true 运行才会真正提交')
+    console.log('')
+    emit({
+      ok: true,
+      stopped: true,
+      needConfirm: true,
+      url,
+      steps,
+      required: chk?.ok ? { total: chk.total, required: chk.required, missing: (chk.missing || []).map(m => m.label) } : null,
+      text: `已填完停在提交前（未提交）。标题：${product.title}｜SKU ${(product.skus || []).length} 行｜必填缺 ${chk?.missing?.length ?? '?'} 项`,
+    })
+  } else {
+    log('=== 16 提交 ===')
+    const r16 = await m16.default(p, { timeoutMs: 180000 })
+    steps.push({ step: 16, ok: !!r16.ok, goodsId: r16.goodsId, required: r16.required ? { total: r16.required.total, required: r16.required.required, missing: r16.required.missing } : null })
+    log('16', r16.ok ? `✅ goodsId=${r16.goodsId}` : '❌ ' + r16.error)
 
-  emit({
-    ok: !!r16.ok,
-    goodsId: r16.goodsId,
-    url: r16.url,
-    successText: r16.successText,
-    steps,
-    required: r16.required ? { total: r16.required.total, required: r16.required.required, missing: r16.required.missing.map(m => m.label) } : null,
-    text: r16.ok ? `上架成功 goodsId=${r16.goodsId}` : r16.error,
-  })
+    emit({
+      ok: !!r16.ok,
+      goodsId: r16.goodsId,
+      url: r16.url,
+      successText: r16.successText,
+      steps,
+      required: r16.required ? { total: r16.required.total, required: r16.required.required, missing: r16.required.missing.map(m => m.label) } : null,
+      text: r16.ok ? `上架成功 goodsId=${r16.goodsId}` : r16.error,
+    })
+  }
 } catch (e) {
   emit({ ok: false, failureKind: 'api_error', text: String(e.message).slice(0, 300), steps })
 }

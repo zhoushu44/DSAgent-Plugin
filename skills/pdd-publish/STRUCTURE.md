@@ -36,7 +36,6 @@ skills/pdd-publish/
 │   ├── step16.mjs          提交 / 存草稿
 │   └── helpers/
 │       ├── slider.mjs          滑块
-│       └── video-upload.mjs    视频上传
 │
 └── scripts/            工具
     ├── harvest-native-props.mjs  抓属性结构（备用）

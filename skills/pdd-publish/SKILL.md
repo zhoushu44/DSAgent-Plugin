@@ -73,9 +73,14 @@ metadata:
 # 预览（默认）：只校验商品数据 + 回显上架计划，不开浏览器、零写操作
 node {baseDir}/steps/index.mjs --product-file "<product.json 绝对路径>" --account "<shopKey>"
 
+# 填完停在提交前（2026-11-26 新增）：真开浏览器把 1→15 全填完、跑提交前必填校验，但不提交
+node {baseDir}/steps/index.mjs --product-file "<product.json 绝对路径>" --account "<shopKey>" --confirm true --stop-before-submit
+
 # 真实上架：L2 写操作，用户明确确认后才允许带 --confirm true
 node {baseDir}/steps/index.mjs --product-file "<product.json 绝对路径>" --account "<shopKey>" --confirm true
 ```
+
+上架流程的固定版本、数据格式、三条硬规矩见 **`docs/00-上架固定流程.md`**。
 
 ⚠ 改入口脚本时必须同步改这两行 + `contract.json`。
 
