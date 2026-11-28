@@ -1,0 +1,580 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>拼多多上架 · 规格填充流程图</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 32px 24px 80px;
+    font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    background: #f5f6f8; color: #1f2329;
+  }
+  h1 { font-size: 26px; margin: 0 0 6px; }
+  .sub { color: #8a9099; font-size: 13px; margin-bottom: 36px; }
+  h2 {
+    font-size: 19px; margin: 56px 0 22px; padding-left: 12px;
+    border-left: 4px solid #e02e24;
+  }
+  .canvas {
+    background: #fff; border-radius: 12px; padding: 32px 24px;
+    box-shadow: 0 1px 4px rgba(0,0,0,.06); overflow-x: auto;
+  }
+
+  /* 节点 */
+  .n {
+    display: inline-block; padding: 11px 18px; border-radius: 8px;
+    font-size: 13.5px; line-height: 1.6; text-align: center;
+    border: 1.5px solid #d0d5dd; background: #fff; white-space: nowrap;
+  }
+  .n.start   { background: #e8f3ff; border-color: #2b7de9; color: #12508f; font-weight: 600; }
+  .n.end     { background: #e7f7ed; border-color: #16a34a; color: #0f6b32; font-weight: 600; }
+  .n.deci    { background: #fff7e6; border-color: #f0a020; color: #8a5a00; font-weight: 600;
+               transform: rotate(0deg); border-radius: 24px; }
+  .n.a       { background: #f0f5ff; border-color: #5b8def; }
+  .n.b       { background: #f3f0ff; border-color: #8b5cf6; }
+  .n.c       { background: #fff0f6; border-color: #e8558f; }
+  .n.d       { background: #fff4e5; border-color: #e8820c; }
+  .n.err     { background: #ffecec; border-color: #e02e24; color: #a51c14; }
+  .n.tip     { background: #fffbe6; border-color: #d4b106; color: #7a6000; font-size: 12.5px; }
+  .n code { background: rgba(0,0,0,.055); padding: 1px 5px; border-radius: 3px;
+            font-family: Consolas, monospace; font-size: 12px; }
+
+  /* 布局 */
+  .col { display: flex; flex-direction: column; align-items: center; }
+  .row { display: flex; justify-content: center; align-items: flex-start; gap: 16px; }
+  .arrow { width: 2px; height: 26px; background: #b8bec7; position: relative; }
+  .arrow::after {
+    content: ''; position: absolute; bottom: -1px; left: 50%;
+    transform: translateX(-50%);
+    border-left: 5px solid transparent; border-right: 5px solid transparent;
+    border-top: 7px solid #b8bec7;
+  }
+  .label { font-size: 12px; color: #8a9099; padding: 2px 8px; }
+
+  /* 分叉 */
+  .fork { display: flex; justify-content: center; gap: 40px; align-items: stretch; }
+  .branch { display: flex; flex-direction: column; align-items: center; }
+
+  /* 步骤编号 */
+  .step {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 22px; height: 22px; border-radius: 50%;
+    background: #e02e24; color: #fff; font-size: 12px; font-weight: 700;
+    margin-right: 8px; flex: 0 0 auto;
+  }
+  .n.withstep { display: inline-flex; align-items: center; text-align: left; }
+
+  /* 强调块 */
+  .warn {
+    background: #fff2f0; border: 1.5px solid #ff4d4f; border-radius: 10px;
+    padding: 14px 18px; margin: 14px 0; font-size: 13px; line-height: 1.8;
+    max-width: 780px;
+  }
+  .warn b { color: #cf1322; }
+  .ok { color: #16a34a; font-weight: 600; }
+  .no { color: #e02e24; font-weight: 600; }
+
+  table { border-collapse: collapse; font-size: 13px; margin-top: 10px; }
+  th, td { border: 1px solid #e4e7ec; padding: 8px 14px; text-align: left; }
+  th { background: #fafbfc; font-weight: 600; }
+
+  .legend { display: flex; gap: 22px; flex-wrap: wrap; font-size: 12.5px;
+            color: #5f6672; margin-bottom: 20px; }
+  .legend i { display: inline-block; width: 14px; height: 14px; border-radius: 4px;
+              margin-right: 6px; vertical-align: -2px; border: 1.5px solid; }
+</style>
+</head>
+<body>
+
+<h1>拼多多上架 · 规格填充流程图</h1>
+<div class="sub">实测定稿 2026-11-16 ｜ 四种规格界面全部验证通过</div>
+
+<div class="legend">
+  <span><i style="background:#e8f3ff;border-color:#2b7de9"></i>开始/结束</span>
+  <span><i style="background:#fff7e6;border-color:#f0a020;border-radius:12px"></i>判断</span>
+  <span><i style="background:#f0f5ff;border-color:#5b8def"></i>A 预设勾选</span>
+  <span><i style="background:#f3f0ff;border-color:#8b5cf6"></i>B 定制输入</span>
+  <span><i style="background:#fff0f6;border-color:#e8558f"></i>C 尺码表</span>
+  <span><i style="background:#fff4e5;border-color:#e8820c"></i>D 定制规格</span>
+  <span><i style="background:#ffecec;border-color:#e02e24"></i>报错</span>
+</div>
+
+
+<!-- ══════════ 主流程 ══════════ -->
+<h2>一、主流程走向</h2>
+<div class="canvas">
+<div class="col">
+
+  <div class="n start">开局：收到 specs + catId</div>
+  <div class="arrow"></div>
+
+  <div class="n deci">specs 为空？</div>
+  <div class="arrow"></div>
+
+  <div class="row" style="gap:80px;align-items:flex-start">
+    <div class="branch">
+      <div class="label">是</div>
+      <div class="arrow" style="height:16px"></div>
+      <div class="n" style="background:#f6f6f6">跳过规格<br>直接进价格库存</div>
+    </div>
+    <div class="branch">
+      <div class="label">否</div>
+      <div class="arrow" style="height:16px"></div>
+      <div class="n withstep"><span class="step">1</span>读模板 tpl.specs</div>
+    </div>
+  </div>
+
+  <div class="arrow" style="margin-left:120px"></div>
+
+  <div class="n deci">maxDims &gt; 0 <br>且 维度数 &gt; maxDims ？</div>
+  <div class="arrow"></div>
+
+  <div class="row" style="gap:80px;align-items:flex-start">
+    <div class="branch">
+      <div class="label">是</div>
+      <div class="arrow" style="height:16px"></div>
+      <div class="n err">报错：规格最多 N 维</div>
+    </div>
+    <div class="branch">
+      <div class="label">否 / maxDims=0</div>
+      <div class="arrow" style="height:16px"></div>
+      <div class="n withstep"><span class="step">2</span>探测页面界面类型</div>
+    </div>
+  </div>
+
+</div>
+</div>
+
+
+<!-- ══════════ 界面判断 ══════════ -->
+<h2>二、界面类型判断 → 分四条路走</h2>
+<div class="canvas">
+<div class="col">
+
+  <div class="n deci">页面上有 <code>.property-container-v2</code> 吗？</div>
+
+  <div class="arrow" style="height:34px"></div>
+
+  <div class="row" style="gap:36px;align-items:flex-start">
+
+    <!-- 有 -->
+    <div class="branch">
+      <div class="label" style="font-weight:600;color:#2b7de9">有维度块</div>
+      <div class="arrow" style="height:14px"></div>
+      <div class="n">块里是什么？</div>
+      <div class="arrow" style="height:14px"></div>
+      <div class="col" style="gap:14px">
+        <div class="branch">
+          <div class="n a">.package-item-container</div>
+          <div class="arrow" style="height:14px"></div>
+          <div class="n a"><b>A 预设勾选</b><br><span style="font-size:11.5px;color:#5f6672">女装颜色分类</span></div>
+        </div>
+        <div class="branch">
+          <div class="n b">input[placeholder*="自定义"]</div>
+          <div class="arrow" style="height:14px"></div>
+          <div class="n b"><b>B 定制输入</b><br><span style="font-size:11.5px;color:#5f6672">纸杯容量</span></div>
+        </div>
+        <div class="branch">
+          <div class="n c">[class*="sizeStandardWrapper"]</div>
+          <div class="arrow" style="height:14px"></div>
+          <div class="n c"><b>C 尺码表</b><br><span style="font-size:11.5px;color:#5f6672">尺码/鞋码/童装身高</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 没有 -->
+    <div class="branch">
+      <div class="label" style="font-weight:600;color:#e8820c">没有维度块</div>
+      <div class="arrow" style="height:14px"></div>
+      <div class="n">页面上有<br>「删除规格类型」<br>+「添加定制规格」？</div>
+      <div class="arrow" style="height:14px"></div>
+      <div class="n d"><b>D 定制规格</b><br><span style="font-size:11.5px;color:#5f6672">床上四件套</span></div>
+      <div class="arrow" style="height:14px"></div>
+      <div class="n tip" style="max-width:210px;white-space:normal">页面初始无维度<br>必须先加一个才能判断</div>
+    </div>
+
+  </div>
+
+  <div class="arrow" style="height:34px"></div>
+  <div class="n withstep"><span class="step">3</span>按对应填法填值（见下四节）</div>
+  <div class="arrow"></div>
+  <div class="n withstep"><span class="step">4</span>校验 SKU 行数 = 各维度值数相乘</div>
+  <div class="arrow"></div>
+  <div class="n end">返回 ok / actualRows</div>
+
+</div>
+</div>
+
+
+<!-- ══════════ A ══════════ -->
+<h2>三、A 类：预设勾选</h2>
+<div class="canvas">
+<div class="col">
+  <div class="n a start">进入 A 类</div>
+  <div class="arrow"></div>
+  <div class="n a">① 定位维度块（三层兜底）</div>
+  <div class="arrow" style="height:14px"></div>
+  <div class="row" style="gap:14px">
+    <div class="n" style="font-size:12px">.property-name-title<br>文字 == 维度名</div>
+    <div class="n" style="font-size:12px">[class*="wrapperTitle"]<br>文字 == 维度名</div>
+    <div class="n" style="font-size:12px">内容特征<br>全选以下规格值</div>
+  </div>
+  <div class="arrow"></div>
+  <div class="n a">② 收集 .package-item-container 组</div>
+  <div class="arrow"></div>
+  <div class="n a">③ 第 i 个值 → 第 i 组</div>
+  <div class="arrow"></div>
+  <div class="n deci">组内有输入框？</div>
+  <div class="arrow"></div>
+  <div class="row" style="gap:60px">
+    <div class="branch">
+      <div class="label">有</div>
+      <div class="arrow" style="height:14px"></div>
+      <div class="n a">✍ 先写值</div>
+    </div>
+    <div class="branch">
+      <div class="label">无</div>
+      <div class="arrow" style="height:14px"></div>
+      <div class="n a">跳过</div>
+    </div>
+  </div>
+  <div class="arrow"></div>
+  <div class="n a">④ 勾 checkbox</div>
+  <div class="arrow"></div>
+  <div class="n a">⑤ 派发 input / change / Enter / blur</div>
+  <div class="arrow"></div>
+  <div class="n end">本维度完成</div>
+</div>
+<div class="warn">
+  <b>⚠ 顺序不能反：</b>必须「先写值，再勾选」。反了值会丢。<br>
+  <b>⚠ 组内 input 有两个：</b>第 1 个是规格名，第 2 个是备注（偏深/浅），只写第 1 个。
+</div>
+</div>
+
+
+<!-- ══════════ B ══════════ -->
+<h2>四、B 类：定制输入</h2>
+<div class="canvas">
+<div class="col">
+  <div class="n b start">进入 B 类</div>
+  <div class="arrow"></div>
+  <div class="n b">① 定位维度块（同上三层）</div>
+  <div class="arrow"></div>
+  <div class="n b">② 找 input[placeholder*="自定义"]</div>
+  <div class="arrow"></div>
+  <div class="n b">③ 第 i 个值 → 第 i 个输入框</div>
+  <div class="arrow"></div>
+  <div class="n deci">组内有 checkbox？</div>
+  <div class="arrow"></div>
+  <div class="row" style="gap:60px">
+    <div class="branch">
+      <div class="label">有</div>
+      <div class="arrow" style="height:14px"></div>
+      <div class="n b">一并勾上</div>
+    </div>
+    <div class="branch">
+      <div class="label">无</div>
+      <div class="arrow" style="height:14px"></div>
+      <div class="n b">跳过</div>
+    </div>
+  </div>
+  <div class="arrow"></div>
+  <div class="n b">④ 派发 input / change / Enter / blur</div>
+  <div class="arrow"></div>
+  <div class="n end">本维度完成</div>
+</div>
+</div>
+
+
+<!-- ══════════ C ══════════ -->
+<h2>五、C 类：尺码表</h2>
+<div class="canvas">
+<div class="col">
+  <div class="n c start">进入 C 类</div>
+  <div class="arrow"></div>
+  <div class="n c">① 定位维度块（三层兜底）</div>
+  <div class="arrow" style="height:14px"></div>
+  <div class="n tip" style="max-width:400px;white-space:normal">
+    尺码表标题<b>不在</b> .property-name-title<br>而在 [class*="wrapperTitle"] 里
+  </div>
+  <div class="arrow"></div>
+  <div class="n c">② 查模板 presetValues[目标值].group</div>
+  <div class="arrow" style="height:14px"></div>
+  <div class="row" style="gap:12px">
+    <div class="n" style="font-size:12px">120 → 身高</div>
+    <div class="n" style="font-size:12px">40 → 欧码</div>
+    <div class="n" style="font-size:12px">M → 中国码</div>
+  </div>
+  <div class="arrow"></div>
+  <div class="n c">③ 切标签页：点 label[class*="RD_outerWrapper"] 文字==该 group</div>
+  <div class="arrow"></div>
+  <div class="n c">④ 逐个值点 checkbox</div>
+  <div class="arrow"></div>
+  <div class="n c">⑤ 停用尺码表</div>
+  <div class="arrow" style="height:14px"></div>
+  <div class="n" style="font-size:12px">点击 <code>a[data-tracking-click-viewid="disable_size_chart"]</code></div>
+  <div class="arrow" style="height:14px"></div>
+  <div class="n c">弹窗 → 点 button「确认停用」</div>
+  <div class="arrow"></div>
+  <div class="n deci">按钮消失？</div>
+  <div class="arrow"></div>
+  <div class="row" style="gap:60px">
+    <div class="branch">
+      <div class="label">是</div>
+      <div class="arrow" style="height:14px"></div>
+      <div class="n end">停用成功</div>
+    </div>
+    <div class="branch">
+      <div class="label">否</div>
+      <div class="arrow" style="height:14px"></div>
+      <div class="n err">重试 / 报错</div>
+    </div>
+  </div>
+</div>
+<div class="warn">
+  <b>为什么必须停用：</b>不停用就要填 9 个参数（身高/体重/衣长/肩宽/胸围/袖长/裤长/臀围/腰围），
+  否则提交报「3 个规格值尺码信息未填写正确，请修改」。<br>
+  <b>停用后：</b>这些参数全部不用填，可直接提交。
+</div>
+</div>
+
+
+<!-- ══════════ D ══════════ -->
+<h2>六、D 类：定制规格（最复杂，四件套这类）</h2>
+<div class="canvas">
+
+<div class="n tip" style="display:block;max-width:none;margin-bottom:20px;white-space:pre;text-align:left;font-family:Consolas,monospace;font-size:12px;line-height:1.7">商品规格  最多添加2个商品规格类型
+
+┌────────────────────────────────────────────────────┐
+│ [颜色 ▾]  □添加图片        下移 | 删除规格类型     │
+│ [米白][删除]  [灰色][删除]  [请输入规格名称]        │
+│ 开始排序   添加定制规格                             │
+└────────────────────────────────────────────────────┘
+
+┌────────────────────────────────────────────────────┐
+│ [尺寸 ▾]  □添加图片        上移 | 删除规格类型     │
+│ [1.5m床][删除]  [1.8m床][删除]  [请输入规格名称]    │
+│ 开始排序   添加定制规格                             │
+└────────────────────────────────────────────────────┘</div>
+
+<div class="col">
+  <div class="n d start">对每个维度 i 循环（i = 0,1,2…）</div>
+  <div class="arrow"></div>
+
+  <div class="n d">① 点 <b>&lt;button&gt;</b> 内含「添加规格类型」</div>
+  <div class="arrow" style="height:14px"></div>
+  <div class="n tip" style="white-space:normal;max-width:460px">
+    文字带 (0/2)、(1/2) → 用<b>包含匹配</b><br>
+    <span class="no">✗ 点外层 div 不触发下拉</span>
+  </div>
+  <div class="arrow"></div>
+
+  <div class="n d">② 等 <code>input[placeholder="规格类型{i+1}"]</code> 出现</div>
+  <div class="arrow"></div>
+
+  <div class="n d" style="border-width:2.5px">③ <b>★ 点这个 input</b>（+ mousedown / mouseup / click）</div>
+  <div class="arrow" style="height:14px"></div>
+  <div class="n tip" style="white-space:normal;max-width:460px">
+    不点 → 下拉<b>永远不弹</b>（等 10 秒也没有）
+  </div>
+  <div class="arrow"></div>
+
+  <div class="n deci">下拉出现了？</div>
+  <div class="arrow"></div>
+  <div class="row" style="gap:60px">
+    <div class="branch">
+      <div class="label">是</div>
+      <div class="arrow" style="height:14px"></div>
+      <div class="n d">④ 从 ul[role="listbox"] 选维度</div>
+    </div>
+    <div class="branch">
+      <div class="label">否</div>
+      <div class="arrow" style="height:14px"></div>
+      <div class="n err">再点一次 input</div>
+    </div>
+  </div>
+  <div class="arrow"></div>
+
+  <div class="n d">⑤ 填值：<code>input[placeholder="请输入规格名称"]</code></div>
+  <div class="arrow" style="height:14px"></div>
+  <div class="n deci">输入框够用？</div>
+  <div class="arrow"></div>
+  <div class="row" style="gap:60px">
+    <div class="branch">
+      <div class="label">够</div>
+      <div class="arrow" style="height:14px"></div>
+      <div class="n d">直接写</div>
+    </div>
+    <div class="branch">
+      <div class="label">不够</div>
+      <div class="arrow" style="height:14px"></div>
+      <div class="n d">点「添加定制规格」</div>
+    </div>
+  </div>
+  <div class="arrow"></div>
+
+  <div class="n d" style="border-width:2.5px">⑥ <b>★★★ 写完点空白处</b></div>
+  <div class="arrow" style="height:14px"></div>
+  <div class="n" style="font-size:12px;white-space:normal;max-width:460px">
+    <code>.Form_itemLabelWrapper_5-194-0</code><br>或 <code>label.Form_itemLabelContent_5-194-0</code>
+  </div>
+  <div class="arrow" style="height:14px"></div>
+  <div class="n tip" style="white-space:normal;max-width:460px">
+    不点 → 最后一个值丢失 → SKU 表<b>不生成</b>
+  </div>
+  <div class="arrow"></div>
+
+  <div class="n deci">还有维度？</div>
+  <div class="arrow"></div>
+  <div class="row" style="gap:60px">
+    <div class="branch">
+      <div class="label">有</div>
+      <div class="arrow" style="height:14px"></div>
+      <div class="n d">回到 ① 处理下个维度</div>
+    </div>
+    <div class="branch">
+      <div class="label">没有</div>
+      <div class="arrow" style="height:14px"></div>
+      <div class="n end">进入价格库存</div>
+    </div>
+  </div>
+</div>
+
+<div class="warn">
+  <b>三个致命坑（全部实测踩过，缺一个就失败）：</b><br><br>
+  <b>坑 1 — 点 div 不触发下拉</b><br>
+  <span class="no">✗</span> 点外层 div：<code>text="添加规格类型("</code> → 返回 ok:true 但下拉不出现<br>
+  <span class="ok">✓</span> 点 button：<code>text="添加规格类型(1/2)"</code> → 下拉正常弹出<br><br>
+
+  <b>坑 2 — 不点「规格类型N」输入框，下拉不弹</b><br>
+  <span class="no">✗</span> 等下拉自己出现 → 等 10 秒也没有<br>
+  <span class="ok">✓</span> 点 <code>input[placeholder="规格类型1"]</code> → 下拉立刻弹出（30 个选项）<br><br>
+
+  <b>坑 3 — 写完值不点空白，值丢失</b><br>
+  现象：写入 1.5m床 ✓　写入 1.8m床 ✓ → 但页面只剩 1.5m床<br>
+  SKU 表：只有 2 行（应该 4 行）<br>
+  <span class="ok">✓</span> 点空白 label 后：<code>["1.5m床","1.8m床"]</code> 都在，SKU 表 4 行
+</div>
+
+<div style="margin-top:22px">
+<b style="font-size:14px">下拉里的 30 个可用维度（实测）</b>
+<div class="n tip" style="display:block;white-space:pre;text-align:left;font-family:Consolas,monospace;font-size:12.5px;margin-top:10px;max-width:none">颜色(常用)  尺寸(常用)  型号    款式    器型    材质
+口味        色号        适用人群 容量    花型    尺码
+地点        包装方式    香型    货号    组合    成份
+版本        度数        运营商  属性    重量    地区
+套餐        类别        适用年龄 功效    品类    时间
+
+维度名对不上时：按 ['颜色','尺寸','尺码','型号','款式','规格'] 顺序试
+都不行 → 选下拉第一个（值都是自定义输入，维度名不影响结果）</div>
+</div>
+
+</div>
+
+
+<!-- ══════════ 价格库存 ══════════ -->
+<h2>七、价格库存填写（step12）</h2>
+<div class="canvas">
+<div class="col">
+  <div class="n start">进入价格库存</div>
+  <div class="arrow"></div>
+
+  <div class="n">① 读表头文字 → 找列号<br>库存 / 拼单价 / 单买价 / 规格编码</div>
+  <div class="arrow"></div>
+
+  <div class="n">② 行内定位：用「第 N 个 text input」</div>
+  <div class="arrow" style="height:14px"></div>
+  <div class="n tip" style="white-space:normal;max-width:480px">
+    表头顺序 → input 顺序：<br>
+    库存 → 拼单价 → 单买价 → 规格编码 → 商品编码<br>
+    （规格列只有文字无 input；预览图是 file input，已跳过）
+  </div>
+  <div class="arrow"></div>
+
+  <div class="n" style="border-width:2.5px;background:#fff4e5;border-color:#e8820c">
+    ③ <b>写入顺序：库存 → 单买价 → 拼单价 → 编码</b>
+  </div>
+  <div class="arrow" style="height:14px"></div>
+  <div class="n tip" style="white-space:normal;max-width:520px">
+    <b>★ 必须先写单买价！</b><br>
+    平台联动校验「拼单价 &lt; 单买价」<br>
+    先写拼单价时单买价还是空 → React 判非法 → <b>直接清空</b>
+  </div>
+  <div class="arrow"></div>
+
+  <div class="n">④ 每写一个值 <b>立刻回读确认</b></div>
+  <div class="arrow" style="height:14px"></div>
+  <div class="n tip" style="white-space:normal;max-width:480px">
+    同一次 evaluate 里连写 4 个 → 第 2 个被 React 重渲染冲掉<br>
+    每个值单独 evaluate + 回读 → 4 个全部保留
+  </div>
+  <div class="arrow"></div>
+
+  <div class="n">⑤ 每行写完等 400ms 再写下一行</div>
+  <div class="arrow"></div>
+
+  <div class="n deci">回读不一致？</div>
+  <div class="arrow"></div>
+  <div class="row" style="gap:60px">
+    <div class="branch">
+      <div class="label">只警告</div>
+      <div class="arrow" style="height:14px"></div>
+      <div class="n">不阻断，继续</div>
+    </div>
+    <div class="branch">
+      <div class="label">写入失败</div>
+      <div class="arrow" style="height:14px"></div>
+      <div class="n err">才算错误</div>
+    </div>
+  </div>
+  <div class="arrow"></div>
+  <div class="n end">交给 step16 提交 + 平台校验</div>
+</div>
+
+<div class="warn">
+  <b>回读为什么只警告：</b>不同类目 SKU 表的 rowspan / colspan / 表头结构差异极大
+  （T恤颜色列 rowspan=3、休闲裤 rowspan=2、纸杯无规格列），回读难以 100% 覆盖。
+  写入本身是成功的（页面可见），真实校验交给提交前的必填检查 + 平台校验。
+</div>
+</div>
+
+
+<!-- ══════════ 实测总表 ══════════ -->
+<h2>八、四类界面实测覆盖</h2>
+<div class="canvas">
+<table>
+<tr><th>类型</th><th>类目</th><th>维度</th><th>SKU 行</th><th>结果</th></tr>
+<tr><td>A 预设勾选</td><td>女装 T 恤</td><td>颜色 2 × 尺码 3</td><td>6</td><td class="ok">✅</td></tr>
+<tr><td>A 预设勾选</td><td>连衣裙</td><td>颜色 2 × 尺码 3</td><td>6</td><td class="ok">✅</td></tr>
+<tr><td>A 预设勾选</td><td>休闲裤</td><td>颜色 2 × 尺码 2</td><td>4</td><td class="ok">✅</td></tr>
+<tr><td>B 定制输入</td><td>纸杯</td><td>容量 3</td><td>3</td><td class="ok">✅</td></tr>
+<tr><td>C 尺码表</td><td>跑步鞋</td><td>颜色 2 × 鞋码 3</td><td>6</td><td class="ok">✅</td></tr>
+<tr><td>C 尺码表</td><td>童装</td><td>颜色 2 × 身高 3</td><td>6</td><td class="ok">✅</td></tr>
+<tr><td>C 尺码表</td><td>童装</td><td>身高 4（1 维）</td><td>4</td><td class="ok">✅</td></tr>
+<tr><td>D 定制规格</td><td>床上四件套</td><td>颜色 2 × 尺寸 2</td><td>4</td><td class="ok">✅</td></tr>
+</table>
+</div>
+
+
+<!-- ══════════ 报错对照 ══════════ -->
+<h2>九、常见报错 → 卡在哪一步</h2>
+<div class="canvas">
+<table>
+<tr><th style="width:34%">报错原文</th><th style="width:26%">卡在哪</th><th>解决</th></tr>
+<tr><td>规格最多 0 维，当前 1 维</td><td>校验（第 2 步）</td><td>maxDims=0 时跳过校验</td></tr>
+<tr><td>规格维度「XXX」不在模板内（可用：）</td><td>校验</td><td>模板 dimensions 为空时允许任意维度名</td></tr>
+<tr><td>选了「尺寸常用」但页面上找不到该维度块</td><td>D 类 ④ 选维度</td><td>取 li 内第一个文本节点（去「常用」标签）</td></tr>
+<tr><td>下拉里找不到「XXX」（页面可选：官方客服）</td><td>D 类 ④ 选维度</td><td>用 ul[role="listbox"] li[role="option"]</td></tr>
+<tr><td>找不到「添加定制规格」</td><td>D 类 ⑤ 填值</td><td>点 button，不是外层 div</td></tr>
+<tr><td>规格值尺码信息未填写正确，请修改</td><td>C 类 ⑤ 停用</td><td>点「停用尺码表」→ 确认停用</td></tr>
+<tr><td>第1行规格的拼单价必须大于0</td><td>价格库存 ③ 顺序</td><td>先写单买价，再写拼单价</td></tr>
+<tr><td>请上传第1行规格的预览图后重新操作</td><td>价格库存后</td><td>每个 sku 加 thumb 图片路径</td></tr>
+</table>
+</div>
+
+<div style="text-align:center;color:#b0b6bf;font-size:12px;margin-top:60px">
+  拼多多上架 · 规格填充流程图 ｜ 2026-11-16
+</div>
+
+</body>
+</html>

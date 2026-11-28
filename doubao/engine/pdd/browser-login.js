@@ -1,0 +1,1930 @@
+/**
+ * 浏览器登录核心逻辑 — 供 host 工具和 browser 半区 HTTP 路由共用。
+ *
+ * 动态导入 puppeteer-core，连接本机 Chrome，导航到登录页，轮询关键 Cookie。
+ */
+import { keyCookies, credentialPlatform, isRiskPassCookie } from './services/credential-store.js';
+import { applyStealth } from './stealth-inject.js';
+import { clearRiskCooldown, probePlatformPermission, invalidateGatewayCache, desktopUserAgent } from './gateway-proxy.js';
+import * as authOp from './services/auth-operation.js';
+import { cpSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
+/** 活跃浏览器实例 */
+let activeBrowser = null;
+/**
+ * 关闭当前活跃浏览器，并释放它占用的 Profile 锁。
+ *
+ * 所有关闭路径统一走这里，避免「关了浏览器却漏放锁」导致该平台后续任务全部被拒。
+ */
+async function closeActiveBrowser() {
+    const current = activeBrowser;
+    if (!current)
+        return;
+    try {
+        await current.close();
+    }
+    catch { /* 忽略 */ }
+    // Windows：close() resolve 后 Chrome 进程退出与文件句柄释放是异步的，
+    // 立即对该 Profile 目录做 rename / cpSync 会 EPERM（登录收编即踩中）。
+    // 主动等进程真正退出（上限 2s，正常路径几乎零延迟）。
+    try {
+        const proc = current.browser?.process?.();
+        if (proc && proc.exitCode === null) {
+            await new Promise(resolve => {
+                const timer = setTimeout(resolve, 2000);
+                proc.once('exit', () => { clearTimeout(timer); resolve(); });
+            });
+        }
+    }
+    catch { /* browser 已断连等，忽略 */ }
+    activeBrowser = null;
+    if (current.userDataDir)
+        releaseProfile(current.userDataDir);
+}
+const busyProfiles = new Map();
+/**
+ * 尝试占用 Profile 目录。
+ *
+ * @returns true = 占用成功（含同 owner 重复占用的幂等情形）；
+ *          false = 已被**其他**占用者持有，调用方应给出可读提示
+ */
+export function tryAcquireProfile(dir, owner) {
+    const held = busyProfiles.get(dir);
+    if (held) {
+        // 同一占用者重复 acquire：计数 +1，视为成功（避免自我阻塞）
+        if (held.owner === owner) {
+            held.count += 1;
+            held.borrowers.add(owner);
+            return true;
+        }
+        // 不同占用者：Chrome 的 userDataDir 独占，必须拒绝
+        return false;
+    }
+    busyProfiles.set(dir, { owner, count: 1, borrowers: new Set([owner]) });
+    return true;
+}
+/** 释放 Profile 目录占用（**引用计数归零才真正释放**；幂等，可安全重复调用） */
+export function releaseProfile(dir) {
+    const held = busyProfiles.get(dir);
+    if (!held)
+        return;
+    held.count -= 1;
+    if (held.count <= 0)
+        busyProfiles.delete(dir);
+}
+/** 查询 Profile 目录当前的占用者描述（用于提示文案） */
+export function profileOwner(dir) {
+    return busyProfiles.get(dir)?.owner;
+}
+/** 查询某目录的全部占用者（Accio borrower Map 的对应物，用于排障与清理决策） */
+export function profileBorrowers(dir) {
+    const held = busyProfiles.get(dir);
+    return held ? [...held.borrowers] : [];
+}
+/** 该目录是否正被占用（任意引用计数 > 0） */
+export function isProfileBusy(dir) {
+    return busyProfiles.has(dir);
+}
+/**
+ * 记录「本 Profile 目录当前对应的 CDP 调试端口」，用于端口归属校验。
+ *
+ * 背景（吸收 Accio 的 `ChromePortOwnershipError`）：
+ * `taobao-publish` 会读 `userDataDir/DevToolsActivePort` 拿到端口后直接
+ * `puppeteer.connect({ browserURL: 'http://127.0.0.1:<port>' })` 以复用已开窗口。
+ * 但那个文件**可能是陈旧的**（上次崩溃残留、目录被复制过），
+ * 于是端口可能属于**另一个 Profile 的浏览器** —— 连上去会在错误的浏览器里操作，
+ * 后果是「在别的账号的窗口里点了发布」，属于最危险的一类串号事故。
+ *
+ * 这里记录“目录 → 端口”的归属，配合 `verifyPortOwnership()` 在 connect 前校验。
+ */
+const profilePorts = new Map();
+/** 登记某 Profile 的 CDP 端口（启动浏览器后调用） */
+export function registerProfilePort(dir, port) {
+    if (!dir || !Number.isInteger(port) || port <= 0)
+        return;
+    profilePorts.set(dir, port);
+}
+/** 查询某目录登记的端口（无记录返回 undefined） */
+export function registeredPortFor(dir) {
+    return profilePorts.get(dir);
+}
+export function verifyPortOwnership(dir, port) {
+    const registered = profilePorts.get(dir);
+    if (registered === undefined)
+        return 'unknown';
+    return registered === port ? 'match' : 'mismatch';
+}
+/** 释放某目录的端口登记（关闭浏览器后调用） */
+export function unregisterProfilePort(dir) {
+    profilePorts.delete(dir);
+}
+/**
+ * 清理 Chrome 遗留的 Profile 锁文件。
+ *
+ * 上一次验证的浏览器被强杀 / 崩溃时，userDataDir 里的 SingletonLock 等会残留，
+ * 导致下次 puppeteer.launch 直接失败。启动前清一遍 + 失败后清一遍重试。
+ */
+export function clearProfileLocks(dir) {
+    for (const name of ['SingletonLock', 'SingletonCookie', 'SingletonSocket', 'lockfile']) {
+        try {
+            rmSync(join(dir, name), { force: true });
+        }
+        catch { /* 不存在或正被占用 */ }
+    }
+}
+/**
+ * 获取多域名 Cookie（阿里系 SSO 关键修复）。
+ *
+ * Puppeteer 的 page.cookies() 不传域名时只返回当前页面域的 Cookie。
+ * 阿里系 SSO 登录后，unb 等 Cookie 写在 .taobao.com 域，
+ * 而闲鱼登录后 Cookie 写在 .goofish.com 域。
+ * 必须指定所有相关域名才能拿到完整 Cookie 集。
+ */
+async function getAllDomainCookies(page, platform) {
+    const credPlatform = credentialPlatform(platform);
+    const domainMap = {
+        taobao: ['https://.taobao.com', 'https://.tmall.com'],
+        tmall: ['https://.taobao.com', 'https://.tmall.com'],
+        xianyu: ['https://.taobao.com', 'https://.goofish.com'],
+        sycm: ['https://.taobao.com'],
+        alimama: ['https://.taobao.com'],
+        dmp: ['https://.taobao.com'],
+        sycm_insight: ['https://.taobao.com'],
+        // 拼多多：登录票据（PDDAccessToken / pdd_user_id）写在 `mobile.yangkeduo.com` 域，
+        // 不传域名时 `page.cookies()` 只能取到当前页域，容易漏；显式列全相关域。
+        pdd: ['https://mobile.yangkeduo.com', 'https://.yangkeduo.com', 'https://.pinduoduo.com'],
+        // 拼多多商家后台：登录票据 PASS_ID 写在 mms.pinduoduo.com / .pinduoduo.com 域，
+        // 与买家 H5（mobile.yangkeduo.com）不共享，必须显式列全。
+        // ★ 2026-10-24 修复：推广域 yingxiao.pinduoduo.com 是**独立登录**，
+        //   账号连接器扫一次码只落到 mms 域，pdd-promo 打开商品推广仍要求单独登录。
+        //   这里把推广域也加进取数域，让扫码后 Cookie 一并入库。
+        //   注意：.pinduoduo.com 的通配符不覆盖 yingxiao 子域（Puppeteer 按精确 host 匹配），
+        //   所以必须显式列出。
+        pdd_mms: [
+            'https://mms.pinduoduo.com',
+            'https://.pinduoduo.com',
+            'https://yingxiao.pinduoduo.com',
+            'https://cashier.pinduoduo.com',
+            'https://mms-static.pddpic.com',
+        ],
+        // 1688（阿里巴巴 B2B）：独立登录，Cookie 写在 .1688.com 域
+        alibaba: ['https://.1688.com', 'https://work.1688.com', 'https://.taobao.com'],
+        // ★ 抖店（抖音小店商家后台）：登录态来自抖音 SSO，但**发品必需的域 Cookie**
+        //   （无它可以登录抖音却打不开发布页）落在 .jinritemai.com。两个域都必须取，
+        //   否则 mqs 三平台里的「抖店上架」会表现为「明明登录了却要求登录」。
+        douyin_shop: ['https://.douyin.com', 'https://fxg.jinritemai.com', 'https://.jinritemai.com'],
+        // ★ 京东（独立登录态）：发品域 wares-jdm.jd.com 与 passport 同属 .jd.com
+        jd: ['https://passport.jd.com', 'https://.jd.com', 'https://wares-jdm.jd.com'],
+    };
+    // ★ 2026-11-25 修复：先按业务平台查。闲鱼的凭证平台是 taobao，但登录票据只写在
+    //   .goofish.com 域 —— 按凭证平台查会只取淘宝域，扫码成功也取不回 unb，
+    //   表现为「Cookie 提取成功但存储失败：无法识别账号 ID（xianyu 需要 unb）」。
+    const domains = domainMap[platform] || domainMap[credPlatform] || [];
+    if (domains.length > 0) {
+        // Puppeteer 支持传入多个 URL 来获取对应域的 Cookie
+        // ★ 2026-11-03：返回值带上 domain 字段（Puppeteer 本来就返回），
+        //   让调用方能按域过滤（推广域票据是否真的拿到了，只有按域才判得准）。
+        return await page.cookies(...domains);
+    }
+    return await page.cookies();
+}
+/**
+ * 小红书登录态实证（浏览器内同域 fetch SSR HTML）。
+ *
+ * 为什么不能用 Cookie 判据：实测 headful 浏览器访问 /explore 时，页面 JS 会为
+ * **匿名访客**写入 `web_session`（2s 内即出现；同一 URL 在 headless 下 10s 都不出现），
+ * 因此 `KEY_COOKIES.xhs = ['web_session']` 对「已登录」与「匿名」毫无区分度 ——
+ * 轮询第 1 轮（2s）就判「登录成功」→ 立即关窗 → 用户根本没机会扫码（FIX-LOG #63）。
+ *
+ * 小红书 /api/sns/** 需要 jsvmp 签名（无签名恒 HTTP 406），不能直接调；
+ * 但首页 SSR HTML 里内联了 `"user":{"loggedIn":true|false,...}`，同域 fetch 即可读到，
+ * 无需签名、不经过 host 网关（不吃账号节流），是可靠的实证判据。
+ */
+async function verifyXhsLoggedIn(page) {
+    try {
+        const res = await page.evaluate(async () => {
+            try {
+                const r = await fetch('https://www.xiaohongshu.com/explore', {
+                    credentials: 'include',
+                    headers: { accept: 'text/html,application/xhtml+xml' },
+                });
+                if (!r.ok)
+                    return { ok: false, status: r.status };
+                const html = await r.text();
+                const normalized = html.replace(/\\"/g, '"');
+                const seg = normalized.match(/"user"\s*:\s*\{\s*"loggedIn"\s*:\s*(?:true|false)[\s\S]{0,600}/);
+                if (!seg)
+                    return { ok: false, status: r.status, reason: '响应缺少 user 字段' };
+                return {
+                    ok: true,
+                    loggedIn: /"loggedIn"\s*:\s*true/.test(seg[0]),
+                    guest: /"guest"\s*:\s*true/.test(seg[0]),
+                };
+            }
+            catch (e) {
+                return { ok: false, error: String(e) };
+            }
+        });
+        if (!res || res.ok !== true)
+            return false;
+        return res.loggedIn === true && res.guest !== true;
+    }
+    catch {
+        return false;
+    }
+}
+/**
+ * UI 操作后的标准等待时间（ms）。
+ *
+ * 统一各 publish 脚本中 UI 操作后的延迟基准：原来散落为 2500ms（淘宝/拼多多/知乎/B站）
+ * 与 1500~6000ms 等不一致的魔法数字，现提取为共享常量，保证各平台节拍一致。
+ * - 用途：点击按钮 / 选择下拉项 / 上传文件后等待页面渲染落定
+ * - 对于需要更长等待的场景（如文件上传完成轮询），仍可传更大的值
+ */
+export const UI_STEP_DELAY_MS = 2500;
+/** sleep 的便捷封装（各 publish 脚本无须各自再定义 sleep 函数） */
+export function sleep(ms) {
+    return new Promise(r => setTimeout(r, ms));
+}
+/** 查找本机 Chrome 可执行文件 */
+export function findChromePath() {
+    const candidates = [
+        'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+        'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+        `${process.env.LOCALAPPDATA}\\Google\\Chrome\\Application\\chrome.exe`,
+        'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+        'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+    ];
+    return candidates.find(p => p && existsSync(p));
+}
+// ── 环境指纹（P1-3，比特浏览器 + QIWork 模式）──────────────────
+//
+// 环境漂移（IP + UA + 时区三者突变）是电商风控掉登录的头号诱因。
+// 每个账号首次登录时生成一套环境指纹并持久化，之后该账号的网关请求
+// 与所有浏览器操作都复用它 —— 平台看到的是「同一台设备在定期回来」。
+/** 读取账号绑定的环境指纹（未绑定时返回 null） */
+export function envOf(account) {
+    const env = account?.account_meta?.env;
+    if (!env || typeof env !== 'object' || !env.ua)
+        return null;
+    return env;
+}
+/** 默认视口（与改造前 3 处硬编码一致：无 env 的账号回退到这套，行为不变） */
+const DEFAULT_VIEWPORT = { width: 1440, height: 900 };
+/** 生成一套新环境指纹（登录成功时调用一次；不落库，由 store.bindAccountEnv 持久化） */
+export function buildAccountEnv() {
+    return {
+        ua: desktopUserAgent(),
+        viewport: { ...DEFAULT_VIEWPORT },
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai',
+        language: process.env.LANG?.split('.')[0] || 'zh-CN',
+        platform: process.platform === 'win32' ? 'Win32' : process.platform,
+        env_bound_at: new Date().toISOString(),
+    };
+}
+/**
+ * 把账号绑定的环境应用到 puppeteer page（viewport / 时区 / 语言 / UA）。
+ *
+ * 调用方拿到 page 后立即调用。UA 只在 env 与本机默认不同的时候才覆盖：
+ * 不覆盖时用本机真实 Chrome 的 UA，才能与内核自动发出的 sec-ch-ua /
+ * navigator.userAgentData 保持一致；env 里记的本来就是本机 UA，正常情况
+ * 不会走到覆盖分支，仅在换机器后（旧 env UA ≠ 本机 UA）才显式钉住旧值。
+ */
+export async function applyAccountEnv(page, env) {
+    const vp = env?.viewport?.width ? env.viewport : DEFAULT_VIEWPORT;
+    await page.setViewport({ width: vp.width, height: vp.height });
+    if (env?.timezone || env?.language) {
+        try {
+            await page.emulateTimezone(env?.timezone || undefined);
+        }
+        catch { /* 旧版 puppeteer 无此 API */ }
+        try {
+            await page.setExtraHTTPHeaders(env?.language ? { 'Accept-Language': `${env.language},zh;q=0.9` } : {});
+        }
+        catch { /* 忽略 */ }
+    }
+    if (env?.ua && env.ua !== desktopUserAgent()) {
+        try {
+            await page.setUserAgent(env.ua);
+        }
+        catch { /* 忽略 */ }
+    }
+}
+/** 出口 IP 观测节流：同一进程内每 10 分钟至多查一次公网 IP（无代理时的低成本基线） */
+let lastEgressProbeAt = 0;
+let lastEgressIp;
+const EGRESS_PROBE_INTERVAL_MS = 10 * 60 * 1000;
+/**
+ * 观测并记录账号的公网出口 IP（P1-3，比特浏览器 stopWhileIpChange 思路）。
+ *
+ * - 进程级节流（10 分钟一次）：探测 IP 要打外网服务，不能每个请求都查；
+ * - IP 变化时 console.warn 告警 —— 无代理场景下家庭宽带重拨 / 切换网络
+ *   都会造成出口 IP 漂移，这是用户唯一能感知的「环境变了」信号；
+ * - 观测失败静默跳过（公网 IP 服务不可用不能影响登录/请求主流程）。
+ */
+export async function observeEgressIp(store, shopKey) {
+    const nowMs = Date.now();
+    if (lastEgressIp && nowMs - lastEgressProbeAt < EGRESS_PROBE_INTERVAL_MS) {
+        if (shopKey) {
+            try {
+                await store.recordEgressIp(shopKey, lastEgressIp);
+            }
+            catch { /* 忽略 */ }
+        }
+        return;
+    }
+    lastEgressProbeAt = nowMs;
+    try {
+        const res = await fetch('https://api.ipify.org?format=json', {
+            signal: AbortSignal.timeout(8000),
+        });
+        if (!res.ok)
+            return;
+        const data = await res.json();
+        const ip = String(data.ip || '').trim();
+        if (!ip)
+            return;
+        if (lastEgressIp && lastEgressIp !== ip) {
+            console.warn(`[dsagent-env] 出口 IP 已变化: ${lastEgressIp} → ${ip}（无代理场景下请留意账号风控；若使用代理请确认代理稳定）`);
+        }
+        lastEgressIp = ip;
+        if (shopKey) {
+            try {
+                await store.recordEgressIp(shopKey, ip);
+            }
+            catch { /* 忽略 */ }
+        }
+    }
+    catch { /* 网络异常或超时：跳过本轮观测 */ }
+}
+/** 浏览器 Profile 根目录 —— 所有 userDataDir 都在此之下 */
+function profilesRoot() {
+    const root = join(homedir(), '.dsh', 'browser-profiles');
+    try {
+        mkdirSync(root, { recursive: true });
+    }
+    catch { /* 已存在 */ }
+    return root;
+}
+/**
+ * 账号专属 Profile 路径（只算路径，不建目录 —— 供「判存在 / 迁移」使用）。
+ *
+ * ★ 只认 shopKey、不再叠一层平台名：淘宝与天猫共用同一套登录态（同一个 shop_key），
+ *   若路径里再带平台维度，同一账号从两个入口进来就会落到两个环境，设备身份照样分裂。
+ */
+function accountProfilePath(shopKey) {
+    return join(profilesRoot(), 'accounts', shopKey);
+}
+/**
+ * 生成浏览器用户数据目录（Profile 隔离）。
+ *
+ * 传 shopKey → **账号专属**目录 `browser-profiles/accounts/{shopKey}`：
+ * 同一账号无论登录 / 发布 / 采集 / 风控验证，永远复用同一个 Chrome 环境。
+ * 环境（Cookie、缓存、localStorage、硬件指纹缓存）稳定不变，平台才会把每次访问
+ * 都当作「老设备回来了」—— 这正是指纹浏览器「账号长期保持」的真正来源。
+ *
+ * 不传 shopKey → 历史【平台级】目录 `browser-profiles/{platform}`：
+ * 仅剩「登录前还不知道是哪个账号」的场景（扫码前无法派生 account_id）。
+ */
+export function profileDir(platform, shopKey) {
+    const base = shopKey ? accountProfilePath(shopKey) : join(profilesRoot(), platform);
+    try {
+        mkdirSync(base, { recursive: true });
+    }
+    catch { /* 已存在 */ }
+    return base;
+}
+/**
+ * 把一次性登录 Profile「收编」为账号专属 Profile（登录成功后调用，返回最终目录）。
+ *
+ * 新账号扫码前派生不出 account_id，只能用一次性干净目录（freshProfileDir）；
+ * 若不收编，该目录会在下一次「添加其他账号」时被当作历史垃圾清掉，
+ * 这个账号的设备身份就永远是一次性的 —— 帐号级隔离等于白做。
+ *
+ * 迁移策略（按优先级）：
+ * 1. 目标已存在            → 保留既有环境（设备身份更老、平台更认），丢掉本次一次性环境；
+ *                            若既有环境连关键 Cookie 文件都没有（空壳，多为发布侧 profileDir()
+ *                            mkdirSync 副作用预建的），则用本次登录态覆盖之。
+ * 2. rename（原子、秒成）   → 失败时退化为 cpSync 拷贝（Windows 上 Chrome 文件锁异步释放，
+ *                            close() 返回后短暂窗口内 rename 会 EPERM；EXDEV 跨盘同理）。
+ * 3. 拷贝成功后尽力删除源目录，删不掉也不回退（多一份残留好过登录态丢失）。
+ *
+ * 迁移失败时【不再静默】：返回一次性目录的同时打 WARN 日志 ——
+ * 此时账号没有专属 Profile，后续发布/风控验证将退化为「空目录 + 仅注入 Cookie」，
+ * 大概率被平台风控挂起，必须让人看见。
+ */
+function adoptProfileDir(fromDir, shopKey) {
+    if (!fromDir || !shopKey)
+        return fromDir;
+    const target = accountProfilePath(shopKey);
+    if (fromDir === target)
+        return target;
+    const log = (level, msg) => (level === 'warn' ? console.warn : console.log)(`[dsagent-login] ${msg}`);
+    try {
+        if (existsSync(target)) {
+            // 空壳判定：目录存在但连 Default/Cookies（或 Network/Cookies）都没有 →
+            // 是 profileDir() 的 mkdirSync 副作用预建的空目录，本次登录态比它有价值，直接覆盖。
+            const hasCookieFile = ['Default/Cookies', 'Network/Cookies'].some(p => existsSync(join(target, p)));
+            if (hasCookieFile) {
+                rmSync(fromDir, { recursive: true, force: true });
+                log('log', `Profile 已有账号专属环境，本次一次性环境已丢弃: ${target}`);
+                return target;
+            }
+            log('log', `检测到账号 Profile 空壳（无 Cookie 文件），用本次登录环境覆盖: ${target}`);
+            rmSync(target, { recursive: true, force: true });
+        }
+        mkdirSync(join(profilesRoot(), 'accounts'), { recursive: true });
+        // rename 优先：原子且零拷贝。Windows 上 close() 后 Chrome 锁异步释放，短窗内会 EPERM，
+        // 用小步重试（总等待约 1s）覆盖绝大多数场景；仍失败（EXDEV 跨盘等）则退化为拷贝。
+        let lastErr = null;
+        for (let i = 0; i < 4; i++) {
+            try {
+                renameSync(fromDir, target);
+                lastErr = null;
+                break;
+            }
+            catch (err) {
+                lastErr = err;
+                const code = err?.code;
+                if (code !== 'EPERM' && code !== 'EACCES' && code !== 'EBUSY')
+                    break; // 不可重试错误，走拷贝退化
+                Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300);
+            }
+        }
+        if (lastErr) {
+            log('warn', `Profile rename 失败（${lastErr instanceof Error ? lastErr.message : String(lastErr)}），退化为拷贝`);
+            cpSync(fromDir, target, { recursive: true, force: true });
+            try {
+                rmSync(fromDir, { recursive: true, force: true });
+            }
+            catch { /* 源删不掉留着也无害 */ }
+            log('log', `Profile 已拷贝收编为账号专属: ${target}`);
+        }
+        else {
+            log('log', `Profile 已收编为账号专属: ${target}`);
+        }
+        return target;
+    }
+    catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        log('warn', `Profile 收编失败（登录态未落到账号目录，后续发布可能触发平台风控）: ${msg}`);
+        return fromDir;
+    }
+}
+/**
+ * 删除账号专属 Profile（删除账号时调用，尽力而为）。
+ *
+ * 为何要删：账号级 Profile 就是「这台设备属于这个号」，账号删了它没有服务对象；
+ * 且路径由 shopKey 决定、可确定性重建，同一个号将来重新接入会命中这里的残留 Cookie，
+ * 而用户点「删除账号」的预期是干净。
+ *
+ * ★ 只负责删目录，不碰凭证：调用方必须先删凭证成功再调本函数 ——
+ *   Profile 删不掉（如 Chrome 正在跑该账号的任务）不应该牵连账号本身删不掉。
+ */
+export function removeAccountProfile(shopKey) {
+    if (!shopKey)
+        return { cleaned: false, note: '缺少 shopKey' };
+    const target = accountProfilePath(shopKey);
+    // 本来就没有 → 目标状态（无残留）已达成，算清理成功
+    if (!existsSync(target))
+        return { cleaned: true, note: '无本地 Profile' };
+    const owner = busyProfiles.get(target);
+    if (owner)
+        return { cleaned: false, note: `该账号正在运行任务（${owner}），Profile 未清理` };
+    try {
+        rmSync(target, { recursive: true, force: true });
+        console.log(`[dsagent-login] 账号 Profile 已删除: ${target}`);
+        return { cleaned: true };
+    }
+    catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.log(`[dsagent-login] 账号 Profile 删除失败: ${msg}`);
+        return { cleaned: false, note: msg };
+    }
+}
+/**
+ * 「添加其他账号」专用的一次性干净 Profile 目录。
+ *
+ * 背景（FIX-LOG #51）：扫码前派生不出 account_id，登录窗口只能落到平台级目录，
+ * 而平台级目录里可能已经有**另一个账号**的登录态 —— 导航到登录页后第一轮轮询（2s）
+ * 就发现关键 Cookie 齐全 → 误判「登录成功」→ 立即关窗，
+ * 用户观感是「登录其他账号直接就关闭了」，根本没机会扫码。
+ *
+ * 因此「添加其他账号」必须使用全新的空 Profile，登录页才会真正弹出扫码界面。
+ * 目录名带时间戳保证每次干净；启动前清理同平台的历史一次性目录避免堆积
+ * （登录成功的一次性目录会被 adoptProfileDir 收编到账号名下，不会留在这里被清）。
+ */
+function freshProfileDir(platform) {
+    const root = profilesRoot();
+    try {
+        for (const name of readdirSync(root)) {
+            if (name.startsWith(`${platform}-new-`)) {
+                try {
+                    rmSync(join(root, name), { recursive: true, force: true });
+                }
+                catch { /* 正被占用，忽略 */ }
+            }
+        }
+    }
+    catch { /* 忽略 */ }
+    const dir = join(root, `${platform}-new-${Date.now()}`);
+    try {
+        mkdirSync(dir, { recursive: true });
+    }
+    catch { /* 已存在 */ }
+    return dir;
+}
+/**
+ * 登录等待基础时长：5 分钟。
+ *
+ * 原值 120s 对「扫码 + 手机上确认」远远不够：找手机、打开 App、二次确认都可能超过 2 分钟，
+ * 结果用户明明登录成功了却被告知「超时」（FIX-LOG #66）。
+ */
+const LOGIN_TIMEOUT_MS = 300_000;
+/**
+ * 检测到用户操作（鼠标 / 键盘 / 滚动 / 拖动滑块）时，把截止时间顺延到「此刻 + 本值」。
+ *
+ * 滑块验证期间用户会持续拖动鼠标，若仍按固定倒计时，人还没拖完就被判超时。
+ * 只要还在操作就继续等，操作停止后才真正开始倒计时（FIX-LOG #66）。
+ */
+const LOGIN_ACTIVITY_EXTEND_MS = 90_000;
+/** 登录等待硬上限：即便用户一直在操作，最多等 15 分钟，避免窗口永挂 */
+const LOGIN_MAX_TIMEOUT_MS = 900_000;
+/**
+ * 未完成的登录会话（超时后不关窗，允许用户继续）。
+ *
+ * 超时不再关窗，而是记住本次使用的 Profile 目录；用户完成扫码后再次调用
+ * dsagent_browser_login，会复用同一个 Profile（登录态已写入其中）→ 首轮轮询即命中，
+ * 不会丢失用户已经完成的登录进度（FIX-LOG #66）。
+ */
+let activeLogin = null;
+/**
+ * loginUrl 是否为「登录路径型」：pathname 含 /login 或 /signin，或主机为 passport.* / login.*。
+ * 拼多多商家后台（mms…/login）、阿里系（login.taobao.com）、知乎（…/signin）都是；
+ * 抖音（www.douyin.com/ 主页 + 页内弹窗）不是。
+ */
+function isLoginLikeUrl(loginUrl) {
+    try {
+        const a = new URL(loginUrl);
+        const loginPathRe = /\/(login|signin)(\/|$)/i;
+        const isLoginHost = (h) => /^passport\./i.test(h) || /^login\./i.test(h);
+        return loginPathRe.test(a.pathname) || isLoginHost(a.hostname);
+    }
+    catch {
+        return false;
+    }
+}
+/**
+ * 判定当前页面是否已跳离登录页（登录路径型平台的登录成功强证据，FIX：重登假阳性）。
+ *
+ * 这些平台登录成功后必然 302 离开登录页；**过期票据只会被留在登录页**
+ * （如 mms.pinduoduo.com/login/?redirectUrl=…），因此「已跳离」不可伪造。
+ * 反之，仅凭「关键 Cookie 存在」不可信：重登复用旧 Profile 时残留的过期票据
+ * （如 pdd_mms 的 PASS_ID）会让旧判据在 2s 内假阳性（实测复现）。
+ */
+function isOffLoginPage(loginUrl, currentUrl) {
+    if (!isLoginLikeUrl(loginUrl))
+        return false;
+    try {
+        const a = new URL(loginUrl);
+        const b = new URL(currentUrl);
+        if (b.protocol !== 'http:' && b.protocol !== 'https:')
+            return false;
+        if (b.origin !== a.origin)
+            return true;
+        const loginPathRe = /\/(login|signin)(\/|$)/i;
+        const isLoginHost = (h) => /^passport\./i.test(h) || /^login\./i.test(h);
+        return !loginPathRe.test(b.pathname) && !isLoginHost(b.hostname);
+    }
+    catch {
+        return false;
+    }
+}
+/**
+ * 把 Cookie 列表压成扁平 jar（name → value），**空值不覆盖已有非空值**。
+ *
+ * 同名 Cookie 可能落在多个域 / 路径上，`page.cookies()` 的返回顺序不保证。
+ * goofish 会对未登录访客下发 `unb=""`（空串），后出现的空值若直接覆盖，
+ * 登录态会被冲成空 —— 表现为「登录成功却报无法识别账号 ID」。
+ * 与 refreshXianyuCookies 里的合并规则一致（空值不得覆盖已有非空值）。
+ */
+function jarFromCookies(cookies) {
+    const jar = {};
+    for (const c of cookies) {
+        if (!c.value && jar[c.name])
+            continue;
+        jar[c.name] = c.value ?? '';
+    }
+    return jar;
+}
+/**
+ * 闲鱼的「已登录」实证（FIX 2026-11-25：扫码成功却报「无法识别账号 ID」）。
+ *
+ * Cookie 和 URL 在闲鱼上都不可靠，有头实测（2026-11-25 接口记录）：
+ *   - 登录页 URL 本身含 goofish.com，且页面加载时会凭浏览器记住的设备凭据**静默自动登录**
+ *     并跳到首页 —— 「跳离登录页」既可能在没扫码时成立，也可能在已登录时迟迟不成立；
+ *   - 登录前后 Cookie 只有 sgcookie / tfstk 轮换，`unb` 不变；而且老账号的 unb 只有 9 位
+ *     （本次实测 456148124），不能按位数判断「像不像真实 ID」。
+ * 唯一可靠的证据是服务器：页面自己会请求用户信息接口，未登录返回
+ * FAIL_SYS_SESSION_EXPIRED，已登录返回 SUCCESS 并带上 userId。
+ * 这里只认页面自身请求的响应，不需要自己签名、不经过 host 网关。
+ */
+const XIANYU_USER_APIS = /mtop\.(?:taobao\.idlemessage\.pc\.loginuser\.get|idle\.web\.user\.page\.nav)\//;
+/** 从用户信息接口的响应里取「已登录」结论与账号 ID；未登录 / 解析失败返回 null */
+function xianyuServerUser(body) {
+    const ret = Array.isArray(body?.ret) ? body.ret[0] : body?.ret;
+    if (!String(ret ?? '').startsWith('SUCCESS'))
+        return null;
+    const userId = body?.data?.userId;
+    return { userId: userId != null && /^\d+$/.test(String(userId)) ? String(userId) : undefined };
+}
+/**
+ * 抓 PDD 商家后台的店铺名（用于「账号连接」页显示）。
+ *
+ * 背景：PDD 的店铺名不在任何 Cookie 里，`resolveDisplayNick` 只会退回
+ * account_id（32 位 hex），用户在账号连接页看到一堆哈希分不清是哪家店。
+ *
+ * 三条通路（2026-10-23 实测，按优先级）：
+ *   ① DOM 提取：后台任意页面左上角/侧栏有店铺名文本（带「旗舰店/专营店/…」后缀）。
+ *      最稳，不依赖接口。
+ *   ② POST /earth/api/mallInfo/queryCredential → result.result.stapleName（经营品类，
+ *      非店铺名，仅兜底）——注意 querySimpleCredential/commonMallInfo 都是 405，
+ *      POST 不通。
+ *   ③ window.__INITIAL_STATE__ / 全局变量里的 mallName。
+ *
+ * ⚠️ 该接口域需要 Anti-Content 签名头，纯 Node fetch（只带 Cookie）会 405 ——
+ *    必须借已登录的浏览器页面调。
+ *
+ * @param page 已登录的 puppeteer page（登录成功后浏览器还没关）
+ * @returns 店铺名；失败返回 ''（不影响登录流程）
+ */
+async function fetchPddMallName(page) {
+    try {
+        /**
+         * ★★ 2026-11-19 修：这里曾经把登录页文案当成店铺名写进账号库 ★★
+         *
+         *   事故：用户重新登录后，账号列表里的店铺名从「空空商行」变成了「还没有店铺」，
+         *   而「还没有店铺」其实是登录页上「还没有店铺？ 0元开店」这行**宣传文案**。
+         *
+         *   两个原因叠加：
+         *     ① 导航判断写的是 `!/mms\.pinduoduo\.com/.test(page.url())`，
+         *        而登录页 URL 恰好是 mms.pinduoduo.com/login/?redirectUrl=... —— 匹配得上，
+         *        于是**不会**导航到商品页，直接在登录页上做 DOM 提取；
+         *     ② DOM 正则 `([^\n\s]{2,20}(?:...|店铺))` 里 "店铺" 命中了「还没有店铺」，
+         *        过滤条件只排除了「商家后台|拼多多」，拦不住它。
+         *
+         *   后果不只是显示难看：display_label 被写坏后，所有「按店铺名匹配账号」的逻辑
+         *   （pdd-shop 的 --shop-name、账号连接页、发布技能）全部对不上号。
+         *
+         *   修法（三层）：
+         *     A. 只要当前在登录页就强制导航到商品列表页，导航不动就**直接放弃**返回 ''
+         *        —— 宁可名字留空（保留原值），也绝不从登录页抓文案；
+         *     B. 正则加负向断言排除「还没有/暂无/没有」这类前缀；
+         *     C. 过滤词表补充「0元开店 / 扫码登录 / 登录 / 免费开店」等文案特征。
+         */
+        const isOnLoginPage = (u) => /\/login\b|redirectUrl=/i.test(u || '');
+        try {
+            const cur = page.url() || '';
+            // ★ 与之前的关键差异：登录页也要导航（原判断只看域，导致停在登录页）
+            if (isOnLoginPage(cur) || !/mms\.pinduoduo\.com/.test(cur)) {
+                await page.goto('https://mms.pinduoduo.com/goods/goods_list', { waitUntil: 'domcontentloaded', timeout: 20000 });
+            }
+            await new Promise(r => setTimeout(r, 3000));
+        }
+        catch {
+            // 导航失败也继续试（可能已经在 mms 域内）
+        }
+        // ★ 导航后仍停在登录页 → 说明登录态没真正建立，直接放弃，不猜名字
+        if (isOnLoginPage(page.url() || '')) {
+            console.warn('[dsagent-login] 抓店铺名时页面仍在登录页，放弃抓取（保留原 display_label）');
+            return '';
+        }
+        // ① DOM 提取（最稳）
+        const domName = await page.evaluate(() => {
+            const t = document.body?.innerText || '';
+            // 排除「还没有店铺 / 暂无店铺 / 没有店铺」这类引导文案
+            const m = t.match(/(?<![还没有暂无])([^\n\s]{2,20}(?:旗舰店|专营店|专卖店|企业店|百货店|工厂店|仓库|商行|店铺))/);
+            return m ? m[1].trim() : '';
+        }).catch(() => '');
+        if (domName && !/商家后台|拼多多|还没有|暂无|没有店铺|0元开店|扫码登录|免费开店|立即入驻/.test(domName)) {
+            return domName;
+        }
+        // ② 接口兜底（XHR 走签名器）
+        const apiName = await page.evaluate(() => new Promise((resolve) => {
+            const x = new XMLHttpRequest();
+            x.open('POST', 'https://mms.pinduoduo.com/earth/api/mallInfo/queryCredential', true);
+            x.setRequestHeader('Content-Type', 'application/json');
+            x.onload = () => {
+                try {
+                    const j = JSON.parse(x.responseText);
+                    resolve(String(j?.result?.result?.mallName || j?.result?.mallName || ''));
+                }
+                catch {
+                    resolve('');
+                }
+            };
+            x.onerror = () => resolve('');
+            x.send(JSON.stringify({}));
+        })).catch(() => '');
+        return typeof apiName === 'string' ? apiName.trim() : '';
+    }
+    catch {
+        return '';
+    }
+}
+export async function doBrowserLogin(platform, loginUrl, store, opts) {
+    const opId = opts?.operationId;
+    const rep = (phase, msg, extra) => authOp.report(opId, phase, msg, extra);
+    if (!platform || !loginUrl) {
+        rep('failed', '缺少 platform 或 loginUrl', { error: '缺少 platform 或 loginUrl' });
+        return { ok: false, error: '缺少 platform 或 loginUrl' };
+    }
+    const freshLogin = opts?.freshLogin === true;
+    const replaceShopKey = opts?.replaceShopKey || undefined;
+    // 上一次登录超时后窗口是「保持打开」的：若平台与模式都一致，复用当时的 Profile
+    // （用户可能已经在那个窗口里完成了扫码，登录态就写在这个目录里）。
+    const resuming = activeLogin?.platform === platform && activeLogin?.freshLogin === freshLogin;
+    // ★ 登录窗口同样占用该账号的 Profile 目录，必须与其他使用同目录的工具（发布 / 数据分析 /
+    //   风控验证）共享同一把锁，否则会撞上 Chrome 的 userDataDir 独占锁而启动失败。
+    let lockedDir = null;
+    try {
+        // 动态导入 puppeteer-core
+        const puppeteer = await import(/* @vite-ignore */ 'puppeteer-core');
+        const chromePath = findChromePath();
+        if (!chromePath) {
+            return { ok: false, error: '未找到 Chrome 或 Edge 浏览器，请先安装 Chrome' };
+        }
+        console.log(`[dsagent-login] 使用浏览器: ${chromePath}`);
+        // 续登：上次超时后窗口保持打开、Profile 里可能已经写入了登录态。
+        // 复用当时的目录（而不是新建），用户「重新点一次登录」即可命中，不必重新扫码（FIX-LOG #66）。
+        if (resuming && activeLogin) {
+            console.log(`[dsagent-login] 检测到上次未完成的登录会话，复用 Profile: ${activeLogin.userDataDir}`);
+        }
+        if (activeBrowser) {
+            await closeActiveBrowser();
+        }
+        // Profile 隔离：每个账号独立 userDataDir，避免同平台多号 Cookie 串扰。
+        // 重新登录（已知 replaceShopKey）→ 直接回到该账号的专属环境（设备身份延续）。
+        // 添加其他账号（freshLogin）→ 必须用全新空 Profile，否则会复用已登录态秒判成功。
+        // 其余（首次接入某平台，扫码前无法识别账号）→ 平台级目录兜底，登录成功后收编为账号目录。
+        // 注意：续登时不能调用 freshProfileDir —— 它启动前会清理同平台历史目录，会把要复用的目录删掉。
+        const userDataDir = resuming && activeLogin
+            ? activeLogin.userDataDir
+            : freshLogin
+                ? freshProfileDir(platform)
+                : profileDir(platform, replaceShopKey);
+        console.log(`[dsagent-login] 使用 Profile 目录: ${userDataDir}${freshLogin ? '（添加其他账号：全新环境）' : ''}`);
+        const busyOwner = profileOwner(userDataDir);
+        if (!tryAcquireProfile(userDataDir, '登录窗口')) {
+            return {
+                ok: false,
+                error: `平台 ${platform} 的浏览器环境正被「${busyOwner || '其他任务'}」占用，`
+                    + `请先等待该任务结束（或关闭已弹出的浏览器窗口）后再登录。`,
+            };
+        }
+        lockedDir = userDataDir;
+        const browser = await puppeteer.launch({
+            headless: false,
+            executablePath: chromePath,
+            userDataDir,
+            args: [
+                '--no-sandbox',
+                '--disable-blink-features=AutomationControlled',
+                '--window-size=1440,900',
+            ],
+        });
+        const page = await browser.newPage();
+        // ★ P1-3：按账号绑定的环境指纹设置 viewport / 时区 / 语言。
+        //   replaceShopKey 对应已有账号 → envOf 取到已绑定的 env；首次登录 → env 还没写入，用默认。
+        //   不覆盖 UA 的策略保持不变（applyAccountEnv 内部只在 env UA ≠ 本机 UA 时才钉住旧值）。
+        const loginEnv = replaceShopKey ? envOf(store.get(replaceShopKey)) : null;
+        await applyAccountEnv(page, loginEnv);
+        // 反自动化检测：隐藏 webdriver 标志
+        // 同时埋一个「用户操作计数器」：页面内的点击/按键/滚动/拖动鼠标都会累加，
+        // 供轮询判断「用户正在操作」→ 有操作就续时，不把正在扫码的用户误判成超时（FIX-LOG #66）。
+        // ★ 2026-10-24：webdriver 隐藏改用 applyStealth（HTML 注入 + 随机化 + 自删除），
+        //   不再用 Object.defineProperty 覆写 —— 那会留下自定义 getter，
+        //   PDD 官方 hl 检测用 in + hasOwnProperty 双查 + getOwnPropertyDescriptor 一行识破。
+        await applyStealth(page);
+        await page.evaluateOnNewDocument(() => {
+            const w = window;
+            w.__dsaActivity = 0;
+            const bump = () => { w.__dsaActivity = (w.__dsaActivity || 0) + 1; };
+            for (const ev of ['mousedown', 'mousemove', 'keydown', 'scroll', 'click', 'touchstart']) {
+                window.addEventListener(ev, bump, { passive: true, capture: true });
+            }
+        });
+        activeBrowser = {
+            close: async () => {
+                try {
+                    await page.close();
+                }
+                catch { /* 忽略 */ }
+                try {
+                    await browser.close();
+                }
+                catch { /* 忽略 */ }
+            },
+            browser,
+            page,
+            userDataDir,
+            platform,
+            freshLogin,
+        };
+        // 闲鱼：页面自身请求的用户信息接口是否已返回「已登录」（见 xianyuServerUser）。
+        // 监听必须挂在导航之前 —— 页面一加载就会凭记住的设备凭据静默登录并请求该接口。
+        let xianyuServerOk = false;
+        let xianyuServerUserId;
+        if (platform === 'xianyu') {
+            page.on('response', async (res) => {
+                try {
+                    if (!XIANYU_USER_APIS.test(res.url() || ''))
+                        return;
+                    const hit = xianyuServerUser(await res.json());
+                    if (!hit)
+                        return;
+                    xianyuServerOk = true;
+                    if (hit.userId)
+                        xianyuServerUserId = hit.userId;
+                    console.log(`[dsagent-login] 闲鱼服务器确认已登录（userId 位数 ${hit.userId?.length ?? '?'}）`);
+                }
+                catch { /* 页面导航中响应体取不到，忽略 */ }
+            });
+        }
+        await page.goto(loginUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        // 抖音：主页加载后需要点击"登录"按钮弹出登录窗
+        // 使用 page.mouse.click() 在坐标上点击，避免 ElementHandle detached 问题
+        // ★ 抖店（douyin_shop）**不**走这条：它的登录入口就是 fxg.jinritemai.com/login/common
+        //   自己的扫码页（二维码已直接在页面上）。实测「登录抖音主页后自动获得抖店域
+        //   Cookie」不成立 —— 抖店有独立会话校验，走抖音弹窗扫码后仍打不开后台。
+        //   故这里只对 platform === 'douyin' 生效，抖店走独立分支（见下方）。
+        if (platform === 'douyin') {
+            try {
+                await page.waitForSelector('button', { timeout: 10000 });
+                // 等待页面完全渲染
+                await new Promise(r => setTimeout(r, 1000));
+                // 在页面上查找"登录"按钮并获取其坐标
+                const buttonInfo = await page.evaluate(() => {
+                    const btns = Array.from(document.querySelectorAll('button'));
+                    for (const b of btns) {
+                        if (b.textContent?.trim() === '登录') {
+                            const rect = b.getBoundingClientRect();
+                            return { found: true, x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+                        }
+                    }
+                    // 备用：.semi-button-primary 类
+                    const altBtns = Array.from(document.querySelectorAll('.semi-button-primary'));
+                    for (const b of altBtns) {
+                        if (b.textContent?.trim() === '登录') {
+                            const rect = b.getBoundingClientRect();
+                            return { found: true, x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+                        }
+                    }
+                    return { found: false };
+                });
+                if (buttonInfo.found) {
+                    console.log(`[dsagent-login] 抖音登录按钮找到，坐标 (${buttonInfo.x}, ${buttonInfo.y})，点击`);
+                    await page.mouse.click(buttonInfo.x, buttonInfo.y);
+                    // 等待登录弹窗出现
+                    await page.waitForSelector('.douyin_login_new_class', { timeout: 10000 }).catch(() => { });
+                    await new Promise(r => setTimeout(r, 1000));
+                }
+                else {
+                    console.log(`[dsagent-login] 抖音登录按钮未找到`);
+                }
+            }
+            catch { /* 忽略 */ }
+        }
+        const kc = keyCookies(platform);
+        const credPlatform = credentialPlatform(platform);
+        const pollIntervalMs = 2000;
+        const startTime = Date.now();
+        // ★ 登录前基线快照（FIX：重登假阳性）：goto 登录页后立即记录关键 Cookie 的
+        //   当前值。重登场景复用旧 Profile，里面残留的**过期**票据（如 pdd_mms 的
+        //   PASS_ID）会让「任一关键 Cookie 存在即成功」的旧判据在 2s 内误判成功，
+        //   把过期 Cookie 原样搬进凭证库（实测复现：poll 2s | found=[PASS_ID]，
+        //   用户还没来得及扫码）。改为只认「值发生变化」——重新扫码必然轮换票据。
+        const baselineJar = {};
+        try {
+            const baseCookies = await getAllDomainCookies(page, platform);
+            for (const c of baseCookies)
+                baselineJar[c.name] = c.value;
+        }
+        catch { /* 导航中读取失败则基线为空，退化为旧行为 */ }
+        if (kc.some(name => baselineJar[name])) {
+            console.log(`[dsagent-login] 检测到 Profile 内残留旧票据（${kc.filter(name => baselineJar[name]).join(',')}），登录成功判据已收紧（登录路径型平台只认跳离登录页，弹窗型平台只认票据值轮换）`);
+        }
+        // 截止时间而非固定总时长：用户每有操作就把 deadline 顺延到「此刻 + LOGIN_ACTIVITY_EXTEND_MS」，
+        // 滑块验证期间持续拖动鼠标就不会被判超时；同时用硬上限防止窗口永挂（FIX-LOG #66）。
+        let deadline = startTime + LOGIN_TIMEOUT_MS;
+        const hardDeadline = startTime + LOGIN_MAX_TIMEOUT_MS;
+        let lastActivity = 0;
+        // 小红书的关键 Cookie（web_session）对匿名访客也会下发，无区分度，
+        // 必须改用浏览器内 SSR 实证判据（见 verifyXhsLoggedIn 注释）。
+        const useSsrCheck = credPlatform === 'xhs';
+        let loginSuccess = false;
+        // ★ 2026-11-03：带 domain 字段（推广域票据只能按域过滤判定）
+        let cookies = [];
+        // 归因证据：区分「用户压根没登录」/「卡在滑块验证」/「登录了但没权限」
+        let sawSlider = false;
+        let lastUrl = '';
+        // 闲鱼：服务器已确认登录 + goofish 域拿到 unb，连续稳定的轮询数
+        let xianyuStable = 0;
+        // 进入等待用户阶段（上报给 operation，模型据此把控制权交还用户）
+        rep('waiting_user', '已打开登录页，等待用户完成扫码 / 滑块验证');
+        /** 滑块上报只做一次，避免每 2s 刷一条相同的阶段消息 */
+        let sliderReported = false;
+        while (Date.now() < deadline) {
+            // ★ 取消感知：模型/用户 cancel 后尽快退出循环，不要空等到超时。
+            //   退出前不关窗（与超时一致），让 cancelOperation 的 onCancel 决定怎么处理窗口。
+            if (authOp.isCancelled(opId)) {
+                rep('cancelled', '已取消登录等待');
+                return { ok: false, error: '登录已被取消' };
+            }
+            await new Promise(r => setTimeout(r, pollIntervalMs));
+            try {
+                // 阿里系 SSO 关键修复：page.cookies() 必须指定域名，否则拿不到跨域 Cookie
+                cookies = await getAllDomainCookies(page, platform);
+                const jar = jarFromCookies(cookies);
+                lastUrl = page.url() || lastUrl;
+                // ★ 闲鱼走服务器实证（见 xianyuServerUser），且要 goofish 域拿到 unb、连续 2 轮稳定。
+                //   必须用业务平台判断：闲鱼的凭证平台是 taobao，credPlatform === 'xianyu' 永远不成立。
+                if (platform === 'xianyu') {
+                    xianyuStable = xianyuServerOk && jar['unb'] ? xianyuStable + 1 : 0;
+                }
+                // 有操作就续时：页面内的操作计数器（见 evaluateOnNewDocument）递增即视为用户在操作
+                try {
+                    const activity = await page.evaluate(() => (window.__dsaActivity || 0));
+                    if (activity > lastActivity) {
+                        lastActivity = activity;
+                        const next = Math.min(Date.now() + LOGIN_ACTIVITY_EXTEND_MS, hardDeadline);
+                        if (next > deadline)
+                            deadline = next;
+                    }
+                }
+                catch { /* 页面导航中读取失败，忽略 */ }
+                // 归因证据采集：滑块验证 / 风控页特征（用于失败时给出准确指引）
+                if (!sawSlider) {
+                    try {
+                        const bodyText = await page.evaluate(() => document.body?.innerText?.slice(0, 500) || '');
+                        const html = await page.evaluate(() => document.documentElement?.outerHTML?.slice(0, 3000) || '');
+                        const probe = `${bodyText} ${html}`;
+                        if (/nc_1_n1z|nc_iconfont|nc-container|nocaptcha|请按住滑块|拖动滑块|slide-to-unlock/i.test(probe)) {
+                            sawSlider = true;
+                            console.log(`[dsagent-login] 检测到滑块验证元素，判定为「等待人工验证」`);
+                            // 把「卡在验证」这件事显式上报，模型才能给出「请拖动滑块」而不是「请扫码」
+                            if (!sliderReported) {
+                                sliderReported = true;
+                                rep('waiting_user', '检测到平台安全验证（滑块），请在浏览器窗口中手动拖动滑块完成验证', {
+                                    detail: { sawSlider: true },
+                                });
+                            }
+                        }
+                    }
+                    catch { /* 忽略 */ }
+                }
+                if (useSsrCheck) {
+                    // 小红书：Cookie 齐 ≠ 已登录，用 SSR 实证（loggedIn 且非 guest）
+                    const loggedIn = await verifyXhsLoggedIn(page);
+                    console.log(`[dsagent-login] poll ${Math.round((Date.now() - startTime) / 1000)}s | total=${cookies.length} | SSR loggedIn=${loggedIn} | url=${page.url()?.slice(0, 80)}`);
+                    if (loggedIn) {
+                        console.log(`[dsagent-login] 小红书 SSR 实证已登录，确认成功`);
+                        loginSuccess = true;
+                        break;
+                    }
+                    continue;
+                }
+                // 调试：打印关键 Cookie 状态
+                const missing = kc.filter(name => !jar[name]);
+                const found = kc.filter(name => !!jar[name]);
+                console.log(`[dsagent-login] poll ${Math.round((Date.now() - startTime) / 1000)}s | total=${cookies.length} | found=[${found.join(',')}] | missing=[${missing.join(',')}] | url=${page.url()?.slice(0, 80)}`);
+                if (kc.length > 0) {
+                    // ★ 判据收紧（FIX：重登假阳性）——按 loginUrl 类型分支：
+                    //   ① 登录路径型（loginUrl 的 pathname 含 /login、/signin，或主机为
+                    //      passport.* / login.*：pdd_mms、阿里系、知乎）：只认「已跳离登录页」。
+                    //      登录成功必然 302 离开；过期票据只会被留在登录页跳不走，
+                    //      「已跳离」不可伪造。值轮换但仍在登录页（平台刷新过期票据的极端
+                    //      场景）不算成功。也天然覆盖 resuming（已登录态页面早已跳走）。
+                    //   ② 弹窗型（如抖音：主页 + 页内登录弹窗，URL 前后不变）：
+                    //      - resuming：Profile 是上次登录窗口的延续，票据可能是用户刚扫的
+                    //        （基线快照已含新值，轮换检测失效），保留旧判据「任一关键
+                    //        Cookie 存在」以维持 FIX-LOG #66 的续登行为；
+                    //      - 首登/重登：只认值轮换（重新扫码必然轮换票据）。
+                    //   旧的「任一关键 Cookie 存在即成功」对全新 Profile 是对的，但对复用
+                    //   旧 Profile 的重登会把过期残留票据误判成新登录（2s 假阳性，实测复现：
+                    //   poll 2s | found=[PASS_ID]，用户还没来得及扫码）。
+                    const loginPathPlatform = isLoginLikeUrl(loginUrl);
+                    const anyRotated = kc.some(name => jar[name] && jar[name] !== baselineJar[name]);
+                    const leftLogin = isOffLoginPage(loginUrl, page.url() || '');
+                    // ★ 闲鱼走服务器实证（见 xianyuServerUser）。
+                    const success = platform === 'xianyu'
+                        ? xianyuStable >= 2
+                        : loginPathPlatform
+                            ? leftLogin
+                            : resuming
+                                ? kc.some(name => jar[name])
+                                : anyRotated;
+                    if (success) {
+                        if (leftLogin && !anyRotated) {
+                            // 跳离登录页但票据未轮换：多为 resuming 已登录态，多等 2s 让 Cookie 稳定
+                            console.log(`[dsagent-login] URL 已跳离登录页（${page.url()?.slice(0, 80)}），等待 Cookie 稳定…`);
+                            await new Promise(r => setTimeout(r, 2000));
+                            cookies = await getAllDomainCookies(page, platform);
+                        }
+                        // ★ 2026-10-24：PDD 商家后台扫码成功后，主动打通推广域（yingxiao）登录态。
+                        //   yingxiao.pinduoduo.com 是**独立登录域**，扫码只写 mms 域的 Cookie，
+                        //   不导航过去的话 pdd-promo 打开商品推广仍要求单独登录。
+                        //   做法：用已登录的 mms 会话访问推广域首页，SSO 会自动换取票据。
+                        //
+                        //   ★ 2026-11-03 加固（实测回归）：
+                        //     原实现只「导航 + 等 5s + 看 URL」就认定打通，失败仅 console.log 放过。
+                        //     后果是静默失败——扫码明明成功、账号连接页显示 valid，但凭证库里
+                        //     没有任何 yingxiao 域票据，pdd-promo 打开推广域被重定向到 /login/sso，
+                        //     报 token_expired，从外部完全看不出卡在哪。
+                        //     现在改三点：
+                        //       ① 重试 3 次、单次等待 8s+6s（SSO 换票是异步链，慢的时候要 10s 以上）
+                        //       ② 用**真的拿到 yingxiao 域 Cookie** 判定成功，不只看 URL 离没离开登录页
+                        //          （CDP page.cookies() 返回的 Cookie 带 domain 字段，可按域过滤）
+                        //       ③ 打通失败不阻断 mms 登录，但明确告警，让人知道要去单独登推广域
+                        if (platform === 'pdd_mms') {
+                            const yxOf = (list) => list.filter(c => /yingxiao/i.test(c?.domain || ''));
+                            let yxOk = false;
+                            let yxUrl = '';
+                            for (let attempt = 1; attempt <= 3 && !yxOk; attempt++) {
+                                try {
+                                    console.log(`[dsagent-login] 打通推广域（yingxiao）登录态…（第 ${attempt}/3 次）`);
+                                    await page.goto('https://yingxiao.pinduoduo.com/mains/promotionOverview', { waitUntil: 'domcontentloaded', timeout: 30000 });
+                                    await new Promise(r => setTimeout(r, 8000));
+                                    yxUrl = page.url() || '';
+                                    // SSO 还在跳转链中 → 再等一轮，必要时重导航
+                                    if (/\/login|\/sso/i.test(yxUrl)) {
+                                        await new Promise(r => setTimeout(r, 6000));
+                                        yxUrl = page.url() || '';
+                                        if (/\/login|\/sso/i.test(yxUrl) && attempt < 3) {
+                                            await page.goto('https://yingxiao.pinduoduo.com/mains/promotionOverview', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => { });
+                                            await new Promise(r => setTimeout(r, 6000));
+                                            yxUrl = page.url() || '';
+                                        }
+                                    }
+                                    const list = await getAllDomainCookies(page, platform);
+                                    const got = yxOf(list).length;
+                                    console.log(`[dsagent-login] 推广域 Cookie：${got} 个｜URL：${yxUrl.slice(0, 70)}`);
+                                    // 双重判据：URL 不在登录态 且 确实拿到 yingxiao 域票据
+                                    if (got > 0 && !/\/login|\/sso/i.test(yxUrl)) {
+                                        yxOk = true;
+                                        cookies = list; // 把推广域票据一并带出去入库
+                                    }
+                                }
+                                catch (e) {
+                                    console.log(`[dsagent-login] 推广域打通第 ${attempt} 次异常：${e.message?.slice(0, 80)}`);
+                                }
+                            }
+                            if (yxOk) {
+                                console.log(`[dsagent-login] ✅ 推广域已打通（${yxOf(cookies).length} 个票据随凭证入库）`);
+                            }
+                            else {
+                                console.warn(`[dsagent-login] ⚠️ 推广域未打通（URL: ${yxUrl.slice(0, 70)}）。`);
+                                console.warn(`[dsagent-login]    mms 登录不受影响；但 pdd-promo 等推广域技能需单独登录推广后台。`);
+                            }
+                        }
+                        loginSuccess = true;
+                        break;
+                    }
+                }
+                else {
+                    if (cookies.length > 10) {
+                        loginSuccess = true;
+                        break;
+                    }
+                }
+                // 额外检测：淘宝/闲鱼登录后会跳转到 my.taobao.com 或 goofish.com
+                // 如果页面 URL 已跳转到非 login 页面，再多等 2s 让 Cookie 写完
+                // ★ 闲鱼不走这段（已由服务器实证判定）：下面的条件对 goofish 登录页恒成立
+                //   （URL 含 goofish.com、访客也有 unb），会在用户扫码前就判成功并关窗。
+                // ★ 注意按业务平台判断（闲鱼的 credPlatform 是 taobao）。
+                const currentUrl = page.url();
+                if (platform !== 'xianyu' && kc.includes('unb') && !currentUrl.includes('login.taobao.com') && (currentUrl.includes('taobao.com') || currentUrl.includes('goofish.com'))) {
+                    console.log(`[dsagent-login] URL 已跳转到 ${currentUrl}，等待 Cookie 写入…`);
+                    await new Promise(r => setTimeout(r, 2000));
+                    cookies = await getAllDomainCookies(page, platform);
+                    const jar2 = {};
+                    for (const c of cookies)
+                        jar2[c.name] = c.value;
+                    if (jar2['unb']) {
+                        console.log(`[dsagent-login] unb Cookie 在跳转后找到！`);
+                        loginSuccess = true;
+                        break;
+                    }
+                }
+                // 知乎登录成功后会跳转到首页 www.zhihu.com 且 URL 不再包含 /signin
+                if (kc.includes('z_c0') && !currentUrl.includes('/signin') && currentUrl.includes('zhihu.com')) {
+                    console.log(`[dsagent-login] 知乎 URL 已跳转到 ${currentUrl}，等待 Cookie 写入…`);
+                    await new Promise(r => setTimeout(r, 2000));
+                    cookies = await page.cookies();
+                    const jar4 = {};
+                    for (const c of cookies)
+                        jar4[c.name] = c.value;
+                    if (jar4['z_c0']) {
+                        console.log(`[dsagent-login] z_c0 Cookie 在跳转后找到！`);
+                        loginSuccess = true;
+                        break;
+                    }
+                }
+                // 抖音：登录成功后 sessionid Cookie 会自动写入，无需检测 URL 跳转
+                // （因为登录 URL 本身就是 https://www.douyin.com/，登录弹窗关闭后 URL 不变）
+            }
+            catch {
+                // 页面导航中可能导致 cookies 获取失败，忽略
+            }
+        }
+        if (!loginSuccess) {
+            // ★ 超时不再关窗：用户可能正在扫码 / 拖滑块，窗口留着还能继续。
+            //   记录本次 Profile 目录，用户重新点一次登录即走 resuming 分支复用（FIX-LOG #66）。
+            activeLogin = { platform, freshLogin, userDataDir };
+            const waitedSec = Math.round((Date.now() - startTime) / 1000);
+            const suffix = '浏览器窗口**保持打开**，你可以继续在窗口内完成扫码/验证，'
+                + '完成后再点一次「重新登录」即可（无需重新扫码，登录态已写入该浏览器环境）。';
+            // ★ 上报 timed_out 而非 failed：这个阶段**可续推**（窗口还开着、进度没丢），
+            //   对应 Accio 的「可 advance 继续」语义。用 failed 会让模型以为必须从头再来。
+            rep('timed_out', `等待 ${waitedSec}s 未检测到登录凭证，浏览器窗口保持打开，可继续完成或续推`, {
+                detail: { waitedSec, sawSlider, lastUrl },
+                error: sawSlider ? '等待超时：疑似卡在滑块验证' : '等待超时：未检测到登录凭证',
+            });
+            if (sawSlider) {
+                return {
+                    ok: false,
+                    error: `登录未完成（等待 ${waitedSec}s）：检测到平台弹出**滑块/安全验证**，需要你在浏览器窗口内手动拖动滑块完成验证。${suffix}`,
+                };
+            }
+            return {
+                ok: false,
+                error: `登录未完成（等待 ${waitedSec}s）：未检测到 ${platform} 的登录凭证（关键 Cookie ${kc.join('/') || '数量阈值'} 未出现）。`
+                    + `请确认已在弹出的浏览器窗口内完成扫码并确认登录。${suffix}`,
+            };
+        }
+        // 已抓到凭证，进入校验与落库（用户视角：已经扫完码了）
+        rep('capturing', '已获取登录凭证，正在校验并保存');
+        // 登录成功：清理未完成会话标记（窗口即将关闭，无需保留续登上下文）
+        activeLogin = null;
+        const jar = jarFromCookies(cookies);
+        // 闲鱼：Cookie 里的 unb 应与服务器报告的账号一致；不一致只留痕，不阻断（以 Cookie 入库）
+        if (platform === 'xianyu' && xianyuServerUserId && xianyuServerUserId !== (jar['unb'] ?? '').trim()) {
+            console.log(`[dsagent-login] ⚠️ 闲鱼服务器报告的账号与 Cookie 里的 unb 不一致，以 Cookie 为准`);
+        }
+        // ★ 2026-11-03：按域留档，供「推广域票据到底进没进库」这类排查使用。
+        //   注意 jar 仍是扁平 name→value（credential-store 的入参契约，不能改），
+        //   域信息只作为旁证挂在 account_meta 上，不参与请求。
+        const yxDomains = [...new Set(cookies.filter(c => /yingxiao/i.test(c?.domain || '')).map(c => c.domain))];
+        try {
+            console.log(`[dsagent-login] 登录成功，准备保存凭证...${replaceShopKey ? `（替换旧账号 ${replaceShopKey}，绑定关系继承）` : ''}`);
+            const saved = await store.save(platform, jar, { replaceShopKey });
+            console.log(`[dsagent-login] 凭证已保存: shopKey=${saved.shop_key}, accountId=${saved.account_id}`);
+            // ★ PDD 商家后台：登录成功后抓店铺名，写回 display_label。
+            //   PDD 的店铺名不在任何 Cookie 里（resolveDisplayNick 只会退回 account_id
+            //   一串 hex），且 /earth/api/mallInfo/querySimpleCredential 需要 Anti-Content
+            //   签名头，纯 Node fetch 会 405 —— 必须借刚登录完还没关的浏览器页面调。
+            //   不抓的话「账号连接」页只能显示 de55c3e1590… 这种哈希，用户分不清是哪家店。
+            if (platform === 'pdd_mms' && activeBrowser?.page) {
+                try {
+                    const mallName = await fetchPddMallName(activeBrowser.page);
+                    /**
+                     * ★ 2026-11-19：写入前加一道**内容闸门**。
+                     *   历史事故：登录页文案「还没有店铺」被当成店铺名写进 display_label，
+                     *   把原本正确的「空空商行」覆盖掉了，导致后续按店铺名匹配全断。
+                     *   原则：**宁可不写，也不能写错** —— 抓到的名字不像店铺名就丢弃，保留原值。
+                     */
+                    const looksLikeStoreName = !!mallName
+                        && mallName.length >= 2
+                        && mallName.length <= 30
+                        && !/还没有|暂无|没有店铺|0元开店|扫码登录|登录|注册|免费开店|立即入驻|商家后台|拼多多|帮助中心|客服/.test(mallName);
+                    if (looksLikeStoreName) {
+                        await store.save(platform, jar, {
+                            replaceShopKey,
+                            displayLabel: mallName,
+                            accountMeta: { ...(saved.account_meta || {}), mall_name: mallName, display_nick: mallName },
+                        });
+                        console.log(`[dsagent-login] PDD 店铺名已写入 display_label: ${mallName}`);
+                        saved.display_label = mallName;
+                    }
+                    else {
+                        console.warn(`[dsagent-login] PDD 店铺名抓取无效（${mallName || '空'}），display_label 保持原值 ${saved.display_label}`);
+                    }
+                }
+                catch (e) {
+                    console.warn(`[dsagent-login] 抓 PDD 店铺名失败（不影响登录）: ${e.message}`);
+                }
+            }
+            // ★ 2026-11-03：推广域票据落库确认。
+            //   jar 是扁平字典，域名信息在 save 时被丢掉，所以只能在这里、拿着带 domain 的
+            //   cookies 列表做一次显式核对并打日志——出问题时「凭证库里到底有没有推广域票」
+            //   这件事必须有迹可查，不能再靠猜。
+            if (platform === 'pdd_mms') {
+                if (yxDomains.length) {
+                    console.log(`[dsagent-login] ✅ 推广域票据已入库（域: ${yxDomains.join(', ')}）`);
+                }
+                else {
+                    console.warn(`[dsagent-login] ⚠️ 本次凭证未包含 yingxiao 域票据，推广域技能可能仍需单独登录`);
+                }
+            }
+            // ★ P1-3：首次登录时绑定环境指纹（UA / viewport / 时区 / 语言）。
+            //   已有 env 的账号不覆盖（env 是账号身份的一部分）。
+            //   绑定后该账号的网关请求 UA 与所有浏览器操作 viewport 都复用这套环境，
+            //   避免环境漂移触发异地/换设备风控。
+            await store.bindAccountEnv(saved.shop_key, buildAccountEnv());
+            // 记录当前出口 IP 作为基线（后续变化时告警）
+            await observeEgressIp(store, saved.shop_key);
+            // ★ 重新登录后凭证已变 → 立即失效该账号的网关缓存。
+            //   凭证指纹虽已参与缓存键（键会自然改变），但显式清理能同时回收
+            //   「同一账号在旧身份下留下的条目」占用的内存，避免长期运行堆积。
+            const clearedForAccount = invalidateGatewayCache({ shopKey: saved.shop_key });
+            if (clearedForAccount > 0) {
+                console.log(`[dsagent-login] 已失效该账号的 ${clearedForAccount} 条网关缓存`);
+            }
+            if (activeBrowser) {
+                console.log(`[dsagent-login] 正在关闭浏览器...`);
+                await closeActiveBrowser();
+                console.log(`[dsagent-login] 浏览器已关闭`);
+            }
+            // ★ 收编：把本次登录用的环境落到该账号名下的固定目录（一次性目录 → 账号专属目录）。
+            //   这样这个账号此后每次登录 / 发布 / 风控验证都回到同一个环境，设备身份得以延续；
+            //   锁也要跟着换到新目录，否则 finally 释放的是已经不存在的旧路径。
+            const adoptedDir = adoptProfileDir(userDataDir, saved.shop_key);
+            if (adoptedDir !== userDataDir && lockedDir) {
+                releaseProfile(lockedDir);
+                lockedDir = adoptedDir;
+                tryAcquireProfile(lockedDir, '登录窗口');
+            }
+            // 登录后立即预检平台权限（生意参谋系）：当场告知「是哪个店 / 有没有权限」，
+            // 而不是等用户跑技能时才报 code=-1（FIX-LOG #66）。
+            const permissionNote = await probePlatformPermission(store, platform, saved.shop_key);
+            // ★ 淘宝登录成功后立即派生/刷新闲鱼登录态（FIX-LOG #70）：
+            //   阿里 SSO 用户免二次扫码。闲鱼独立登录成功后同样要补一次 goofish 域刷新
+            //   （FIX-LOG #74）—— 扫码页下发的 _m_h5_tk 常是空壳，不刷新会在技能里撞
+            //   FAIL_SYS_TOKEN_EMPTY。
+            //   代价是登录流程多等约 10~20s（拉起一次 headless 浏览器取 goofish 域 Cookie）。
+            const xianyuNote = platform === 'taobao'
+                ? await syncXianyuAfterTaobaoLogin(store)
+                : platform === 'xianyu'
+                    ? await refreshXianyuAfterOwnLogin(store, saved.shop_key)
+                    : '';
+            rep('succeeded', `登录成功，账号 ${saved.display_label} 已保存`, {
+                result: { shopKey: saved.shop_key, accountId: saved.account_id },
+                detail: { permissionNote, xianyuNote },
+            });
+            return {
+                ok: true,
+                text: `登录成功！账号 ${saved.display_label}（${saved.shop_key}）已保存到本地凭证库。${permissionNote}${xianyuNote}`,
+                shopKey: saved.shop_key,
+                accountId: saved.account_id,
+            };
+        }
+        catch (err) {
+            console.log(`[dsagent-login] 保存失败: ${err instanceof Error ? err.message : String(err)}`);
+            // ★ 保存失败不关窗（FIX 2026-11-25）：与超时路径同一策略。凭证没能落库时，
+            //   用户已经扫的码只存在于这个窗口里，关掉就得从头再来；留着窗口并登记为
+            //   未完成会话，下次点「登录」走 resuming 分支复用它。
+            activeLogin = { platform, freshLogin, userDataDir };
+            const reason = (err instanceof Error ? err.message : String(err)).replace(/。+$/, '');
+            // 取到了哪些域的票据 —— 「扫码成功却缺 unb」这类问题必须一眼看出是没取对域
+            const domainCount = {};
+            for (const c of cookies)
+                domainCount[c.domain || '?'] = (domainCount[c.domain || '?'] || 0) + 1;
+            const diag = `（本次取到 ${cookies.length} 个 Cookie：${Object.entries(domainCount).map(([d, n]) => `${d}×${n}`).join('、') || '无'}）`;
+            const msg = `登录凭证未能保存：${reason}${diag}。浏览器窗口保持打开，请确认已在窗口内完成扫码，然后再点一次「登录」。`;
+            rep('failed', msg, { error: msg });
+            return { ok: false, error: msg };
+        }
+    }
+    catch (err) {
+        if (activeBrowser) {
+            try {
+                await closeActiveBrowser();
+            }
+            catch { }
+        }
+        const msg = `浏览器启动失败：${err instanceof Error ? err.message : String(err)}`;
+        rep('failed', msg, { error: msg });
+        return { ok: false, error: msg };
+    }
+    finally {
+        // 登录窗口在成功 / 超时 / 保存失败 / 启动异常各路径都会关闭浏览器，故统一在此释放锁。
+        if (lockedDir)
+            releaseProfile(lockedDir);
+    }
+}
+export async function closeBrowser() {
+    if (activeBrowser) {
+        await closeActiveBrowser();
+        activeLogin = null;
+        return { ok: true, text: '浏览器已关闭' };
+    }
+    return { ok: true, text: '没有活跃的浏览器实例' };
+}
+/**
+ * 刷新闲鱼域名 Cookie。
+ *
+ * SSO 复用的淘宝 Cookie 不被闲鱼 mtop 网关识别为合法站点登录
+ * （FAIL_BIZ_LOGIN_SITE_ILLEGAL）。需要通过浏览器访问 goofish.com，
+ * 利用已有的淘宝 SSO Cookie 完成 SSO 重定向，获取 goofish.com 域名的
+ * 完整 Cookie 集（包括 _m_h5_tk、isg、cna 等）。
+ *
+ * 流程：
+ *   1. 用 puppeteer 打开 Chrome（headless）
+ *   2. 先设置 taobao.com 域的 Cookie（从凭证库读取）
+ *   3. 访问 https://www.goofish.com/，触发 SSO 自动登录
+ *   4. 等待页面加载完成，提取 goofish.com 域的所有 Cookie
+ *   5. 合并到凭证库中对应闲鱼账号的 Cookie 里
+ */
+/**
+ * P1-2 刷新单飞 + 冷却（Accio AccountRefresher 模式）：
+ *   - inflight Map：同一账号的并发刷新共享同一个 Promise —— 登录流程与 2h 巡检
+ *     同时发现闲鱼 Cookie 缺失时，只拉起一次浏览器，其余调用等结果，防止 Profile 互踩；
+ *   - cooldownUntil Map：浏览器阶段失败（启动失败/未装 Chrome）后 60s 内直接短路，
+ *     防止失败风暴反复拉起 headless Chrome。
+ *   守卫类拒绝（身份不一致、缺 unb）是确定性错误，不进入冷却（标记 retryable 的才冷却）。
+ */
+const xianyuRefreshInflight = new Map();
+const xianyuRefreshCooldownUntil = new Map();
+const XIANYU_REFRESH_COOLDOWN_MS = 60_000;
+export async function refreshXianyuCookies(store, shopKey, sourceCookies) {
+    // 前置守卫去重（P1-2）：账号缺失是确定性错误，直接短路，不占单飞槽位
+    if (!store.get(shopKey))
+        return { ok: false, error: `账号 ${shopKey} 不存在` };
+    const cooldown = xianyuRefreshCooldownUntil.get(shopKey) ?? 0;
+    if (Date.now() < cooldown) {
+        const remain = Math.ceil((cooldown - Date.now()) / 1000);
+        return { ok: false, error: `上次刷新失败，冷却中（约 ${remain}s），稍后自动重试` };
+    }
+    const existing = xianyuRefreshInflight.get(shopKey);
+    if (existing)
+        return existing;
+    const task = doRefreshXianyuCookies(store, shopKey, sourceCookies)
+        .then(r => {
+        if (!r.ok && r.retryable)
+            xianyuRefreshCooldownUntil.set(shopKey, Date.now() + XIANYU_REFRESH_COOLDOWN_MS);
+        else if (r.ok)
+            xianyuRefreshCooldownUntil.delete(shopKey);
+        return r;
+    })
+        .finally(() => { xianyuRefreshInflight.delete(shopKey); });
+    xianyuRefreshInflight.set(shopKey, task);
+    return task;
+}
+async function doRefreshXianyuCookies(store, shopKey, sourceCookies) {
+    const account = store.get(shopKey);
+    if (!account) {
+        return { ok: false, error: `账号 ${shopKey} 不存在` };
+    }
+    // SSO 依赖 taobao.com 域的 unb。闲鱼账号自身可能被 goofish 下发的空值污染（unb=""），
+    // 所以允许调用方显式传入淘宝账号的 Cookie 作为 SSO 来源。
+    const accountCookies = account.cookies || {};
+    const taobaoCookies = sourceCookies?.['unb'] ? sourceCookies : accountCookies;
+    if (!taobaoCookies['unb']) {
+        return { ok: false, error: 'Cookie 中缺少 unb，无法执行 SSO 重定向' };
+    }
+    // ★ 身份保护：SSO 来源必须与目标账号同号。
+    // 两者 unb 不同说明调用方传进来的是另一个淘宝账号的 Cookie，
+    // 合并会把目标账号的登录态整体覆盖成别人的，而 setCookies() 不重算 shop_key，
+    // 漂移因此完全静默（shop_key 与实际身份永久不一致，后续请求都在用别人的账号）。
+    const ownUnb = String(accountCookies['unb'] ?? '');
+    const sourceUnb = String(taobaoCookies['unb'] ?? '');
+    if (ownUnb && ownUnb !== sourceUnb) {
+        return {
+            ok: false,
+            error: `SSO 来源身份（unb=${sourceUnb}）与目标账号身份（unb=${ownUnb}）不一致，已拒绝合并以免覆盖登录态`,
+        };
+    }
+    try {
+        const puppeteer = await import(/* @vite-ignore */ 'puppeteer-core');
+        const chromePath = findChromePath();
+        if (!chromePath) {
+            // 未装浏览器是环境级确定性错误：进冷却意义不大，但 60s 冷却可挡住登录流程
+            // 与巡检在同一分钟内的重复尝试（用户装好浏览器前每次都会失败）。
+            return { ok: false, error: '未找到 Chrome 或 Edge 浏览器', retryable: true };
+        }
+        console.log(`[dsagent-xianyu-refresh] 使用浏览器: ${chromePath}`);
+        const browser = await puppeteer.launch({
+            headless: 'new',
+            executablePath: chromePath,
+            userDataDir: profileDir('xianyu-refresh'),
+            args: [
+                '--no-sandbox',
+                '--disable-blink-features=AutomationControlled',
+                '--disable-gpu',
+            ],
+        });
+        // 先关闭旧的浏览器实例
+        if (activeBrowser) {
+            try {
+                await activeBrowser.close();
+            }
+            catch { }
+            activeBrowser = null;
+        }
+        // 必须登记为完整句柄（含 close），否则 closeActiveBrowser() 调 current.close() 会抛错。
+        // 注意：本函数不占用 Profile 锁，故不填 userDataDir（避免 closeActiveBrowser 误释放他人的锁）。
+        activeBrowser = {
+            close: async () => {
+                try {
+                    await browser.close();
+                }
+                catch { /* 忽略 */ }
+            },
+            browser,
+            platform: 'xianyu',
+        };
+        try {
+            const page = await browser.newPage();
+            // P1-3：闲鱼刷新也按淘宝账号绑定的 env 设置 viewport（无 env 时回退默认 1440x900）
+            const refreshEnv = envOf(store.get(shopKey));
+            await applyAccountEnv(page, refreshEnv);
+            // 反自动化检测
+            await applyStealth(page);
+            // 先访问 taobao.com 设置 Cookie 域
+            await page.goto('https://www.taobao.com/', { waitUntil: 'domcontentloaded', timeout: 15000 });
+            // 把淘宝 SSO Cookie 设置到 .taobao.com 域
+            const cookieList = Object.entries(taobaoCookies).map(([name, value]) => ({
+                name,
+                value: String(value),
+                domain: '.taobao.com',
+                path: '/',
+            }));
+            if (cookieList.length > 0) {
+                await page.setCookie(...cookieList);
+            }
+            console.log(`[dsagent-xianyu-refresh] 已设置 ${cookieList.length} 个 taobao.com Cookie`);
+            // 访问 goofish.com，触发 SSO 自动登录重定向
+            console.log(`[dsagent-xianyu-refresh] 访问 goofish.com，等待 SSO 重定向...`);
+            await page.goto('https://www.goofish.com/', { waitUntil: 'networkidle0', timeout: 30000 });
+            // 等待页面稳定
+            await new Promise(r => setTimeout(r, 3000));
+            // 提取 goofish.com + taobao.com 域的所有 Cookie（指定域名，避免漏取跨域 Cookie）
+            const allCookies = await page.cookies('https://.goofish.com', 'https://.taobao.com');
+            const goofishJar = {};
+            for (const c of allCookies) {
+                if (c.domain && (c.domain.includes('goofish.com') || c.domain.includes('taobao.com'))) {
+                    goofishJar[c.name] = c.value;
+                }
+            }
+            console.log(`[dsagent-xianyu-refresh] 提取到 ${Object.keys(goofishJar).length} 个 Cookie`);
+            // ★ P1-2：SSO 静默失败判定 —— goofish 域一个 Cookie 都没拿到说明 SSO 没发生
+            //   （被重定向到登录页/风控页），此时若仍返回 ok，xianyuSsoSynced 会被占位，
+            //   该身份在本进程内永远不会重试（FIX-LOG #70 同类问题）。
+            if (Object.keys(goofishJar).length === 0) {
+                return { ok: false, error: 'SSO 未发生（goofish.com 未下发任何 Cookie，可能登录态已被风控拦截）', retryable: true };
+            }
+            // 合并：goofish Cookie 优先，但空值不得覆盖已有非空值
+            // （goofish 会下发 unb= 空串，直接覆盖会让闲鱼登录态丢失、后续 SSO 无法复用）
+            const goofishNonEmpty = Object.fromEntries(Object.entries(goofishJar).filter(([, v]) => v !== '' && v != null));
+            const merged = { ...accountCookies, ...taobaoCookies, ...goofishNonEmpty };
+            // 回写到凭证库
+            await store.setCookies(shopKey, merged);
+            // 注意：日志只报合并结果，不要单独报 goofish 域 jar ——
+            // unb 写在 .taobao.com 域，goofish 域 jar 天然没有 unb，单独打会误报「unb=缺失」。
+            console.log(`[dsagent-xianyu-refresh] 合并后共 ${Object.keys(merged).length} 个 Cookie，` +
+                `_m_h5_tk=${merged['_m_h5_tk'] ? '存在' : '缺失'}, unb=${merged['unb'] ? '存在' : '缺失'}，已保存到 ${shopKey}`);
+            return { ok: true };
+        }
+        finally {
+            await closeActiveBrowser();
+        }
+    }
+    catch (err) {
+        // 浏览器阶段失败（启动/超时/导航）是暂时性错误 → retryable，进入 60s 冷却
+        return { ok: false, error: `浏览器启动失败：${err instanceof Error ? err.message : String(err)}`, retryable: true };
+    }
+}
+/**
+ * 已成功同步过闲鱼域 Cookie 的淘宝身份（unb）集合，避免重复拉起浏览器。
+ *
+ * ★ 必须按「身份」而不是「进程内只做一次」记录（FIX-LOG #70）：
+ *   旧实现是一次性布尔标志，插件启动时若凭证库还没有淘宝账号，标志照样被置 true，
+ *   用户之后登录淘宝**永远不会再派生闲鱼账号**（只能重启进程）。
+ *   改为按 unb 记录后，未同步成功的身份不占位，登录淘宝后立即可派生。
+ */
+const xianyuSsoSynced = new Set();
+/**
+ * 阿里系 SSO：闲鱼与淘宝共用登录态（关键 Cookie 都是 unb），不需要用户重复扫码。
+ *
+ * 账号库里只有淘宝账号时自动派生闲鱼账号；派生的账号只有 `.taobao.com` 域的 Cookie，
+ * 直接调闲鱼接口会返回 `FAIL_BIZ_LOGIN_SITE_ILLEGAL::登录站点非法`，
+ * 因此必须再走一次 `refreshXianyuCookies` 让 goofish.com 下发自己的域 Cookie。
+ *
+ * `opts.force`：跳过「已同步」短路，用于淘宝刚登录成功后的立即同步。
+ */
+export async function ensureXianyuFromTaobao(store, opts) {
+    // 必须精确匹配 platform === 'taobao'：findByPlatform 按「凭证平台」匹配，
+    // 闲鱼的凭证平台同为 taobao，会选中闲鱼账号自身（Cookie 最多），SSO 来源就错了。
+    const taobaoList = store.listAccounts().filter(a => a.platform === 'taobao');
+    const pickTaobao = () => taobaoList
+        .slice()
+        .sort((x, y) => Object.keys(y.cookies || {}).length - Object.keys(x.cookies || {}).length)
+        .find(a => a.status === 'valid') ?? taobaoList[0];
+    const xianyuList = store.listAccounts().filter(a => a.platform === 'xianyu' && a.status !== 'invalid');
+    // ★ 选中「淘宝派生」的那条闲鱼行，而不是列表里的第一条（FIX-LOG #73）：
+    //   闲鱼行可能有多条（含历史遗留的独立登录号，如 xianyu_456148124）。
+    //   旧实现取 `find(...)` 的第一条，若第一条恰好是独立闲鱼号（库中无同号淘宝账号），
+    //   下面的同号守卫会直接 return，**真正需要刷新的淘宝派生行永远不会被同步**，
+    //   表现为「淘宝登录成功、闲鱼却一直 FAIL_BIZ_LOGIN_SITE_ILLEGAL」。
+    //   判定同 isTaobaoDerivedXianyu（platform=taobao 且 unb 相同），按身份而非位置选中。
+    const xianyuUnb = (a) => String(a.cookies?.['unb'] ?? '');
+    const existing = xianyuList.find(a => taobaoList.some(t => xianyuUnb(t) === xianyuUnb(a) && xianyuUnb(a)))
+        ?? xianyuList[0];
+    if (existing) {
+        // ★ 已有闲鱼账号：SSO 来源必须是「同号」的淘宝账号（unb 一致），
+        // 否则会用另一个淘宝账号的 Cookie 覆盖本账号登录态（shop_key 与实际身份永久漂移）。
+        const ownUnb = String(existing.cookies?.['unb'] ?? '');
+        // ★ 漂移行守卫（FIX-LOG #72）：shop_key 后缀必须等于自身 unb，否则该行是历史错误合并的
+        // 产物（key 语法合法故 migrateDriftedKeys 之外无人纠正）。此时不能信它的 shop_key，
+        // 直接落到下面的「派生」分支，让正确身份的闲鱼行被建出来。
+        if (ownUnb && !existing.shop_key.endsWith(`_${ownUnb}`)) {
+            console.warn(`[dsagent] 阿里系 SSO：闲鱼账号 ${existing.shop_key} 的 shop_key 与身份 (unb=${ownUnb}) 不符，` +
+                '按正确身份重新派生');
+        }
+        else {
+            // 两段式查找：有 unb 时只认 unb 精确匹配（唯一可靠的身份判据，且不得回退到
+            // account_id —— 漂移账号的 account_id 与 unb 指向不同身份，回退会命中异号账号，
+            // 随后被 refreshXianyuCookies 的身份守卫拒绝，表现为「安全但永不刷新」）；
+            // 仅当 unb 缺失时，才按 account_id 兜底。
+            const sameIdentity = ownUnb
+                ? taobaoList.find(a => a.cookies?.['unb'] === ownUnb)
+                : taobaoList.find(a => a.account_id === existing.account_id);
+            if (ownUnb && !sameIdentity) {
+                console.warn(`[dsagent] 阿里系 SSO：闲鱼账号 ${existing.shop_key} (unb=${ownUnb}) 无同号淘宝账号，` +
+                    '跳过同步以免覆盖登录态');
+                return;
+            }
+            const syncKey = ownUnb || existing.shop_key;
+            if (!opts?.force && xianyuSsoSynced.has(syncKey))
+                return;
+            const result = await refreshXianyuCookies(store, existing.shop_key, sameIdentity?.cookies);
+            if (result.ok) {
+                xianyuSsoSynced.add(syncKey);
+                console.log(`[dsagent] 阿里系 SSO：闲鱼域 Cookie 同步完成 (${existing.shop_key})`);
+            }
+            else {
+                console.warn(`[dsagent] 阿里系 SSO：闲鱼域 Cookie 同步失败 - ${result.error}`);
+            }
+            return;
+        }
+    }
+    // 尚无闲鱼账号：从淘宝账号派生（新 shop_key 由该淘宝 unb 推导，身份天然一致）。
+    // ★ 无淘宝账号 / 无 unb 时直接返回且**不占位**，等用户登录淘宝后再派生。
+    const taobao = pickTaobao();
+    const unb = String(taobao?.cookies?.['unb'] ?? '');
+    if (!unb)
+        return;
+    if (!opts?.force && xianyuSsoSynced.has(unb))
+        return;
+    let shopKey;
+    try {
+        const saved = await store.save('xianyu', taobao.cookies);
+        shopKey = saved.shop_key;
+        console.log(`[dsagent] 阿里系 SSO：已从淘宝账号派生闲鱼账号 ${shopKey}`);
+    }
+    catch (e) {
+        console.warn('[dsagent] 派生闲鱼账号失败:', e instanceof Error ? e.message : String(e));
+        return;
+    }
+    const result = await refreshXianyuCookies(store, shopKey, taobao.cookies);
+    if (result.ok) {
+        xianyuSsoSynced.add(unb);
+        console.log(`[dsagent] 阿里系 SSO：闲鱼域 Cookie 同步完成 (${shopKey})`);
+    }
+    else {
+        console.warn(`[dsagent] 阿里系 SSO：闲鱼域 Cookie 同步失败 - ${result.error}`);
+    }
+}
+/**
+ * 淘宝登录成功后立即同步闲鱼登录态（FIX-LOG #70）。
+ *
+ * 账号页已有闲鱼独立登录入口（FIX-LOG #74），本函数不再是闲鱼唯一的可用通路，
+ * 但保留为「淘宝已登录 → 闲鱼免二次扫码」的兜底：淘宝登录成功后当场跑一次，
+ * 让阿里 SSO 用户开箱即用闲鱼技能。失败只提示，不影响「淘宝登录本身已成功」。
+ */
+async function syncXianyuAfterTaobaoLogin(store) {
+    await ensureXianyuFromTaobao(store, { force: true });
+    const xianyu = store.listAccounts().find(a => a.platform === 'xianyu' && a.status !== 'invalid');
+    if (!xianyu)
+        return '\n⚠️ 闲鱼登录态同步未完成：本地暂无可用的闲鱼凭证。';
+    return xianyu.cookies?.['_m_h5_tk']
+        ? '\n✅ 闲鱼登录态已同步（goofish 域 Cookie 就绪），闲鱼技能可直接使用。'
+        : '\n⚠️ 闲鱼登录态同步不完整：goofish 域 Cookie 缺失，闲鱼技能可能报登录失效，请稍后重试。';
+}
+/**
+ * 闲鱼**独立**登录成功后的 goofish 域 Cookie 刷新（FIX-LOG #74）。
+ *
+ * 为什么必须补这一步：闲鱼扫码登录的二维码页本身就会下发 goofish 域 Cookie，
+ * 但 mtop 网关要的 `_m_h5_tk` 是**访问过 h5api.m.goofish.com 之后**才成型的
+ * （首次访问只会拿到空壳 + 一个引导响应）。扫码页停留期间 token 往往还没落地，
+ * 直接保存的凭证在跑技能时会撞上 `FAIL_SYS_TOKEN_EMPTY::令牌为空`。
+ *
+ * 与 `syncXianyuAfterTaobaoLogin` 的区别：那条走「找同号淘宝账号当 SSO 来源」的派生逻辑，
+ * 独立扫码登录后库里通常没有同号淘宝行，会被同号守卫跳过；这条用**刚保存的闲鱼凭证自身**
+ * 当 SSO 来源（unb 就写在里面），不依赖淘宝行存在。
+ *
+ * 失败只返回提示文本，不影响「闲鱼登录本身已成功」这个事实。
+ */
+async function refreshXianyuAfterOwnLogin(store, shopKey) {
+    const result = await refreshXianyuCookies(store, shopKey);
+    if (result.ok) {
+        console.log(`[dsagent-login] 闲鱼独立登录后 goofish 域 Cookie 刷新完成 (${shopKey})`);
+        return '\n✅ 闲鱼 goofish 域 Cookie 已刷新，发布/采集技能可直接使用。';
+    }
+    console.warn(`[dsagent-login] 闲鱼独立登录后刷新失败 - ${result.error}`);
+    return '\n⚠️ goofish 域 Cookie 刷新失败，闲鱼技能可能报「令牌为空」，请稍后重试或重新登录。';
+}
+/** 风控验证默认等待时长：4 分钟（用户需手工拖动滑块） */
+const RISK_VERIFY_TIMEOUT_MS = 240_000;
+/**
+ * deny 页分支的等待时长：45 秒。
+ *
+ * deny 页（action=denycdc_forbidden）本身没有滑块，用户无从「完成验证」，
+ * 能否拿到 x5sec 完全取决于平台在用户正常浏览首页时是否顺势下发 —— 概率低且不可控。
+ * 沿用 240s 只会让用户白等 4 分钟才看到指引（FIX-LOG #50）。
+ */
+const RISK_VERIFY_DENY_TIMEOUT_MS = 45_000;
+/**
+ * 风控验证助手 —— 补上原项目没有的「完成验证」半个动作。
+ *
+ * 背景：淘宝命中 RGV587_ERROR 后会返回一个 punish 页链接（verifyUrl），
+ * 平台要求用户在该页完成滑块验证；过完后平台下发 x5sec（白名单凭证）。
+ * 若这个凭证不落库，后续请求永远带不上，风控永不解除 ——
+ * 原项目的处方只有「引导重登」，且完全没有 x5sec 的提取/回写入口（FIX-LOG #47/#48）。
+ *
+ * 流程：
+ *   1. 用 puppeteer 打开可见浏览器（用户要手工拖滑块，不能 headless）
+ *   2. 先访问 taobao.com，把账号已有 Cookie 写进 .taobao.com 域（保证验证页认得账号）
+ *   3. 导航到 verifyUrl（punish 页）
+ *   4. 每 2s 轮询一次 Cookie，直到出现 x5sec 类「验证通过」凭证
+ *   5. 合并回写凭证库 + 立即解除该账号的风控冷却，随后脚本重试即可通过
+ */
+export async function riskVerify(store, platform, verifyUrl, timeoutMs = RISK_VERIFY_TIMEOUT_MS, operationId) {
+    const rep = (phase, msg, extra) => authOp.report(operationId, phase, msg, extra);
+    const account = store.listAccounts()
+        .filter(a => a.platform === platform && a.status !== 'invalid')
+        .sort((a, b) => Object.keys(b.cookies || {}).length - Object.keys(a.cookies || {}).length)[0];
+    if (!account) {
+        const msg = `未找到平台 ${platform} 的可用账号，请先在「账号连接」页面完成登录。`;
+        rep('failed', msg, { error: msg });
+        return {
+            ok: false,
+            passed: false,
+            error: msg,
+        };
+    }
+    const target = (verifyUrl || '').trim();
+    if (!target) {
+        const msg = '缺少风控验证地址。请先执行一次原技能触发风控，插件会自动记录验证入口后再调用本工具。';
+        rep('failed', msg, { error: msg });
+        return {
+            ok: false,
+            passed: false,
+            error: msg,
+        };
+    }
+    const shopKey = account.shop_key;
+    const accountCookies = account.cookies || {};
+    // 同 Profile 互斥：Chrome 的 userDataDir 独占，二次启动必失败（FIX-LOG #50）。
+    // ★ 锁按目录划分，故发布/数据分析工具占用同一目录时这里也能感知到。
+    // ★ 用该账号的专属环境：验证页看到的是这个账号平时登录/发布时的同一台「设备」，
+    //   换环境验证会被平台当成陌生设备，通过率反而更低。
+    const dir = profileDir(platform, shopKey);
+    const owner = profileOwner(dir);
+    if (!tryAcquireProfile(dir, '风控验证')) {
+        return {
+            ok: false,
+            passed: false,
+            error: `平台 ${platform} 的浏览器环境正被「${owner || '其他任务'}」占用。`
+                + `请先等待该任务结束（或关闭已弹出的浏览器窗口），再重新调用本工具。`,
+        };
+    }
+    try {
+        const puppeteer = await import(/* @vite-ignore */ 'puppeteer-core');
+        const chromePath = findChromePath();
+        if (!chromePath) {
+            return { ok: false, passed: false, error: '未找到 Chrome 或 Edge 浏览器' };
+        }
+        // 复用该平台自己的 Profile，验证页才能认出已有登录态
+        const launchOpts = {
+            headless: false,
+            executablePath: chromePath,
+            userDataDir: dir,
+            args: [
+                '--no-sandbox',
+                '--disable-blink-features=AutomationControlled',
+                '--window-size=1440,900',
+            ],
+        };
+        // 启动前先清一遍残留锁；仍失败则再清一次重试（上次验证被强杀会留下 SingletonLock）
+        clearProfileLocks(dir);
+        let browser;
+        try {
+            browser = await puppeteer.launch(launchOpts);
+        }
+        catch (e) {
+            console.warn('[dsagent-risk-verify] 首次启动失败，清理 Profile 锁后重试:', e instanceof Error ? e.message : String(e));
+            clearProfileLocks(dir);
+            browser = await puppeteer.launch(launchOpts);
+        }
+        if (activeBrowser) {
+            try {
+                await activeBrowser.close();
+            }
+            catch { }
+            activeBrowser = null;
+        }
+        // 必须登记为完整句柄（含 close），否则 closeActiveBrowser() 调 current.close() 会抛错
+        activeBrowser = {
+            close: async () => {
+                try {
+                    await browser.close();
+                }
+                catch { /* 忽略 */ }
+            },
+            browser,
+            userDataDir: dir,
+            platform,
+        };
+        try {
+            const page = await browser.newPage();
+            // P1-3：风控验证按账号绑定的 env 设置 viewport（无 env 时回退默认 1440x900）
+            const verifyEnv = envOf(store.get(shopKey));
+            await applyAccountEnv(page, verifyEnv);
+            await applyStealth(page);
+            // 先把已有 Cookie 写进 .taobao.com 域，验证页才会挂到同一个账号上
+            try {
+                await page.goto('https://www.taobao.com/', { waitUntil: 'domcontentloaded', timeout: 20000 });
+                const cookieList = Object.entries(accountCookies)
+                    .filter(([, v]) => v !== '' && v != null)
+                    .map(([name, value]) => ({ name, value: String(value), domain: '.taobao.com', path: '/' }));
+                if (cookieList.length > 0)
+                    await page.setCookie(...cookieList);
+                console.log(`[dsagent-risk-verify] 已注入 ${cookieList.length} 个 taobao.com Cookie（账号 ${shopKey}）`);
+            }
+            catch (e) {
+                console.warn('[dsagent-risk-verify] 注入 Cookie 阶段异常:', e instanceof Error ? e.message : String(e));
+            }
+            // 平台回传的 punish 链接常带 `:443//h5/...` 双斜杠，归一后再导航
+            const normalized = target.replace(/(:\d+)\/\//, '$1/');
+            console.log('[dsagent-risk-verify] 打开验证页，请在弹出的浏览器窗口完成滑块验证...');
+            try {
+                await page.goto(normalized, { waitUntil: 'domcontentloaded', timeout: 30000 });
+            }
+            catch (e) {
+                console.warn('[dsagent-risk-verify] 导航验证页异常:', e instanceof Error ? e.message : String(e));
+            }
+            // ── 探针 ──────────────────────────────────────────────
+            // 验证页「是否真的渲染了滑块」原先不可观测：超时后无法区分
+            // 「页面空白 / 跳到登录页 / 滑块已渲染但用户没动」三种情况。
+            // 这里落一张截图 + 记录 url/title/DOM 特征，供事后归因。
+            //
+            // ★关键事实（FIX-LOG #50）：淘宝 RGV587 响应 data.url 里的 punish 链接，
+            // 实测 action=denycdc_forbidden 时打开的是「访问被拒绝」静态 deny 页，**根本没有滑块**。
+            // 盲目在 deny 页上轮询 240s 只会得到一句无用的超时提示，必须识别出来并给出可执行指引。
+            const shotDir = join(homedir(), '.dsh', 'risk-verify-shots');
+            try {
+                mkdirSync(shotDir, { recursive: true });
+            }
+            catch { /* 已存在 */ }
+            const shotPath = join(shotDir, `risk-${platform}-${Date.now()}.png`);
+            let denyPage = false;
+            try {
+                await new Promise(r => setTimeout(r, 3000));
+                await page.screenshot({ path: shotPath });
+                const probeUrl = page.url();
+                const probeTitle = await page.title().catch(() => '');
+                const probeHtml = await page.evaluate(() => (document.documentElement?.outerHTML || '').slice(0, 20000)).catch(() => '');
+                const probeBody = await page.evaluate(() => (document.body?.innerText || '').slice(0, 300)).catch(() => '');
+                // 滑块特征只认真正的滑块组件；旧正则里的 punish|x5sec 会把 deny 页误判成滑块页
+                const hasSlider = /nc_1_n1z|nc_iconfont|nc-container|nocaptcha|请按住滑块|拖动滑块|slide-to-unlock/i.test(probeHtml);
+                const isDeny = /访问被拒绝|denycdc_forbidden|denycdc|拒绝访问|account.{0,4}abnormal/i.test(probeTitle + probeHtml + probeBody);
+                denyPage = isDeny && !hasSlider;
+                console.log(`[dsagent-risk-verify][探针] url=${probeUrl}`);
+                console.log(`[dsagent-risk-verify][探针] title=${probeTitle}`);
+                console.log(`[dsagent-risk-verify][探针] slider=${hasSlider} deny=${denyPage} shot=${shotPath}`);
+                console.log(`[dsagent-risk-verify][探针] body=${probeBody.replace(/\s+/g, ' ').slice(0, 200)}`);
+            }
+            catch (e) {
+                console.warn('[dsagent-risk-verify][探针] 截图失败:', e instanceof Error ? e.message : String(e));
+            }
+            if (denyPage) {
+                // deny 页上没有滑块，等多久都不会出 x5sec。改为把用户带到可用页面：
+                // 用户可在该窗口内重新登录 / 正常浏览，平台可能顺势完成安全校验并下发 x5sec。
+                console.log('[dsagent-risk-verify] punish 链接打开的是「访问被拒绝」deny 页（无滑块），改导航到 taobao.com 首页');
+                try {
+                    await page.goto('https://www.taobao.com/', { waitUntil: 'domcontentloaded', timeout: 30000 });
+                }
+                catch (e) {
+                    console.warn('[dsagent-risk-verify] 导航首页异常:', e instanceof Error ? e.message : String(e));
+                }
+            }
+            // 轮询等待用户过滑块 → 平台下发 x5sec
+            // deny 页没有滑块可操作，缩短等待，尽快把可执行指引交给用户
+            const effectiveTimeout = denyPage ? RISK_VERIFY_DENY_TIMEOUT_MS : timeoutMs;
+            const deadline = Date.now() + effectiveTimeout;
+            let passedJar = {};
+            let pageClosed = false;
+            let tick = 0;
+            rep('waiting_user', denyPage
+                ? '验证入口是「访问被拒绝」页（无滑块），已改为在窗口内打开首页，等待平台顺势下发凭证'
+                : '验证页已打开，请在浏览器窗口中拖动滑块完成验证', { detail: { denyPage } });
+            while (Date.now() < deadline) {
+                // ★ 取消感知：与登录一致，cancel 后尽快退出，不空等到超时
+                if (authOp.isCancelled(operationId)) {
+                    rep('cancelled', '已取消风控验证等待');
+                    return { ok: false, passed: false, error: '风控验证已被取消' };
+                }
+                await new Promise(r => setTimeout(r, 2000));
+                tick++;
+                // 心跳：每 16s 打一次当前页面地址与 Cookie 数，判断页面是否还活着
+                if (tick % 8 === 0) {
+                    try {
+                        console.log(`[dsagent-risk-verify][探针] 心跳 ${tick * 2}s url=${page.url()} cookies=${(await page.cookies()).length}`);
+                    }
+                    catch { /* 页面可能已关，下方 cookies() 会抛并走 pageClosed 分支 */ }
+                }
+                let cookies;
+                try {
+                    cookies = await getAllDomainCookies(page, platform);
+                    // 补上当前页面宿主域的 Cookie：punish 页在 h5api.m.taobao.com 上，
+                    // 可能下发 host-only 的 x5sec，只查 .taobao.com 域会漏。
+                    cookies = cookies.concat(await page.cookies());
+                }
+                catch {
+                    // 用户把窗口关了（或浏览器崩溃）→ 立刻结束，别干等到超时
+                    pageClosed = true;
+                    break;
+                }
+                const nonEmpty = {};
+                for (const c of cookies) {
+                    if (c && c.name && c.value !== '' && c.value != null)
+                        nonEmpty[c.name] = c.value;
+                }
+                const hit = Object.keys(nonEmpty).filter(n => isRiskPassCookie(n));
+                if (hit.length > 0) {
+                    passedJar = nonEmpty;
+                    console.log(`[dsagent-risk-verify] 检测到验证凭证：${hit.join('、')}`);
+                    break;
+                }
+            }
+            if (pageClosed) {
+                const msg = '验证浏览器已被关闭，未检测到验证通过凭证。可重新调用本工具再试一次。';
+                rep('failed', msg, { error: msg });
+                return {
+                    ok: false,
+                    passed: false,
+                    error: msg,
+                };
+            }
+            const passedNames = Object.keys(passedJar).filter(n => isRiskPassCookie(n));
+            if (passedNames.length === 0) {
+                const msg = denyPage
+                    ? `平台返回的验证入口是「访问被拒绝」页（action=denycdc_forbidden），该页不提供滑块，`
+                        + `无法通过本工具完成验证 —— 说明账号已被平台判定为高风险。`
+                        + `建议：① 在弹出的浏览器窗口内手动登录淘宝并正常浏览几分钟；`
+                        + `② 等待一段时间（风控分随时间衰减）后重试技能；`
+                        + `③ 更换网络出口（切换 WiFi / 热点）后重试。`
+                    : `等待 ${Math.round(effectiveTimeout / 1000)}s 仍未检测到验证通过凭证（x5sec）。`
+                        + `请确认已在弹出的浏览器窗口内完成滑块验证，然后重试。`;
+                // ★ 这类等待超时同样可续推（窗口开着、用户随时可能拖完滑块），
+                //   故上报 timed_out 而非 failed，与登录流程的语义保持一致。
+                rep('timed_out', msg, {
+                    error: msg,
+                    detail: { denyPage, effectiveTimeoutSec: Math.round(effectiveTimeout / 1000) },
+                });
+                return {
+                    ok: false,
+                    passed: false,
+                    error: msg,
+                };
+            }
+            // 合并回写：非空 Cookie 全量落库（setCookies 语义是空值不覆盖已有值）
+            await store.setCookies(shopKey, passedJar);
+            // 验证已通过 → 立即解除 60s 风控冷却，下次请求就能带上 x5sec
+            clearRiskCooldown(shopKey);
+            rep('succeeded', `风控验证已通过，凭证 ${passedNames.join('、')} 已写回账号`, {
+                result: { shopKey, cookieNames: passedNames },
+            });
+            return {
+                ok: true,
+                passed: true,
+                cookieNames: passedNames,
+                text: `风控验证已通过。验证凭证（${passedNames.join('、')}）已写回账号 ${shopKey}，`
+                    + `风控冷却已解除。请重新执行刚才失败的技能，即可正常获取数据。`,
+            };
+        }
+        finally {
+            await closeActiveBrowser();
+            releaseProfile(dir);
+        }
+    }
+    catch (err) {
+        releaseProfile(dir);
+        const msg = `风控验证失败：${err instanceof Error ? err.message : String(err)}`;
+        authOp.report(operationId, 'failed', msg, { error: msg });
+        return { ok: false, passed: false, error: msg };
+    }
+}
+//# sourceMappingURL=browser-login.js.map

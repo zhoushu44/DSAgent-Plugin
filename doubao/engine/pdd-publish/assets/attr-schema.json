@@ -1,0 +1,79 @@
+{
+  "纸杯": {
+    "catePath": "餐饮具 > 一次性餐桌用品 > 纸杯",
+    "catId": "",
+    "attrs": [
+      {
+        "id": "basic.propertys.0.value",
+        "name": "品牌",
+        "required": true,
+        "filled": false,
+        "placeholder": "请输入品牌名称搜索",
+        "type": "dropdown",
+        "options": [
+          "无品牌/无注册商标",
+          "DAISO/大创",
+          "BIALETTI/比乐蒂",
+          "VISIONS/康宁",
+          "Zwilling/双立人",
+          "ORREFORS",
+          "NORITAKE",
+          "THE BRITISH MUSEUM/大英博物馆",
+          "Kosta boda",
+          "Joseph Joseph"
+        ]
+      },
+      {
+        "id": "basic.propertys.2.value",
+        "name": "适用场景",
+        "required": false,
+        "filled": false,
+        "placeholder": "请选择",
+        "type": "dropdown",
+        "options": [
+          "婚礼",
+          "办公",
+          "家用",
+          "广告",
+          "餐厅",
+          "户外",
+          "新年"
+        ]
+      },
+      {
+        "id": "basic.propertys.4.value",
+        "name": "是否支持定制",
+        "required": true,
+        "filled": false,
+        "placeholder": "请选择",
+        "type": "dropdown",
+        "options": [
+          "支持定制",
+          "不支持定制"
+        ]
+      },
+      {
+        "id": "basic.propertys.6.value",
+        "name": "使用对象",
+        "required": false,
+        "filled": false,
+        "placeholder": "请选择",
+        "type": "dropdown",
+        "options": [
+          "茶水",
+          "关东煮",
+          "炸串",
+          "豆浆",
+          "爆米花",
+          "咖啡",
+          "冰淇淋",
+          "蛋糕"
+        ]
+      }
+    ],
+    "attrCount": 4,
+    "totalOptions": 27,
+    "updatedAt": "2026-10-30T08:44:55.336Z",
+    "harvestCount": 1
+  }
+}

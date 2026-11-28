@@ -84,3 +84,7 @@ skills/pdd-ai-video/.cache/
 # 测试/审计产物（本地数据，不入库）
 skills/_shared/.audit-all.json
 skills/_shared/.test-result.json
+
+doubao/out/
+doubao/engine/skills
+doubao/imgspace-key.json

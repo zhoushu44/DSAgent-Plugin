@@ -1,0 +1,625 @@
+{
+  "儿童睡衣": {
+    "catId": "",
+    "catePath": "童装/婴儿装/亲子装",
+    "dims": [
+      {
+        "user": "颜色分类",
+        "page": "颜色分类",
+        "type": ""
+      },
+      {
+        "user": "参考分类",
+        "page": "参考分类",
+        "type": ""
+      }
+    ],
+    "requiredAttrs": [
+      {
+        "name": "材质成分",
+        "value": "聚酯纤维（涤纶）:100%"
+      },
+      {
+        "name": "品牌",
+        "value": "其他"
+      },
+      {
+        "name": "适用性别",
+        "value": "中性/男女均可"
+      },
+      {
+        "name": "安全等级",
+        "value": "A类"
+      },
+      {
+        "name": "面料名称",
+        "value": "莫代尔"
+      },
+      {
+        "name": "适用年龄段",
+        "value": "中小童(3~8岁，100~140cm)"
+      },
+      {
+        "name": "风格",
+        "value": "休闲"
+      },
+      {
+        "name": "厚薄",
+        "value": "普通"
+      },
+      {
+        "name": "流行元素",
+        "value": "潮范"
+      },
+      {
+        "name": "货源类别",
+        "value": "现货"
+      },
+      {
+        "name": "上市时节",
+        "value": "2026年秋季"
+      },
+      {
+        "name": "主面料成分含量",
+        "value": "95"
+      },
+      {
+        "name": "产地",
+        "value": "浙江"
+      },
+      {
+        "name": "图案",
+        "value": "纯色"
+      },
+      {
+        "name": "商品货号",
+        "value": "童衣童缘&25102豹纹毛毛睡衣套装"
+      },
+      {
+        "name": "功能",
+        "value": "吸湿排汗、其他"
+      },
+      {
+        "name": "面料工艺",
+        "value": "柔软处理"
+      },
+      {
+        "name": "适用季节",
+        "value": "冬季、秋季"
+      },
+      {
+        "name": "是否库存",
+        "value": "否"
+      },
+      {
+        "name": "适用场景",
+        "value": "居家"
+      },
+      {
+        "name": "袖长",
+        "value": "长袖"
+      },
+      {
+        "name": "领型",
+        "value": "圆领（显式指定）"
+      },
+      {
+        "name": "主面料成分",
+        "value": "粘纤"
+      },
+      {
+        "name": "适合年龄段",
+        "value": "中大童(8岁以上，140cm以上)"
+      },
+      {
+        "name": "元素",
+        "value": "套装、潮范、糖果"
+      },
+      {
+        "name": "上市年份季节",
+        "value": "2025年春季"
+      },
+      {
+        "name": "平车针距12~14针/3cm",
+        "value": "否"
+      },
+      {
+        "name": "货号",
+        "value": "MHJ-拼接袖莫代尔套装"
+      },
+      {
+        "name": "适合季节",
+        "value": "春秋、夏季"
+      },
+      {
+        "name": "图片实拍",
+        "value": "实拍无模特"
+      },
+      {
+        "name": "毛头/杂余线头是否修剪",
+        "value": "全部修剪干净"
+      },
+      {
+        "name": "AQL抽检标准",
+        "value": "无"
+      },
+      {
+        "name": "主要销售地区",
+        "value": "其他"
+      },
+      {
+        "name": "主要下游平台",
+        "value": "其他"
+      },
+      {
+        "name": "是否跨境出口专供货源",
+        "value": "否"
+      },
+      {
+        "name": "有可授权的自有品牌",
+        "value": "是"
+      },
+      {
+        "name": "是否IP授权",
+        "value": "1"
+      },
+      {
+        "name": "内衣内裤类别",
+        "value": "长袖长裤"
+      },
+      {
+        "name": "领标",
+        "value": "有领标"
+      },
+      {
+        "name": "货源类型",
+        "value": "源头工厂"
+      },
+      {
+        "name": "吊牌",
+        "value": "无吊牌"
+      },
+      {
+        "name": "袖型设计",
+        "value": "落肩袖"
+      },
+      {
+        "name": "颜色",
+        "value": "粉色、黄色、灰色、蓝色、绿色、天蓝色"
+      }
+    ],
+    "price": "44.9",
+    "stock": "300",
+    "goodsId": "1023092233824",
+    "updatedAt": "2026-10-30T08:34:57.522Z",
+    "successCount": 31
+  },
+  "纸杯": {
+    "catId": "",
+    "catePath": "",
+    "dims": [
+      {
+        "user": "容量",
+        "page": "容量",
+        "type": ""
+      }
+    ],
+    "requiredAttrs": [
+      {
+        "name": "适用场景",
+        "value": "家用"
+      },
+      {
+        "name": "使用对象",
+        "value": "咖啡"
+      },
+      {
+        "name": "产地",
+        "value": "中国大陆"
+      },
+      {
+        "name": "材质",
+        "value": "纸"
+      },
+      {
+        "name": "品牌",
+        "value": "无品牌/无注册商标"
+      },
+      {
+        "name": "功能特点",
+        "value": "多层"
+      },
+      {
+        "name": "是否支持定制",
+        "value": "不支持定制"
+      },
+      {
+        "name": "是否接触食品",
+        "value": "是"
+      }
+    ],
+    "price": "19.9",
+    "stock": "500",
+    "goodsId": "1023381759702",
+    "updatedAt": "2026-10-30T20:39:56.952Z",
+    "successCount": 5
+  },
+  "手机壳": {
+    "catId": "",
+    "catePath": "",
+    "dims": [
+      {
+        "user": "型号",
+        "page": "型号",
+        "type": ""
+      },
+      {
+        "user": "颜色",
+        "page": "颜色",
+        "type": ""
+      }
+    ],
+    "requiredAttrs": [
+      {
+        "name": "风格",
+        "value": "简约"
+      },
+      {
+        "name": "品牌",
+        "value": "无品牌/无注册商标"
+      },
+      {
+        "name": "适用品牌",
+        "value": "Apple/苹果"
+      },
+      {
+        "name": "保护套质地",
+        "value": "其它"
+      },
+      {
+        "name": "流行元素",
+        "value": "气囊"
+      },
+      {
+        "name": "包装方式",
+        "value": "简装"
+      },
+      {
+        "name": "适用型号",
+        "value": "iPhone 15"
+      }
+    ],
+    "price": "29.9",
+    "stock": "300",
+    "goodsId": "1023382208344",
+    "updatedAt": "2026-10-30T20:46:40.606Z",
+    "successCount": 2
+  },
+  "抱枕": {
+    "catId": "",
+    "catePath": "",
+    "dims": [
+      {
+        "user": "尺寸",
+        "page": "尺寸",
+        "type": ""
+      }
+    ],
+    "requiredAttrs": [
+      {
+        "name": "适用场景",
+        "value": "客厅"
+      },
+      {
+        "name": "面料材质",
+        "value": "棉"
+      },
+      {
+        "name": "填充物净重",
+        "value": "300g"
+      },
+      {
+        "name": "图案",
+        "value": "纯色"
+      },
+      {
+        "name": "产地",
+        "value": "中国大陆"
+      },
+      {
+        "name": "适用性别",
+        "value": "通用"
+      },
+      {
+        "name": "包装方式",
+        "value": "简装"
+      },
+      {
+        "name": "品牌",
+        "value": "无品牌/无注册商标"
+      },
+      {
+        "name": "产品类型",
+        "value": "午睡枕"
+      },
+      {
+        "name": "填充物",
+        "value": "其他"
+      },
+      {
+        "name": "风格",
+        "value": "简约现代"
+      },
+      {
+        "name": "形状",
+        "value": "方形"
+      },
+      {
+        "name": "工艺",
+        "value": "平纹"
+      },
+      {
+        "name": "安全等级",
+        "value": "B类"
+      },
+      {
+        "name": "适用季节",
+        "value": "不限季节"
+      },
+      {
+        "name": "平方克重",
+        "value": "120g/m²"
+      }
+    ],
+    "price": "39.9",
+    "stock": "200",
+    "goodsId": "1023385539665",
+    "updatedAt": "2026-10-30T21:05:11.364Z",
+    "successCount": 2
+  },
+  "毛巾": {
+    "catId": "205041314615",
+    "catePath": "",
+    "dims": [
+      {
+        "user": "尺寸",
+        "page": "尺寸",
+        "type": "custom-input",
+        "checkboxCount": 0
+      },
+      {
+        "user": "颜色",
+        "page": "颜色",
+        "type": "custom-input",
+        "checkboxCount": 0
+      }
+    ],
+    "requiredAttrs": [
+      {
+        "name": "材质",
+        "value": "棉"
+      },
+      {
+        "name": "品牌",
+        "value": "无品牌/无注册商标"
+      },
+      {
+        "name": "成分含量",
+        "value": "100%"
+      },
+      {
+        "name": "产品类型",
+        "value": "可洗式"
+      },
+      {
+        "name": "风格",
+        "value": "简约"
+      },
+      {
+        "name": "适用场景",
+        "value": "家用"
+      },
+      {
+        "name": "安全等级",
+        "value": "B类"
+      },
+      {
+        "name": "工艺",
+        "value": "无捻纱"
+      },
+      {
+        "name": "质检标准",
+        "value": "优等品"
+      },
+      {
+        "name": "适用人群",
+        "value": "通用"
+      },
+      {
+        "name": "抗菌等级",
+        "value": "1A抗菌"
+      },
+      {
+        "name": "尺寸",
+        "value": "80x160cm"
+      },
+      {
+        "name": "颜色",
+        "value": "蓝色"
+      },
+      {
+        "name": "功能",
+        "value": "透气"
+      },
+      {
+        "name": "流行元素",
+        "value": "纯色"
+      },
+      {
+        "name": "使用对象",
+        "value": "纸巾"
+      }
+    ],
+    "price": "",
+    "stock": "100",
+    "updatedAt": "2026-10-31T08:39:04.173Z",
+    "successCount": 15,
+    "goodsId": ""
+  },
+  "水杯": {
+    "catId": "205049623165",
+    "catePath": "",
+    "dims": [
+      {
+        "user": "容量",
+        "page": "容量",
+        "type": "custom-input",
+        "checkboxCount": 0
+      }
+    ],
+    "requiredAttrs": [
+      {
+        "name": "产地",
+        "value": "中国大陆"
+      },
+      {
+        "name": "品牌",
+        "value": "无品牌/无注册商标"
+      },
+      {
+        "name": "外身材质",
+        "value": "201不锈钢"
+      },
+      {
+        "name": "内胆材质种类",
+        "value": "201不锈钢"
+      },
+      {
+        "name": "保温时长",
+        "value": "6h以下"
+      },
+      {
+        "name": "风格",
+        "value": "运动"
+      },
+      {
+        "name": "是否带茶隔",
+        "value": "不带茶隔"
+      },
+      {
+        "name": "杯盖款式",
+        "value": "弹跳式"
+      },
+      {
+        "name": "杯子种类",
+        "value": "大肚杯"
+      },
+      {
+        "name": "是否显示温度",
+        "value": "不显示温度"
+      },
+      {
+        "name": "适用场景",
+        "value": "运动"
+      },
+      {
+        "name": "附加功能",
+        "value": "防滑"
+      },
+      {
+        "name": "包装方式",
+        "value": "普通盒装"
+      },
+      {
+        "name": "服务承诺",
+        "value": "假一赔十"
+      },
+      {
+        "name": "容量",
+        "value": "1000ml"
+      },
+      {
+        "name": "材质",
+        "value": "皮革"
+      },
+      {
+        "name": "功能",
+        "value": "可折叠"
+      },
+      {
+        "name": "流行元素",
+        "value": "透明"
+      },
+      {
+        "name": "使用对象",
+        "value": "碗筷"
+      }
+    ],
+    "price": "",
+    "stock": "100",
+    "updatedAt": "2026-10-31T08:36:44.503Z",
+    "successCount": 2,
+    "goodsId": ""
+  },
+  "收纳盒": {
+    "catId": "205049841846",
+    "catePath": "",
+    "dims": [
+      {
+        "user": "尺寸",
+        "page": "尺寸",
+        "type": "custom-input",
+        "checkboxCount": 0
+      },
+      {
+        "user": "颜色",
+        "page": "颜色",
+        "type": "custom-input",
+        "checkboxCount": 0
+      }
+    ],
+    "requiredAttrs": [
+      {
+        "name": "品牌",
+        "value": "无品牌/无注册商标"
+      },
+      {
+        "name": "功能",
+        "value": "分格"
+      },
+      {
+        "name": "流行元素",
+        "value": "透明"
+      },
+      {
+        "name": "使用对象",
+        "value": "文具"
+      },
+      {
+        "name": "适用场景",
+        "value": "办公室"
+      },
+      {
+        "name": "服务承诺",
+        "value": "假一赔十"
+      },
+      {
+        "name": "材质",
+        "value": "皮革"
+      },
+      {
+        "name": "尺寸",
+        "value": "大号"
+      },
+      {
+        "name": "颜色",
+        "value": "灰色"
+      }
+    ],
+    "price": "",
+    "stock": "100",
+    "updatedAt": "2026-10-31T08:37:28.638Z",
+    "successCount": 4,
+    "goodsId": ""
+  }
+}

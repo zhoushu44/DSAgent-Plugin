@@ -1,0 +1,41 @@
+{
+  "schema": "dsagent/skill-contract@1",
+  "id": "pdd-publish",
+  "entry": {
+    "form": "script",
+    "script": "steps/index.mjs"
+  },
+  "input": {
+    "args": [
+      {
+        "name": "product",
+        "description": "统一商品数据（JSON 字符串）：{title, images, detailImages?, category?, catId?, price?, stock?, itemNo?, discount?, shipTime?, whiteBg?, specs?, skus?, attributes?}"
+      },
+      {
+        "name": "product_file",
+        "description": "统一商品数据 JSON 文件路径（优先于 product）",
+        "flag": "--product-file"
+      },
+      {
+        "name": "confirm",
+        "description": "确认上架：true 才真正提交；省略/false 只返回预览，不产生任何写操作（L2 门禁）",
+        "flag": "--confirm"
+      },
+      {
+        "name": "account",
+        "description": "账号 shopKey（必填）。该平台多账号且未绑定时需先向用户确认",
+        "flag": "--account"
+      }
+    ]
+  },
+  "output": {
+    "protocol": "dsagent-result",
+    "resultPrefix": "__DSAGENT_RESULT__",
+    "filesMarker": "---[OUTPUT_FILES]"
+  },
+  "notes": [
+    "全部步骤走基座：pdd-launch / pdd-antiban / pdd-risk / pdd-request",
+    "步骤 1→16，含提交前必填校验（step16 内置）",
+    "已实测类目：纸杯(16675) / 女装T恤(8463) / 隔音板(9683) / 门贴(22278)"
+  ]
+}

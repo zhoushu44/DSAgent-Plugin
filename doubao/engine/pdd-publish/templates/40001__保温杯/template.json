@@ -1,0 +1,857 @@
+{
+ "templateId": 40001,
+ "category": {
+  "name": "保温杯",
+  "catId": 16557,
+  "cats": [
+   {
+    "cat_id": 16557,
+    "cat_name": "保温杯/保冷杯"
+   }
+  ]
+ },
+ "attributes": [
+  {
+   "templatePid": 310135,
+   "label": "品牌",
+   "refPid": 5,
+   "moduleId": 51789,
+   "required": false,
+   "mode": "single",
+   "unit": "",
+   "topTip": "",
+   "bottomTip": "",
+   "options": [
+    {
+     "vid": 4643510,
+     "value": "无品牌/无注册商标"
+    },
+    {
+     "vid": 915,
+     "value": "DAISO/大创"
+    },
+    {
+     "vid": 1358541,
+     "value": "BIALETTI/比乐蒂"
+    },
+    {
+     "vid": 12298,
+     "value": "VISIONS/康宁"
+    },
+    {
+     "vid": 1134,
+     "value": "Zwilling/双立人"
+    },
+    {
+     "vid": 1767763,
+     "value": "ORREFORS"
+    },
+    {
+     "vid": 1767766,
+     "value": "NORITAKE"
+    },
+    {
+     "vid": 193868,
+     "value": "THE BRITISH MUSEUM/大英博物馆"
+    },
+    {
+     "vid": 194496,
+     "value": "Kosta boda"
+    },
+    {
+     "vid": 195689,
+     "value": "Joseph Joseph"
+    },
+    {
+     "vid": 198907,
+     "value": "PALACE MUSEUM/故宫"
+    },
+    {
+     "vid": 34231,
+     "value": "NITORI/宜得利家居"
+    },
+    {
+     "vid": 288,
+     "value": "ZOJIRUSHI/象印"
+    },
+    {
+     "vid": 3722,
+     "value": "TIGER/虎牌"
+    },
+    {
+     "vid": 394,
+     "value": "Lock&Lock/乐扣乐扣"
+    },
+    {
+     "vid": 490503,
+     "value": "Costa/咖世家"
+    },
+    {
+     "vid": 52325,
+     "value": "TOYO-SASAKI GLASS/东洋佐佐木"
+    },
+    {
+     "vid": 52458,
+     "value": "SCHOTT ZWIESEL/肖特圣维莎"
+    },
+    {
+     "vid": 52695,
+     "value": "Monbento"
+    },
+    {
+     "vid": 80,
+     "value": "DURALEX/多莱斯"
+    },
+    {
+     "vid": 96,
+     "value": "EMSA/爱慕莎"
+    },
+    {
+     "vid": 7303,
+     "value": "Philips/飞利浦"
+    },
+    {
+     "vid": 43,
+     "value": "SUPOR/苏泊尔"
+    },
+    {
+     "vid": 1085564,
+     "value": "KAGAMI"
+    },
+    {
+     "vid": 9738,
+     "value": "WMF/福腾宝"
+    },
+    {
+     "vid": 9802,
+     "value": "Thermos/膳魔师"
+    },
+    {
+     "vid": 1450668,
+     "value": "永丰源"
+    },
+    {
+     "vid": 12109,
+     "value": "YEEHOO/英氏"
+    },
+    {
+     "vid": 12320,
+     "value": "Contigo/康迪克"
+    },
+    {
+     "vid": 127488,
+     "value": "Neoflam/佑福来"
+    },
+    {
+     "vid": 1155,
+     "value": "Tupperware/特百惠"
+    },
+    {
+     "vid": 14603,
+     "value": "ASVEL/阿司倍鹭"
+    },
+    {
+     "vid": 1717742,
+     "value": "康宁餐具"
+    },
+    {
+     "vid": 1771155,
+     "value": "LSA"
+    },
+    {
+     "vid": 156495,
+     "value": "AKAW"
+    },
+    {
+     "vid": 17541,
+     "value": "Harbor House"
+    },
+    {
+     "vid": 50,
+     "value": "Midea/美的"
+    },
+    {
+     "vid": 192010,
+     "value": "MIRACLE DYNASTY/玛戈隆特"
+    },
+    {
+     "vid": 184,
+     "value": "Glasslock/盖朗"
+    },
+    {
+     "vid": 201203,
+     "value": "Brewista"
+    },
+    {
+     "vid": 201247,
+     "value": "Bormioli Rocco"
+    },
+    {
+     "vid": 206525,
+     "value": "Guanfu/观复"
+    },
+    {
+     "vid": 1977,
+     "value": "FISHER-PRICE/费雪"
+    },
+    {
+     "vid": 1989,
+     "value": "Starbucks/星巴克"
+    },
+    {
+     "vid": 1996,
+     "value": "Luminarc/乐美雅"
+    },
+    {
+     "vid": 2002,
+     "value": "Libbey/利比"
+    },
+    {
+     "vid": 235172,
+     "value": "旭包鲜"
+    },
+    {
+     "vid": 226,
+     "value": "Citylong/禧天龙"
+    },
+    {
+     "vid": 27544,
+     "value": "Zoomland/卓朗"
+    }
+   ],
+   "optionCount": 49
+  },
+  {
+   "templatePid": 310136,
+   "label": "产地",
+   "refPid": 93,
+   "moduleId": 51789,
+   "required": false,
+   "mode": "single",
+   "unit": "",
+   "topTip": "",
+   "bottomTip": "",
+   "options": [
+    {
+     "vid": 24044,
+     "value": "中国大陆"
+    },
+    {
+     "vid": 24046,
+     "value": "其他海外地区"
+    },
+    {
+     "vid": 24047,
+     "value": "日本"
+    },
+    {
+     "vid": 24048,
+     "value": "欧洲"
+    },
+    {
+     "vid": 32782,
+     "value": "美国"
+    },
+    {
+     "vid": 32783,
+     "value": "港澳台"
+    },
+    {
+     "vid": 32784,
+     "value": "东南亚"
+    }
+   ],
+   "optionCount": 7
+  },
+  {
+   "templatePid": 310137,
+   "label": "外身材质",
+   "refPid": 23,
+   "moduleId": 51789,
+   "required": false,
+   "mode": "single",
+   "unit": "",
+   "topTip": "",
+   "bottomTip": "",
+   "options": [
+    {
+     "vid": 173313,
+     "value": "紫砂"
+    },
+    {
+     "vid": 173254,
+     "value": "钛合金"
+    },
+    {
+     "vid": 173063,
+     "value": "201不锈钢"
+    },
+    {
+     "vid": 173066,
+     "value": "304不锈钢"
+    },
+    {
+     "vid": 173067,
+     "value": "316不锈钢"
+    },
+    {
+     "vid": 173065,
+     "value": "302不锈钢"
+    },
+    {
+     "vid": 173257,
+     "value": "陶瓷"
+    },
+    {
+     "vid": 65868,
+     "value": "玻璃"
+    },
+    {
+     "vid": 329320,
+     "value": "镀银"
+    },
+    {
+     "vid": 409544,
+     "value": "999银"
+    },
+    {
+     "vid": 387219,
+     "value": "925银"
+    },
+    {
+     "vid": 90042,
+     "value": "塑料"
+    },
+    {
+     "vid": 462970,
+     "value": "锌合金"
+    },
+    {
+     "vid": 98561,
+     "value": "硅胶"
+    },
+    {
+     "vid": 471386,
+     "value": "钛"
+    },
+    {
+     "vid": 2705982,
+     "value": "316L不锈钢"
+    },
+    {
+     "vid": 65873,
+     "value": "竹"
+    },
+    {
+     "vid": 173242,
+     "value": "木"
+    },
+    {
+     "vid": 173195,
+     "value": "高硼硅玻璃"
+    },
+    {
+     "vid": 929721,
+     "value": "钠钙玻璃"
+    },
+    {
+     "vid": 1205878,
+     "value": "中硼硅玻璃"
+    },
+    {
+     "vid": 465664,
+     "value": "纯钛"
+    },
+    {
+     "vid": 5212133,
+     "value": "316不锈钢+覆钛"
+    },
+    {
+     "vid": 5212134,
+     "value": "304不锈钢+覆钛"
+    },
+    {
+     "vid": 5212135,
+     "value": "不锈钢+覆钛"
+    }
+   ],
+   "optionCount": 25
+  },
+  {
+   "templatePid": 310139,
+   "label": "内胆材质种类",
+   "refPid": 23,
+   "moduleId": 51789,
+   "required": false,
+   "mode": "single",
+   "unit": "",
+   "topTip": "",
+   "bottomTip": "注意！如内胆的内壁和内底材质不同，请填写内壁实际材质（内胆材质标注以面积占比大的为主）！",
+   "options": [
+    {
+     "vid": 65868,
+     "value": "玻璃"
+    },
+    {
+     "vid": 173066,
+     "value": "304不锈钢"
+    },
+    {
+     "vid": 173067,
+     "value": "316不锈钢"
+    },
+    {
+     "vid": 173254,
+     "value": "钛合金"
+    },
+    {
+     "vid": 173257,
+     "value": "陶瓷"
+    },
+    {
+     "vid": 173313,
+     "value": "紫砂"
+    },
+    {
+     "vid": 173063,
+     "value": "201不锈钢"
+    },
+    {
+     "vid": 173065,
+     "value": "302不锈钢"
+    },
+    {
+     "vid": 329320,
+     "value": "镀银"
+    },
+    {
+     "vid": 387219,
+     "value": "925银"
+    },
+    {
+     "vid": 409544,
+     "value": "999银"
+    },
+    {
+     "vid": 65815,
+     "value": "铜"
+    },
+    {
+     "vid": 173195,
+     "value": "高硼硅玻璃"
+    },
+    {
+     "vid": 471386,
+     "value": "钛"
+    },
+    {
+     "vid": 929721,
+     "value": "钠钙玻璃"
+    },
+    {
+     "vid": 2705982,
+     "value": "316L不锈钢"
+    },
+    {
+     "vid": 173147,
+     "value": "镀银玻璃"
+    },
+    {
+     "vid": 4821789,
+     "value": "陶瓷覆层"
+    },
+    {
+     "vid": 465664,
+     "value": "纯钛"
+    },
+    {
+     "vid": 5212133,
+     "value": "316不锈钢+覆钛"
+    },
+    {
+     "vid": 5212134,
+     "value": "304不锈钢+覆钛"
+    },
+    {
+     "vid": 5212135,
+     "value": "不锈钢+覆钛"
+    },
+    {
+     "vid": 5606576,
+     "value": "316不锈钢内底+304不锈钢内壁"
+    },
+    {
+     "vid": 5606577,
+     "value": "316不锈钢+陶瓷覆层"
+    },
+    {
+     "vid": 5606578,
+     "value": "304不锈钢+陶瓷覆层"
+    }
+   ],
+   "optionCount": 25
+  },
+  {
+   "templatePid": 310140,
+   "label": "保温时长",
+   "refPid": 433,
+   "moduleId": 51789,
+   "required": false,
+   "mode": "single",
+   "unit": "",
+   "topTip": "",
+   "bottomTip": "水温在42度及以上",
+   "options": [
+    {
+     "vid": 172961,
+     "value": "6h以下"
+    },
+    {
+     "vid": 172962,
+     "value": "6h(含)—8h"
+    },
+    {
+     "vid": 172963,
+     "value": "8h(含)—12h"
+    },
+    {
+     "vid": 172964,
+     "value": "12(含)—24h"
+    },
+    {
+     "vid": 172965,
+     "value": "24h(含)—36h"
+    }
+   ],
+   "optionCount": 5
+  },
+  {
+   "templatePid": 310141,
+   "label": "风格",
+   "refPid": 12,
+   "moduleId": 51789,
+   "required": false,
+   "mode": "single",
+   "unit": "",
+   "topTip": "",
+   "bottomTip": "",
+   "options": [
+    {
+     "vid": 10495,
+     "value": "简约"
+    },
+    {
+     "vid": 10496,
+     "value": "淑女"
+    },
+    {
+     "vid": 12891,
+     "value": "商务"
+    },
+    {
+     "vid": 12892,
+     "value": "运动"
+    },
+    {
+     "vid": 13051,
+     "value": "中式"
+    },
+    {
+     "vid": 13052,
+     "value": "韩式"
+    },
+    {
+     "vid": 13053,
+     "value": "日式"
+    },
+    {
+     "vid": 13054,
+     "value": "美式"
+    },
+    {
+     "vid": 13055,
+     "value": "东南亚"
+    },
+    {
+     "vid": 13056,
+     "value": "北欧风"
+    },
+    {
+     "vid": 13389,
+     "value": "卡通"
+    },
+    {
+     "vid": 65712,
+     "value": "欧式"
+    },
+    {
+     "vid": 173395,
+     "value": "呆萌"
+    },
+    {
+     "vid": 173824,
+     "value": "法式"
+    },
+    {
+     "vid": 411211,
+     "value": "ins风"
+    }
+   ],
+   "optionCount": 15
+  },
+  {
+   "templatePid": 310142,
+   "label": "是否带茶隔",
+   "refPid": 439,
+   "moduleId": 51789,
+   "required": false,
+   "mode": "single",
+   "unit": "",
+   "topTip": "",
+   "bottomTip": "",
+   "options": [
+    {
+     "vid": 1116747,
+     "value": "带茶隔"
+    },
+    {
+     "vid": 1116748,
+     "value": "不带茶隔"
+    }
+   ],
+   "optionCount": 2
+  },
+  {
+   "templatePid": 310143,
+   "label": "杯盖款式",
+   "refPid": 9,
+   "moduleId": 51789,
+   "required": false,
+   "mode": "single",
+   "unit": "",
+   "topTip": "",
+   "bottomTip": "",
+   "options": [
+    {
+     "vid": 173443,
+     "value": "按压式"
+    },
+    {
+     "vid": 173444,
+     "value": "弹跳式"
+    },
+    {
+     "vid": 173445,
+     "value": "旋转式"
+    },
+    {
+     "vid": 173446,
+     "value": "一杯双盖"
+    },
+    {
+     "vid": 792431,
+     "value": "一杯三盖"
+    },
+    {
+     "vid": 1462901,
+     "value": "磁吸式"
+    }
+   ],
+   "optionCount": 6
+  },
+  {
+   "templatePid": 310144,
+   "label": "杯子种类",
+   "refPid": 40,
+   "moduleId": 51789,
+   "required": false,
+   "mode": "single",
+   "unit": "",
+   "topTip": "",
+   "bottomTip": "",
+   "options": [
+    {
+     "vid": 173365,
+     "value": "直身杯"
+    },
+    {
+     "vid": 55380,
+     "value": "子弹头型"
+    },
+    {
+     "vid": 809053,
+     "value": "大肚杯"
+    },
+    {
+     "vid": 809054,
+     "value": "带手柄"
+    },
+    {
+     "vid": 1548006,
+     "value": "有盖"
+    },
+    {
+     "vid": 1548008,
+     "value": "有手柄"
+    },
+    {
+     "vid": 1548013,
+     "value": "带茶隔"
+    },
+    {
+     "vid": 1548007,
+     "value": "带提绳"
+    },
+    {
+     "vid": 1548009,
+     "value": "双饮杯"
+    }
+   ],
+   "optionCount": 9
+  },
+  {
+   "templatePid": 310145,
+   "label": "是否显示温度",
+   "refPid": 599,
+   "moduleId": 51789,
+   "required": false,
+   "mode": "single",
+   "unit": "",
+   "topTip": "",
+   "bottomTip": "",
+   "options": [
+    {
+     "vid": 1116724,
+     "value": "显示温度"
+    },
+    {
+     "vid": 1116725,
+     "value": "不显示温度"
+    }
+   ],
+   "optionCount": 2
+  },
+  {
+   "templatePid": 347679,
+   "label": "适用场景",
+   "refPid": 33,
+   "moduleId": 51789,
+   "required": false,
+   "mode": "single",
+   "unit": "",
+   "topTip": "",
+   "bottomTip": "",
+   "options": [
+    {
+     "vid": 12787,
+     "value": "运动"
+    },
+    {
+     "vid": 12794,
+     "value": "居家"
+    },
+    {
+     "vid": 173893,
+     "value": "户外"
+    },
+    {
+     "vid": 518375,
+     "value": "办公"
+    },
+    {
+     "vid": 1077932,
+     "value": "校园"
+    }
+   ],
+   "optionCount": 5
+  },
+  {
+   "templatePid": 434135,
+   "label": "附加功能",
+   "refPid": 78,
+   "moduleId": 51789,
+   "required": false,
+   "mode": "single",
+   "unit": "",
+   "topTip": "",
+   "bottomTip": "",
+   "options": [
+    {
+     "vid": 984151,
+     "value": "防滑"
+    },
+    {
+     "vid": 984154,
+     "value": "抗菌"
+    },
+    {
+     "vid": 1000812,
+     "value": "智能控温"
+    },
+    {
+     "vid": 4006448,
+     "value": "LED屏显"
+    },
+    {
+     "vid": 4006449,
+     "value": "双饮"
+    },
+    {
+     "vid": 4006450,
+     "value": "一键速开"
+    },
+    {
+     "vid": 4006451,
+     "value": "带磁吸支架"
+    },
+    {
+     "vid": 4006452,
+     "value": "磁弹泡茶"
+    },
+    {
+     "vid": 4115074,
+     "value": "可喷雾"
+    }
+   ],
+   "optionCount": 9
+  },
+  {
+   "templatePid": 618736,
+   "label": "包装方式",
+   "refPid": 147,
+   "moduleId": 51789,
+   "required": false,
+   "mode": "single",
+   "unit": "",
+   "topTip": "",
+   "bottomTip": "",
+   "options": [
+    {
+     "vid": 55420,
+     "value": "普通盒装"
+    },
+    {
+     "vid": 55421,
+     "value": "礼盒装"
+    },
+    {
+     "vid": 81282,
+     "value": "简装"
+    }
+   ],
+   "optionCount": 3
+  }
+ ],
+ "specs": {
+  "isSpec": false,
+  "mode": "none",
+  "maxDims": 0,
+  "customDimsLimit": 0,
+  "singleSpecValueNum": 0,
+  "dimensions": []
+ },
+ "limits": {
+  "maxSku": 900,
+  "chooseAllQualifySpec": false
+ }
+}

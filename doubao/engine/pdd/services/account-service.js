@@ -1,0 +1,590 @@
+/**
+ * 账号服务：账号连接器页与账号类工具的唯一数据出口。
+ *
+ * 不依赖任何外部网关，凭证自己存在本地 CredentialStore。
+ *
+ * 数据来源：
+ *   1. 本地 CredentialStore（dsagent-accounts.json）
+ *   2. 内置回退数据（无数据时用于预览，保证页面不报错）
+ *
+ * 安全：Cookie 只存在 CredentialStore 中，不出插件。
+ */
+import { CredentialStore, keyCookies, credentialPlatform, isPseudoNick, PLATFORM_PREFIX, resolveAccountForRequest, normalizePlatform, accountsForPlatform, planCascadeDisconnect } from './credential-store.js';
+/** 掩码 AppSecret：前 4 位明文 + •••• */
+function maskSecret(s) {
+    if (!s)
+        return '';
+    return s.length <= 4 ? '••••' : s.slice(0, 4) + '••••';
+}
+/** 平台登录入口 URL（扫码用） */
+const LOGIN_URLS = {
+    taobao: 'https://login.taobao.com/member/login.jhtml',
+    tmall: 'https://login.taobao.com/member/login.jhtml',
+    sycm: 'https://sycm.taobao.com/',
+    alimama: 'https://one.alimama.com/',
+    dmp: 'https://dmp.taobao.com/',
+    sycm_insight: 'https://sycm.taobao.com/',
+    jd: 'https://passport.jd.com/new/login.aspx',
+    pdd: 'https://mobile.yangkeduo.com/login.html',
+    // ★ 拼多多商家后台登录页（与买家 H5 不同）：有「扫码登录 / 账号密码登录 / 立即注册」三个入口
+    pdd_mms: 'https://mms.pinduoduo.com/login',
+    // ★ 抖音：主页 + 页内登录弹窗（doBrowserLogin 有 douyin 专用分支点「登录」按钮）
+    douyin: 'https://www.douyin.com/',
+    xhs: 'https://www.xiaohongshu.com/',
+    xiaohongshu: 'https://www.xiaohongshu.com/',
+    bilibili: 'https://passport.bilibili.com/login',
+    kuaishou: 'https://passport.kuaishou.com/pc/account/login',
+    wechat_mp: 'https://mp.weixin.qq.com/',
+    // ★ 闲鱼登录页必须是 /login（独立扫码页，有二维码 iframe）；首页无法完成真实登录
+    xianyu: 'https://www.goofish.com/login',
+    pinduoduo: 'https://mobile.yangkeduo.com/login.html',
+    wechat_store: 'https://channels.weixin.qq.com/shop',
+    zhihu: 'https://www.zhihu.com/signin',
+    // ★ 抖店（抖音小店商家后台）：**必须直接落在抖店登录页**，不能图省事用抖音主页。
+    //   实测（2026-10）：抖音账号的 Cookie 双域注入 fxg.jinritemai.com 后仍被跳
+    //   /login/common —— 抖店有自己的会话校验，「登录抖音后访问抖店会自动补发
+    //   该域 Cookie」这个旧假设不成立。走抖店自己的扫码页，扫码后 domain 判定
+    //   才能同时覆盖 .douyin.com 与 .jinritemai.com。
+    douyin_shop: 'https://fxg.jinritemai.com/login/common',
+    // ★ 1688（阿里巴巴 B2B）独立登录页
+    alibaba: 'https://login.1688.com/member/signin.htm',
+};
+/** 内置回退数据：仅用于无数据时的可视预览 */
+const FALLBACK_ACCOUNTS = [
+    // status 绝不能硬编码为 valid：预览兜底不该制造「账号有效」的假象（FIX-LOG：淘宝远端失效仍显示有效）。
+    // 用 pending 让 UI 显示「待验证」，不承诺任何有效性。
+    { shopKey: 'taobao_2218891961201', accountId: 'a1', platformId: 'taobao', nickname: 'tb957985228335', platformUid: '2218891961201', status: 'pending', lastCheckAt: '2026-09-17 14:20', syncServices: [], boundAgentName: '默认智能体' },
+];
+/**
+ * 业务平台 -> 凭证平台。
+ * 直接复用 credential-store.ts 的 credentialPlatform()，它同时处理别名归一化
+ * （xiaohongshu -> xhs、pinduoduo -> pdd）与凭证层复用（生意参谋系 sycm/万相台/达摩盘/天猫洞察 -> taobao、
+ * 闲鱼 -> taobao）。此处**禁止**再维护一份副本，否则两端漂移会导致绑定查询匹配不到账号。
+ */
+const toCredentialPlatform = credentialPlatform;
+/** 昵称前缀表：从 credential-store 统一引入，禁止本地再维护副本 */
+/**
+ * 生成展示昵称。
+ * 凭证库里 display_label 可能是伪昵称（等于 account_id、或等于「前缀 + account_id」、
+ * 或 Cookie 原始值截断后的乱码串），此时视为「无昵称」，必须回退到「平台前缀 + account_id」。
+ * API Key 账号的 display_label 就是 AppID，直接使用。
+ */
+function toNickname(platform, label, accountId, authType) {
+    // API Key 账号：display_label = AppID，直接用
+    if (authType === 'apikey')
+        return label || accountId;
+    if (label && !isPseudoNick(label, platform, accountId))
+        return label;
+    const prefix = PLATFORM_PREFIX[platform] || platform;
+    return accountId ? `${prefix}${accountId}` : (label || '');
+}
+/** 将 StoredAccount 转为 AccountRow */
+function toRow(a) {
+    const isApiKey = a.auth_type === 'apikey';
+    return {
+        shopKey: a.shop_key,
+        accountId: a.account_id,
+        platformId: a.platform,
+        nickname: toNickname(a.platform, a.display_label || a.account_meta?.display_nick, a.account_id, a.auth_type),
+        platformUid: a.account_id,
+        status: a.status,
+        lastCheckAt: a.last_checked_at?.replace('T', ' ').slice(0, 16) || '—',
+        syncServices: [],
+        boundAgentName: a.bound_agent_ids?.join(', ') || '—',
+        boundAgentIds: [...(a.bound_agent_ids || [])],
+        // 三种异常态各给**不同**的 reason（用户据此知道该做什么）：
+        //   reauth_required —— 确定要重登，重试无用
+        //   expired         —— 疑似失效，可先重试
+        //   invalid         —— Cookie 结构坏了，需删除重加
+        expireReason: a.status === 'reauth_required'
+            ? '登录态已失效，必须重新登录'
+            : a.status === 'expired'
+                ? '登录态疑似过期，可先重试；仍失败请重新登录'
+                : a.status === 'invalid'
+                    ? 'Cookie 已失效，请重新登录'
+                    : null,
+        authType: a.auth_type || 'cookie',
+        appId: isApiKey ? (a.app_id || '') : undefined,
+        secretHint: isApiKey ? maskSecret(a.app_secret || '') : undefined,
+    };
+}
+/** 调用 host 半区工具的桥接函数 —— browser 半区通过 HTTP 路由调 host 工具 */
+async function callHostTool(action, args) {
+    try {
+        const resp = await fetch('/dsagent/api', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action, ...args }),
+        });
+        if (!resp.ok)
+            return null;
+        return await resp.json();
+    }
+    catch {
+        return null;
+    }
+}
+export function createAccountService(storePath) {
+    const store = new CredentialStore(storePath);
+    return {
+        /** 列出账号，可按平台过滤 */
+        async list(platform) {
+            // 优先通过 HTTP 路由从 host 半区获取（browser 半区不能直接读本地文件）
+            const res = await callHostTool('list_accounts', {});
+            if (res?.ok && res.rows?.length) {
+                const rows = res.rows.map(r => {
+                    const id = String(r.accountId || '');
+                    const plat = String(r.platform || '');
+                    const authType = r.authType || 'cookie';
+                    return {
+                        shopKey: String(r.shopKey || ''),
+                        accountId: id,
+                        platformId: plat,
+                        nickname: toNickname(plat, r.displayLabel, id, authType),
+                        platformUid: id,
+                        status: r.status || 'pending',
+                        lastCheckAt: r.lastCheckAt || '',
+                        syncServices: [],
+                        boundAgentName: r.boundAgentName || (Array.isArray(r.boundAgentIds) ? r.boundAgentIds.join(', ') : ''),
+                        boundAgentIds: Array.isArray(r.boundAgentIds) ? r.boundAgentIds : [],
+                        authType: authType,
+                        appId: r.appId || undefined,
+                        secretHint: r.secretHint || undefined,
+                        // 与本地 toRow 保持一致的失效原因推导，供 UI 悬停提示
+                        expireReason: r.status === 'reauth_required' ? (r.expireReason || '登录态已失效，必须重新登录')
+                            : r.status === 'expired' ? (r.expireReason || '登录态疑似过期，可先重试；仍失败请重新登录')
+                                : r.status === 'invalid' ? 'Cookie 已失效，请重新登录' : null,
+                    };
+                });
+                return platform ? rows.filter(r => r.platformId === platform || toCredentialPlatform(r.platformId) === toCredentialPlatform(platform)) : rows;
+            }
+            // 降级：直接读本地文件（host 半区或非 DSH 环境）
+            const accounts = store.listAccounts();
+            if (!accounts.length)
+                return [...FALLBACK_ACCOUNTS];
+            const localRows = accounts.map(toRow);
+            return platform ? localRows.filter(r => r.platformId === platform || toCredentialPlatform(r.platformId) === toCredentialPlatform(platform)) : localRows;
+        },
+        /** 检查登录态健康度 */
+        async checkHealth(platform) {
+            const rows = await this.list(platform);
+            return rows.map(r => ({
+                platformId: r.platformId,
+                nickname: r.nickname,
+                status: r.status,
+                reason: r.expireReason ?? undefined,
+            }));
+        },
+        /** 该平台是否已绑定有效账号 */
+        async isBound(platform) {
+            if (!platform || !platform.trim())
+                return false;
+            const rows = await this.list(platform);
+            return rows.some(r => r.status === 'valid' || r.status === 'pending');
+        },
+        /** 根据关键词自动查找匹配的账号 */
+        async findByKeyword(keyword, platform) {
+            const allRows = await this.list(platform);
+            if (!keyword || !keyword.trim())
+                return allRows;
+            const tokens = extractTokens(keyword);
+            const lowerKeyword = keyword.toLowerCase();
+            const tokenMatches = [];
+            if (tokens.length > 0) {
+                for (const row of allRows) {
+                    for (const token of tokens) {
+                        if (row.platformUid.includes(token) || row.accountId.includes(token) || row.nickname.includes(token)) {
+                            tokenMatches.push(row);
+                            break;
+                        }
+                    }
+                }
+            }
+            const fuzzyMatches = allRows.filter(r => r.nickname.toLowerCase().includes(lowerKeyword) ||
+                r.platformId.toLowerCase().includes(lowerKeyword));
+            const seen = new Set();
+            const merged = [];
+            for (const row of [...tokenMatches, ...fuzzyMatches]) {
+                if (!seen.has(row.accountId)) {
+                    seen.add(row.accountId);
+                    merged.push(row);
+                }
+            }
+            return merged;
+        },
+        /**
+         * 获取账号绑定上下文。
+         *
+         * 选择链与网关共用 `resolveAccountForRequest`（见 credential-store.ts）：
+         * ① 显式 shopKey → ② 当前会话绑定 → ③ 平台默认 → ④ 自动兜底。
+         * 走到第 ④ 级且有多个可用账号时**不静默选择**，返回 failureKind='need_account_choice'
+         * + choices，由模型向用户提问（静默选错号的代价会放大到所有技能）。
+         *
+         * `shopKey`：用户在上一轮 `need_account_choice` 里选定后，模型回传的账号主键。
+         */
+        async fetchBindingContext(platform, agentId, shopKey) {
+            if (!platform || !platform.trim())
+                return null;
+            const bizPlatform = normalizePlatform(platform);
+            const credPlatform = toCredentialPlatform(platform);
+            const rows = await this.list(credPlatform);
+            // 候选集必须与网关（gateway-proxy.ts::handleProxy）同一套语义 —— 直接复用
+            // credential-store.ts::accountsForPlatform()：精确平台优先，其次凭证所有者平台
+            // （如 sycm 请求取 taobao 账号 —— 淘宝登录后生意参谋即可用），最后才放宽到凭证层派生账号；
+            // 闲鱼/天猫**禁止**降级（域名不同、Cookie 域不同，选到淘宝号会静默失效）。
+            //
+            // 修复前这里用 credPlatform 做精确匹配（闲鱼 → taobao），把淘宝账号混进了闲鱼候选集，
+            // 于是淘宝账号上的 `default` 绑定会在闲鱼请求里命中第 ③ 级 → 闲鱼也报 token_expired。
+            const skipDegrade = bizPlatform === 'xianyu' || bizPlatform === 'tmall';
+            const candidates = accountsForPlatform(store.listAccounts(), bizPlatform, {
+                allowDegrade: !skipDegrade,
+            });
+            if (!candidates.length)
+                return null;
+            // 账号选择链：① 显式 shopKey → ② 会话绑定 → ③ 平台默认 → ④ 派生闲鱼优先 → ⑤ 自动兜底。
+            // 第 ④ 级需要全库行（同号淘宝行）作派生证据，而闲鱼候选集不允许降级，故传全库行。
+            const resolved = resolveAccountForRequest(candidates, {
+                agentId,
+                shopKey,
+                allAccounts: store.listAccounts(),
+            });
+            if (!resolved.account) {
+                return {
+                    shopKey: '',
+                    sessionHint: 'none',
+                    displayLabel: '',
+                    tbToken: null,
+                    platformId: platform,
+                    accountId: '',
+                    nickname: '',
+                    failureKind: 'need_account_choice',
+                    choices: resolved.choices,
+                };
+            }
+            const picked = resolved.account;
+            // sessionHint 细化：valid→ok, pending→none, reauth_required→reauth_required, 其余→expired
+            //
+            // ★ `reauth_required` 单独一档：它表示连续探测失败已达阈值、重试无用。
+            //   下游据此报 failureKind='token_expired' 且文案明确要求「重新登录」，
+            //   而 `expired`（疑似失效）仍走原来的模糊引导，两者不再混同。
+            const sessionHint = picked.status === 'valid' ? 'ok'
+                : picked.status === 'pending' ? 'none'
+                    : picked.status === 'reauth_required' ? 'reauth_required'
+                        : 'expired';
+            const row = rows.find(r => r.shopKey === picked.shop_key);
+            return {
+                shopKey: picked.shop_key,
+                sessionHint,
+                displayLabel: row?.nickname || picked.display_label,
+                tbToken: picked.tb_token || null,
+                platformId: picked.platform,
+                accountId: picked.account_id,
+                nickname: row?.nickname || picked.display_label,
+            };
+        },
+        /**
+         * 启动浏览器登录 —— 通过 host 半区工具启动 Playwright 浏览器
+         *
+         * host 半区的 dsagent_browser_login 工具会：
+         *   1. 启动 Playwright 浏览器
+         *   2. 导航到平台登录页
+         *   3. 等待用户扫码/登录
+         *   4. 轮询关键 Cookie 出现
+         *   5. 提取 Cookie 并通过 CredentialStore.save() 存储
+         *
+         * opts.freshLogin：为 true 时用全新空浏览器环境登录，
+         * 用于在同一平台添加「其他账号」，避免复用已绑定账号的登录态。
+         * opts.shopKey：「重新登录」时传入被刷新账号的凭证库主键，
+         * 登录成功后 host 侧会替换旧条目并继承绑定关系。
+         */
+        async startLogin(platform, _method, opts) {
+            // ★ 闲鱼**可**独立登录（FIX-LOG #74 反转）：LOGIN_URLS.xianyu = goofish.com/login，
+            //   用闲鱼 App 扫码。只有生意参谋系 / 天猫仍不可独立登录（复用淘宝登录态）。
+            //   注意 LOGIN_URLS 的 `|| toCredentialPlatform(...)` 兜底只对无自身入口的平台生效。
+            const loginUrl = LOGIN_URLS[platform] || LOGIN_URLS[toCredentialPlatform(platform)];
+            if (!loginUrl)
+                return { ok: false, error: `不支持的平台：${platform}` };
+            // 调用 host 半区的浏览器登录工具
+            const res = await callHostTool('browser_login', {
+                platform,
+                loginUrl,
+                freshLogin: opts?.freshLogin === true,
+                shopKey: opts?.shopKey || '',
+            });
+            if (!res) {
+                // host 工具不可用（可能不在 DSH 环境中），降级提示
+                return { ok: false, error: '浏览器登录工具不可用，请确认插件已正确加载' };
+            }
+            return { ok: res.ok, error: res.error };
+        },
+        /** 关闭登录窗口 */
+        async closeLogin() {
+            const res = await callHostTool('browser_close', {});
+            if (!res)
+                return { ok: false, error: '浏览器工具不可用' };
+            return { ok: res.ok, error: res.error };
+        },
+        /**
+         * 轮询本地凭证库，检测是否有新账号出现
+         */
+        async waitForNewAccount(before, opts) {
+            const maxAttempts = opts?.maxAttempts ?? 40;
+            const intervalMs = opts?.intervalMs ?? 3000;
+            const isCancelled = opts?.isCancelled ?? (() => false);
+            for (let i = 0; i < maxAttempts; i++) {
+                if (isCancelled())
+                    return { status: 'failed', error: '用户取消' };
+                await new Promise(r => setTimeout(r, intervalMs));
+                store.reload(); // 强制重新从磁盘读取
+                const rows = await this.list(before.platform);
+                const newRows = rows.filter(r => !before.accountIds.includes(r.accountId));
+                if (newRows.length > 0) {
+                    return { status: 'success', account: newRows[0] };
+                }
+            }
+            return { status: 'expired', error: '轮询超时（120s），请确认是否已完成登录' };
+        },
+        /**
+         * 手动导入 Cookie —— 直接存入 CredentialStore
+         */
+        async submitLoginCookie(platform, cookieStr) {
+            try {
+                // 委托 host 半区解析并存储 Cookie（host 有 fs 和 crypto）
+                const res = await callHostTool('save_cookie', { platform, cookieStr });
+                if (!res)
+                    return { ok: false, error: '存储工具不可用' };
+                if (!res.ok)
+                    return { ok: false, error: res.error };
+                store.reload();
+                const accounts = store.listAccounts();
+                const saved = accounts.find(a => a.shop_key === res.shopKey);
+                if (saved)
+                    return { ok: true, account: toRow(saved) };
+                return { ok: true };
+            }
+            catch (err) {
+                return { ok: false, error: `导入失败：${err instanceof Error ? err.message : String(err)}` };
+            }
+        },
+        /** 提交 AppID+Secret —— 通过 host 半区保存为 API Key 凭证 */
+        async submitLoginAppId(platform, appId, appSecret) {
+            try {
+                const res = await callHostTool('save_apikey', { platform, appId, appSecret });
+                if (!res)
+                    return { ok: false, error: '保存工具不可用' };
+                if (!res.ok)
+                    return { ok: false, error: res.error };
+                store.reload();
+                const accounts = store.listAccounts();
+                const saved = accounts.find(a => a.shop_key === res.shopKey);
+                if (saved)
+                    return { ok: true, account: toRow(saved) };
+                return { ok: true };
+            }
+            catch (err) {
+                return { ok: false, error: `保存失败：${err instanceof Error ? err.message : String(err)}` };
+            }
+        },
+        /** 删除账号 —— browser 半区不能读写本地文件，必须走 host 路由 */
+        async deleteAccount(shopKey) {
+            if (!shopKey)
+                return { ok: false, error: '无效的 shopKey' };
+            const res = await callHostTool('delete_account', { shopKey });
+            if (!res)
+                return { ok: false, error: '删除失败：无法连接 host 半区' };
+            return res;
+        },
+        /**
+         * 预演「断开该账号会影响谁」—— 供删除前的二次确认展示。
+         *
+         * 对应 Accio 的 `managedShopDisconnectGroup`（按逻辑店铺整组断开的提示语义）：
+         * 删掉淘宝账号会连带影响生意参谋系（凭证层借用）与闲鱼（自动派生），
+         * 用户应当在确认前就知道，而不是删完发现别的技能也不能用了。
+         */
+        async planDisconnect(shopKey) {
+            const accounts = store.listAccounts();
+            const plan = planCascadeDisconnect(shopKey, accounts);
+            return {
+                ok: true,
+                summary: plan.summary,
+                affected: plan.affected.map(a => a.shop_key),
+            };
+        },
+        /** 绑定会话（= 智能体，同一个 id）—— 必须走 host 路由 */
+        async bindAgent(shopKey, agentId) {
+            if (!shopKey || !agentId)
+                return { ok: false, error: '缺少 shopKey / agentId' };
+            const res = await callHostTool('bind_agent', { shopKey, agentId });
+            if (!res)
+                return { ok: false, error: '绑定失败：无法连接 host 半区' };
+            return res;
+        },
+        /** 解绑会话 —— 同上，必须走 host 路由 */
+        async unbindAgent(shopKey, agentId) {
+            if (!shopKey || !agentId)
+                return { ok: false, error: '缺少 shopKey / agentId' };
+            const res = await callHostTool('unbind_agent', { shopKey, agentId });
+            if (!res)
+                return { ok: false, error: '解绑失败：无法连接 host 半区' };
+            return res;
+        },
+        /**
+         * 会话（= 智能体）列表 —— 绑定下拉的数据源。
+         * cordis 的 agents 服务只在 host 半区可见，browser 半区必须走 HTTP 路由取。
+         * Agent 只有 id（无人类可读名），故下拉项只能显示 id。
+         */
+        async listAgents() {
+            const res = await callHostTool('list_agents', {});
+            return res?.ok && Array.isArray(res.agents) ? res.agents : [];
+        },
+        /**
+         * 真实健康检查 —— 本地 Cookie 结构检查 + 远程轻量探测（#55）。
+         *
+         * 每个账号先做本地关键 Cookie 结构检查（P1-1：缺失只计数，达阈值才置位，
+         * 与远端探测同一套连续失败语义）；通过后再经 host 路由 probe_session
+         * 发起一次远程轻量探测。
+         * 探测结果四态（P1-1 语义化状态机）：
+         *   valid → 恢复/保持 valid；expired → 连续失败计数，达阈值落 reauth_required；
+         *   risk_control → 风控/限流 ≠ 凭证失效，状态保持仅提示；unknown → 状态保持。
+         */
+        async checkHealthReal(platform) {
+            const rows = await this.list(platform);
+            const results = [];
+            for (const row of rows) {
+                const stored = store.findByPlatform(row.platformId);
+                if (!stored) {
+                    results.push({ platformId: row.platformId, nickname: row.nickname, status: row.status, reason: row.expireReason ?? undefined });
+                    continue;
+                }
+                // 仅检查 valid/pending 状态的账号（已失效的不再探测）
+                if (row.status !== 'valid' && row.status !== 'pending') {
+                    results.push({ platformId: row.platformId, nickname: row.nickname, status: row.status, reason: row.expireReason ?? undefined });
+                    continue;
+                }
+                // 本地 Cookie 基础检查
+                const kc = keyCookies(row.platformId);
+                const cookieJar = stored.cookies || {};
+                const hasKeyCookies = kc.length > 0 && kc.every(name => cookieJar[name]);
+                if (!hasKeyCookies) {
+                    // ★ P1-1：单次关键 Cookie 缺失不再立即落 expired。
+                    //   setCookies 的「空值不覆盖」策略意味着 Cookie 只会在整库重写时被清掉，
+                    //   偶发缺失更可能是「探测点域不覆盖该 Cookie」而非真失效；
+                    //   且与远端探测的连续失败阈值语义对齐（§5.0：不得由单次失败触发）。
+                    //   交给远端探测确认：缺 Cookie 的账号在 host 侧 probeRemoteSession
+                    //   开头就会因 cookie_str 为空/关键项缺失返回 expired/unknown，
+                    //   走 recordSessionProbe 的计数路径，达阈值才落 reauth_required。
+                    await store.recordSessionProbe(stored.shop_key, 'expired');
+                    const rec2 = store.get(stored.shop_key);
+                    const curStatus = rec2?.status || 'pending';
+                    results.push({
+                        platformId: row.platformId,
+                        nickname: row.nickname,
+                        status: curStatus,
+                        reason: `关键 Cookie 缺失${rec2?.session_fail_count ? `（${rec2.session_fail_count}/3）` : ''}`,
+                    });
+                    continue;
+                }
+                // 远程轻量探测：本地 Cookie 结构完整 ≠ 登录态有效（#55）。
+                // 服务端可让 web_session 失效（风控 / 异地登录 / 过期），此时本地 Cookie 完好，
+                // 账号页仍显示「有效」，用户被误导。由 host 半区发起探测（browser 半区无法跨域）。
+                // 落库由 host 侧 recordSessionProbe 按连续失败计数决定（规范 §5.0），
+                // 此处只读回结果，避免两端各写一次状态。
+                let probe = await callHostTool('probe_session', { shopKey: stored.shop_key });
+                // ★ 2026-10-21 降级：host HTTP 路由不可用时（node 直调 / host 半区本进程），
+                //   本地直接探测 —— 否则 callHostTool 返回 null 会被当成「无法判定」，
+                //   状态恒为本地心跳的 valid，假阳性依旧。
+                if (!probe) {
+                    try {
+                        const { probeRemoteSession } = await import('../gateway-proxy.js');
+                        const local = await probeRemoteSession({
+                            platform: stored.platform,
+                            shop_key: stored.shop_key,
+                            cookie_str: stored.cookie_str || '',
+                            account_meta: stored.account_meta,
+                        });
+                        const rec = await store.recordSessionProbe(stored.shop_key, local.result);
+                        probe = { ok: true, result: local.result, reason: local.reason, status: rec.status, failCount: rec.failCount };
+                    }
+                    catch { /* 探测模块不可用则保持原状态 */ }
+                }
+                // ★ P1-1：风控/限流 ≠ 凭证失效 —— 状态保持原样（host 侧未落库），
+                //   仅在 reason 里透出风控提示，避免账号页把限流误读为掉登录。
+                if (probe?.ok && probe.result === 'risk_control') {
+                    results.push({
+                        platformId: row.platformId,
+                        nickname: row.nickname,
+                        status: row.status,
+                        reason: probe.reason || '命中平台风控/限流（登录态未受影响，稍后自动重试）',
+                    });
+                    continue;
+                }
+                if (probe?.ok && probe.result === 'expired') {
+                    // ★ 2026-10-21：远端**明确**判定未登录（如 PDD 探测到跳登录/错误响应）时，
+                    //   不再等 3 次阈值 —— 本地 status 是心跳假象，用户看到"有效"跑去跑技能，
+                    //   立刻 token_expired，体验更差。仅在 reason 注明计数进度供参考。
+                    //
+                    //   区分口径：probe.reason 含「明确失效」语义（远端判定/被重定向/401/403）
+                    //   即透出；网络异常类（unknown）仍走 host 侧连续失败计数。
+                    const explicit = /失效|未登录|重定向到登录|401|403|错误响应/i.test(probe.reason || '');
+                    if (explicit || probe.status === 'reauth_required' || probe.status === 'expired') {
+                        const finalStatus = probe.status === 'reauth_required' ? 'reauth_required' : (explicit ? 'expired' : probe.status);
+                        results.push({
+                            platformId: row.platformId,
+                            nickname: row.nickname,
+                            status: finalStatus,
+                            reason: probe.reason
+                                || (finalStatus === 'reauth_required'
+                                    ? '登录态已失效，必须重新登录'
+                                    : '登录态疑似过期（可先重试）'),
+                        });
+                        continue;
+                    }
+                }
+                // 探测通过或无法判定（平台未支持 / 网络异常）→ 保持原状态
+                results.push({ platformId: row.platformId, nickname: row.nickname, status: row.status, reason: undefined });
+            }
+            return results;
+        },
+        /** 获取指定账号的 Cookie 字符串（供技能执行时注入环境变量） */
+        getCookieStr(shopKey) {
+            const account = store.get(shopKey);
+            return account?.cookie_str || '';
+        },
+        /**
+         * 查找账号，返回完整 StoredAccount（含 Cookie）。
+         *
+         * 优先按 `shopKey` 精确取（模型按用户选择回传的账号）；
+         * 无 shopKey 时退回「平台 + 会话」查找。
+         */
+        findStoredAccount(platform, agentId, shopKey) {
+            if (shopKey) {
+                const hit = store.get(shopKey);
+                if (hit)
+                    return hit;
+            }
+            return store.findByPlatform(platform, agentId);
+        },
+        dispose() {
+            // CredentialStore 无需显式释放
+        },
+        get isDisposed() {
+            return false;
+        },
+    };
+}
+/**
+ * 从自然语言中提取 token 关键词
+ */
+const ARG_TOKEN_RE = /(?<![0-9A-Za-z_])(\d{5,13}|[A-Za-z]{1,6}_?\d{3,12})(?![0-9A-Za-z])/g;
+export function extractTokens(text) {
+    if (!text)
+        return [];
+    const seen = [];
+    for (const token of text.matchAll(ARG_TOKEN_RE)) {
+        const t = token[1];
+        if (t && !seen.includes(t))
+            seen.push(t);
+    }
+    return seen;
+}
+//# sourceMappingURL=account-service.js.map
