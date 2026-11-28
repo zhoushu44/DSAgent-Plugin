@@ -1,0 +1,86 @@
+{
+  "catId": 50000671,
+  "title": "测试商品DOUBAO-003 纯棉短袖T恤女2026夏季",
+  "price": "59",
+  "stock": "100",
+  "itemNo": "DOUBAO-003",
+  "images": [
+    "E:\\360MoveData\\Users\\Administrator\\Desktop\\DSAgent-Plugin\\doubao\\素材\\测试主图.jpg"
+  ],
+  "specs": [
+    {
+      "name": "颜色分类",
+      "values": [
+        {
+          "value": "黑色"
+        },
+        {
+          "value": "白色"
+        }
+      ]
+    },
+    {
+      "name": "尺码",
+      "values": [
+        {
+          "value": "M"
+        },
+        {
+          "value": "L"
+        }
+      ]
+    }
+  ],
+  "skus": [
+    {
+      "specs": {
+        "颜色分类": "黑色",
+        "尺码": "M"
+      },
+      "price": "59",
+      "stock": "25",
+      "outerId": "DOUBAO-003-BM"
+    },
+    {
+      "specs": {
+        "颜色分类": "黑色",
+        "尺码": "L"
+      },
+      "price": "59",
+      "stock": "25",
+      "outerId": "DOUBAO-003-BL"
+    },
+    {
+      "specs": {
+        "颜色分类": "白色",
+        "尺码": "M"
+      },
+      "price": "59",
+      "stock": "25",
+      "outerId": "DOUBAO-003-WM"
+    },
+    {
+      "specs": {
+        "颜色分类": "白色",
+        "尺码": "L"
+      },
+      "price": "59",
+      "stock": "25",
+      "outerId": "DOUBAO-003-WL"
+    }
+  ],
+  "materials": "棉:95 氨纶:5",
+  "sizeTable": {
+    "M": [
+      "160",
+      "50",
+      "88"
+    ],
+    "L": [
+      "165",
+      "55",
+      "92"
+    ]
+  },
+  "fillAllAttrs": true
+}

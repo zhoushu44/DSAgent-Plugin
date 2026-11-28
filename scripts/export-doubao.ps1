@@ -56,6 +56,8 @@ foreach ($m in $copyMap) {
 }
 # 淘宝三件套
 foreach ($f in 'lib.cjs','submit-batch.cjs','img-space.cjs') { if (Test-Path -LiteralPath "$tbSrc\$f") { Copy-Item -LiteralPath "$tbSrc\$f" -Destination $db -Force; $n++ } }
+# test-images（素材图）
+if (Test-Path -LiteralPath $tbSrc\test-images) { New-Item -ItemType Directory -Path $db\test-images -Force | Out-Null; Copy-Item -LiteralPath $tbSrc\test-images\* -Destination $db\test-images -Force }
 # puppeteer-core 及运行时依赖（增量 robocopy，快）
 $nm = Get-ChildItem -LiteralPath (Join-Path $plugin 'node_modules') -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^(puppeteer-core|@puppeteer|debug|chromium-bidi|devtools-protocol|typed-query-selector|ws|semver|tar-fs|proxy-agent|extract-zip|progress|unbzip2-stream|yargs|cliui|ms|proxy-from-env|get-stream|pump|buffer-crc32|tar-stream|streamx|events-universal|text-decoder|through|yauzl|fd-slicer|fs-extra|jsonfile|graceful-fs|universalify|klaw|minimist|mkdirp|readable-stream|string_decoder|safe-buffer|core-util-is|isarray|process-nextick-args|util-deprecate|inherits|once|wrappy|end-of-stream|bl|buffer)' }
 foreach ($d in $nm) { $dst = Join-Path $db "node_modules\$($d.Name)"; if (-not (Test-Path -LiteralPath $dst)) { Copy-Item -LiteralPath $d.FullName -Destination $dst -Recurse -Force; $n++ } }

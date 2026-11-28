@@ -1,0 +1,42 @@
+{
+  "catId": 50022668,
+  "title": "测试商品DOUBAO-002 桌面收纳盒塑料抽屉式",
+  "price": "25.9",
+  "stock": "150",
+  "itemNo": "DOUBAO-002",
+  "images": [
+    "E:\\360MoveData\\Users\\Administrator\\Desktop\\DSAgent-Plugin\\doubao\\素材\\测试主图.jpg"
+  ],
+  "specs": [
+    {
+      "name": "颜色分类",
+      "values": [
+        {
+          "value": "白色"
+        },
+        {
+          "value": "黑色"
+        }
+      ]
+    }
+  ],
+  "skus": [
+    {
+      "specs": {
+        "颜色分类": "白色"
+      },
+      "price": "25.9",
+      "stock": "75",
+      "outerId": "DOUBAO-002-W"
+    },
+    {
+      "specs": {
+        "颜色分类": "黑色"
+      },
+      "price": "25.9",
+      "stock": "75",
+      "outerId": "DOUBAO-002-B"
+    }
+  ],
+  "fillAllAttrs": true
+}

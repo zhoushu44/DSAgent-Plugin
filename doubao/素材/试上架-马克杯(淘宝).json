@@ -1,0 +1,42 @@
+{
+  "catId": 50006119,
+  "title": "测试商品DOUBAO-001 陶瓷马克杯办公水杯定制",
+  "price": "19.9",
+  "stock": "200",
+  "itemNo": "DOUBAO-001",
+  "images": [
+    "E:\\360MoveData\\Users\\Administrator\\Desktop\\DSAgent-Plugin\\doubao\\素材\\测试主图.jpg"
+  ],
+  "specs": [
+    {
+      "name": "颜色分类",
+      "values": [
+        {
+          "value": "白色"
+        },
+        {
+          "value": "黑色"
+        }
+      ]
+    }
+  ],
+  "skus": [
+    {
+      "specs": {
+        "颜色分类": "白色"
+      },
+      "price": "19.9",
+      "stock": "100",
+      "outerId": "DOUBAO-001-W"
+    },
+    {
+      "specs": {
+        "颜色分类": "黑色"
+      },
+      "price": "19.9",
+      "stock": "100",
+      "outerId": "DOUBAO-001-B"
+    }
+  ],
+  "fillAllAttrs": true
+}
