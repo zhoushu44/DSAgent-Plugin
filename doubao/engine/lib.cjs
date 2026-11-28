@@ -6,16 +6,24 @@ const path = require('path');
 let _speed = Math.max(0.3, Math.min(1, parseFloat(process.env.DSAGENT_SPEED || '0.6')));
 const setSpeed = f => { _speed = Math.max(0.3, Math.min(1, f)); };
 const sleep = ms => new Promise(r => setTimeout(r, Math.round(ms * _speed)));
-const PUP = path.join('E:/360MoveData/Users/Administrator/Desktop/DSAgent-Plugin/node_modules', 'puppeteer-core');
-const getBrowser = async () => {
-  const puppeteer = require(PUP);
+// ── 浏览器启动（可移植：不写死盘符、用户名、店铺）──────────────────────────────
+// puppeteer-core 随包放在 engine/node_modules，相对本文件定位。
+const PUP = path.join(__dirname, 'node_modules', 'puppeteer-core');
+// Chrome 探测：环境变量 > 常规安装位置 > PATH。对方装在 D 盘时设 DS_CHROME_PATH 即可。
+const findChrome = () => {
   const fs = require('fs');
-  const f = path.join('C:/Users/Administrator/.dsh/browser-profiles/accounts/taobao_2218891961201', 'DevToolsActivePort');
-  if (!fs.existsSync(f)) throw new Error('发布浏览器未运行（无 DevToolsActivePort）');
-  const port = parseInt(fs.readFileSync(f, 'utf8').split('\n')[0].trim(), 10);
-  const b = await puppeteer.connect({ browserURL: `http://127.0.0.1:${port}`, defaultViewport: null });
-  // 测试标签页在后台打开（不抢焦点、不弹到前台）：用户反馈每开一个标签页都会打断他操作。
-  // Chrome 的 Target.createTarget 带 background:true 即可；再让页面以为自己有焦点，后台标签的键盘/焦点事件照常生效。
+  const cands = [process.env.DS_CHROME_PATH,
+    path.join(process.env.PROGRAMFILES || 'C:\\Program Files', 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    path.join(process.env['PROGRAMFILES(X86)'] || 'C:\\Program Files (x86)', 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    path.join(process.env.LOCALAPPDATA || '', 'Google', 'Chrome', 'Application', 'chrome.exe')].filter(Boolean);
+  for (const c of cands) { if (c && fs.existsSync(c)) return c; }
+  return 'chrome.exe';
+};
+// 账号 profile 根目录：与拼多多基座同一处（~/.dsh/browser-profiles/accounts/<shopKey>），可被 DS_HOME 覆盖。
+const DS_HOME = process.env.DS_HOME || path.join(require('os').homedir(), '.dsh');
+const profileDirOf = shopKey => path.join(DS_HOME, 'browser-profiles', 'accounts', shopKey || 'taobao_default');
+// 后台标签页包装：新标签页不抢焦点（Target.createTarget background:true + 焦点仿真），键盘/焦点事件照常生效。
+const wrapBackgroundTabs = (b) => {
   b.newPage = async () => {
     const session = await b.target().createCDPSession();
     const { targetId } = await session.send('Target.createTarget', { url: 'about:blank', background: true });
@@ -26,6 +34,34 @@ const getBrowser = async () => {
     return page;
   };
   return b;
+};
+// 取浏览器。两种用法：
+//   getBrowser({ browser })            包装一个已有浏览器（兼容旧调用）
+//   getBrowser({ shopKey, headless })  自己启动 Chrome：按 shopKey 独立 profile，返回 { browser, close }
+// 不传 shopKey 时用 taobao_default。
+const getBrowser = async (o = {}) => {
+  const puppeteer = require(PUP);
+  if (o.browser) return wrapBackgroundTabs(o.browser);
+  const fs = require('fs'); const { spawn } = require('child_process'); const net = require('net');
+  const shopKey = o.shopKey || 'taobao_default';
+  const profile = o.profileDir || profileDirOf(shopKey);
+  for (const n of ['SingletonLock', 'SingletonCookie', 'SingletonSocket', 'DevToolsActivePort']) { try { fs.rmSync(path.join(profile, n), { force: true, recursive: true }); } catch (e) {} }
+  fs.mkdirSync(profile, { recursive: true });
+  const port = await new Promise((res, rej) => { const s = net.createServer(); s.on('error', rej); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => res(p)); }); });
+  const headless = o.headless !== false; // 默认无头：不弹窗、不打断用户；需要人工看页面（如扫码）时传 false
+  const args = [`--user-data-dir=${profile}`, `--remote-debugging-port=${port}`, '--remote-debugging-address=127.0.0.1', '--no-first-run', '--no-default-browser-check',
+    '--disable-blink-features=AutomationControlled', '--lang=zh-CN', '--window-size=1440,900',
+    ...(headless ? ['--headless=new', '--disable-gpu'] : ['--window-position=100,50']),
+    ...(o.args || []), 'about:blank'];
+  const proc = spawn(findChrome(), args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  let errTail = ''; proc.stderr.on('data', d => { errTail = (errTail + String(d)).slice(-1500); });
+  proc.on('error', e => { errTail = 'Chrome 启动失败（检查是否已安装 Chrome，或设 DS_CHROME_PATH）：' + e.message; });
+  const t0 = Date.now(); let info = null;
+  while (Date.now() - t0 < 30000 && !info) { await new Promise(r => setTimeout(r, 150)); try { const r = await fetch(`http://127.0.0.1:${port}/json/version`, { signal: AbortSignal.timeout(500) }); info = await r.json(); } catch (e) {} }
+  if (!info) { try { proc.kill(); } catch (e) {} throw new Error(errTail.slice(-300) || 'Chrome 30 秒内未就绪'); }
+  const browser = await puppeteer.connect({ browserURL: `http://127.0.0.1:${port}`, defaultViewport: null });
+  return { browser: wrapBackgroundTabs(browser), port, proc, profileDir: profile,
+    close: async () => { try { await browser.disconnect(); } catch (e) {} try { proc.kill(); } catch (e) {} } };
 };
 
 // ── 页面内定位：选择器 + 可选 placeholder / title / 精确文本，只取可见元素 ──
